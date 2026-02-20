@@ -304,4 +304,4 @@ bun run build
 
 ## License
 
-MIT
+Copyright 2026 Query.Farm LLC [https://query.farm](https://query.farm). All rights reserved. See [LICENSE.md](LICENSE.md).
