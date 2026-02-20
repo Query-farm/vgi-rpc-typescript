@@ -26,6 +26,12 @@ export {
 } from "./schema.js";
 export { RpcError, VersionError } from "./errors.js";
 export {
+  createHttpHandler,
+  ARROW_CONTENT_TYPE,
+  type HttpHandlerOptions,
+  type StateSerializer,
+} from "./http/index.js";
+export {
   RPC_METHOD_KEY,
   REQUEST_VERSION_KEY,
   REQUEST_VERSION,
@@ -38,4 +44,5 @@ export {
   DESCRIBE_VERSION_KEY,
   DESCRIBE_VERSION,
   DESCRIBE_METHOD_NAME,
+  STATE_KEY,
 } from "./constants.js";

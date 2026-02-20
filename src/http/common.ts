@@ -1,0 +1,56 @@
+import {
+  RecordBatchStreamWriter,
+  RecordBatchReader,
+  Schema,
+  type RecordBatch,
+} from "apache-arrow";
+
+export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
+
+export class HttpRpcError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number,
+  ) {
+    super(message);
+    this.name = "HttpRpcError";
+  }
+}
+
+/** Serialize a schema + batches into a complete IPC stream as Uint8Array. */
+export function serializeIpcStream(
+  schema: Schema,
+  batches: RecordBatch[],
+): Uint8Array {
+  const writer = new RecordBatchStreamWriter();
+  writer.reset(undefined, schema);
+  for (const batch of batches) {
+    writer.write(batch);
+  }
+  writer.close();
+  return writer.toUint8Array(true);
+}
+
+/** Create a Response with Arrow IPC content type. Casts Uint8Array for TS lib compat. */
+export function arrowResponse(body: Uint8Array, status = 200, extraHeaders?: Headers): Response {
+  const headers = extraHeaders ?? new Headers();
+  headers.set("Content-Type", ARROW_CONTENT_TYPE);
+  return new Response(body as unknown as BodyInit, { status, headers });
+}
+
+/** Read schema + first batch from an IPC stream body. */
+export async function readRequestFromBody(
+  body: Uint8Array,
+): Promise<{ schema: Schema; batch: RecordBatch }> {
+  const reader = await RecordBatchReader.from(body);
+  await reader.open();
+  const schema = reader.schema;
+  if (!schema) {
+    throw new HttpRpcError("Empty IPC stream: no schema", 400);
+  }
+  const batches = reader.readAll();
+  if (batches.length === 0) {
+    throw new HttpRpcError("IPC stream contains no batches", 400);
+  }
+  return { schema, batch: batches[0] };
+}
