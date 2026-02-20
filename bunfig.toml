@@ -1,0 +1,5 @@
+[install]
+# Install settings
+
+[resolve]
+# Tell Bun to prefer TypeScript sources
