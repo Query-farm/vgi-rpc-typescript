@@ -1,0 +1,101 @@
+---
+title: Output Collector
+description: Emit data batches and log messages from streaming handlers.
+---
+
+The `OutputCollector` is passed to `produce` and `exchange` handlers to emit data batches and log messages.
+
+## Emitting data
+
+There are three ways to emit output:
+
+### Column arrays
+
+Most efficient for multi-row batches. Pass an object with arrays keyed by field name:
+
+```typescript
+out.emit({ name: ["alice", "bob"], value: [1.0, 2.0] });
+```
+
+### Single-row convenience
+
+Wraps each value in an array and calls `emit()`:
+
+```typescript
+out.emitRow({ name: "alice", value: 1.0 });
+```
+
+### Pre-built RecordBatch
+
+Pass a RecordBatch directly:
+
+```typescript
+import { recordBatchFromArrays } from "apache-arrow";
+
+const batch = recordBatchFromArrays(
+  { name: ["alice"], value: [1.0] },
+  outputSchema,
+);
+out.emit(batch);
+```
+
+## One batch per call
+
+Each `produce` or `exchange` invocation must emit exactly **one** data batch. Emitting more than one throws an error:
+
+```typescript
+// This will throw
+produce: (state, out) => {
+  out.emitRow({ value: 1 });
+  out.emitRow({ value: 2 }); // Error: Only one data batch may be emitted per call
+},
+```
+
+To emit multiple rows, use column arrays:
+
+```typescript
+produce: (state, out) => {
+  out.emit({ value: [1, 2, 3] }); // Single batch with 3 rows
+},
+```
+
+## Finishing a stream
+
+In producer methods, call `out.finish()` to end the stream:
+
+```typescript
+produce: (state, out) => {
+  if (state.current >= state.limit) {
+    out.finish();
+    return;
+  }
+  out.emitRow({ value: state.current });
+  state.current++;
+},
+```
+
+`finish()` is only available in producer methods. Calling it in an exchange method throws an error — exchange streams end when the client stops sending input batches.
+
+## Client logging
+
+The OutputCollector also implements the `LogContext` interface:
+
+```typescript
+produce: (state, out) => {
+  out.clientLog("INFO", `Processing batch ${state.current}`);
+  out.emitRow({ value: state.current });
+  state.current++;
+},
+```
+
+See [Client Logging](/guides/client-logging/) for more details.
+
+## Int64 coercion
+
+When emitting column arrays, JavaScript `Number` values for `Int64` fields are automatically coerced to `BigInt`. This lets you write natural JavaScript without worrying about BigInt literals:
+
+```typescript
+// Both work for Int64 fields
+out.emit({ count: [42] });       // Number → BigInt automatically
+out.emit({ count: [42n] });      // BigInt directly
+```

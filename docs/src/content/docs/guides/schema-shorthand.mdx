@@ -1,0 +1,76 @@
+---
+title: Schema Shorthand
+description: Declare Arrow schemas concisely with type singletons.
+---
+
+vgi-rpc-typescript provides shorthand type singletons that eliminate boilerplate when declaring parameter, result, and output schemas.
+
+## Using shorthand
+
+Instead of constructing `Schema` and `Field` objects manually, use the shorthand syntax:
+
+```typescript
+import { str, int, float } from "vgi-rpc-typescript";
+
+protocol.unary("echo", {
+  params: { name: str, count: int, value: float },
+  result: { result: str },
+  handler: ({ name }) => ({ result: name }),
+});
+```
+
+This is equivalent to the verbose form:
+
+```typescript
+import { Schema, Field, Utf8, Int64, Float64 } from "apache-arrow";
+
+protocol.unary("echo", {
+  params: new Schema([
+    new Field("name", new Utf8(), false),
+    new Field("count", new Int64(), false),
+    new Field("value", new Float64(), false),
+  ]),
+  result: new Schema([new Field("result", new Utf8(), false)]),
+  handler: ({ name }) => ({ result: name }),
+});
+```
+
+## Available type singletons
+
+| Singleton | Arrow Type | Python equivalent |
+|-----------|-----------|-------------------|
+| `str` | `Utf8` | `str` |
+| `bytes` | `Binary` | `bytes` |
+| `int` | `Int64` | `int` |
+| `int32` | `Int32` | `Annotated[int, ArrowType(pa.int32())]` |
+| `float` | `Float64` | `float` |
+| `float32` | `Float32` | `Annotated[float, ArrowType(pa.float32())]` |
+| `bool` | `Bool` | `bool` |
+
+## The `SchemaLike` type
+
+Methods accept either a full `Schema` object or a `Record<string, DataType>` shorthand:
+
+```typescript
+type SchemaLike = Schema | Record<string, DataType>;
+```
+
+The `toSchema()` function converts a shorthand record into a proper Arrow `Schema`. All fields created via shorthand are non-nullable.
+
+## Complex types
+
+For types not covered by the singletons — `List`, `Map`, `Dictionary`, `Struct`, or nullable fields — use the full `Schema`/`Field` constructors from `apache-arrow`:
+
+```typescript
+import { Schema, Field, List, new Utf8 } from "apache-arrow";
+
+protocol.unary("tags", {
+  params: new Schema([
+    new Field("tags", new List(new Field("item", new Utf8(), false)), false),
+  ]),
+  result: { count: int },
+  handler: ({ tags }) => ({ count: tags.length }),
+});
+```
+
+You can mix shorthand and full schemas — use shorthand where it fits and full schemas where you need more control.

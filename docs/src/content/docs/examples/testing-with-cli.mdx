@@ -1,0 +1,75 @@
+---
+title: Testing with the CLI
+description: Using the Python vgi-rpc CLI to test and introspect TypeScript servers.
+---
+
+The Python [vgi-rpc CLI](https://github.com/rustyconover/vgi-rpc) is the primary tool for testing vgi-rpc-typescript servers. It can discover methods, call them, and display results in various formats.
+
+## Installation
+
+```bash
+pip install vgi-rpc[cli]
+```
+
+## Subprocess mode
+
+The CLI can launch your server as a subprocess, communicating over stdin/stdout:
+
+```bash
+vgi-rpc --cmd "bun run server.ts" <command>
+```
+
+### Describe a service
+
+```bash
+vgi-rpc --cmd "bun run examples/calculator.ts" describe
+```
+
+This calls the `__describe__` method and displays all available methods, their parameters, result schemas, and documentation.
+
+### Call a unary method
+
+```bash
+vgi-rpc --cmd "bun run examples/calculator.ts" call add a=2.0 b=3.0
+# {"result": 5.0}
+```
+
+Parameters are passed as `key=value` pairs. The CLI infers types from the parameter schema.
+
+### Call a producer stream
+
+```bash
+vgi-rpc --cmd "bun run examples/streaming.ts" call count limit=5 --format table
+```
+
+The `--format table` flag renders streaming results as a formatted table.
+
+### Output formats
+
+| Flag | Format |
+|------|--------|
+| (default) | JSON lines |
+| `--format table` | Formatted table |
+| `--format csv` | CSV |
+
+## HTTP mode
+
+The CLI also supports HTTP transport:
+
+```bash
+# Start your server
+bun run server.ts &  # or use Bun.serve()
+
+# Describe via HTTP
+vgi-rpc --url http://localhost:8080 describe
+
+# Call via HTTP
+vgi-rpc --url http://localhost:8080 call add a=1.0 b=2.0
+```
+
+## Tips
+
+- Use `describe` first to discover available methods and their parameter types
+- Parameter types are inferred — the CLI handles type coercion automatically
+- Producer streams output results incrementally as they arrive
+- Exchange streams require piped input (see `vgi-rpc --help` for details)

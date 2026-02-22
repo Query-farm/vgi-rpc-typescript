@@ -1,0 +1,72 @@
+---
+title: Client Logging
+description: Emit log messages that travel over the wire to the client.
+---
+
+Handler functions can emit log messages that are transmitted to the client over the Arrow IPC wire protocol. This is useful for progress reporting, debugging, and diagnostics.
+
+## Unary methods
+
+In unary handlers, use the `ctx` parameter:
+
+```typescript
+import { Protocol, str } from "vgi-rpc-typescript";
+
+const protocol = new Protocol("MyService");
+
+protocol.unary("process", {
+  params: { data: str },
+  result: { result: str },
+  handler: (params, ctx) => {
+    ctx.clientLog("INFO", `Processing: ${params.data}`);
+    ctx.clientLog("DEBUG", "Transform complete", { detail: "extra info" });
+    return { result: params.data.toUpperCase() };
+  },
+});
+```
+
+## Streaming methods
+
+In producer and exchange handlers, use `out.clientLog()`:
+
+```typescript
+produce: (state, out) => {
+  out.clientLog("INFO", `Producing batch ${state.current}`);
+  out.emitRow({ value: state.current });
+  state.current++;
+},
+```
+
+## Log levels
+
+Log messages support any string level. Common conventions:
+
+| Level | Usage |
+|-------|-------|
+| `DEBUG` | Detailed diagnostic information |
+| `INFO` | Progress and status updates |
+| `WARNING` | Potential issues |
+| `ERROR` | Errors that don't abort the request |
+
+## Extra metadata
+
+Pass additional key-value metadata as the third argument:
+
+```typescript
+ctx.clientLog("INFO", "Query completed", {
+  rows_processed: "1000",
+  duration_ms: "42",
+});
+```
+
+Extra metadata values must be strings.
+
+## Wire format
+
+Log messages are transmitted as zero-row Arrow batches with metadata:
+
+- `vgi_rpc.log_level` — the log level string
+- `vgi_rpc.log_message` — the message text
+- `vgi_rpc.log_extra` — JSON-encoded extra metadata (if provided)
+
+The client receives these interleaved with data batches and can display or filter them as needed.

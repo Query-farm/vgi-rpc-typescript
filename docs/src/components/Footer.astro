@@ -1,0 +1,23 @@
+---
+import Default from "@astrojs/starlight/components/Footer.astro";
+---
+
+<Default {...Astro.props}>
+  <slot />
+</Default>
+<footer class="site-copyright">
+  <p>Copyright 2026 <a href="https://query.farm">Query.Farm LLC</a>. Licensed under <a href="https://github.com/rustyconover/vgi-rpc-typescript/blob/main/LICENSE.md">Apache 2.0</a>.</p>
+</footer>
+
+<style>
+  .site-copyright {
+    text-align: center;
+    padding: 1rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+    border-top: 1px solid var(--sl-color-gray-6);
+  }
+  .site-copyright a {
+    color: var(--sl-color-gray-2);
+  }
+</style>

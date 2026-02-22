@@ -1,0 +1,50 @@
+---
+title: Installation
+description: How to install vgi-rpc-typescript and set up your project.
+---
+
+## Prerequisites
+
+vgi-rpc-typescript requires [Bun](https://bun.sh/) runtime.
+
+## Install the package
+
+```bash
+bun add vgi-rpc-typescript
+```
+
+## Optional: Python CLI
+
+The [vgi-rpc CLI](https://github.com/rustyconover/vgi-rpc) is useful for testing and introspecting your servers:
+
+```bash
+pip install vgi-rpc[cli]
+```
+
+The CLI can describe services, call unary methods, and interact with streaming methods from the command line.
+
+## Verify installation
+
+Create a minimal server to verify everything works:
+
+```typescript
+import { Protocol, VgiRpcServer, str } from "vgi-rpc-typescript";
+
+const protocol = new Protocol("Hello");
+
+protocol.unary("hello", {
+  params: { name: str },
+  result: { greeting: str },
+  handler: async ({ name }) => ({ greeting: `Hello, ${name}!` }),
+});
+
+const server = new VgiRpcServer(protocol, { enableDescribe: true });
+server.run();
+```
+
+Save this as `server.ts` and test with:
+
+```bash
+vgi-rpc --cmd "bun run server.ts" call hello name=World
+# {"greeting": "Hello, World!"}
+```

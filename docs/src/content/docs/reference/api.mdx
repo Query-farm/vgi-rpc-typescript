@@ -1,0 +1,224 @@
+---
+title: API Reference
+description: Complete reference for all public exports from vgi-rpc-typescript.
+---
+
+All public symbols are exported from the `vgi-rpc-typescript` package entry point.
+
+## Classes
+
+### Protocol
+
+Fluent builder for defining RPC methods.
+
+```typescript
+import { Protocol } from "vgi-rpc-typescript";
+
+const protocol = new Protocol(name: string);
+```
+
+**Properties:**
+- `name: string` — the protocol/service name
+
+**Methods:**
+- `unary(name, config)` — register a [unary method](/guides/unary-methods/)
+- `producer<S>(name, config)` — register a [producer stream](/guides/producer-streams/)
+- `exchange<S>(name, config)` — register an [exchange stream](/guides/exchange-streams/)
+- `getMethods()` — returns `Map<string, MethodDefinition>`
+
+### VgiRpcServer
+
+RPC server that reads Arrow IPC requests from stdin and writes responses to stdout.
+
+```typescript
+import { VgiRpcServer } from "vgi-rpc-typescript";
+
+const server = new VgiRpcServer(protocol, options?);
+```
+
+**Options:**
+- `enableDescribe?: boolean` — register the `__describe__` introspection method (default: `true`)
+- `serverId?: string` — server ID included in response metadata (random if omitted)
+
+**Methods:**
+- `run(): Promise<void>` — start the server loop; reads requests until stdin closes
+
+### OutputCollector
+
+Accumulates output batches during produce/exchange calls. Passed as the `out` parameter to streaming handlers.
+
+```typescript
+import { OutputCollector } from "vgi-rpc-typescript";
+```
+
+**Methods:**
+- `emit(columns: Record<string, any[]>)` — emit a data batch from column arrays
+- `emit(batch: RecordBatch, metadata?: Map<string, string>)` — emit a pre-built RecordBatch
+- `emitRow(values: Record<string, any>)` — emit a single-row batch
+- `finish()` — signal stream completion (producer only)
+- `clientLog(level, message, extra?)` — emit a log message
+
+**Properties:**
+- `finished: boolean` — whether `finish()` has been called
+- `batches: EmittedBatch[]` — accumulated batches
+- `outputSchema: Schema` — the output schema
+
+## Functions
+
+### createHttpHandler
+
+Create a fetch-compatible HTTP handler for a Protocol.
+
+```typescript
+import { createHttpHandler } from "vgi-rpc-typescript";
+
+const handler = createHttpHandler(protocol: Protocol, options?: HttpHandlerOptions);
+// Returns: (request: Request) => Response | Promise<Response>
+```
+
+See [HTTP Transport](/guides/http-transport/) for usage details.
+
+### toSchema
+
+Convert a `SchemaLike` value to an Arrow `Schema`:
+
+```typescript
+import { toSchema } from "vgi-rpc-typescript";
+
+const schema = toSchema({ name: str, value: float });
+// Returns: Schema
+```
+
+### inferParamTypes
+
+Infer parameter type strings from an Arrow schema:
+
+```typescript
+import { inferParamTypes } from "vgi-rpc-typescript";
+
+const types = inferParamTypes(schema);
+// Returns: Record<string, string>
+```
+
+## Type singletons
+
+Schema shorthand values — see [Schema Shorthand](/guides/schema-shorthand/) for details.
+
+| Export | Arrow Type |
+|--------|-----------|
+| `str` | `Utf8` |
+| `bytes` | `Binary` |
+| `int` | `Int64` |
+| `int32` | `Int32` |
+| `float` | `Float64` |
+| `float32` | `Float32` |
+| `bool` | `Bool` |
+
+## Type aliases
+
+```typescript
+type UnaryHandler = (
+  params: Record<string, any>,
+  ctx: LogContext,
+) => Promise<Record<string, any>> | Record<string, any>;
+
+type ProducerInit<S> = (
+  params: Record<string, any>,
+) => Promise<S> | S;
+
+type ProducerFn<S> = (
+  state: S,
+  out: OutputCollector,
+) => Promise<void> | void;
+
+type ExchangeInit<S> = (
+  params: Record<string, any>,
+) => Promise<S> | S;
+
+type ExchangeFn<S> = (
+  state: S,
+  input: RecordBatch,
+  out: OutputCollector,
+) => Promise<void> | void;
+
+type HeaderInit = (
+  params: Record<string, any>,
+  state: any,
+  ctx: LogContext,
+) => Record<string, any>;
+
+type SchemaLike = Schema | Record<string, DataType>;
+```
+
+## Interfaces
+
+### LogContext
+
+```typescript
+interface LogContext {
+  clientLog(level: string, message: string, extra?: Record<string, string>): void;
+}
+```
+
+### HttpHandlerOptions
+
+See [Configuration](/reference/configuration/).
+
+### StateSerializer
+
+```typescript
+interface StateSerializer {
+  serialize(state: any): Uint8Array;
+  deserialize(bytes: Uint8Array): any;
+}
+```
+
+## Enums
+
+### MethodType
+
+```typescript
+enum MethodType {
+  UNARY = "unary",
+  STREAM = "stream",
+}
+```
+
+## Error classes
+
+### RpcError
+
+```typescript
+class RpcError extends Error {
+  readonly errorType: string;
+  readonly errorMessage: string;
+  readonly remoteTraceback: string;
+}
+```
+
+### VersionError
+
+```typescript
+class VersionError extends Error {}
+```
+
+## Constants
+
+Wire protocol metadata keys:
+
+| Constant | Value |
+|----------|-------|
+| `RPC_METHOD_KEY` | `vgi_rpc.method` |
+| `REQUEST_VERSION_KEY` | `vgi_rpc.request_version` |
+| `REQUEST_VERSION` | `1` |
+| `LOG_LEVEL_KEY` | `vgi_rpc.log_level` |
+| `LOG_MESSAGE_KEY` | `vgi_rpc.log_message` |
+| `LOG_EXTRA_KEY` | `vgi_rpc.log_extra` |
+| `SERVER_ID_KEY` | `vgi_rpc.server_id` |
+| `REQUEST_ID_KEY` | `vgi_rpc.request_id` |
+| `PROTOCOL_NAME_KEY` | `vgi_rpc.protocol_name` |
+| `DESCRIBE_VERSION_KEY` | `vgi_rpc.describe_version` |
+| `DESCRIBE_VERSION` | `2` |
+| `DESCRIBE_METHOD_NAME` | `__describe__` |
+| `STATE_KEY` | `vgi_rpc.stream_state` |
+| `ARROW_CONTENT_TYPE` | `application/vnd.apache.arrow.stream` |

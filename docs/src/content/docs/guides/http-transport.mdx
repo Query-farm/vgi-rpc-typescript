@@ -1,0 +1,101 @@
+---
+title: HTTP Transport
+description: Serve vgi-rpc methods over HTTP with stateless streaming.
+---
+
+In addition to stdin/stdout, vgi-rpc-typescript can serve methods over HTTP using the `createHttpHandler()` function. This enables browser clients, load balancing, and standard HTTP infrastructure.
+
+## Quick start
+
+```typescript
+import { Protocol, float, createHttpHandler } from "vgi-rpc-typescript";
+
+const protocol = new Protocol("Calculator");
+
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a + b }),
+});
+
+const handler = createHttpHandler(protocol);
+Bun.serve({ port: 8080, fetch: handler });
+```
+
+## Compatibility
+
+The handler returns a standard `(Request) => Response | Promise<Response>` function compatible with:
+
+- **Bun** — `Bun.serve({ fetch: handler })`
+- **Deno** — `Deno.serve(handler)`
+- **Cloudflare Workers** — `export default { fetch: handler }`
+
+## Routes
+
+All routes are under a configurable prefix (default: `/vgi`):
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `{prefix}/{name}` | POST | Unary method call |
+| `{prefix}/{name}/init` | POST | Initialize a stream (producer or exchange) |
+| `{prefix}/{name}/exchange` | POST | Send/receive a stream batch |
+| `{prefix}/__describe__` | POST | Service introspection |
+| `{prefix}/__capabilities__` | OPTIONS | Server capabilities |
+
+All POST requests must use `Content-Type: application/vnd.apache.arrow.stream`.
+
+## Stateless streaming
+
+HTTP streaming uses HMAC-SHA256 signed state tokens to maintain stream state across requests:
+
+1. Client calls `/{method}/init` with parameters → receives first batch + state token
+2. Client calls `/{method}/exchange` with state token + input batch → receives output batch + new token
+3. Repeat step 2 until the stream ends
+
+State tokens are:
+- Signed with HMAC-SHA256 to prevent tampering
+- Time-limited (default: 1 hour TTL)
+- Self-contained (no server-side session storage needed)
+
+## Configuration
+
+Pass `HttpHandlerOptions` to customize behavior:
+
+```typescript
+const handler = createHttpHandler(protocol, {
+  prefix: "/api",
+  signingKey: myKey,           // HMAC key (random 32 bytes if omitted)
+  tokenTtl: 7200,             // Token TTL in seconds (default: 3600)
+  corsOrigins: "*",            // CORS allowed origins
+  maxRequestBytes: 10_000_000, // Max request body size
+  maxStreamResponseBytes: 5_000_000, // Max bytes before continuation token
+  serverId: "my-server",      // Server ID in response metadata
+  stateSerializer: custom,    // Custom state serializer
+});
+```
+
+See [Configuration](/reference/configuration/) for full details on each option.
+
+## CORS
+
+Set `corsOrigins` to enable CORS headers on all responses:
+
+```typescript
+const handler = createHttpHandler(protocol, {
+  corsOrigins: "*",
+});
+```
+
+The handler automatically responds to `OPTIONS` preflight requests.
+
+## Testing with the CLI
+
+The Python CLI supports HTTP transport:
+
+```bash
+# Describe
+vgi-rpc --url http://localhost:8080 describe
+
+# Call a unary method
+vgi-rpc --url http://localhost:8080 call add a=1.0 b=2.0
+```

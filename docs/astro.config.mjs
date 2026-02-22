@@ -1,0 +1,69 @@
+import { defineConfig } from "astro/config";
+import starlight from "@astrojs/starlight";
+
+export default defineConfig({
+  site: "https://vgi-rpc-typescript.query.farm",
+  integrations: [
+    starlight({
+      title: "vgi-rpc-typescript",
+      customCss: ["./src/styles/custom.css"],
+      social: [
+        {
+          icon: "github",
+          label: "GitHub",
+          href: "https://github.com/rustyconover/vgi-rpc-typescript",
+        },
+      ],
+      credits: false,
+      lastUpdated: true,
+      components: {
+        Footer: "./src/components/Footer.astro",
+      },
+      sidebar: [
+        {
+          label: "Getting Started",
+          items: [
+            { label: "Installation", slug: "getting-started/installation" },
+            {
+              label: "Your First Server",
+              slug: "getting-started/your-first-server",
+            },
+          ],
+        },
+        {
+          label: "Guides",
+          items: [
+            { label: "Unary Methods", slug: "guides/unary-methods" },
+            { label: "Producer Streams", slug: "guides/producer-streams" },
+            { label: "Exchange Streams", slug: "guides/exchange-streams" },
+            { label: "Stream Headers", slug: "guides/stream-headers" },
+            { label: "Schema Shorthand", slug: "guides/schema-shorthand" },
+            { label: "Output Collector", slug: "guides/output-collector" },
+            { label: "Client Logging", slug: "guides/client-logging" },
+            { label: "Error Handling", slug: "guides/error-handling" },
+            { label: "HTTP Transport", slug: "guides/http-transport" },
+          ],
+        },
+        {
+          label: "Examples",
+          items: [
+            { label: "Calculator", slug: "examples/calculator" },
+            { label: "Streaming", slug: "examples/streaming" },
+            {
+              label: "Testing with CLI",
+              slug: "examples/testing-with-cli",
+            },
+          ],
+        },
+        {
+          label: "Reference",
+          items: [
+            { label: "API", slug: "reference/api" },
+            { label: "Configuration", slug: "reference/configuration" },
+            { label: "Wire Protocol", slug: "reference/wire-protocol" },
+          ],
+        },
+      ],
+    }),
+  ],
+});

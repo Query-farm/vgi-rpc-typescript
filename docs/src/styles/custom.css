@@ -1,0 +1,18 @@
+/* Farm-themed color palette for vgi-rpc-typescript docs */
+
+:root {
+  /* Light mode: deep crop green accent */
+  --sl-color-accent-low: hsl(100, 30%, 20%);
+  --sl-color-accent: hsl(100, 50%, 36%);
+  --sl-color-accent-high: hsl(100, 40%, 90%);
+
+  /* Warm gray tints (earthy feel) */
+  --sl-hue: 40;
+}
+
+:root[data-theme="dark"] {
+  /* Dark mode: warm amber/gold accent */
+  --sl-color-accent-low: hsl(40, 40%, 16%);
+  --sl-color-accent: hsl(40, 80%, 56%);
+  --sl-color-accent-high: hsl(40, 20%, 10%);
+}

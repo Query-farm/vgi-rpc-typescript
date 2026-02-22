@@ -1,0 +1,100 @@
+---
+title: Wire Protocol
+description: Technical details of the Arrow IPC wire protocol.
+---
+
+vgi-rpc-typescript implements the same wire protocol as the Python [vgi-rpc](https://github.com/rustyconover/vgi-rpc) framework, ensuring cross-language compatibility.
+
+## Overview
+
+Communication uses multiple sequential Arrow IPC streams over stdin/stdout (subprocess mode) or HTTP request/response bodies (HTTP mode).
+
+## Request format
+
+Each request is a single Arrow IPC stream containing one `RecordBatch`:
+
+- The batch schema fields correspond to method parameters
+- Batch metadata carries the method name and protocol version:
+  - `vgi_rpc.method` — the method name to invoke
+  - `vgi_rpc.request_version` — protocol version (currently `"1"`)
+  - `vgi_rpc.request_id` — optional request correlation ID
+
+## Response format
+
+### Unary responses
+
+A single Arrow IPC stream containing one `RecordBatch` with the result fields.
+
+### Stream responses
+
+Multiple batches within a single IPC stream:
+
+1. Optional header batch (if `headerSchema` is defined)
+2. One or more data batches from `produce` or `exchange`
+3. Log batches interleaved between data batches
+
+### Log batches
+
+Zero-row batches with metadata:
+
+- `vgi_rpc.log_level` — log level string (e.g., `"INFO"`, `"DEBUG"`)
+- `vgi_rpc.log_message` — the message text
+- `vgi_rpc.log_extra` — JSON-encoded extra metadata (optional)
+
+### Error batches
+
+Zero-row batches with exception metadata:
+
+- `vgi_rpc.log_level` set to `"EXCEPTION"`
+- `vgi_rpc.log_message` containing the error message
+
+## Streaming protocol
+
+### Producer streams
+
+1. Client sends a single request batch
+2. Server responds with a stream of output batches
+3. Server signals completion by ending the IPC stream
+
+### Exchange streams
+
+Exchange streams use a **lockstep** protocol:
+
+1. Client sends one input batch
+2. Server reads it and writes one output batch
+3. Repeat until the client stops sending
+
+This interleaved read/write pattern prevents deadlocks when both sides buffer data on stdin/stdout pipes.
+
+## Metadata keys
+
+| Key | Value | Description |
+|-----|-------|-------------|
+| `vgi_rpc.method` | Method name | Identifies the RPC method |
+| `vgi_rpc.request_version` | `"1"` | Protocol version |
+| `vgi_rpc.request_id` | UUID string | Request correlation ID |
+| `vgi_rpc.log_level` | Level string | Log/error level |
+| `vgi_rpc.log_message` | Message string | Log/error message |
+| `vgi_rpc.log_extra` | JSON string | Additional metadata |
+| `vgi_rpc.server_id` | ID string | Server identifier |
+| `vgi_rpc.protocol_name` | Name string | Protocol name (in describe) |
+| `vgi_rpc.describe_version` | `"2"` | Describe protocol version |
+| `vgi_rpc.stream_state` | Token string | HTTP streaming state token |
+
+## Introspection
+
+The `__describe__` method is a special built-in that returns service metadata:
+
+- Method names, types, parameter schemas, and documentation
+- Enabled by setting `enableDescribe: true` on `VgiRpcServer`
+- Response uses describe protocol version `"2"`
+
+## HTTP wire format
+
+When using HTTP transport, the wire format wraps the same Arrow IPC streams in HTTP request/response bodies:
+
+- Content-Type: `application/vnd.apache.arrow.stream`
+- State tokens in `vgi_rpc.stream_state` batch metadata enable stateless streaming
+- Tokens are HMAC-SHA256 signed, base64-encoded, and time-limited
+
+See [HTTP Transport](/guides/http-transport/) for the HTTP-specific routing and state management details.

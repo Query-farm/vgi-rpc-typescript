@@ -1,0 +1,42 @@
+---
+title: vgi-rpc-typescript
+description: TypeScript server library for the vgi-rpc framework using Apache Arrow IPC serialization.
+template: splash
+hero:
+  title: vgi-rpc-typescript
+  tagline: Build RPC servers with Apache Arrow IPC serialization. Define methods with Arrow-typed schemas, serve them over stdin/stdout or HTTP, and interact using any vgi-rpc client.
+  actions:
+    - text: Get Started
+      link: /getting-started/installation/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/rustyconover/vgi-rpc-typescript
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Features
+
+<CardGrid>
+  <Card title="Three Method Types" icon="list-format">
+    Unary (request-response), producer (server-streaming), and exchange (bidirectional-streaming) methods.
+  </Card>
+  <Card title="Apache Arrow IPC" icon="rocket">
+    Efficient columnar serialization compatible with the Python vgi-rpc framework. No JSON overhead.
+  </Card>
+  <Card title="Schema Shorthand" icon="pencil">
+    Declare schemas with `{ name: str, count: int }` instead of manual `Schema`/`Field` construction.
+  </Card>
+  <Card title="HTTP Transport" icon="globe">
+    Serve methods over HTTP with stateless streaming via HMAC-signed state tokens. Works with Bun, Deno, and Cloudflare Workers.
+  </Card>
+  <Card title="Fluent Protocol Builder" icon="setting">
+    Chain `.unary()`, `.producer()`, `.exchange()` calls to define your service.
+  </Card>
+  <Card title="Runtime Introspection" icon="magnifier">
+    Opt-in `__describe__` method for dynamic service discovery via the CLI.
+  </Card>
+</CardGrid>

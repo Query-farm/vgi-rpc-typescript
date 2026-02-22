@@ -1,0 +1,104 @@
+---
+title: Configuration
+description: Configuration options for VgiRpcServer and HTTP handler.
+---
+
+## VgiRpcServer options
+
+The `VgiRpcServer` constructor accepts an optional configuration object:
+
+```typescript
+const server = new VgiRpcServer(protocol, {
+  enableDescribe: true,
+  serverId: "my-server-01",
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enableDescribe` | `boolean` | `true` | Register the `__describe__` introspection method |
+| `serverId` | `string` | Random 12-char UUID | Server identifier included in response metadata |
+
+## HttpHandlerOptions
+
+The `createHttpHandler` function accepts an optional `HttpHandlerOptions` object:
+
+```typescript
+const handler = createHttpHandler(protocol, {
+  prefix: "/api",
+  signingKey: myKey,
+  tokenTtl: 7200,
+  corsOrigins: "*",
+  maxRequestBytes: 10_000_000,
+  maxStreamResponseBytes: 5_000_000,
+  serverId: "http-01",
+  stateSerializer: customSerializer,
+});
+```
+
+### Options reference
+
+#### `prefix`
+
+- **Type:** `string`
+- **Default:** `"/vgi"`
+
+URL path prefix for all endpoints. All method routes are mounted under this prefix.
+
+#### `signingKey`
+
+- **Type:** `Uint8Array`
+- **Default:** Random 32 bytes
+
+HMAC-SHA256 signing key for state tokens. Provide a stable key if you need tokens to survive server restarts.
+
+#### `tokenTtl`
+
+- **Type:** `number`
+- **Default:** `3600` (1 hour)
+
+State token time-to-live in seconds. Set to `0` to disable TTL checks.
+
+#### `corsOrigins`
+
+- **Type:** `string`
+- **Default:** `undefined` (no CORS headers)
+
+CORS allowed origins. When set, `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`, and `Access-Control-Allow-Headers` headers are added to all responses. `OPTIONS` preflight requests are handled automatically.
+
+#### `maxRequestBytes`
+
+- **Type:** `number`
+- **Default:** `undefined` (unlimited)
+
+Maximum request body size in bytes. Requests exceeding this limit receive a `413` response. The limit is also advertised via the `VGI-Max-Request-Bytes` header on the `__capabilities__` endpoint.
+
+#### `maxStreamResponseBytes`
+
+- **Type:** `number`
+- **Default:** `undefined` (unlimited)
+
+Maximum bytes before a producer stream emits a continuation token instead of more data. This limits memory usage for large stream responses.
+
+#### `serverId`
+
+- **Type:** `string`
+- **Default:** Random 12-char UUID
+
+Server ID included in response metadata. Useful for identifying which server handled a request in multi-server deployments.
+
+#### `stateSerializer`
+
+- **Type:** `StateSerializer`
+- **Default:** JSON serializer with BigInt support
+
+Custom serializer for stream state objects stored in state tokens.
+
+```typescript
+interface StateSerializer {
+  serialize(state: any): Uint8Array;
+  deserialize(bytes: Uint8Array): any;
+}
+```
+
+The default serializer uses JSON with special handling for `BigInt` values (prefixed with `__bigint__:`).

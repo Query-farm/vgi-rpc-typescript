@@ -1,0 +1,116 @@
+---
+title: Your First Server
+description: Build a complete calculator RPC server step by step.
+---
+
+This tutorial walks through building a calculator server with three operations: add, multiply, and divide.
+
+## 1. Create the protocol
+
+Every vgi-rpc server starts with a `Protocol` that names your service:
+
+```typescript
+import { Protocol, VgiRpcServer, float } from "vgi-rpc-typescript";
+
+const protocol = new Protocol("Calculator");
+```
+
+## 2. Define methods
+
+Use the fluent builder to register unary methods. Each method needs a parameter schema, result schema, and handler function:
+
+```typescript
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a + b }),
+  doc: "Add two numbers.",
+});
+
+protocol.unary("multiply", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a * b }),
+  doc: "Multiply two numbers.",
+});
+
+protocol.unary("divide", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => {
+    if (b === 0) throw new Error("Division by zero");
+    return { result: a / b };
+  },
+  doc: "Divide two numbers.",
+});
+```
+
+The `params` and `result` objects use [schema shorthand](/guides/schema-shorthand/) — `float` expands to `Float64` Arrow fields automatically.
+
+## 3. Create and run the server
+
+```typescript
+const server = new VgiRpcServer(protocol, { enableDescribe: true });
+server.run();
+```
+
+Setting `enableDescribe: true` registers the `__describe__` introspection method.
+
+## 4. Test with the CLI
+
+```bash
+# Discover available methods
+vgi-rpc --cmd "bun run calculator.ts" describe
+
+# Call methods
+vgi-rpc --cmd "bun run calculator.ts" call add a=2.0 b=3.0
+# {"result": 5.0}
+
+vgi-rpc --cmd "bun run calculator.ts" call divide a=10.0 b=3.0
+# {"result": 3.3333333333333335}
+
+# Error handling works automatically
+vgi-rpc --cmd "bun run calculator.ts" call divide a=1.0 b=0.0
+# Error: Division by zero
+```
+
+## Complete example
+
+```typescript
+import { Protocol, VgiRpcServer, float } from "vgi-rpc-typescript";
+
+const protocol = new Protocol("Calculator");
+
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a + b }),
+  doc: "Add two numbers.",
+});
+
+protocol.unary("multiply", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a * b }),
+  doc: "Multiply two numbers.",
+});
+
+protocol.unary("divide", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => {
+    if (b === 0) throw new Error("Division by zero");
+    return { result: a / b };
+  },
+  doc: "Divide two numbers.",
+});
+
+const server = new VgiRpcServer(protocol, { enableDescribe: true });
+server.run();
+```
+
+## Next steps
+
+- Learn about [producer streams](/guides/producer-streams/) for server-streaming
+- Learn about [exchange streams](/guides/exchange-streams/) for bidirectional streaming
+- See the [schema shorthand](/guides/schema-shorthand/) guide for all available types

@@ -1,0 +1,81 @@
+---
+title: Calculator Example
+description: Walkthrough of the calculator example with unary methods.
+---
+
+The calculator example demonstrates three unary methods for basic arithmetic.
+
+## Source code
+
+```typescript
+import { Protocol, VgiRpcServer, float } from "vgi-rpc-typescript";
+
+const protocol = new Protocol("Calculator");
+
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a + b }),
+  doc: "Add two numbers.",
+});
+
+protocol.unary("multiply", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a * b }),
+  doc: "Multiply two numbers.",
+});
+
+protocol.unary("divide", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => {
+    if (b === 0) throw new Error("Division by zero");
+    return { result: a / b };
+  },
+  doc: "Divide two numbers.",
+});
+
+const server = new VgiRpcServer(protocol, { enableDescribe: true });
+server.run();
+```
+
+## Walkthrough
+
+### Protocol definition
+
+The `Protocol` constructor takes a service name (`"Calculator"`) used for introspection and identification.
+
+### Method registration
+
+Each `protocol.unary()` call registers a method with:
+
+- **`params`** — input schema using [schema shorthand](/guides/schema-shorthand/). `float` maps to Arrow `Float64`.
+- **`result`** — output schema, also using shorthand.
+- **`handler`** — async function that receives parsed parameters and returns a result record.
+- **`doc`** — documentation string exposed via `__describe__`.
+
+### Error handling
+
+The `divide` method demonstrates error propagation: throwing an `Error` sends it to the client as an exception-level log batch. The transport stays clean for the next request.
+
+### Server startup
+
+`VgiRpcServer` wraps the protocol and handles the stdin/stdout request loop. Setting `enableDescribe: true` enables the `__describe__` introspection method.
+
+## Running
+
+```bash
+# Describe available methods
+vgi-rpc --cmd "bun run examples/calculator.ts" describe
+
+# Call methods
+vgi-rpc --cmd "bun run examples/calculator.ts" call add a=2.0 b=3.0
+# {"result": 5.0}
+
+vgi-rpc --cmd "bun run examples/calculator.ts" call multiply a=4.0 b=5.0
+# {"result": 20.0}
+
+vgi-rpc --cmd "bun run examples/calculator.ts" call divide a=10.0 b=3.0
+# {"result": 3.3333333333333335}
+```

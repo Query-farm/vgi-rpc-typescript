@@ -1,0 +1,66 @@
+---
+title: Error Handling
+description: How errors are propagated from handlers to clients.
+---
+
+Errors thrown in handlers are automatically caught, serialized, and transmitted to the client as Arrow IPC error batches.
+
+## Throwing errors
+
+Throw any `Error` from a handler to signal a failure:
+
+```typescript
+import { Protocol, float } from "vgi-rpc-typescript";
+
+const protocol = new Protocol("MyService");
+
+protocol.unary("divide", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => {
+    if (b === 0) throw new Error("Division by zero");
+    return { result: a / b };
+  },
+});
+```
+
+The error message is transmitted to the client and the transport remains clean for subsequent requests.
+
+## Wire format
+
+Errors are transmitted as zero-row Arrow batches with `EXCEPTION`-level metadata:
+
+- `vgi_rpc.log_level` set to `EXCEPTION`
+- `vgi_rpc.log_message` containing the error message
+
+## Error classes
+
+### RpcError
+
+Represents an error received from the RPC protocol:
+
+```typescript
+import { RpcError } from "vgi-rpc-typescript";
+
+class RpcError extends Error {
+  readonly errorType: string;
+  readonly errorMessage: string;
+  readonly remoteTraceback: string;
+}
+```
+
+### VersionError
+
+Thrown when the client sends an unsupported request version:
+
+```typescript
+import { VersionError } from "vgi-rpc-typescript";
+
+class VersionError extends Error {
+  // Inherits message from Error
+}
+```
+
+## Streaming errors
+
+Errors in producer `produce` and exchange `exchange` functions terminate the stream and send an error batch to the client. The `init` function errors are also caught and reported.

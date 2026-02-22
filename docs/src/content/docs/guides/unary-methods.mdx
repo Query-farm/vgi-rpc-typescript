@@ -1,0 +1,84 @@
+---
+title: Unary Methods
+description: Define request-response RPC methods with typed parameters and results.
+---
+
+Unary methods handle a single request and return a single response — the most common RPC pattern.
+
+## Basic usage
+
+```typescript
+import { Protocol, float } from "vgi-rpc-typescript";
+
+const protocol = new Protocol("MyService");
+
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a + b }),
+  doc: "Add two numbers.",
+});
+```
+
+## Handler signature
+
+The handler receives two arguments:
+
+```typescript
+type UnaryHandler = (
+  params: Record<string, any>,
+  ctx: LogContext,
+) => Promise<Record<string, any>> | Record<string, any>;
+```
+
+- **`params`** — parsed parameter values from the request, keyed by field name
+- **`ctx`** — provides `clientLog()` for [client-directed logging](/guides/client-logging/)
+
+The handler must return an object matching the result schema. It can be sync or async.
+
+## Default values
+
+Provide default values for optional parameters with the `defaults` field:
+
+```typescript
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a + b }),
+  defaults: { b: 1.0 },
+});
+```
+
+When the client omits `b`, it defaults to `1.0`.
+
+## Documentation strings
+
+The `doc` field is exposed through the `__describe__` introspection method:
+
+```typescript
+protocol.unary("greet", {
+  params: { name: str },
+  result: { greeting: str },
+  handler: async ({ name }) => ({ greeting: `Hello, ${name}!` }),
+  doc: "Greet someone by name.",
+});
+```
+
+Clients can discover method documentation by calling `vgi-rpc describe`.
+
+## Error handling
+
+Throw any `Error` from a handler to propagate it to the client:
+
+```typescript
+protocol.unary("divide", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => {
+    if (b === 0) throw new Error("Division by zero");
+    return { result: a / b };
+  },
+});
+```
+
+See [Error Handling](/guides/error-handling/) for more details.
