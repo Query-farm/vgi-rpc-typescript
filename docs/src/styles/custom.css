@@ -1,18 +1,81 @@
-/* Farm-themed color palette for vgi-rpc-typescript docs */
+/* Farm-themed color palette matching vgi-rpc.query.farm */
 
+/* Google Fonts: Inter + JetBrains Mono */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/*
+ * Farm palette reference (from vgi-rpc.query.farm):
+ *   --color-farm-green-deep:    #2d5016
+ *   --color-farm-green-field:   #4a7c23
+ *   --color-farm-green-light:   #6ba034
+ *   --color-farm-gold:          #c8a43a
+ *   --color-farm-gold-light:    #d4b64e
+ *   --color-farm-cream:         #faf8f0
+ *   --color-farm-cream-dark:    #f0ece0
+ *   --color-farm-dark:          #1a1a0e
+ *   --color-farm-dark-card:     #252518
+ *   --color-farm-dark-border:   #3a3a28
+ *   --color-farm-text:          #2c2c1e
+ *   --color-farm-text-muted:    #6b6b5a
+ *   --color-farm-text-light:    #f5f0e0
+ *   --color-farm-text-light-muted: #b8b0a0
+ */
+
+/* ── Dark mode (default in Starlight) ── */
 :root {
-  /* Light mode: deep crop green accent */
-  --sl-color-accent-low: hsl(100, 30%, 20%);
-  --sl-color-accent: hsl(100, 50%, 36%);
-  --sl-color-accent-high: hsl(100, 40%, 90%);
+	/* Accent: farm gold */
+	--sl-color-accent-low: #2e2810;
+	--sl-color-accent: #c8a43a;
+	--sl-color-accent-high: #f5f0e0;
 
-  /* Warm gray tints (earthy feel) */
-  --sl-hue: 40;
+	/* Warm earthy grays instead of blue-gray */
+	--sl-color-white: #f5f0e0;
+	--sl-color-gray-1: #d4cbae;
+	--sl-color-gray-2: #b8b0a0;
+	--sl-color-gray-3: #6b6b5a;
+	--sl-color-gray-4: #4a4a38;
+	--sl-color-gray-5: #3a3a28;
+	--sl-color-gray-6: #252518;
+	--sl-color-black: #1a1a0e;
+
+	/* Semantic colors using farm palette */
+	--sl-hue-green: 101;
+	--sl-hue-orange: 41;
+
+	/* Fonts */
+	--sl-font: 'Inter', system-ui, -apple-system, sans-serif;
+	--sl-font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
 }
 
-:root[data-theme="dark"] {
-  /* Dark mode: warm amber/gold accent */
-  --sl-color-accent-low: hsl(40, 40%, 16%);
-  --sl-color-accent: hsl(40, 80%, 56%);
-  --sl-color-accent-high: hsl(40, 20%, 10%);
+/* ── Light mode ── */
+:root[data-theme='light'] {
+	/* Accent: farm green */
+	--sl-color-accent-low: #e8f0dc;
+	--sl-color-accent: #4a7c23;
+	--sl-color-accent-high: #2d5016;
+
+	/* Warm earthy grays */
+	--sl-color-white: #2c2c1e;
+	--sl-color-gray-1: #3a3a2a;
+	--sl-color-gray-2: #4a4a38;
+	--sl-color-gray-3: #6b6b5a;
+	--sl-color-gray-4: #8b8b7a;
+	--sl-color-gray-5: #d4cbae;
+	--sl-color-gray-6: #f0ece0;
+	--sl-color-gray-7: #f5f2e8;
+	--sl-color-black: #faf8f0;
+}
+
+/* ── Links: use gold in dark, green in light ── */
+:root {
+	--sl-color-text-accent: #d4b64e;
+}
+
+:root[data-theme='light'] {
+	--sl-color-text-accent: #4a7c23;
+}
+
+/* ── Code block styling ── */
+pre code {
+	font-size: 0.8125em;
 }

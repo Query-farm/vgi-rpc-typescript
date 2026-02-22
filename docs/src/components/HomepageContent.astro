@@ -1,0 +1,153 @@
+---
+// Simplified homepage — prose-first, one code example, one terminal proof.
+---
+
+<section class="home-content">
+
+  <div class="value-props">
+    <div class="prop">
+      <strong>Arrow-native end to end.</strong>
+      Data stays in columnar format from handler to wire. No JSON serialization, no encoding overhead.
+    </div>
+    <div class="prop">
+      <strong>Two transports, one definition.</strong>
+      The same Protocol serves subprocess stdin/stdout and HTTP. Switch with one line.
+    </div>
+    <div class="prop">
+      <strong>Runtime introspection built in.</strong>
+      Any vgi-rpc client discovers your methods, their schemas, and their docs automatically.
+    </div>
+  </div>
+
+  <div class="code-section">
+    <p class="code-label">A complete RPC server in 8 lines</p>
+    <div class="code-block">
+      <pre><code><span class="kw">const</span> protocol = <span class="kw">new</span> <span class="cls">Protocol</span>(<span class="str">"Calculator"</span>);
+
+protocol.<span class="fn">unary</span>(<span class="str">"add"</span>, {'{'}
+  params: {'{'} a: <span class="typ">float</span>, b: <span class="typ">float</span> {'}'},
+  result: {'{'} result: <span class="typ">float</span> {'}'},
+  handler: <span class="kw">async</span> ({'{'} a, b {'}'}) =&gt; ({'{'} result: a + b {'}'}),
+{'}'});
+
+<span class="kw">new</span> <span class="cls">VgiRpcServer</span>(protocol).<span class="fn">run</span>();</code></pre>
+    </div>
+  </div>
+
+  <div class="terminal-section">
+    <div class="terminal">
+      <div class="terminal-bar">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
+      </div>
+      <pre><code><span class="prompt">$</span> vgi-rpc call add a=2 b=3
+<span class="out">{'{'}result: 5.0{'}'}</span></code></pre>
+    </div>
+  </div>
+
+</section>
+
+<style>
+  .home-content {
+    max-width: 42rem;
+    margin: 0 auto;
+    padding: 0 1rem 3rem;
+  }
+
+  /* ── Value propositions ── */
+  .value-props {
+    display: flex;
+    flex-direction: column;
+    gap: 1.75rem;
+    margin-bottom: 3.5rem;
+    padding-top: 1rem;
+  }
+  .prop {
+    font-size: var(--sl-text-lg);
+    line-height: 1.7;
+    color: var(--sl-color-gray-2);
+    text-align: center;
+  }
+  .prop strong {
+    color: var(--sl-color-white);
+  }
+
+  /* ── Code example ── */
+  .code-section {
+    margin-bottom: 2rem;
+  }
+  .code-label {
+    text-align: center;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+    margin: 0 0 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 500;
+  }
+  .code-block {
+    border-radius: 0.75rem;
+    overflow: hidden;
+    border: 1px solid var(--sl-color-gray-5);
+    background: var(--sl-color-gray-6);
+  }
+  .code-block pre {
+    margin: 0;
+    padding: 1.5rem;
+    overflow-x: auto;
+    font-size: 0.875rem;
+    line-height: 1.7;
+  }
+  .code-block code {
+    font-family: var(--__sl-font-mono);
+    background: none;
+  }
+
+  /* ── Syntax colors (farm palette) ── */
+  .kw { color: #c8a43a; }
+  .cls { color: #6ba034; }
+  .fn { color: #8bb85a; }
+  .str { color: #d4b64e; }
+  .typ { color: #6ba034; }
+
+  /* ── Terminal proof ── */
+  .terminal-section {
+    display: flex;
+    justify-content: center;
+  }
+  .terminal {
+    border-radius: 0.75rem;
+    overflow: hidden;
+    border: 1px solid var(--sl-color-gray-5);
+    background: var(--sl-color-gray-6);
+    width: 22rem;
+  }
+  .terminal-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem;
+    background: var(--sl-color-gray-5);
+  }
+  .dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+  }
+  .dot.red { background: #e5534b; }
+  .dot.yellow { background: #c8a43a; }
+  .dot.green { background: #4a7c23; }
+  .terminal pre {
+    margin: 0;
+    padding: 1rem 1.25rem;
+    font-size: 0.8125rem;
+    line-height: 1.7;
+  }
+  .terminal code {
+    font-family: var(--__sl-font-mono);
+    background: none;
+  }
+  .prompt { color: #4a7c23; font-weight: 700; }
+  .out { color: var(--sl-color-gray-2); }
+</style>

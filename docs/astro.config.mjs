@@ -6,6 +6,11 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "vgi-rpc-typescript",
+      logo: {
+        src: "./public/logo-hero.png",
+        alt: "VGI-RPC Logo",
+      },
+      favicon: "/logo-hero.png",
       customCss: ["./src/styles/custom.css"],
       social: [
         {
