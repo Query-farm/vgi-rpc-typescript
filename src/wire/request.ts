@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 import { DataType, type Schema, type RecordBatch } from "apache-arrow";
 import {
   RPC_METHOD_KEY,

@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 import { describe, test, expect } from "bun:test";
 import { packStateToken, unpackStateToken } from "../../src/http/token.js";
 import { jsonStateSerializer } from "../../src/http/types.js";

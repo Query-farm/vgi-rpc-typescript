@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 /** Error thrown when the server encounters an RPC protocol error. */
 export class RpcError extends Error {
   constructor(

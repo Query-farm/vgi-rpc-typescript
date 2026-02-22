@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 import { type RecordBatch } from "apache-arrow";
 import { Protocol, VgiRpcServer, int32, float, type OutputCollector } from "../src/index.js";
 

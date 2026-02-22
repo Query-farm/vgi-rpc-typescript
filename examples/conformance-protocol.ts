@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Conformance protocol — 43-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.

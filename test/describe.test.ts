@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 import { describe, it, expect } from "bun:test";
 import { Schema, Field, Float64, Utf8 } from "apache-arrow";
 import { Protocol } from "../src/protocol.js";

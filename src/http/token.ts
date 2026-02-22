@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 const TOKEN_VERSION = 2;

@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 import { Schema, RecordBatch } from "apache-arrow";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";

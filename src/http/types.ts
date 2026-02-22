@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 /** Configuration options for createHttpHandler(). */
 export interface HttpHandlerOptions {
   /** URL path prefix for all endpoints. Default: "/vgi" */

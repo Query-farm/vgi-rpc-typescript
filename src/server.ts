@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 import { Schema } from "apache-arrow";
 import { Protocol } from "./protocol.js";
 import { IpcStreamReader } from "./wire/reader.js";

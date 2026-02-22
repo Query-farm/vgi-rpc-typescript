@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 /** Well-known metadata keys matching Python's metadata.py */
 
 export const RPC_METHOD_KEY = "vgi_rpc.method";
