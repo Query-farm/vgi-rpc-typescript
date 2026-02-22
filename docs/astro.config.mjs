@@ -60,6 +60,11 @@ export default defineConfig({
       },
       sidebar: [
         {
+          label: "vgi-rpc Project",
+          link: "https://vgi-rpc.query.farm",
+          attrs: { target: "_blank", rel: "noopener" },
+        },
+        {
           label: "Getting Started",
           items: [
             { label: "Installation", slug: "getting-started/installation" },
