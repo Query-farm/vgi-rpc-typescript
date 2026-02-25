@@ -3,14 +3,14 @@ title: Schema Shorthand
 description: Declare Arrow schemas concisely with type singletons.
 ---
 
-vgi-rpc-typescript provides shorthand type singletons that eliminate boilerplate when declaring parameter, result, and output schemas.
+vgi-rpc provides shorthand type singletons that eliminate boilerplate when declaring parameter, result, and output schemas.
 
 ## Using shorthand
 
 Instead of constructing `Schema` and `Field` objects manually, use the shorthand syntax:
 
 ```typescript
-import { str, int, float } from "vgi-rpc-typescript";
+import { str, int, float } from "vgi-rpc";
 
 protocol.unary("echo", {
   params: { name: str, count: int, value: float },

@@ -10,7 +10,7 @@ This tutorial walks through building a calculator server with three operations: 
 Every vgi-rpc server starts with a `Protocol` that names your service:
 
 ```typescript
-import { Protocol, VgiRpcServer, float } from "vgi-rpc-typescript";
+import { Protocol, VgiRpcServer, float } from "vgi-rpc";
 
 const protocol = new Protocol("Calculator");
 ```
@@ -77,7 +77,7 @@ vgi-rpc --cmd "bun run calculator.ts" call divide a=1.0 b=0.0
 ## Complete example
 
 ```typescript
-import { Protocol, VgiRpcServer, float } from "vgi-rpc-typescript";
+import { Protocol, VgiRpcServer, float } from "vgi-rpc";
 
 const protocol = new Protocol("Calculator");
 

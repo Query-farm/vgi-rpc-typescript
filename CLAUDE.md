@@ -1,4 +1,4 @@
-# vgi-rpc-typescript
+# vgi-rpc
 
 TypeScript server library for the vgi-rpc framework. Communicates over stdin/stdout using Apache Arrow IPC serialization. Implements the same wire protocol as the Python reference implementation.
 

@@ -1,4 +1,4 @@
-# vgi-rpc-typescript
+# vgi-rpc
 
 TypeScript server library for the [vgi-rpc](https://github.com/rustyconover/vgi-rpc) framework. Implements RPC servers that communicate over stdin/stdout using [Apache Arrow](https://arrow.apache.org/) IPC serialization.
 
@@ -17,7 +17,7 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 ## Installation
 
 ```bash
-bun add vgi-rpc-typescript
+bun add vgi-rpc
 ```
 
 Requires [Bun](https://bun.sh/) runtime.
@@ -25,7 +25,7 @@ Requires [Bun](https://bun.sh/) runtime.
 ## Quick Start
 
 ```typescript
-import { Protocol, VgiRpcServer, str, float } from "vgi-rpc-typescript";
+import { Protocol, VgiRpcServer, str, float } from "vgi-rpc";
 
 const protocol = new Protocol("Calculator");
 
@@ -155,7 +155,7 @@ protocol.producer<{ count: number; current: number }>("produce_with_header", {
 Declare schemas using convenient type singletons instead of manual `Schema`/`Field` construction:
 
 ```typescript
-import { str, bytes, int, int32, float, float32, bool } from "vgi-rpc-typescript";
+import { str, bytes, int, int32, float, float32, bool } from "vgi-rpc";
 
 // Shorthand
 protocol.unary("echo", {

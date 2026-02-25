@@ -10,7 +10,7 @@ Errors thrown in handlers are automatically caught, serialized, and transmitted 
 Throw any `Error` from a handler to signal a failure:
 
 ```typescript
-import { Protocol, float } from "vgi-rpc-typescript";
+import { Protocol, float } from "vgi-rpc";
 
 const protocol = new Protocol("MyService");
 
@@ -40,7 +40,7 @@ Errors are transmitted as zero-row Arrow batches with `EXCEPTION`-level metadata
 Represents an error received from the RPC protocol:
 
 ```typescript
-import { RpcError } from "vgi-rpc-typescript";
+import { RpcError } from "vgi-rpc";
 
 class RpcError extends Error {
   readonly errorType: string;
@@ -54,7 +54,7 @@ class RpcError extends Error {
 Thrown when the client sends an unsupported request version:
 
 ```typescript
-import { VersionError } from "vgi-rpc-typescript";
+import { VersionError } from "vgi-rpc";
 
 class VersionError extends Error {
   // Inherits message from Error

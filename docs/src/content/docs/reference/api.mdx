@@ -1,9 +1,9 @@
 ---
 title: API Reference
-description: Complete reference for all public exports from vgi-rpc-typescript.
+description: Complete reference for all public exports from vgi-rpc.
 ---
 
-All public symbols are exported from the `vgi-rpc-typescript` package entry point.
+All public symbols are exported from the `vgi-rpc` package entry point.
 
 ## Classes
 
@@ -12,7 +12,7 @@ All public symbols are exported from the `vgi-rpc-typescript` package entry poin
 Fluent builder for defining RPC methods.
 
 ```typescript
-import { Protocol } from "vgi-rpc-typescript";
+import { Protocol } from "vgi-rpc";
 
 const protocol = new Protocol(name: string);
 ```
@@ -31,7 +31,7 @@ const protocol = new Protocol(name: string);
 RPC server that reads Arrow IPC requests from stdin and writes responses to stdout.
 
 ```typescript
-import { VgiRpcServer } from "vgi-rpc-typescript";
+import { VgiRpcServer } from "vgi-rpc";
 
 const server = new VgiRpcServer(protocol, options?);
 ```
@@ -48,7 +48,7 @@ const server = new VgiRpcServer(protocol, options?);
 Accumulates output batches during produce/exchange calls. Passed as the `out` parameter to streaming handlers.
 
 ```typescript
-import { OutputCollector } from "vgi-rpc-typescript";
+import { OutputCollector } from "vgi-rpc";
 ```
 
 **Methods:**
@@ -70,7 +70,7 @@ import { OutputCollector } from "vgi-rpc-typescript";
 Create a fetch-compatible HTTP handler for a Protocol.
 
 ```typescript
-import { createHttpHandler } from "vgi-rpc-typescript";
+import { createHttpHandler } from "vgi-rpc";
 
 const handler = createHttpHandler(protocol: Protocol, options?: HttpHandlerOptions);
 // Returns: (request: Request) => Response | Promise<Response>
@@ -83,7 +83,7 @@ See [HTTP Transport](/guides/http-transport/) for usage details.
 Convert a `SchemaLike` value to an Arrow `Schema`:
 
 ```typescript
-import { toSchema } from "vgi-rpc-typescript";
+import { toSchema } from "vgi-rpc";
 
 const schema = toSchema({ name: str, value: float });
 // Returns: Schema
@@ -94,7 +94,7 @@ const schema = toSchema({ name: str, value: float });
 Infer parameter type strings from an Arrow schema:
 
 ```typescript
-import { inferParamTypes } from "vgi-rpc-typescript";
+import { inferParamTypes } from "vgi-rpc";
 
 const types = inferParamTypes(schema);
 // Returns: Record<string, string>

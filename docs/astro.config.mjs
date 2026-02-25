@@ -5,7 +5,7 @@ export default defineConfig({
   site: "https://vgi-rpc-typescript.query.farm",
   integrations: [
     starlight({
-      title: "vgi-rpc-typescript",
+      title: "vgi-rpc",
       description:
         "TypeScript RPC server library powered by Apache Arrow IPC.",
       logo: {
@@ -41,7 +41,7 @@ export default defineConfig({
           attrs: {
             property: "og:image:alt",
             content:
-              "vgi-rpc-typescript: TypeScript RPC powered by Apache Arrow",
+              "vgi-rpc: TypeScript RPC powered by Apache Arrow",
           },
         },
       ],

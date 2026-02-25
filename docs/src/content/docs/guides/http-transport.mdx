@@ -3,12 +3,12 @@ title: HTTP Transport
 description: Serve vgi-rpc methods over HTTP with stateless streaming.
 ---
 
-In addition to stdin/stdout, vgi-rpc-typescript can serve methods over HTTP using the `createHttpHandler()` function. This enables browser clients, load balancing, and standard HTTP infrastructure.
+In addition to stdin/stdout, vgi-rpc can serve methods over HTTP using the `createHttpHandler()` function. This enables browser clients, load balancing, and standard HTTP infrastructure.
 
 ## Quick start
 
 ```typescript
-import { Protocol, float, createHttpHandler } from "vgi-rpc-typescript";
+import { Protocol, float, createHttpHandler } from "vgi-rpc";
 
 const protocol = new Protocol("Calculator");
 
