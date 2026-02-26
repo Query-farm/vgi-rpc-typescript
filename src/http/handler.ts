@@ -129,7 +129,7 @@ export function createHttpHandler(
     let body = new Uint8Array(await request.arrayBuffer());
     const contentEncoding = request.headers.get("Content-Encoding");
     if (contentEncoding === "zstd") {
-      body = Bun.zstdDecompress(body);
+      body = new Uint8Array(Bun.zstdDecompressSync(body));
     }
 
     // Route: {prefix}/__describe__
