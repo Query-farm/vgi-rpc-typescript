@@ -108,6 +108,10 @@ export async function httpDispatchStreamInit(
     return arrowResponse(serializeIpcStream(errSchema, [errBatch]), 500);
   }
 
+  // Support dynamic output schemas (same as pipe transport)
+  const resolvedOutputSchema = state?.__outputSchema ?? outputSchema;
+  const effectiveProducer = state?.__isProducer ?? isProducer;
+
   // Build header IPC stream if method has a header schema
   let headerBytes: Uint8Array | null = null;
   if (method.headerSchema && method.headerInit) {
@@ -141,11 +145,11 @@ export async function httpDispatchStreamInit(
     }
   }
 
-  if (isProducer) {
+  if (effectiveProducer) {
     return produceStreamResponse(
       method,
       state,
-      outputSchema,
+      resolvedOutputSchema,
       inputSchema,
       ctx,
       parsed.requestId,
@@ -154,7 +158,7 @@ export async function httpDispatchStreamInit(
   } else {
     // Exchange: serialize state into signed token, return zero-row batch with token
     const stateBytes = ctx.stateSerializer.serialize(state);
-    const schemaBytes = serializeSchema(outputSchema);
+    const schemaBytes = serializeSchema(resolvedOutputSchema);
     const inputSchemaBytes = serializeSchema(inputSchema);
     const token = packStateToken(
       stateBytes,
@@ -165,8 +169,8 @@ export async function httpDispatchStreamInit(
 
     const tokenMeta = new Map<string, string>();
     tokenMeta.set(STATE_KEY, token);
-    const tokenBatch = buildEmptyBatch(outputSchema, tokenMeta);
-    const tokenStreamBytes = serializeIpcStream(outputSchema, [tokenBatch]);
+    const tokenBatch = buildEmptyBatch(resolvedOutputSchema, tokenMeta);
+    const tokenStreamBytes = serializeIpcStream(resolvedOutputSchema, [tokenBatch]);
 
     let responseBody: Uint8Array;
     if (headerBytes) {
@@ -204,10 +208,13 @@ export async function httpDispatchStreamExchange(
   }
 
   const state = ctx.stateSerializer.deserialize(unpacked.stateBytes);
-  const outputSchema = method.outputSchema!;
-  const inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
 
-  if (isProducer) {
+  // Support dynamic output schemas (same as pipe transport)
+  const outputSchema = state?.__outputSchema ?? method.outputSchema!;
+  const inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
+  const effectiveProducer = state?.__isProducer ?? isProducer;
+
+  if (effectiveProducer) {
     return produceStreamResponse(
       method,
       state,

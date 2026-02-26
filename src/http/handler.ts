@@ -125,8 +125,12 @@ export function createHttpHandler(
       }
     }
 
-    // Read body
-    const body = new Uint8Array(await request.arrayBuffer());
+    // Read body, decompressing if needed
+    let body = new Uint8Array(await request.arrayBuffer());
+    const contentEncoding = request.headers.get("Content-Encoding");
+    if (contentEncoding === "zstd") {
+      body = Bun.zstdDecompress(body);
+    }
 
     // Route: {prefix}/__describe__
     if (path === `${prefix}/${DESCRIBE_METHOD_NAME}`) {

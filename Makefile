@@ -30,6 +30,8 @@ dist/index.js: $(SRC) tsconfig.json | node_modules
 
 test: node_modules ## Run all tests (integration/conformance need Python CLI)
 	bun test
+	@test -x $(PYTHON_VENV) || { echo "error: Python venv not found at $(PYTHON_VENV)"; exit 1; }
+	$(PYTHON_VENV) -m pytest test_ts_conformance.py -x -v
 
 test-unit: node_modules ## Run unit tests only (no Python CLI needed)
 	bun test $(UNIT_TESTS)
