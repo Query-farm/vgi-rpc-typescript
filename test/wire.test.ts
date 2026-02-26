@@ -27,7 +27,8 @@ import {
   LOG_MESSAGE_KEY,
   SERVER_ID_KEY,
 } from "../src/constants.js";
-import { Writable, PassThrough } from "node:stream";
+import { openSync, closeSync, readFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 describe("buildResultBatch", () => {
   it("builds a 1-row result batch with metadata", () => {
@@ -165,13 +166,8 @@ describe("IPC roundtrip", () => {
 
 describe("IpcStreamWriter", () => {
   it("writes a complete IPC stream to output", () => {
-    const chunks: Buffer[] = [];
-    const sink = new Writable({
-      write(chunk, _enc, cb) {
-        chunks.push(Buffer.from(chunk));
-        cb();
-      },
-    });
+    const tmpPath = `${tmpdir()}/ipc-test-${Date.now()}.arrow`;
+    const fd = openSync(tmpPath, "w");
 
     const schema = new Schema([new Field("x", new Float64(), false)]);
     const arr = vectorFromArray([1.0], new Float64());
@@ -183,11 +179,13 @@ describe("IpcStreamWriter", () => {
     });
     const batch = new RecordBatch(schema, data);
 
-    const writer = new IpcStreamWriter(sink as any);
+    const writer = new IpcStreamWriter(fd);
     writer.writeStream(schema, [batch]);
+    closeSync(fd);
 
-    expect(chunks.length).toBeGreaterThan(0);
-    const totalBytes = chunks.reduce((sum, c) => sum + c.length, 0);
-    expect(totalBytes).toBeGreaterThan(0);
+    const bytes = readFileSync(tmpPath);
+    expect(bytes.length).toBeGreaterThan(0);
+
+    unlinkSync(tmpPath);
   });
 });

@@ -27,24 +27,42 @@ examples/
   calculator.ts     — Unary methods example
   greeter.ts        — String params example
   streaming.ts      — Producer and exchange streams
-  conformance.ts    — 43-method conformance suite for wire-protocol testing
+  conformance.ts    — 46-method conformance suite for wire-protocol testing
 test/
   wire.test.ts      — Unit tests for wire serialization
   describe.test.ts  — Unit tests for __describe__ method
   schema.test.ts    — Unit tests for toSchema and inferParamTypes
   output-collector.test.ts — Unit tests for OutputCollector and result validation
   integration.test.ts      — Integration tests (requires Python CLI)
-  conformance.test.ts      — Conformance tests (requires Python CLI)
+test_ts_conformance.py     — Python conformance suite runner (imports tests from vgi-rpc Python)
 ```
+
+## Makefile
+
+The project uses a Makefile for common tasks. Run `make help` to see all targets.
+
+- `make` / `make build` — Install deps and build (JS bundle + type declarations)
+- `make test-unit` — Run unit tests only (no external dependencies)
+- `make test-integration` — Run integration tests (requires Python CLI)
+- `make test-conformance` — Run conformance tests (requires Python CLI)
+- `make test` — Run all tests
+- `make typecheck` — Type-check without emitting
+- `make docs` / `make docs-dev` — Build or serve the documentation site
+- `make clean` — Remove `dist/`
+- `make distclean` — Remove `dist/` and `node_modules/`
 
 ## Testing
 
-- Run tests: `bun test`
-- Run unit tests only (no Python CLI needed): `bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts`
+- Run tests: `make test` or `bun test`
+- Run unit tests only (no Python CLI needed): `make test-unit`
+- Run conformance tests: `make test-conformance` (runs Python conformance suite against bun worker)
 - All individual tests must complete in 5 seconds or less
-- Integration and conformance tests require the Python CLI at `/Users/rusty/Development/vgi-rpc/.venv/bin/vgi-rpc`
+- **Always use a 60-second timeout when running tests** (e.g., `timeout 60 make test-conformance`)
+- Integration and conformance tests require the Python venv at `/Users/rusty/Development/vgi-rpc/.venv/bin/python3`
+  - Conformance tests use `test_ts_conformance.py` which imports Python conformance suite and runs against `bun run examples/conformance.ts`
+  - Integration tests spawn the Python CLI, which in turn runs `bun run examples/<server>.ts` as a subprocess
 - Always use timeouts on subprocess spawns to prevent hangs
-- Build: `bun run build` (runs TypeScript type-checking then bundles)
+- Build: `make build` or `bun run build` (runs TypeScript type-checking then bundles)
 
 ## Dependencies
 

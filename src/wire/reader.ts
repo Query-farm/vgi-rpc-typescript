@@ -16,6 +16,8 @@ export interface StreamMessage {
 export class IpcStreamReader {
   private reader: RecordBatchReader;
   private initialized = false;
+  /** True once readNextBatch() returns null (EOS reached for current stream). */
+  private streamEnded = false;
 
   private constructor(reader: RecordBatchReader) {
     this.reader = reader;
@@ -55,6 +57,8 @@ export class IpcStreamReader {
     while (true) {
       const result = await this.reader.next();
       if (result.done) break;
+      // Skip Arrow-JS synthetic placeholder for empty streams
+      if (result.value.constructor.name === "_InternalEmptyPlaceholderRecordBatch") break;
       batches.push(result.value);
     }
 
@@ -74,16 +78,32 @@ export class IpcStreamReader {
       }
     }
     this.initialized = true;
+    this.streamEnded = false;
     return this.reader.schema ?? null;
   }
 
   /**
    * Read the next batch from the currently open IPC stream.
    * Returns null when the stream ends (EOS).
+   *
+   * Once EOS is reached, subsequent calls return null immediately without
+   * reading from the underlying byte source. This prevents the Arrow-JS
+   * reader from consuming bytes that belong to the next IPC stream.
    */
   async readNextBatch(): Promise<RecordBatch | null> {
+    if (this.streamEnded) return null;
     const result = await this.reader.next();
-    if (result.done) return null;
+    if (result.done) {
+      this.streamEnded = true;
+      return null;
+    }
+    // Arrow-JS synthesizes a placeholder batch for streams with a schema but
+    // zero real batches. Treat it as EOS so callers don't block trying to
+    // read more bytes from a stream that has already ended.
+    if (result.value.constructor.name === "_InternalEmptyPlaceholderRecordBatch") {
+      this.streamEnded = true;
+      return null;
+    }
     return result.value;
   }
 

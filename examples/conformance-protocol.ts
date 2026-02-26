@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance protocol — 43-method reference RPC service exercising all framework
+ * Conformance protocol — 46-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * This module exports the Protocol instance so it can be reused by both the
@@ -11,6 +11,7 @@
 import {
   Schema,
   Field,
+  Data,
   Utf8,
   Binary,
   Int64,
@@ -26,6 +27,8 @@ import {
   RecordBatchStreamWriter,
   RecordBatchReader,
   recordBatchFromArrays,
+  makeData,
+  vectorFromArray,
   Struct,
 } from "apache-arrow";
 import { Protocol, type OutputCollector, type LogContext } from "../src/index.js";
@@ -84,6 +87,177 @@ const ACCUM_OUTPUT = new Schema([
   new Field("running_sum", new Float64(), false),
   new Field("exchange_count", new Int64(), false),
 ]);
+
+// ---------------------------------------------------------------------------
+// RichHeader schema — 18 fields matching Python's RichHeader dataclass
+// ---------------------------------------------------------------------------
+
+const POINT_FIELDS = [
+  new Field("x", new Float64(), false),
+  new Field("y", new Float64(), false),
+];
+const POINT_STRUCT = new Struct(POINT_FIELDS);
+
+const STATUS_CYCLE = ["PENDING", "ACTIVE", "CLOSED"];
+
+const richMapStrInt = makeMapType(
+  new Field("key", new Utf8(), false),
+  new Field("value", new Int64(), false),
+);
+
+const richMapStrStr = makeMapType(
+  new Field("key", new Utf8(), false),
+  new Field("value", new Utf8(), false),
+);
+
+const RICH_HEADER_SCHEMA = new Schema([
+  new Field("str_field", new Utf8(), false),
+  new Field("bytes_field", new Binary(), false),
+  new Field("int_field", new Int64(), false),
+  new Field("float_field", new Float64(), false),
+  new Field("bool_field", new Bool(), false),
+  new Field("list_of_int", new List(new Field("item", new Int64(), false)), false),
+  new Field("list_of_str", new List(new Field("item", new Utf8(), false)), false),
+  new Field("dict_field", richMapStrInt, false),
+  new Field("enum_field", new Dictionary(new Utf8(), new Int16()), false),
+  new Field("nested_point", POINT_STRUCT, false),
+  new Field("optional_str", new Utf8(), true),
+  new Field("optional_int", new Int64(), true),
+  new Field("optional_nested", POINT_STRUCT, true),
+  new Field("list_of_nested", new List(new Field("item", POINT_STRUCT, false)), false),
+  new Field("nested_list", new List(new Field("item", new List(new Field("item", new Int64(), false)), false)), false),
+  new Field("annotated_int32", new Int32(), false),
+  new Field("annotated_float32", new Float32(), false),
+  new Field("dict_str_str", richMapStrStr, false),
+]);
+
+// ---------------------------------------------------------------------------
+// Data builders for complex types in RichHeader
+// ---------------------------------------------------------------------------
+
+function buildStructPointData(x: number, y: number): Data {
+  const xData = vectorFromArray([x], new Float64()).data[0];
+  const yData = vectorFromArray([y], new Float64()).data[0];
+  return makeData({
+    type: POINT_STRUCT,
+    length: 1,
+    children: [xData, yData],
+    nullCount: 0,
+  });
+}
+
+function buildNullStructPointData(): Data {
+  // PyArrow requires valid-sized child buffers even for null struct entries.
+  // Use vectorFromArray to build proper Float64 children with valid buffers.
+  const xData = vectorFromArray([0], new Float64()).data[0];
+  const yData = vectorFromArray([0], new Float64()).data[0];
+  return makeData({
+    type: POINT_STRUCT,
+    length: 1,
+    children: [xData, yData],
+    nullCount: 1,
+    nullBitmap: new Uint8Array([0]),
+  });
+}
+
+function buildListOfPointsData(points: { x: number; y: number }[]): Data {
+  const offsets = new Int32Array([0, points.length]);
+  const xData = vectorFromArray(points.map((p) => p.x), new Float64()).data[0];
+  const yData = vectorFromArray(points.map((p) => p.y), new Float64()).data[0];
+  const structData = makeData({
+    type: POINT_STRUCT,
+    length: points.length,
+    children: [xData, yData],
+    nullCount: 0,
+  });
+  const listType = new List(new Field("item", POINT_STRUCT, false));
+  return makeData({
+    type: listType,
+    length: 1,
+    valueOffsets: offsets,
+    child: structData,
+    nullCount: 0,
+  } as any);
+}
+
+function buildMapDataFromEntries(
+  keyField: Field,
+  valueField: Field,
+  keys: any[],
+  values: any[],
+): Data {
+  const offsets = new Int32Array([0, keys.length]);
+  const keyData = vectorFromArray(keys, keyField.type).data[0];
+  const valData = vectorFromArray(values, valueField.type).data[0];
+  const entriesStruct = new Struct([keyField, valueField]);
+  const entriesData = makeData({
+    type: entriesStruct,
+    length: keys.length,
+    children: [keyData, valData],
+    nullCount: 0,
+  });
+  const mapType = makeMapType(keyField, valueField);
+  return makeData({
+    type: mapType,
+    length: 1,
+    valueOffsets: offsets,
+    child: entriesData,
+    nullCount: 0,
+  } as any);
+}
+
+// ---------------------------------------------------------------------------
+// buildRichHeader — deterministic header values matching Python exactly
+// ---------------------------------------------------------------------------
+
+function buildRichHeader(seed: number): Record<string, any> {
+  const s = BigInt(seed);
+  return {
+    str_field: `seed-${seed}`,
+    bytes_field: new Uint8Array([seed % 256, (seed + 1) % 256, (seed + 2) % 256]),
+    int_field: seed * 7,
+    float_field: seed * 1.5,
+    bool_field: seed % 2 === 0,
+    list_of_int: [s, s + 1n, s + 2n],
+    list_of_str: [`item-${seed}`, `item-${seed + 1}`],
+    dict_field: buildMapDataFromEntries(
+      new Field("key", new Utf8(), false),
+      new Field("value", new Int64(), false),
+      ["a", "b"],
+      [s, s + 1n],
+    ),
+    enum_field: STATUS_CYCLE[seed % 3],
+    nested_point: buildStructPointData(seed, seed * 2),
+    optional_str: seed % 2 === 0 ? `opt-${seed}` : null,
+    optional_int: seed % 2 === 1 ? seed * 3 : null,
+    optional_nested:
+      seed % 3 === 0
+        ? buildStructPointData(seed, 0)
+        : buildNullStructPointData(),
+    list_of_nested: buildListOfPointsData([{ x: seed, y: seed + 1 }]),
+    nested_list: [[s, s + 1n], [s + 2n]],
+    annotated_int32: seed % 1000,
+    annotated_float32: seed / 3.0,
+    dict_str_str: buildMapDataFromEntries(
+      new Field("key", new Utf8(), false),
+      new Field("value", new Utf8(), false),
+      ["key"],
+      [`val-${seed}`],
+    ),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildDynamicSchema — dynamic output schema for produce_dynamic_schema
+// ---------------------------------------------------------------------------
+
+function buildDynamicSchema(includeStrings: boolean, includeFloats: boolean): Schema {
+  // Python pa.field() defaults to nullable=True, so we match that here.
+  const fields: Field[] = [new Field("index", new Int64(), true)];
+  if (includeStrings) fields.push(new Field("label", new Utf8(), true));
+  if (includeFloats) fields.push(new Field("score", new Float64(), true));
+  return new Schema(fields);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -530,8 +704,10 @@ protocol.exchange<{ factor: number }>("exchange_scale", {
   outputSchema: SCALE_OUTPUT,
   init: ({ factor }) => ({ factor }),
   exchange: (state, input: RecordBatch, out) => {
-    const value = input.getChildAt(0)?.get(0) as number;
-    out.emitRow({ value: value * state.factor });
+    const col = input.getChildAt(0)!;
+    const values: number[] = [];
+    for (let i = 0; i < input.numRows; i++) values.push(col.get(i) * state.factor);
+    out.emit({ value: values });
   },
 });
 
@@ -541,8 +717,10 @@ protocol.exchange<{ runningSum: number; exchangeCount: number }>("exchange_accum
   outputSchema: ACCUM_OUTPUT,
   init: () => ({ runningSum: 0, exchangeCount: 0 }),
   exchange: (state, input: RecordBatch, out) => {
-    const value = input.getChildAt(0)?.get(0) as number;
-    state.runningSum += value;
+    const col = input.getChildAt(0)!;
+    let sum = 0;
+    for (let i = 0; i < input.numRows; i++) sum += col.get(i) as number;
+    state.runningSum += sum;
     state.exchangeCount++;
     out.emitRow({ running_sum: state.runningSum, exchange_count: state.exchangeCount });
   },
@@ -556,8 +734,7 @@ protocol.exchange<{}>("exchange_with_logs", {
   exchange: (_state, input: RecordBatch, out) => {
     out.clientLog("INFO", "exchange processing");
     out.clientLog("DEBUG", "exchange debug");
-    const value = input.getChildAt(0)?.get(0) as number;
-    out.emitRow({ value });
+    out.emit(input);
   },
 });
 
@@ -573,8 +750,7 @@ protocol.exchange<{ failOn: number; exchangeCount: number }>("exchange_error_on_
         `intentional error on exchange ${state.exchangeCount}`,
       );
     }
-    const value = input.getChildAt(0)?.get(0) as number;
-    out.emitRow({ value });
+    out.emit(input);
   },
   paramTypes: { fail_on: "int" },
 });
@@ -604,7 +780,75 @@ protocol.exchange<{ factor: number }>("exchange_with_header", {
   }),
   init: ({ factor }) => ({ factor }),
   exchange: (state, input: RecordBatch, out) => {
-    const value = input.getChildAt(0)?.get(0) as number;
-    out.emitRow({ value: value * state.factor });
+    const col = input.getChildAt(0)!;
+    const values: number[] = [];
+    for (let i = 0; i < input.numRows; i++) values.push(col.get(i) * state.factor);
+    out.emit({ value: values });
+  },
+});
+
+// ===== Dynamic Streams With Rich Multi-Type Headers (3) =====
+
+protocol.producer<{ count: number; current: number }>("produce_with_rich_header", {
+  params: { seed: int, count: int },
+  outputSchema: COUNTER_SCHEMA,
+  headerSchema: RICH_HEADER_SCHEMA,
+  headerInit: (params) => buildRichHeader(params.seed),
+  init: ({ count }) => ({ count, current: 0 }),
+  produce: (state, out) => {
+    if (state.current >= state.count) {
+      out.finish();
+      return;
+    }
+    out.emitRow({ index: state.current, value: state.current * 10 });
+    state.current++;
+  },
+  paramTypes: { seed: "int", count: "int" },
+});
+
+protocol.producer<{
+  count: number;
+  current: number;
+  includeStrings: boolean;
+  includeFloats: boolean;
+  __outputSchema: Schema;
+}>("produce_dynamic_schema", {
+  params: { seed: int, count: int, include_strings: bool, include_floats: bool },
+  outputSchema: COUNTER_SCHEMA, // default, overridden by __outputSchema
+  headerSchema: RICH_HEADER_SCHEMA,
+  headerInit: (params) => buildRichHeader(params.seed),
+  init: (p) => ({
+    count: p.count,
+    current: 0,
+    includeStrings: p.include_strings,
+    includeFloats: p.include_floats,
+    __outputSchema: buildDynamicSchema(p.include_strings, p.include_floats),
+  }),
+  produce: (state, out) => {
+    if (state.current >= state.count) {
+      out.finish();
+      return;
+    }
+    const row: Record<string, any> = { index: state.current };
+    if (state.includeStrings) row.label = `row-${state.current}`;
+    if (state.includeFloats) row.score = state.current * 1.5;
+    out.emitRow(row);
+    state.current++;
+  },
+  paramTypes: { seed: "int", count: "int", include_strings: "bool", include_floats: "bool" },
+});
+
+protocol.exchange<{ factor: number }>("exchange_with_rich_header", {
+  params: { seed: int, factor: float },
+  inputSchema: SCALE_INPUT,
+  outputSchema: SCALE_OUTPUT,
+  headerSchema: RICH_HEADER_SCHEMA,
+  headerInit: (params) => buildRichHeader(params.seed),
+  init: ({ factor }) => ({ factor }),
+  exchange: (state, input: RecordBatch, out) => {
+    const col = input.getChildAt(0)!;
+    const values: number[] = [];
+    for (let i = 0; i < input.numRows; i++) values.push(col.get(i) * state.factor);
+    out.emit({ value: values });
   },
 });

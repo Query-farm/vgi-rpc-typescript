@@ -35,7 +35,6 @@ export async function dispatchStream(
 ): Promise<void> {
   const isProducer =
     !method.inputSchema || method.inputSchema.fields.length === 0;
-  const outputSchema = method.outputSchema!;
 
   let state: any;
   try {
@@ -57,6 +56,15 @@ export async function dispatchStream(
     }
     return;
   }
+
+  // Support dynamic output schemas: init may return state with __outputSchema
+  // to override the method's registered output schema (needed for methods
+  // like VGI's "init" that produce different schemas per invocation).
+  const outputSchema = state?.__outputSchema ?? method.outputSchema!;
+
+  // Effective producer mode: check state override (VGI "init" is registered as
+  // exchange but may act as producer depending on the function type).
+  const effectiveProducer = state?.__isProducer ?? isProducer;
 
   // Write header IPC stream if method has a header schema
   if (method.headerSchema && method.headerInit) {
@@ -99,16 +107,17 @@ export async function dispatchStream(
     return;
   }
 
-  // Open incremental output stream
-  const outStream = writer.openStream(outputSchema);
+  // Use a single continuous IPC stream for all output (matching Python vgi-rpc).
+  // DuckDB exchanges are ping-pong: one input batch → one output batch on the
+  // same stream. We use IncrementalStream which writes bytes synchronously.
+  const stream = writer.openStream(outputSchema);
 
   try {
-    // Read input batches one at a time, process, and write output incrementally
     while (true) {
       const inputBatch = await reader.readNextBatch();
-      if (!inputBatch) break; // Input stream ended (EOS)
+      if (!inputBatch) break;
 
-      const out = new OutputCollector(outputSchema, isProducer, serverId, requestId);
+      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId);
 
       if (isProducer) {
         await method.producerFn!(state, out);
@@ -116,9 +125,8 @@ export async function dispatchStream(
         await method.exchangeFn!(state, inputBatch, out);
       }
 
-      // Write emitted batches to the output stream
       for (const emitted of out.batches) {
-        outStream.write(emitted.batch);
+        stream.write(emitted.batch);
       }
 
       if (out.finished) {
@@ -126,9 +134,18 @@ export async function dispatchStream(
       }
     }
   } catch (error: any) {
-    const errBatch = buildErrorBatch(outputSchema, error, serverId, requestId);
-    outStream.write(errBatch);
-  } finally {
-    outStream.close();
+    stream.write(buildErrorBatch(outputSchema, error, serverId, requestId));
+  }
+
+  stream.close();
+
+  // Drain remaining input so transport stays synchronized for next request.
+  // Matches Python's _drain_stream() called after every streaming method.
+  // Needed when the loop exits early (out.finished, error) while client
+  // is still sending batches.
+  try {
+    while ((await reader.readNextBatch()) !== null) {}
+  } catch {
+    // Suppress errors during drain (broken pipe, etc.)
   }
 }

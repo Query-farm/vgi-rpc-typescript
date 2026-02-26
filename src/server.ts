@@ -48,7 +48,6 @@ export class VgiRpcServer {
   /** Start the server loop. Reads requests until stdin closes. */
   async run(): Promise<void> {
     const stdin = process.stdin as unknown as ReadableStream<Uint8Array>;
-    const stdout = process.stdout;
 
     // Warn if running interactively
     if (process.stdin.isTTY || process.stdout.isTTY) {
@@ -61,7 +60,7 @@ export class VgiRpcServer {
     }
 
     const reader = await IpcStreamReader.create(stdin);
-    const writer = new IpcStreamWriter(stdout);
+    const writer = new IpcStreamWriter();
 
     try {
       while (true) {
@@ -88,7 +87,6 @@ export class VgiRpcServer {
     reader: IpcStreamReader,
     writer: IpcStreamWriter,
   ): Promise<void> {
-    // Read request
     const stream = await reader.readStream();
     if (!stream) {
       throw new Error("EOF");
