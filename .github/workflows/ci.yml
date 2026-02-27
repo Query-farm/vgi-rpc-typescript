@@ -22,6 +22,9 @@ jobs:
       - name: Run unit tests
         run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts
 
+      - name: Run client tests (bun transports only)
+        run: timeout 120 bun test test/client.test.ts
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -76,3 +79,9 @@ jobs:
         env:
           VGI_RPC_PYTHON_PATH: /tmp/vgi-rpc
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v
+
+      - name: Run client tests (all transports)
+        env:
+          VGI_RPC_PYTHON_PATH: /tmp/vgi-rpc
+          VGI_RPC_PYTHON_BIN: python3
+        run: timeout 120 bun test test/client.test.ts

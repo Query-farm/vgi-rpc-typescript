@@ -49,3 +49,4 @@ export {
   DESCRIBE_METHOD_NAME,
   STATE_KEY,
 } from "./constants.js";
+export * from "./client/index.js";

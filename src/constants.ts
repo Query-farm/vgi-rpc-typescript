@@ -19,4 +19,4 @@ export const DESCRIBE_VERSION = "2";
 
 export const DESCRIBE_METHOD_NAME = "__describe__";
 
-export const STATE_KEY = "vgi_rpc.stream_state";
+export const STATE_KEY = "vgi_rpc.stream_state#b64";

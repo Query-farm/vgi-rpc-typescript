@@ -70,9 +70,12 @@ export class VgiRpcServer {
       // EOF or broken pipe → clean exit
       if (
         e.message?.includes("closed") ||
+        e.message?.includes("Expected Schema Message") ||
+        e.message?.includes("null or length 0") ||
         e.code === "EPIPE" ||
         e.code === "ERR_STREAM_PREMATURE_CLOSE" ||
-        e instanceof Error && e.message.includes("EOF")
+        e.code === "ERR_STREAM_DESTROYED" ||
+        (e instanceof Error && e.message.includes("EOF"))
       ) {
         return;
       }
