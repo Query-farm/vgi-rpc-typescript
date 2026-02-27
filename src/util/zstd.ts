@@ -13,7 +13,7 @@ import * as zlib from "node:zlib";
 const isBun = typeof globalThis.Bun !== "undefined";
 
 /** Compress data with zstd at the given level (1-22). */
-export function zstdCompress(data: Uint8Array, level: number): Uint8Array {
+export function zstdCompress(data: Uint8Array, level: number): Uint8Array<ArrayBuffer> {
   if (isBun) {
     return new Uint8Array(Bun.zstdCompressSync(data, { level }));
   }
@@ -34,7 +34,7 @@ export function zstdCompress(data: Uint8Array, level: number): Uint8Array {
 }
 
 /** Decompress zstd-compressed data. */
-export function zstdDecompress(data: Uint8Array): Uint8Array {
+export function zstdDecompress(data: Uint8Array): Uint8Array<ArrayBuffer> {
   if (isBun) {
     return new Uint8Array(Bun.zstdDecompressSync(data));
   }
