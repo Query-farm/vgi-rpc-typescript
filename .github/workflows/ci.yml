@@ -9,21 +9,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        bun-version: ["latest"]
     steps:
       - uses: actions/checkout@v6
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ matrix.bun-version }}
+          bun-version: latest
 
       - name: Install dependencies
-        run: bun install
-
-      - name: Run postinstall (fix arrow-js resolution)
-        run: bun run postinstall
+        run: bun install && bun run postinstall
 
       - name: Run unit tests
         run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts
@@ -38,10 +32,7 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install
-
-      - name: Run postinstall (fix arrow-js resolution)
-        run: bun run postinstall
+        run: bun install && bun run postinstall
 
       - name: Build
         run: bun run build
@@ -50,3 +41,38 @@ jobs:
         run: |
           test -f dist/index.js
           test -f dist/index.d.ts
+
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install JS dependencies
+        run: bun install && bun run postinstall
+
+      - name: Clone Python vgi-rpc
+        run: git clone https://github.com/Query-farm/vgi-rpc-python.git /tmp/vgi-rpc
+
+      - name: Install Python dependencies
+        run: pip install -e "/tmp/vgi-rpc[http]" pytest
+
+      - name: Run conformance tests
+        env:
+          VGI_RPC_PYTHON_PATH: /tmp/vgi-rpc
+        run: timeout 120 python -m pytest test_ts_conformance.py -x -v

@@ -20,6 +20,7 @@ import {
   httpDispatchStreamInit,
   httpDispatchStreamExchange,
 } from "./dispatch.js";
+import { zstdCompress, zstdDecompress } from "../util/zstd.js";
 
 const EMPTY_SCHEMA = new Schema([]);
 
@@ -75,9 +76,7 @@ export function createHttpHandler(
   ): Promise<Response> {
     if (compressionLevel == null || !clientAcceptsZstd) return response;
     const responseBody = new Uint8Array(await response.arrayBuffer());
-    const compressed = Bun.zstdCompressSync(responseBody, {
-      level: compressionLevel,
-    });
+    const compressed = zstdCompress(responseBody, compressionLevel);
     const headers = new Headers(response.headers);
     headers.set("Content-Encoding", "zstd");
     return new Response(compressed as unknown as BodyInit, {
@@ -151,7 +150,7 @@ export function createHttpHandler(
     let body = new Uint8Array(await request.arrayBuffer());
     const contentEncoding = request.headers.get("Content-Encoding");
     if (contentEncoding === "zstd") {
-      body = new Uint8Array(Bun.zstdDecompressSync(body));
+      body = zstdDecompress(body);
     }
 
     // Route: {prefix}/__describe__
