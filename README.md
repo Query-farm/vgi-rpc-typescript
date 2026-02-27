@@ -13,6 +13,7 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 - **Type-safe streaming state** — generic `<S>` parameter threads state types through init and produce/exchange functions
 - **Runtime introspection** — opt-in `__describe__` method for dynamic service discovery via the CLI
 - **Result validation** — missing required fields in handler results throw descriptive errors at emit time
+- **Three client transports** — HTTP, subprocess, and raw pipe, all sharing a unified `RpcClient` interface
 
 ## Installation
 
@@ -46,6 +47,30 @@ protocol.unary("greet", {
 const server = new VgiRpcServer(protocol, { enableDescribe: true });
 server.run();
 ```
+
+## Client
+
+Connect to any vgi-rpc server programmatically:
+
+```typescript
+import { httpConnect, subprocessConnect } from "vgi-rpc";
+
+// HTTP transport
+const client = httpConnect("http://localhost:8080");
+const result = await client.call("add", { a: 2, b: 3 });
+console.log(result); // { result: 5 }
+client.close();
+
+// Subprocess transport (spawns server, communicates over pipes)
+const client2 = subprocessConnect(["bun", "run", "server.ts"]);
+const result2 = await client2.call("greet", { name: "World" });
+console.log(result2); // { result: "Hello, World!" }
+client2.close();
+```
+
+All transports share the same `RpcClient` interface: `call()`, `stream()`, `describe()`, `close()`.
+
+## Testing with the Python CLI
 
 Test it with the Python CLI:
 
@@ -287,7 +312,7 @@ See the Python README's [Wire Protocol Specification](https://github.com/rustyco
 | [`calculator.ts`](examples/calculator.ts) | Unary methods: add, multiply, divide |
 | [`greeter.ts`](examples/greeter.ts) | String parameters and results |
 | [`streaming.ts`](examples/streaming.ts) | Producer and exchange stream patterns |
-| [`conformance.ts`](examples/conformance.ts) | 43-method reference service for wire-protocol conformance testing |
+| [`conformance.ts`](examples/conformance.ts) | 46-method reference service for wire-protocol conformance testing |
 
 ## Development
 

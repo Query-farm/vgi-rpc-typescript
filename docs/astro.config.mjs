@@ -86,6 +86,7 @@ export default defineConfig({
             { label: "Client Logging", slug: "guides/client-logging" },
             { label: "Error Handling", slug: "guides/error-handling" },
             { label: "HTTP Transport", slug: "guides/http-transport" },
+            { label: "Client Transports", slug: "guides/client-transports" },
           ],
         },
         {

@@ -23,6 +23,7 @@ src/
   wire/             — Low-level IPC reader/writer and request/response serialization
   dispatch/         — Method dispatch (unary, stream, describe)
   util/             — Internal utilities
+  client/           — RPC client: transports (HTTP, pipe, subprocess), streaming, introspection
 examples/
   calculator.ts     — Unary methods example
   greeter.ts        — String params example

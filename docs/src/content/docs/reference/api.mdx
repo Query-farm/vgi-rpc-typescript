@@ -100,6 +100,91 @@ const types = inferParamTypes(schema);
 // Returns: Record<string, string>
 ```
 
+### httpConnect
+
+Create an HTTP transport client.
+
+```typescript
+import { httpConnect } from "vgi-rpc";
+
+const client = httpConnect(baseUrl: string, options?: HttpConnectOptions);
+// Returns: RpcClient
+```
+
+See [Client Transports](/guides/client-transports/) for usage details.
+
+### pipeConnect
+
+Create a raw pipe transport client.
+
+```typescript
+import { pipeConnect } from "vgi-rpc";
+
+const client = pipeConnect(readable: ReadableStream<Uint8Array>, writable: PipeWritable, options?: PipeConnectOptions);
+// Returns: RpcClient
+```
+
+### subprocessConnect
+
+Spawn a subprocess and create a pipe transport client over its stdin/stdout.
+
+```typescript
+import { subprocessConnect } from "vgi-rpc";
+
+const client = subprocessConnect(cmd: string[], options?: SubprocessConnectOptions);
+// Returns: RpcClient
+```
+
+### httpIntrospect
+
+Standalone HTTP introspection — calls `__describe__` without creating a full client.
+
+```typescript
+import { httpIntrospect } from "vgi-rpc";
+
+const desc = await httpIntrospect(baseUrl: string, options?: { prefix?: string });
+// Returns: Promise<ServiceDescription>
+```
+
+### parseDescribeResponse
+
+Parse raw describe response batches into a `ServiceDescription`. Reusable across custom transports.
+
+```typescript
+import { parseDescribeResponse } from "vgi-rpc";
+
+const desc = await parseDescribeResponse(batches: RecordBatch[], onLog?: (msg: LogMessage) => void);
+// Returns: Promise<ServiceDescription>
+```
+
+## Client classes
+
+### HttpStreamSession
+
+HTTP streaming session returned by `client.stream()` on HTTP transport clients.
+
+```typescript
+class HttpStreamSession implements StreamSession {
+  readonly header: Record<string, any> | null;
+  exchange(input: Record<string, any>[]): Promise<Record<string, any>[]>;
+  [Symbol.asyncIterator](): AsyncIterableIterator<Record<string, any>[]>;
+  close(): void;
+}
+```
+
+### PipeStreamSession
+
+Pipe streaming session returned by `client.stream()` on pipe and subprocess transport clients.
+
+```typescript
+class PipeStreamSession implements StreamSession {
+  readonly header: Record<string, any> | null;
+  exchange(input: Record<string, any>[]): Promise<Record<string, any>[]>;
+  [Symbol.asyncIterator](): AsyncIterableIterator<Record<string, any>[]>;
+  close(): void;
+}
+```
+
 ## Type singletons
 
 Schema shorthand values — see [Schema Shorthand](/guides/schema-shorthand/) for details.
@@ -159,6 +244,76 @@ interface LogContext {
   clientLog(level: string, message: string, extra?: Record<string, string>): void;
 }
 ```
+
+### RpcClient
+
+```typescript
+interface RpcClient {
+  call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null>;
+  stream(method: string, params?: Record<string, any>): Promise<StreamSession>;
+  describe(): Promise<ServiceDescription>;
+  close(): void;
+}
+```
+
+### StreamSession
+
+```typescript
+interface StreamSession {
+  readonly header: Record<string, any> | null;
+  exchange(input: Record<string, any>[]): Promise<Record<string, any>[]>;
+  [Symbol.asyncIterator](): AsyncIterableIterator<Record<string, any>[]>;
+  close(): void;
+}
+```
+
+### ServiceDescription
+
+```typescript
+interface ServiceDescription {
+  protocolName: string;
+  methods: MethodInfo[];
+}
+```
+
+### MethodInfo
+
+```typescript
+interface MethodInfo {
+  name: string;
+  type: "unary" | "stream";
+  paramsSchema: Schema;
+  resultSchema: Schema;
+  inputSchema?: Schema;
+  outputSchema?: Schema;
+  headerSchema?: Schema;
+  doc?: string;
+  paramTypes?: Record<string, string>;
+  defaults?: Record<string, any>;
+}
+```
+
+### LogMessage
+
+```typescript
+interface LogMessage {
+  level: string;
+  message: string;
+  extra?: Record<string, any>;
+}
+```
+
+### HttpConnectOptions
+
+See [Configuration](/reference/configuration/).
+
+### PipeConnectOptions
+
+See [Configuration](/reference/configuration/).
+
+### SubprocessConnectOptions
+
+See [Configuration](/reference/configuration/).
 
 ### HttpHandlerOptions
 

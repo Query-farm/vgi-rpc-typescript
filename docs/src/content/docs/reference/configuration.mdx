@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: Configuration options for VgiRpcServer and HTTP handler.
+description: Configuration options for VgiRpcServer, HTTP handler, and client transports.
 ---
 
 ## VgiRpcServer options
@@ -102,3 +102,49 @@ interface StateSerializer {
 ```
 
 The default serializer uses JSON with special handling for `BigInt` values (prefixed with `__bigint__:`).
+
+## HttpConnectOptions
+
+The `httpConnect` function accepts an optional `HttpConnectOptions` object:
+
+```typescript
+const client = httpConnect("http://localhost:8080", {
+  prefix: "/vgi",
+  compressionLevel: 3,
+  onLog: (msg) => console.log(`[${msg.level}] ${msg.message}`),
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `prefix` | `string` | `"/vgi"` | URL path prefix |
+| `onLog` | `(msg: LogMessage) => void` | — | Log message callback |
+| `compressionLevel` | `number` | — | zstd compression level (omit to disable) |
+
+## PipeConnectOptions
+
+The `pipeConnect` function accepts an optional `PipeConnectOptions` object:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `onLog` | `(msg: LogMessage) => void` | — | Log message callback |
+
+## SubprocessConnectOptions
+
+The `subprocessConnect` function accepts an optional `SubprocessConnectOptions` object (extends `PipeConnectOptions`):
+
+```typescript
+const client = subprocessConnect(["bun", "run", "server.ts"], {
+  cwd: "./my-project",
+  env: { DEBUG: "1" },
+  stderr: "inherit",
+  onLog: (msg) => console.log(msg),
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `cwd` | `string` | — | Working directory for subprocess |
+| `env` | `Record<string, string>` | — | Additional environment variables |
+| `stderr` | `"inherit" \| "pipe" \| "ignore"` | `"ignore"` | Subprocess stderr handling |
+| `onLog` | `(msg: LogMessage) => void` | — | Log message callback |
