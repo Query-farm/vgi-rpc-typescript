@@ -75,7 +75,7 @@ export default defineConfig({
           ],
         },
         {
-          label: "Guides",
+          label: "Server",
           items: [
             { label: "Unary Methods", slug: "guides/unary-methods" },
             { label: "Producer Streams", slug: "guides/producer-streams" },
@@ -86,7 +86,12 @@ export default defineConfig({
             { label: "Client Logging", slug: "guides/client-logging" },
             { label: "Error Handling", slug: "guides/error-handling" },
             { label: "HTTP Transport", slug: "guides/http-transport" },
-            { label: "Client Transports", slug: "guides/client-transports" },
+          ],
+        },
+        {
+          label: "Client",
+          items: [
+            { label: "Transports", slug: "guides/client-transports" },
           ],
         },
         {

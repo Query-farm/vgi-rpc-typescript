@@ -100,30 +100,3 @@ vgi-rpc --url http://localhost:8080 describe
 vgi-rpc --url http://localhost:8080 call add a=1.0 b=2.0
 ```
 
-## Client usage
-
-Connect to an HTTP server programmatically:
-
-```typescript
-import { httpConnect } from "vgi-rpc";
-
-const client = httpConnect("http://localhost:8080");
-
-// Unary call
-const result = await client.call("add", { a: 2, b: 3 });
-
-// Producer stream
-const stream = await client.stream("count", { limit: 5 });
-for await (const rows of stream) {
-  console.log(rows);
-}
-
-// Exchange stream
-const session = await client.stream("scale", { factor: 2 });
-const output = await session.exchange([{ value: 10 }]);
-session.close();
-
-client.close();
-```
-
-See [Client Transports](/guides/client-transports/) for details on all transport options.

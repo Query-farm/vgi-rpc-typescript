@@ -5,6 +5,10 @@ description: Connect to vgi-rpc servers over HTTP, subprocess pipes, or raw stre
 
 The vgi-rpc client library provides three transport functions that all return the same `RpcClient` interface. Pick the transport that fits your deployment and use `call()`, `stream()`, `describe()`, and `close()` identically across all of them.
 
+:::tip
+For setting up an HTTP server, see the [HTTP Transport](/guides/http-transport/) server guide.
+:::
+
 ## RpcClient interface
 
 ```typescript
