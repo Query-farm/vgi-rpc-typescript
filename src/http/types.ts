@@ -19,6 +19,9 @@ export interface HttpHandlerOptions {
   serverId?: string;
   /** Custom state serializer for stream state objects. Default: JSON with BigInt support. */
   stateSerializer?: StateSerializer;
+  /** zstd compression level for responses (1-22). If set, responses are
+   *  compressed when the client sends Accept-Encoding: zstd. */
+  compressionLevel?: number;
 }
 
 /** Serializer for stream state objects stored in state tokens. */

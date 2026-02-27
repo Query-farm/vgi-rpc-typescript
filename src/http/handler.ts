@@ -50,6 +50,7 @@ export function createHttpHandler(
 
   const methods = protocol.getMethods();
 
+  const compressionLevel = options?.compressionLevel;
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
 
   const ctx = {
@@ -66,6 +67,23 @@ export function createHttpHandler(
       headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
       headers.set("Access-Control-Allow-Headers", "Content-Type");
     }
+  }
+
+  async function compressIfAccepted(
+    response: Response,
+    clientAcceptsZstd: boolean,
+  ): Promise<Response> {
+    if (compressionLevel == null || !clientAcceptsZstd) return response;
+    const responseBody = new Uint8Array(await response.arrayBuffer());
+    const compressed = Bun.zstdCompressSync(responseBody, {
+      level: compressionLevel,
+    });
+    const headers = new Headers(response.headers);
+    headers.set("Content-Encoding", "zstd");
+    return new Response(compressed as unknown as BodyInit, {
+      status: response.status,
+      headers,
+    });
   }
 
   function makeErrorResponse(
@@ -125,6 +143,10 @@ export function createHttpHandler(
       }
     }
 
+    const clientAcceptsZstd = (
+      request.headers.get("Accept-Encoding") ?? ""
+    ).includes("zstd");
+
     // Read body, decompressing if needed
     let body = new Uint8Array(await request.arrayBuffer());
     const contentEncoding = request.headers.get("Content-Encoding");
@@ -137,9 +159,12 @@ export function createHttpHandler(
       try {
         const response = httpDispatchDescribe(protocol.name, methods, serverId);
         addCorsHeaders(response.headers);
-        return response;
+        return compressIfAccepted(response, clientAcceptsZstd);
       } catch (error: any) {
-        return makeErrorResponse(error, 500);
+        return compressIfAccepted(
+          makeErrorResponse(error, 500),
+          clientAcceptsZstd,
+        );
       }
     }
 
@@ -170,7 +195,10 @@ export function createHttpHandler(
       const err = new Error(
         `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
       );
-      return makeErrorResponse(err, 404);
+      return compressIfAccepted(
+        makeErrorResponse(err, 404),
+        clientAcceptsZstd,
+      );
     }
 
     try {
@@ -203,12 +231,18 @@ export function createHttpHandler(
       }
 
       addCorsHeaders(response.headers);
-      return response;
+      return compressIfAccepted(response, clientAcceptsZstd);
     } catch (error: any) {
       if (error instanceof HttpRpcError) {
-        return makeErrorResponse(error, error.statusCode);
+        return compressIfAccepted(
+          makeErrorResponse(error, error.statusCode),
+          clientAcceptsZstd,
+        );
       }
-      return makeErrorResponse(error, 500);
+      return compressIfAccepted(
+        makeErrorResponse(error, 500),
+        clientAcceptsZstd,
+      );
     }
   };
 }
