@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://vgi-rpc.query.farm">
+    <img src="https://vgi-rpc.query.farm/logo-hero.png" alt="VGI — The Vector Gateway Interface" width="200">
+  </a>
+</p>
+
 # vgi-rpc
 
 TypeScript server library for the [vgi-rpc](https://vgi-rpc.query.farm) framework. Implements RPC servers that communicate over stdin/stdout using [Apache Arrow](https://arrow.apache.org/) IPC serialization.
