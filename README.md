@@ -1,6 +1,6 @@
 # vgi-rpc
 
-TypeScript server library for the [vgi-rpc](https://github.com/rustyconover/vgi-rpc) framework. Implements RPC servers that communicate over stdin/stdout using [Apache Arrow](https://arrow.apache.org/) IPC serialization.
+TypeScript server library for the [vgi-rpc](https://vgi-rpc.query.farm) framework. Implements RPC servers that communicate over stdin/stdout using [Apache Arrow](https://arrow.apache.org/) IPC serialization.
 
 Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and interact with them using the Python `vgi-rpc` CLI or any vgi-rpc client. Unlike JSON-over-HTTP, structured data stays in Arrow columnar format for efficient transfer.
 
@@ -18,7 +18,7 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 ## Installation
 
 ```bash
-bun add vgi-rpc
+bun add @query-farm/vgi-rpc
 ```
 
 Requires [Bun](https://bun.sh/) runtime.
@@ -26,7 +26,7 @@ Requires [Bun](https://bun.sh/) runtime.
 ## Quick Start
 
 ```typescript
-import { Protocol, VgiRpcServer, str, float } from "vgi-rpc";
+import { Protocol, VgiRpcServer, str, float } from "@query-farm/vgi-rpc";
 
 const protocol = new Protocol("Calculator");
 
@@ -53,7 +53,7 @@ server.run();
 Connect to any vgi-rpc server programmatically:
 
 ```typescript
-import { httpConnect, subprocessConnect } from "vgi-rpc";
+import { httpConnect, subprocessConnect } from "@query-farm/vgi-rpc";
 
 // HTTP transport
 const client = httpConnect("http://localhost:8080");
@@ -180,7 +180,7 @@ protocol.producer<{ count: number; current: number }>("produce_with_header", {
 Declare schemas using convenient type singletons instead of manual `Schema`/`Field` construction:
 
 ```typescript
-import { str, bytes, int, int32, float, float32, bool } from "vgi-rpc";
+import { str, bytes, int, int32, float, float32, bool } from "@query-farm/vgi-rpc";
 
 // Shorthand
 protocol.unary("echo", {
@@ -275,7 +275,7 @@ Errors are transmitted as zero-row Arrow batches with `EXCEPTION`-level metadata
 
 ## Testing with the Python CLI
 
-The [vgi-rpc CLI](https://github.com/rustyconover/vgi-rpc) can introspect and call methods on any TypeScript server:
+The [vgi-rpc CLI](https://github.com/Query-farm/vgi-rpc-python) can introspect and call methods on any TypeScript server:
 
 ```bash
 pip install vgi-rpc[cli]
@@ -295,7 +295,7 @@ vgi-rpc --cmd "bun run examples/streaming.ts" call scale factor=2.0
 
 ## Wire Protocol Compatibility
 
-This library implements the same wire protocol as the Python [vgi-rpc](https://github.com/rustyconover/vgi-rpc) framework:
+This library implements the same wire protocol as the Python [vgi-rpc](https://github.com/Query-farm/vgi-rpc-python) framework:
 
 - Multiple sequential Arrow IPC streams on stdin/stdout
 - Request batches carry method name and version in batch metadata
@@ -303,7 +303,7 @@ This library implements the same wire protocol as the Python [vgi-rpc](https://g
 - Zero-row batches for log messages and errors
 - `__describe__` introspection method for cross-language service discovery
 
-See the Python README's [Wire Protocol Specification](https://github.com/rustyconover/vgi-rpc#wire-protocol-specification) for the full protocol details.
+See the [Wire Protocol Specification](https://vgi-rpc.query.farm/wire-protocol) for the full protocol details.
 
 ## Examples
 
