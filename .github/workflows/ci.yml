@@ -45,6 +45,41 @@ jobs:
           test -f dist/index.js
           test -f dist/index.d.ts
 
+  runtime-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: latest
+
+      - name: Install dependencies
+        run: bun install && bun run postinstall
+
+      - name: Build
+        run: bun run build
+
+      - name: Smoke test (Bun)
+        run: timeout 60 bun run ./test/smoke-import.ts
+
+      - name: Bundle smoke test for Node.js / Deno
+        run: mkdir -p .smoke-bundle && bun build ./test/smoke-import.ts --outfile .smoke-bundle/smoke.js --target node --format esm
+
+      - name: Smoke test (Node.js)
+        run: timeout 60 node .smoke-bundle/smoke.js
+
+      - name: Smoke test (Deno)
+        run: timeout 60 deno run --allow-all .smoke-bundle/smoke.js
+
   conformance:
     runs-on: ubuntu-latest
     steps:

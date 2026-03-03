@@ -1,4 +1,4 @@
-.PHONY: all build build-types build-js test test-unit test-integration test-conformance typecheck clean distclean docs docs-dev help
+.PHONY: all build build-types build-js test test-unit test-integration test-conformance test-smoke typecheck clean distclean docs docs-dev help
 
 # Python reference implementation (required for integration/conformance tests)
 VGI_CLI := /Users/rusty/Development/vgi-rpc/.venv/bin/vgi-rpc
@@ -39,6 +39,12 @@ test-unit: node_modules ## Run unit tests only (no Python CLI needed)
 test-integration: node_modules ## Run integration tests (requires Python CLI)
 	@test -x $(VGI_CLI) || { echo "error: Python CLI not found at $(VGI_CLI)"; exit 1; }
 	bun test test/integration.test.ts
+
+test-smoke: node_modules ## Run cross-runtime smoke tests (Bun + Node.js)
+	bun run ./test/smoke-import.ts
+	mkdir -p .smoke-bundle
+	bun build ./test/smoke-import.ts --outfile .smoke-bundle/smoke.js --target node --format esm
+	node .smoke-bundle/smoke.js
 
 test-conformance: node_modules ## Run Python conformance suite against bun worker
 	@test -x $(PYTHON_VENV) || { echo "error: Python venv not found at $(PYTHON_VENV)"; exit 1; }

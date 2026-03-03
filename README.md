@@ -1,19 +1,15 @@
-<p align="center">
-  <a href="https://vgi-rpc.query.farm">
-    <img src="https://vgi-rpc.query.farm/logo-hero.png" alt="VGI — The Vector Gateway Interface" width="200">
-  </a>
-</p>
+[![VGI — The Vector Gateway Interface](https://vgi-rpc.query.farm/logo-hero.png)](https://vgi-rpc.query.farm)
 
 # vgi-rpc
 
 TypeScript server library for the [vgi-rpc](https://vgi-rpc.query.farm) framework. Implements RPC servers that communicate over stdin/stdout using [Apache Arrow](https://arrow.apache.org/) IPC serialization.
 
-Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and interact with them using the Python `vgi-rpc` CLI or any vgi-rpc client. Unlike JSON-over-HTTP, structured data stays in Arrow columnar format for efficient transfer.
+Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and interact with them using the Python `vgi-rpc` CLI or any `vgi-rpc` client. Unlike JSON-over-HTTP, structured data stays in Arrow columnar format for efficient transfer.
 
 **Key features:**
 
 - **Three method types** — unary (request-response), producer (server-streaming), and exchange (bidirectional-streaming)
-- **Apache Arrow IPC wire format** — efficient columnar serialization compatible with the Python vgi-rpc framework
+- **Apache Arrow IPC wire format** — efficient columnar serialization compatible with the Python `vgi-rpc` framework
 - **Schema shorthand** — declare schemas with `{ name: str, count: int }` instead of manual `Schema`/`Field` construction
 - **Fluent protocol builder** — chain `.unary()`, `.producer()`, `.exchange()` calls to define your service
 - **Type-safe streaming state** — generic `<S>` parameter threads state types through init and produce/exchange functions
@@ -24,10 +20,32 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 ## Installation
 
 ```bash
+# Bun
 bun add @query-farm/vgi-rpc
+
+# npm
+npm install @query-farm/vgi-rpc
+
+# Deno
+deno add npm:@query-farm/vgi-rpc
 ```
 
-Requires [Bun](https://bun.sh/) runtime.
+## Runtime Compatibility
+
+`vgi-rpc` works with [Bun](https://bun.sh/), [Node.js](https://nodejs.org/) 22+, and [Deno](https://deno.land/) 2+. The HTTP handler and HTTP client are fully runtime-agnostic. The subprocess transport (`subprocessConnect`) requires Bun.
+
+### Browser Usage
+
+The HTTP client works in browsers. Use `httpConnect` to call a `vgi-rpc` server from any browser application:
+
+```typescript
+import { httpConnect } from "@query-farm/vgi-rpc";
+
+const client = httpConnect("https://api.example.com");
+const result = await client.call("add", { a: 2, b: 3 });
+```
+
+You will need a bundler (Vite, esbuild, webpack, etc.) that can resolve the `apache-arrow` dependency. Server-only exports (`VgiRpcServer`, `createHttpHandler`, `subprocessConnect`, `pipeConnect`) are not available in browsers.
 
 ## Quick Start
 
@@ -301,7 +319,7 @@ vgi-rpc --cmd "bun run examples/streaming.ts" call scale factor=2.0
 
 ## Wire Protocol Compatibility
 
-This library implements the same wire protocol as the Python [vgi-rpc](https://github.com/Query-farm/vgi-rpc-python) framework:
+This library implements the same wire protocol as the Python [`vgi-rpc`](https://github.com/Query-farm/vgi-rpc-python) framework:
 
 - Multiple sequential Arrow IPC streams on stdin/stdout
 - Request batches carry method name and version in batch metadata
