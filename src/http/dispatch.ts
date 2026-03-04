@@ -6,6 +6,7 @@ import { STATE_KEY } from "../constants.js";
 import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
+import { conformBatchToSchema } from "../util/conform.js";
 import { serializeSchema } from "../util/schema.js";
 import { parseRequest } from "../wire/request.js";
 import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
@@ -206,9 +207,12 @@ export async function httpDispatchStreamExchange(
     // when effectiveProducer so finish() is allowed.
     const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null);
 
+    // Cast compatible input types (e.g., decimal→double, int32→int64)
+    const conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
+
     try {
       if (method.exchangeFn) {
-        await method.exchangeFn(state, reqBatch, out);
+        await method.exchangeFn(state, conformedBatch, out);
       } else {
         await method.producerFn!(state, out);
       }

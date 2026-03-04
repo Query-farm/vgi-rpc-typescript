@@ -4,6 +4,7 @@
 import { Schema } from "@query-farm/apache-arrow";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
+import { conformBatchToSchema } from "../util/conform.js";
 import type { IpcStreamReader } from "../wire/reader.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
@@ -98,10 +99,24 @@ export async function dispatchStream(
   // same stream. We use IncrementalStream which writes bytes synchronously.
   const stream = writer.openStream(outputSchema);
 
+  // Expected input schema for casting compatible types (e.g., decimal→double)
+  const expectedInputSchema = method.inputSchema;
+
   try {
     while (true) {
-      const inputBatch = await reader.readNextBatch();
+      let inputBatch = await reader.readNextBatch();
       if (!inputBatch) break;
+
+      // Cast compatible input types when schema doesn't match exactly
+      if (expectedInputSchema && !isProducer && inputBatch.schema !== expectedInputSchema) {
+        try {
+          inputBatch = conformBatchToSchema(inputBatch, expectedInputSchema);
+        } catch {
+          throw new TypeError(
+            `Input schema mismatch: expected ${expectedInputSchema}, got ${inputBatch.schema}`,
+          );
+        }
+      }
 
       const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId);
 
