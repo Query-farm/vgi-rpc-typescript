@@ -1,12 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  type RecordBatch,
-  RecordBatchReader,
-  RecordBatchStreamWriter,
-  type Schema,
-} from "@query-farm/apache-arrow";
+import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
 import { conformBatchToSchema } from "../util/conform.js";
 
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";

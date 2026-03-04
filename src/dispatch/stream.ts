@@ -112,9 +112,7 @@ export async function dispatchStream(
         try {
           inputBatch = conformBatchToSchema(inputBatch, expectedInputSchema);
         } catch {
-          throw new TypeError(
-            `Input schema mismatch: expected ${expectedInputSchema}, got ${inputBatch.schema}`,
-          );
+          throw new TypeError(`Input schema mismatch: expected ${expectedInputSchema}, got ${inputBatch.schema}`);
         }
       }
 
