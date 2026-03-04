@@ -2,17 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Schema } from "@query-farm/apache-arrow";
-import { Protocol } from "./protocol.js";
+import { DESCRIBE_METHOD_NAME } from "./constants.js";
+import { buildDescribeBatch } from "./dispatch/describe.js";
+import { dispatchStream } from "./dispatch/stream.js";
+import { dispatchUnary } from "./dispatch/unary.js";
+import { RpcError, VersionError } from "./errors.js";
+import type { Protocol } from "./protocol.js";
+import { MethodType } from "./types.js";
 import { IpcStreamReader } from "./wire/reader.js";
-import { IpcStreamWriter } from "./wire/writer.js";
 import { parseRequest } from "./wire/request.js";
 import { buildErrorBatch } from "./wire/response.js";
-import { buildDescribeBatch } from "./dispatch/describe.js";
-import { dispatchUnary } from "./dispatch/unary.js";
-import { dispatchStream } from "./dispatch/stream.js";
-import { DESCRIBE_METHOD_NAME } from "./constants.js";
-import { MethodType } from "./types.js";
-import { RpcError, VersionError } from "./errors.js";
+import { IpcStreamWriter } from "./wire/writer.js";
 
 const EMPTY_SCHEMA = new Schema([]);
 
@@ -26,21 +26,13 @@ export class VgiRpcServer {
   private serverId: string;
   private describeBatch: import("@query-farm/apache-arrow").RecordBatch | null = null;
 
-  constructor(
-    protocol: Protocol,
-    options?: { enableDescribe?: boolean; serverId?: string },
-  ) {
+  constructor(protocol: Protocol, options?: { enableDescribe?: boolean; serverId?: string }) {
     this.protocol = protocol;
     this.enableDescribe = options?.enableDescribe ?? true;
-    this.serverId =
-      options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
     if (this.enableDescribe) {
-      const { batch } = buildDescribeBatch(
-        protocol.name,
-        protocol.getMethods(),
-        this.serverId,
-      );
+      const { batch } = buildDescribeBatch(protocol.name, protocol.getMethods(), this.serverId);
       this.describeBatch = batch;
     }
   }
@@ -86,10 +78,7 @@ export class VgiRpcServer {
     }
   }
 
-  private async serveOne(
-    reader: IpcStreamReader,
-    writer: IpcStreamWriter,
-  ): Promise<void> {
+  private async serveOne(reader: IpcStreamReader, writer: IpcStreamWriter): Promise<void> {
     const stream = await reader.readStream();
     if (!stream) {
       throw new Error("EOF");
@@ -134,9 +123,7 @@ export class VgiRpcServer {
     const method = methods.get(methodName);
     if (!method) {
       const available = [...methods.keys()].sort();
-      const err = new Error(
-        `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
-      );
+      const err = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, this.serverId, requestId);
       writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
@@ -146,14 +133,7 @@ export class VgiRpcServer {
     if (method.type === MethodType.UNARY) {
       await dispatchUnary(method, params, writer, this.serverId, requestId);
     } else {
-      await dispatchStream(
-        method,
-        params,
-        writer,
-        reader,
-        this.serverId,
-        requestId,
-      );
+      await dispatchStream(method, params, writer, reader, this.serverId, requestId);
     }
   }
 }

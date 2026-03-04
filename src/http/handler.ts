@@ -1,26 +1,21 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema } from "@query-farm/apache-arrow";
 import { randomBytes } from "node:crypto";
+import { Schema } from "@query-farm/apache-arrow";
+import { DESCRIBE_METHOD_NAME } from "../constants.js";
 import type { Protocol } from "../protocol.js";
 import { MethodType } from "../types.js";
-import { DESCRIBE_METHOD_NAME } from "../constants.js";
+import { zstdCompress, zstdDecompress } from "../util/zstd.js";
 import { buildErrorBatch } from "../wire/response.js";
-import { jsonStateSerializer, type HttpHandlerOptions } from "./types.js";
-import {
-  ARROW_CONTENT_TYPE,
-  HttpRpcError,
-  serializeIpcStream,
-  arrowResponse,
-} from "./common.js";
+import { ARROW_CONTENT_TYPE, arrowResponse, HttpRpcError, serializeIpcStream } from "./common.js";
 import {
   httpDispatchDescribe,
-  httpDispatchUnary,
-  httpDispatchStreamInit,
   httpDispatchStreamExchange,
+  httpDispatchStreamInit,
+  httpDispatchUnary,
 } from "./dispatch.js";
-import { zstdCompress, zstdDecompress } from "../util/zstd.js";
+import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
 
 const EMPTY_SCHEMA = new Schema([]);
 
@@ -46,8 +41,7 @@ export function createHttpHandler(
   const corsOrigins = options?.corsOrigins;
   const maxRequestBytes = options?.maxRequestBytes;
   const maxStreamResponseBytes = options?.maxStreamResponseBytes;
-  const serverId =
-    options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
   const methods = protocol.getMethods();
 
@@ -70,10 +64,7 @@ export function createHttpHandler(
     }
   }
 
-  async function compressIfAccepted(
-    response: Response,
-    clientAcceptsZstd: boolean,
-  ): Promise<Response> {
+  async function compressIfAccepted(response: Response, clientAcceptsZstd: boolean): Promise<Response> {
     if (compressionLevel == null || !clientAcceptsZstd) return response;
     const responseBody = new Uint8Array(await response.arrayBuffer());
     const compressed = zstdCompress(responseBody, compressionLevel);
@@ -85,11 +76,7 @@ export function createHttpHandler(
     });
   }
 
-  function makeErrorResponse(
-    error: Error,
-    statusCode: number,
-    schema: Schema = EMPTY_SCHEMA,
-  ): Response {
+  function makeErrorResponse(error: Error, statusCode: number, schema: Schema = EMPTY_SCHEMA): Response {
     const errBatch = buildErrorBatch(schema, error, serverId, null);
     const body = serializeIpcStream(schema, [errBatch]);
     const resp = arrowResponse(body, statusCode);
@@ -128,23 +115,18 @@ export function createHttpHandler(
     // Validate Content-Type
     const contentType = request.headers.get("Content-Type");
     if (!contentType || !contentType.includes(ARROW_CONTENT_TYPE)) {
-      return new Response(
-        `Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`,
-        { status: 415 },
-      );
+      return new Response(`Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`, { status: 415 });
     }
 
     // Check request body size
     if (maxRequestBytes != null) {
       const contentLength = request.headers.get("Content-Length");
-      if (contentLength && parseInt(contentLength) > maxRequestBytes) {
+      if (contentLength && parseInt(contentLength, 10) > maxRequestBytes) {
         return new Response("Request body too large", { status: 413 });
       }
     }
 
-    const clientAcceptsZstd = (
-      request.headers.get("Accept-Encoding") ?? ""
-    ).includes("zstd");
+    const clientAcceptsZstd = (request.headers.get("Accept-Encoding") ?? "").includes("zstd");
 
     // Read body, decompressing if needed
     let body = new Uint8Array(await request.arrayBuffer());
@@ -160,15 +142,12 @@ export function createHttpHandler(
         addCorsHeaders(response.headers);
         return compressIfAccepted(response, clientAcceptsZstd);
       } catch (error: any) {
-        return compressIfAccepted(
-          makeErrorResponse(error, 500),
-          clientAcceptsZstd,
-        );
+        return compressIfAccepted(makeErrorResponse(error, 500), clientAcceptsZstd);
       }
     }
 
     // Parse method name and sub-path from URL
-    if (!path.startsWith(prefix + "/")) {
+    if (!path.startsWith(`${prefix}/`)) {
       return new Response("Not Found", { status: 404 });
     }
 
@@ -191,13 +170,8 @@ export function createHttpHandler(
     const method = methods.get(methodName);
     if (!method) {
       const available = [...methods.keys()].sort();
-      const err = new Error(
-        `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
-      );
-      return compressIfAccepted(
-        makeErrorResponse(err, 404),
-        clientAcceptsZstd,
-      );
+      const err = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
+      return compressIfAccepted(makeErrorResponse(err, 404), clientAcceptsZstd);
     }
 
     try {
@@ -205,10 +179,7 @@ export function createHttpHandler(
 
       if (action === "call") {
         if (method.type !== MethodType.UNARY) {
-          throw new HttpRpcError(
-            `Method '${methodName}' is a stream method. Use /init and /exchange endpoints.`,
-            400,
-          );
+          throw new HttpRpcError(`Method '${methodName}' is a stream method. Use /init and /exchange endpoints.`, 400);
         }
         response = await httpDispatchUnary(method, body, ctx);
       } else if (action === "init") {
@@ -233,15 +204,9 @@ export function createHttpHandler(
       return compressIfAccepted(response, clientAcceptsZstd);
     } catch (error: any) {
       if (error instanceof HttpRpcError) {
-        return compressIfAccepted(
-          makeErrorResponse(error, error.statusCode),
-          clientAcceptsZstd,
-        );
+        return compressIfAccepted(makeErrorResponse(error, error.statusCode), clientAcceptsZstd);
       }
-      return compressIfAccepted(
-        makeErrorResponse(error, 500),
-        clientAcceptsZstd,
-      );
+      return compressIfAccepted(makeErrorResponse(error, 500), clientAcceptsZstd);
     }
   };
 }

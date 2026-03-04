@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Schema } from "@query-farm/apache-arrow";
-import { type SchemaLike, toSchema, inferParamTypes } from "./schema.js";
+import { inferParamTypes, type SchemaLike, toSchema } from "./schema.js";
 import {
-  MethodType,
-  type MethodDefinition,
-  type UnaryHandler,
-  type HeaderInit,
-  type ProducerInit,
-  type ProducerFn,
-  type ExchangeInit,
   type ExchangeFn,
+  type ExchangeInit,
+  type HeaderInit,
+  type MethodDefinition,
+  MethodType,
+  type ProducerFn,
+  type ProducerInit,
+  type UnaryHandler,
 } from "./types.js";
 
 const EMPTY_SCHEMA = new Schema([]);

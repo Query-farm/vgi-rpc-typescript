@@ -1,19 +1,19 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatch, Schema } from "@query-farm/apache-arrow";
-import { STATE_KEY, LOG_LEVEL_KEY, DESCRIBE_METHOD_NAME } from "../constants.js";
+import type { RecordBatch, Schema } from "@query-farm/apache-arrow";
+import { LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
+import { httpIntrospect, type MethodInfo, type ServiceDescription } from "./introspect.js";
 import {
   buildRequestIpc,
-  readResponseBatches,
   dispatchLogOrError,
   extractBatchRows,
+  readResponseBatches,
   readSequentialStreams,
 } from "./ipc.js";
-import { httpIntrospect, type MethodInfo, type ServiceDescription } from "./introspect.js";
 import { HttpStreamSession } from "./stream.js";
-import type { HttpConnectOptions, LogMessage, StreamSession } from "./types.js";
+import type { HttpConnectOptions, StreamSession } from "./types.js";
 
 type CompressFn = (data: Uint8Array, level: number) => Uint8Array;
 type DecompressFn = (data: Uint8Array) => Uint8Array;
@@ -25,10 +25,7 @@ export interface RpcClient {
   close(): void;
 }
 
-export function httpConnect(
-  baseUrl: string,
-  options?: HttpConnectOptions,
-): RpcClient {
+export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcClient {
   const prefix = (options?.prefix ?? "/vgi").replace(/\/+$/, "");
   const onLog = options?.onLog;
   const compressionLevel = options?.compressionLevel;
@@ -84,10 +81,7 @@ export function httpConnect(
   }
 
   return {
-    async call(
-      method: string,
-      params?: Record<string, any>,
-    ): Promise<Record<string, any> | null> {
+    async call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null> {
       await ensureCompression();
       const methods = await ensureMethodCache();
       const info = methods.get(method);
@@ -135,10 +129,7 @@ export function httpConnect(
       return result;
     },
 
-    async stream(
-      method: string,
-      params?: Record<string, any>,
-    ): Promise<HttpStreamSession> {
+    async stream(method: string, params?: Record<string, any>): Promise<HttpStreamSession> {
       await ensureCompression();
       const methods = await ensureMethodCache();
       const info = methods.get(method);
@@ -278,9 +269,10 @@ export function httpConnect(
       // response (it carries the server's actual output schema even for
       // zero-row token batches), then pending batch schemas, then describe info.
       const outputSchema =
-        (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null)
-          ?? (pendingBatches.length > 0 ? pendingBatches[0].schema : null)
-          ?? info.outputSchema ?? info.resultSchema;
+        (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null) ??
+        (pendingBatches.length > 0 ? pendingBatches[0].schema : null) ??
+        info.outputSchema ??
+        info.resultSchema;
 
       return new HttpStreamSession({
         baseUrl,

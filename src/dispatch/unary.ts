@@ -1,11 +1,10 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema } from "@query-farm/apache-arrow";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
+import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
-import { buildResultBatch, buildErrorBatch } from "../wire/response.js";
 
 /**
  * Dispatch a unary RPC call.

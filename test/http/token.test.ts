@@ -1,10 +1,10 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, test, expect } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { packStateToken, unpackStateToken } from "../../src/http/token.js";
 import { jsonStateSerializer } from "../../src/http/types.js";
-import { randomBytes } from "node:crypto";
 
 describe("State Token", () => {
   const signingKey = randomBytes(32);
@@ -14,12 +14,7 @@ describe("State Token", () => {
     const schemaBytes = new Uint8Array([1, 2, 3, 4]);
     const inputSchemaBytes = new Uint8Array([5, 6, 7]);
 
-    const token = packStateToken(
-      stateBytes,
-      schemaBytes,
-      inputSchemaBytes,
-      signingKey,
-    );
+    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey);
 
     expect(typeof token).toBe("string");
 
@@ -38,9 +33,7 @@ describe("State Token", () => {
     const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey);
     const wrongKey = randomBytes(32);
 
-    expect(() => unpackStateToken(token, wrongKey, 3600)).toThrow(
-      "HMAC verification failed",
-    );
+    expect(() => unpackStateToken(token, wrongKey, 3600)).toThrow("HMAC verification failed");
   });
 
   test("detects tampered token", () => {
@@ -55,9 +48,7 @@ describe("State Token", () => {
     buf[10] ^= 0xff; // flip a byte in the state section
     const tamperedToken = buf.toString("base64");
 
-    expect(() => unpackStateToken(tamperedToken, signingKey, 3600)).toThrow(
-      "HMAC verification failed",
-    );
+    expect(() => unpackStateToken(tamperedToken, signingKey, 3600)).toThrow("HMAC verification failed");
   });
 
   test("TTL expiration", () => {
@@ -67,18 +58,10 @@ describe("State Token", () => {
 
     // Created 2 hours ago
     const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
-    const token = packStateToken(
-      stateBytes,
-      schemaBytes,
-      inputSchemaBytes,
-      signingKey,
-      twoHoursAgo,
-    );
+    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey, twoHoursAgo);
 
     // 1-hour TTL should reject it
-    expect(() => unpackStateToken(token, signingKey, 3600)).toThrow(
-      "State token expired",
-    );
+    expect(() => unpackStateToken(token, signingKey, 3600)).toThrow("State token expired");
 
     // 0 TTL (disabled) should accept it
     const unpacked = unpackStateToken(token, signingKey, 0);
@@ -87,9 +70,7 @@ describe("State Token", () => {
 
   test("rejects too-short token", () => {
     const shortToken = Buffer.from("too short").toString("base64");
-    expect(() => unpackStateToken(shortToken, signingKey, 3600)).toThrow(
-      "State token too short",
-    );
+    expect(() => unpackStateToken(shortToken, signingKey, 3600)).toThrow("State token too short");
   });
 
   test("handles empty state", () => {

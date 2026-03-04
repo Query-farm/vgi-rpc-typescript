@@ -10,11 +10,11 @@
  * Run: npx tsx examples/conformance-http-node.ts
  */
 import { createServer, type IncomingMessage } from "node:http";
-import { protocol } from "./conformance-protocol.js";
 import { createHttpHandler } from "../src/http/index.js";
+import { protocol } from "./conformance-protocol.js";
 
 const compressionLevel = process.env.VGI_COMPRESSION_LEVEL
-  ? parseInt(process.env.VGI_COMPRESSION_LEVEL)
+  ? parseInt(process.env.VGI_COMPRESSION_LEVEL, 10)
   : undefined;
 
 const handler = createHttpHandler(protocol, {
@@ -43,10 +43,7 @@ const server = createServer(async (req, res) => {
     headers.append(raw[i], raw[i + 1]);
   }
 
-  const body =
-    req.method !== "GET" && req.method !== "HEAD"
-      ? await collectBody(req)
-      : undefined;
+  const body = req.method !== "GET" && req.method !== "HEAD" ? await collectBody(req) : undefined;
 
   const request = new Request(url.href, {
     method: req.method,
@@ -64,7 +61,7 @@ const server = createServer(async (req, res) => {
 
     const buffer = Buffer.from(await response.arrayBuffer());
     res.end(buffer);
-  } catch (err) {
+  } catch (_err) {
     res.writeHead(500);
     res.end("Internal Server Error");
   }

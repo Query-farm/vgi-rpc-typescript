@@ -2,25 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  Schema,
-  Field,
-  RecordBatch,
-  Utf8,
-  Bool,
   Binary,
-  vectorFromArray,
+  Bool,
+  Field,
   makeData,
+  RecordBatch,
+  Schema,
   Struct,
+  Utf8,
+  vectorFromArray,
 } from "@query-farm/apache-arrow";
-import type { MethodDefinition } from "../types.js";
 import {
-  PROTOCOL_NAME_KEY,
-  REQUEST_VERSION_KEY,
-  REQUEST_VERSION,
-  DESCRIBE_VERSION_KEY,
   DESCRIBE_VERSION,
+  DESCRIBE_VERSION_KEY,
+  PROTOCOL_NAME_KEY,
+  REQUEST_VERSION,
+  REQUEST_VERSION_KEY,
   SERVER_ID_KEY,
 } from "../constants.js";
+import type { MethodDefinition } from "../types.js";
 import { serializeSchema } from "../util/schema.js";
 
 /**
@@ -48,9 +48,7 @@ export function buildDescribeBatch(
   serverId: string,
 ): { batch: RecordBatch; metadata: Map<string, string> } {
   // Sort methods by name for consistent ordering
-  const sortedEntries = [...methods.entries()].sort(([a], [b]) =>
-    a.localeCompare(b),
-  );
+  const sortedEntries = [...methods.entries()].sort(([a], [b]) => a.localeCompare(b));
 
   const names: (string | null)[] = [];
   const methodTypes: (string | null)[] = [];
@@ -69,8 +67,7 @@ export function buildDescribeBatch(
     docs.push(method.doc ?? null);
 
     // Unary methods with non-empty result schema have a return value
-    const hasReturn =
-      method.type === "unary" && method.resultSchema.fields.length > 0;
+    const hasReturn = method.type === "unary" && method.resultSchema.fields.length > 0;
     hasReturns.push(hasReturn);
 
     paramsSchemas.push(serializeSchema(method.paramsSchema));
@@ -87,26 +84,17 @@ export function buildDescribeBatch(
     if (method.defaults && Object.keys(method.defaults).length > 0) {
       const safe: Record<string, any> = {};
       for (const [k, v] of Object.entries(method.defaults)) {
-        if (
-          v === null ||
-          typeof v === "string" ||
-          typeof v === "number" ||
-          typeof v === "boolean"
-        ) {
+        if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
           safe[k] = v;
         }
       }
-      paramDefaultsJsons.push(
-        Object.keys(safe).length > 0 ? JSON.stringify(safe) : null,
-      );
+      paramDefaultsJsons.push(Object.keys(safe).length > 0 ? JSON.stringify(safe) : null);
     } else {
       paramDefaultsJsons.push(null);
     }
 
     hasHeaders.push(!!method.headerSchema);
-    headerSchemas.push(
-      method.headerSchema ? serializeSchema(method.headerSchema) : null,
-    );
+    headerSchemas.push(method.headerSchema ? serializeSchema(method.headerSchema) : null);
   }
 
   // Build the batch using vectorFromArray for each column

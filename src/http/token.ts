@@ -28,8 +28,7 @@ export function packStateToken(
 ): string {
   const now = createdAt ?? Math.floor(Date.now() / 1000);
 
-  const payloadLen =
-    1 + 8 + 4 + stateBytes.length + 4 + schemaBytes.length + 4 + inputSchemaBytes.length;
+  const payloadLen = 1 + 8 + 4 + stateBytes.length + 4 + schemaBytes.length + 4 + inputSchemaBytes.length;
   const buf = Buffer.alloc(payloadLen);
   let offset = 0;
 
@@ -77,11 +76,7 @@ export interface UnpackedToken {
  * Unpack and verify a state token.
  * Throws on tampered, expired, or malformed tokens.
  */
-export function unpackStateToken(
-  tokenBase64: string,
-  signingKey: Uint8Array,
-  tokenTtl: number,
-): UnpackedToken {
+export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, tokenTtl: number): UnpackedToken {
   const token = Buffer.from(tokenBase64, "base64");
 
   if (token.length < MIN_TOKEN_LEN) {

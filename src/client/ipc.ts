@@ -2,30 +2,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  RecordBatch,
-  RecordBatchReader,
-  Schema,
+  Binary,
+  Bool,
   DataType,
   Float64,
   Int64,
-  Utf8,
-  Bool,
-  Binary,
-  vectorFromArray,
   makeData,
+  RecordBatch,
+  RecordBatchReader,
+  type Schema,
   Struct,
+  Utf8,
+  vectorFromArray,
 } from "@query-farm/apache-arrow";
 import {
-  RPC_METHOD_KEY,
-  REQUEST_VERSION_KEY,
-  REQUEST_VERSION,
+  LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
-  LOG_EXTRA_KEY,
+  REQUEST_VERSION,
+  REQUEST_VERSION_KEY,
+  RPC_METHOD_KEY,
 } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { serializeIpcStream } from "../http/common.js";
-import { IpcStreamReader, type StreamMessage } from "../wire/reader.js";
+import { IpcStreamReader } from "../wire/reader.js";
 import type { LogMessage } from "./types.js";
 
 /** Infer an Arrow DataType from a JS value. */
@@ -80,11 +80,7 @@ function coerceForArrow(type: DataType, value: any): any {
 /**
  * Build a 1-row Arrow IPC request batch with method metadata.
  */
-export function buildRequestIpc(
-  schema: Schema,
-  params: Record<string, any>,
-  method: string,
-): Uint8Array {
+export function buildRequestIpc(schema: Schema, params: Record<string, any>, method: string): Uint8Array {
   const metadata = new Map<string, string>();
   metadata.set(RPC_METHOD_KEY, method);
   metadata.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
@@ -121,9 +117,7 @@ export function buildRequestIpc(
 /**
  * Read schema + all batches from an IPC stream body.
  */
-export async function readResponseBatches(
-  body: Uint8Array,
-): Promise<{ schema: Schema; batches: RecordBatch[] }> {
+export async function readResponseBatches(body: Uint8Array): Promise<{ schema: Schema; batches: RecordBatch[] }> {
   const reader = await RecordBatchReader.from(body);
   await reader.open();
   const schema = reader.schema;
@@ -140,10 +134,7 @@ export async function readResponseBatches(
  * If other level → call onLog.
  * Returns true if the batch was consumed as a log/error.
  */
-export function dispatchLogOrError(
-  batch: RecordBatch,
-  onLog?: (msg: LogMessage) => void,
-): boolean {
+export function dispatchLogOrError(batch: RecordBatch, onLog?: (msg: LogMessage) => void): boolean {
   const meta = batch.metadata;
   if (!meta) return false;
 
@@ -194,10 +185,7 @@ export function extractBatchRows(batch: RecordBatch): Record<string, any>[] {
       const field = batch.schema.fields[i];
       let value = batch.getChildAt(i)?.get(r);
       if (typeof value === "bigint") {
-        if (
-          value >= BigInt(Number.MIN_SAFE_INTEGER) &&
-          value <= BigInt(Number.MAX_SAFE_INTEGER)
-        ) {
+        if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
           value = Number(value);
         }
       }
@@ -212,9 +200,7 @@ export function extractBatchRows(batch: RecordBatch): Record<string, any>[] {
  * Read sequential IPC streams from a response body.
  * Returns an IpcStreamReader for reading header + data streams.
  */
-export async function readSequentialStreams(
-  body: Uint8Array,
-): Promise<IpcStreamReader> {
+export async function readSequentialStreams(body: Uint8Array): Promise<IpcStreamReader> {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(body);

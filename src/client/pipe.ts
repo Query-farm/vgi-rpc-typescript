@@ -2,36 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  Field,
+  makeData,
   RecordBatch,
   RecordBatchStreamWriter,
   Schema,
-  Field,
   Struct,
-  makeData,
   vectorFromArray,
 } from "@query-farm/apache-arrow";
 import { DESCRIBE_METHOD_NAME } from "../constants.js";
+import { RpcError } from "../errors.js";
 import { serializeIpcStream } from "../http/common.js";
 import { IpcStreamReader } from "../wire/reader.js";
-import {
-  inferArrowType,
-  buildRequestIpc,
-  dispatchLogOrError,
-  extractBatchRows,
-} from "./ipc.js";
-import {
-  parseDescribeResponse,
-  type MethodInfo,
-  type ServiceDescription,
-} from "./introspect.js";
-import type {
-  LogMessage,
-  PipeConnectOptions,
-  SubprocessConnectOptions,
-  StreamSession,
-} from "./types.js";
 import type { RpcClient } from "./connect.js";
-import { RpcError } from "../errors.js";
+import { type MethodInfo, parseDescribeResponse, type ServiceDescription } from "./introspect.js";
+import { buildRequestIpc, dispatchLogOrError, extractBatchRows, inferArrowType } from "./ipc.js";
+import type { LogMessage, PipeConnectOptions, StreamSession, SubprocessConnectOptions } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Writable abstraction
@@ -195,9 +181,12 @@ export class PipeStreamSession implements StreamSession {
       // strictly and its schema typically uses nullable columns.
       const keys = Object.keys(input[0]);
       const fields = keys.map((key) => {
-        let sample: any = undefined;
+        let sample: any;
         for (const row of input) {
-          if (row[key] != null) { sample = row[key]; break; }
+          if (row[key] != null) {
+            sample = row[key];
+            break;
+          }
         }
         const arrowType = inferArrowType(sample);
         return new Field(key, arrowType, /* nullable */ true);
@@ -215,7 +204,7 @@ export class PipeStreamSession implements StreamSession {
           throw new RpcError(
             "ProtocolError",
             `Exchange input schema changed: expected [${cached.fields.map((f) => f.name).join(", ")}] ` +
-            `but got [${inputSchema.fields.map((f) => f.name).join(", ")}]`,
+              `but got [${inputSchema.fields.map((f) => f.name).join(", ")}]`,
             "",
           );
         }
@@ -422,7 +411,7 @@ export function pipeConnect(
     if (_busy) {
       throw new Error(
         "Pipe transport is busy — another call or stream is in progress. " +
-        "Pipe connections are single-threaded; wait for the current operation to complete.",
+          "Pipe connections are single-threaded; wait for the current operation to complete.",
       );
     }
     _busy = true;
@@ -470,10 +459,7 @@ export function pipeConnect(
   }
 
   return {
-    async call(
-      method: string,
-      params?: Record<string, any>,
-    ): Promise<Record<string, any> | null> {
+    async call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null> {
       const methods = await ensureMethodCache();
       await acquireBusy();
       try {
@@ -522,10 +508,7 @@ export function pipeConnect(
       }
     },
 
-    async stream(
-      method: string,
-      params?: Record<string, any>,
-    ): Promise<StreamSession> {
+    async stream(method: string, params?: Record<string, any>): Promise<StreamSession> {
       const methods = await ensureMethodCache();
       await acquireBusy();
 
@@ -616,10 +599,7 @@ export function pipeConnect(
 // subprocessConnect — spawn a process and wrap with pipeConnect
 // ---------------------------------------------------------------------------
 
-export function subprocessConnect(
-  cmd: string[],
-  options?: SubprocessConnectOptions,
-): RpcClient {
+export function subprocessConnect(cmd: string[], options?: SubprocessConnectOptions): RpcClient {
   const proc = Bun.spawn(cmd, {
     stdin: "pipe",
     stdout: "pipe",

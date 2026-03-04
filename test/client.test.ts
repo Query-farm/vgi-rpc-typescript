@@ -1,22 +1,21 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Subprocess } from "bun";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
-  Schema,
   Field,
   Float64,
-  Utf8,
-  Binary,
-  RecordBatchStreamWriter,
-  RecordBatch,
-  vectorFromArray,
   makeData,
+  RecordBatch,
+  RecordBatchStreamWriter,
+  Schema,
   Struct,
+  Utf8,
+  vectorFromArray,
 } from "@query-farm/apache-arrow";
-import { httpConnect, subprocessConnect, type RpcClient, type LogMessage } from "../src/client/index.js";
-import { httpIntrospect, parseDescribeResponse } from "../src/client/introspect.js";
+import type { Subprocess } from "bun";
+import { httpConnect, type LogMessage, type RpcClient, subprocessConnect } from "../src/client/index.js";
+import { httpIntrospect } from "../src/client/introspect.js";
 import { RpcError } from "../src/errors.js";
 
 // ---------------------------------------------------------------------------
@@ -29,15 +28,12 @@ const PYTHON = process.env.VGI_RPC_PYTHON_BIN ?? `${PYTHON_CWD}/.venv/bin/python
 /** Check if the Python conformance server is available. */
 let hasPython = false;
 try {
-  const fs = require("fs");
+  const fs = require("node:fs");
   hasPython = fs.existsSync(PYTHON) && fs.existsSync(PYTHON_CWD);
 } catch {}
 
 /** Serialize a 1-row batch as IPC bytes (for dataclass params). */
-function serializeDataclass(
-  schema: Schema,
-  values: Record<string, any>,
-): Uint8Array {
+function serializeDataclass(schema: Schema, values: Record<string, any>): Uint8Array {
   const children = schema.fields.map((f) => {
     return vectorFromArray([values[f.name]], f.type).data[0];
   });
@@ -56,10 +52,7 @@ function serializeDataclass(
   return writer.toUint8Array(true);
 }
 
-const POINT_SCHEMA = new Schema([
-  new Field("x", new Float64(), false),
-  new Field("y", new Float64(), false),
-]);
+const POINT_SCHEMA = new Schema([new Field("x", new Float64(), false), new Field("y", new Float64(), false)]);
 
 /** Spawn a server process and read PORT:<n> from stdout, then wait until it accepts connections. */
 async function startServer(proc: Subprocess): Promise<string> {
@@ -97,10 +90,7 @@ async function startServer(proc: Subprocess): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /** HTTP transport: spawns server, reads PORT, creates httpConnect clients. */
-function defineHttpConformanceTests(
-  label: string,
-  spawnFn: () => Subprocess,
-) {
+function defineHttpConformanceTests(label: string, spawnFn: () => Subprocess) {
   defineConformanceTests(
     label,
     // setup: spawn server, return baseUrl
@@ -110,7 +100,9 @@ function defineHttpConformanceTests(
       return { proc, baseUrl };
     },
     // teardown
-    (ctx) => { if (ctx.proc) ctx.proc.kill(); },
+    (ctx) => {
+      if (ctx.proc) ctx.proc.kill();
+    },
     // clientFactory: create a new httpConnect client
     (ctx, opts) => httpConnect(ctx.baseUrl, opts),
     // describeFactory
@@ -136,7 +128,10 @@ function definePipeConformanceTests(
     // describeFactory
     (ctx) => {
       const c = subprocessConnect(ctx.cmd, { cwd: ctx.cmdOpts?.cwd });
-      return c.describe().then((desc) => { c.close(); return desc; });
+      return c.describe().then((desc) => {
+        c.close();
+        return desc;
+      });
     },
     // Pipe transport can't cleanly recover from init errors.
     { supportsInitErrors: false, ...extraOpts },
@@ -264,7 +259,13 @@ function defineConformanceTests<TCtx>(
 
       it("echo_dict", async () => {
         const client = clientFactory(ctx);
-        const result = await client.call("echo_dict", { mapping: new Map([["z", 1], ["a", 2], ["m", 3]]) });
+        const result = await client.call("echo_dict", {
+          mapping: new Map([
+            ["z", 1],
+            ["a", 2],
+            ["m", 3],
+          ]),
+        });
         expect(result).toBeTruthy();
         client.close();
       });
@@ -345,14 +346,16 @@ function defineConformanceTests<TCtx>(
       it("echo_bounding_box", async () => {
         const client = clientFactory(ctx);
         const bbSchema = new Schema([
-          new Field("top_left", new Struct([
-            new Field("x", new Float64(), false),
-            new Field("y", new Float64(), false),
-          ]), false),
-          new Field("bottom_right", new Struct([
-            new Field("x", new Float64(), false),
-            new Field("y", new Float64(), false),
-          ]), false),
+          new Field(
+            "top_left",
+            new Struct([new Field("x", new Float64(), false), new Field("y", new Float64(), false)]),
+            false,
+          ),
+          new Field(
+            "bottom_right",
+            new Struct([new Field("x", new Float64(), false), new Field("y", new Float64(), false)]),
+            false,
+          ),
           new Field("label", new Utf8(), false),
         ]);
         const tlX = vectorFromArray([0.0], new Float64()).data[0];
@@ -550,8 +553,12 @@ function defineConformanceTests<TCtx>(
 
     describe("TestBoundaryValues", () => {
       let client: RpcClient;
-      beforeAll(() => { client = clientFactory(ctx); });
-      afterAll(() => { client.close(); });
+      beforeAll(() => {
+        client = clientFactory(ctx);
+      });
+      afterAll(() => {
+        client.close();
+      });
 
       // Strings
       it("empty string", async () => {
@@ -1035,7 +1042,9 @@ function defineConformanceTests<TCtx>(
     describe("TestErrorRecovery", () => {
       it("error then success", async () => {
         const client = clientFactory(ctx);
-        try { await client.call("raise_value_error", { message: "boom" }); } catch {}
+        try {
+          await client.call("raise_value_error", { message: "boom" });
+        } catch {}
         const result = await client.call("echo_int", { value: 42 });
         expect(result!.result).toBe(42);
         client.close();
@@ -1045,7 +1054,8 @@ function defineConformanceTests<TCtx>(
         const client = clientFactory(ctx);
         try {
           const session = await client.stream("produce_error_mid_stream", { emit_before_error: 1 });
-          for await (const _rows of session) {}
+          for await (const _rows of session) {
+          }
         } catch {}
         const result = await client.call("echo_string", { value: "ok" });
         expect(result!.result).toBe("ok");
@@ -1171,7 +1181,10 @@ function defineConformanceTests<TCtx>(
       it("all columns", async () => {
         const client = clientFactory(ctx);
         const session = await client.stream("produce_dynamic_schema", {
-          seed: 42, count: 3, include_strings: true, include_floats: true,
+          seed: 42,
+          count: 3,
+          include_strings: true,
+          include_floats: true,
         });
         expect(session.header).toBeTruthy();
 
@@ -1189,7 +1202,10 @@ function defineConformanceTests<TCtx>(
       it("strings only", async () => {
         const client = clientFactory(ctx);
         const session = await client.stream("produce_dynamic_schema", {
-          seed: 7, count: 2, include_strings: true, include_floats: false,
+          seed: 7,
+          count: 2,
+          include_strings: true,
+          include_floats: false,
         });
         expect(session.header).toBeTruthy();
 
@@ -1206,7 +1222,10 @@ function defineConformanceTests<TCtx>(
       it("floats only", async () => {
         const client = clientFactory(ctx);
         const session = await client.stream("produce_dynamic_schema", {
-          seed: 5, count: 2, include_strings: false, include_floats: true,
+          seed: 5,
+          count: 2,
+          include_strings: false,
+          include_floats: true,
         });
         expect(session.header).toBeTruthy();
 
@@ -1223,7 +1242,10 @@ function defineConformanceTests<TCtx>(
       it("minimal", async () => {
         const client = clientFactory(ctx);
         const session = await client.stream("produce_dynamic_schema", {
-          seed: 0, count: 1, include_strings: false, include_floats: false,
+          seed: 0,
+          count: 1,
+          include_strings: false,
+          include_floats: false,
         });
         expect(session.header).toBeTruthy();
 
@@ -1288,10 +1310,7 @@ if (hasPython) {
   );
 }
 
-definePipeConformanceTests(
-  "bun-pipe",
-  ["bun", "run", "examples/conformance.ts"],
-);
+definePipeConformanceTests("bun-pipe", ["bun", "run", "examples/conformance.ts"]);
 
 if (hasPython) {
   definePipeConformanceTests(

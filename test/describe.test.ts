@@ -1,38 +1,31 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect } from "bun:test";
-import { Schema, Field, Float64, Utf8 } from "@query-farm/apache-arrow";
-import { Protocol } from "../src/protocol.js";
-import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../src/dispatch/describe.js";
+import { describe, expect, it } from "bun:test";
+import { Field, Float64, Schema, Utf8 } from "@query-farm/apache-arrow";
 import {
-  PROTOCOL_NAME_KEY,
-  DESCRIBE_VERSION_KEY,
   DESCRIBE_VERSION,
-  REQUEST_VERSION_KEY,
+  DESCRIBE_VERSION_KEY,
+  PROTOCOL_NAME_KEY,
   REQUEST_VERSION,
+  REQUEST_VERSION_KEY,
   SERVER_ID_KEY,
 } from "../src/constants.js";
+import { buildDescribeBatch } from "../src/dispatch/describe.js";
+import { Protocol } from "../src/protocol.js";
 
 describe("buildDescribeBatch", () => {
   it("builds a describe batch with correct metadata", () => {
     const protocol = new Protocol("TestProtocol");
     protocol.unary("add", {
-      params: new Schema([
-        new Field("a", new Float64(), false),
-        new Field("b", new Float64(), false),
-      ]),
+      params: new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]),
       result: new Schema([new Field("result", new Float64(), false)]),
       handler: async ({ a, b }) => ({ result: a + b }),
       doc: "Add two numbers.",
       paramTypes: { a: "float", b: "float" },
     });
 
-    const { batch, metadata } = buildDescribeBatch(
-      "TestProtocol",
-      protocol.getMethods(),
-      "test-server-id",
-    );
+    const { metadata } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "test-server-id");
 
     expect(metadata.get(PROTOCOL_NAME_KEY)).toBe("TestProtocol");
     expect(metadata.get(DESCRIBE_VERSION_KEY)).toBe(DESCRIBE_VERSION);
@@ -53,11 +46,7 @@ describe("buildDescribeBatch", () => {
       handler: async ({ name }) => ({ result: `Hello, ${name}!` }),
     });
 
-    const { batch } = buildDescribeBatch(
-      "TestProtocol",
-      protocol.getMethods(),
-      "srv1",
-    );
+    const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
     expect(batch.numRows).toBe(2);
 
@@ -70,21 +59,14 @@ describe("buildDescribeBatch", () => {
   it("includes doc and param types", () => {
     const protocol = new Protocol("TestProtocol");
     protocol.unary("multiply", {
-      params: new Schema([
-        new Field("a", new Float64()),
-        new Field("b", new Float64()),
-      ]),
+      params: new Schema([new Field("a", new Float64()), new Field("b", new Float64())]),
       result: new Schema([new Field("result", new Float64())]),
       handler: async ({ a, b }) => ({ result: a * b }),
       doc: "Multiply two numbers.",
       paramTypes: { a: "float", b: "float" },
     });
 
-    const { batch } = buildDescribeBatch(
-      "TestProtocol",
-      protocol.getMethods(),
-      "srv1",
-    );
+    const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
     // doc column (index 2)
     expect(batch.getChildAt(2)?.get(0)).toBe("Multiply two numbers.");
@@ -105,11 +87,7 @@ describe("buildDescribeBatch", () => {
       handler: async ({ x }) => ({ result: x }),
     });
 
-    const { batch } = buildDescribeBatch(
-      "TestProtocol",
-      protocol.getMethods(),
-      "srv1",
-    );
+    const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
     // has_return column (index 3)
     expect(batch.getChildAt(3)?.get(0)).toBe(true);
@@ -123,11 +101,7 @@ describe("buildDescribeBatch", () => {
       handler: async ({ x }) => ({ result: x }),
     });
 
-    const { batch } = buildDescribeBatch(
-      "TestProtocol",
-      protocol.getMethods(),
-      "srv1",
-    );
+    const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
     // params_schema_ipc column (index 4) should be a non-empty Uint8Array
     const schemaBytes = batch.getChildAt(4)?.get(0);

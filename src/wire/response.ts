@@ -2,22 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  RecordBatch,
-  Schema,
-  Field,
   Data,
   DataType,
+  type Field,
   makeData,
+  RecordBatch,
+  type Schema,
   Struct,
   vectorFromArray,
 } from "@query-farm/apache-arrow";
-import {
-  LOG_LEVEL_KEY,
-  LOG_MESSAGE_KEY,
-  LOG_EXTRA_KEY,
-  SERVER_ID_KEY,
-  REQUEST_ID_KEY,
-} from "../constants.js";
+import { LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY, REQUEST_ID_KEY, SERVER_ID_KEY } from "../constants.js";
 
 /**
  * Coerce values for Int64 schema fields from Number to BigInt.
@@ -63,16 +57,14 @@ export function buildResultBatch(
   for (const field of schema.fields) {
     if (values[field.name] === undefined && !field.nullable) {
       const got = Object.keys(values);
-      throw new TypeError(
-        `Handler result missing required field '${field.name}'. Got keys: [${got.join(", ")}]`,
-      );
+      throw new TypeError(`Handler result missing required field '${field.name}'. Got keys: [${got.join(", ")}]`);
     }
   }
 
   const coerced = coerceInt64(schema, values);
 
   const children = schema.fields.map((f: Field) => {
-    let val = coerced[f.name];
+    const val = coerced[f.name];
     // Raw Data passthrough for Map_ types (whose .get() is broken in arrow-js)
     if (val instanceof Data) {
       return val;
@@ -95,12 +87,7 @@ export function buildResultBatch(
 /**
  * Build a 0-row error batch with EXCEPTION metadata matching Python's Message.from_exception().
  */
-export function buildErrorBatch(
-  schema: Schema,
-  error: Error,
-  serverId: string,
-  requestId: string | null,
-): RecordBatch {
+export function buildErrorBatch(schema: Schema, error: Error, serverId: string, requestId: string | null): RecordBatch {
   const metadata = new Map<string, string>();
   metadata.set(LOG_LEVEL_KEY, "EXCEPTION");
   metadata.set(LOG_MESSAGE_KEY, `${error.constructor.name}: ${error.message}`);
@@ -150,10 +137,7 @@ export function buildLogBatch(
  * Build a 0-row batch from a schema with metadata.
  * Used for error/log batches.
  */
-export function buildEmptyBatch(
-  schema: Schema,
-  metadata?: Map<string, string>,
-): RecordBatch {
+export function buildEmptyBatch(schema: Schema, metadata?: Map<string, string>): RecordBatch {
   const children = schema.fields.map((f: Field) => {
     return makeData({ type: f.type, length: 0, nullCount: 0 });
   });

@@ -1,24 +1,15 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema, RecordBatch, RecordBatchReader } from "@query-farm/apache-arrow";
+import { RecordBatch, RecordBatchReader, Schema } from "@query-farm/apache-arrow";
+import { STATE_KEY } from "../constants.js";
+import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
-import { parseRequest } from "../wire/request.js";
-import {
-  buildResultBatch,
-  buildErrorBatch,
-  buildEmptyBatch,
-} from "../wire/response.js";
-import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
-import { STATE_KEY } from "../constants.js";
 import { serializeSchema } from "../util/schema.js";
-import {
-  HttpRpcError,
-  serializeIpcStream,
-  readRequestFromBody,
-  arrowResponse,
-} from "./common.js";
+import { parseRequest } from "../wire/request.js";
+import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
+import { arrowResponse, HttpRpcError, readRequestFromBody, serializeIpcStream } from "./common.js";
 import { packStateToken, unpackStateToken } from "./token.js";
 import type { StateSerializer } from "./types.js";
 
@@ -60,10 +51,7 @@ export async function httpDispatchUnary(
   const parsed = parseRequest(reqSchema, reqBatch);
 
   if (parsed.methodName !== method.name) {
-    throw new HttpRpcError(
-      `Method name in request '${parsed.methodName}' does not match URL '${method.name}'`,
-      400,
-    );
+    throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
   }
 
   const out = new OutputCollector(schema, true, ctx.serverId, parsed.requestId);
@@ -93,10 +81,7 @@ export async function httpDispatchStreamInit(
   const parsed = parseRequest(reqSchema, reqBatch);
 
   if (parsed.methodName !== method.name) {
-    throw new HttpRpcError(
-      `Method name in request '${parsed.methodName}' does not match URL '${method.name}'`,
-      400,
-    );
+    throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
   }
 
   // Init state
@@ -121,31 +106,13 @@ export async function httpDispatchStreamInit(
   let headerBytes: Uint8Array | null = null;
   if (method.headerSchema && method.headerInit) {
     try {
-      const headerOut = new OutputCollector(
-        method.headerSchema,
-        true,
-        ctx.serverId,
-        parsed.requestId,
-      );
+      const headerOut = new OutputCollector(method.headerSchema, true, ctx.serverId, parsed.requestId);
       const headerValues = method.headerInit(parsed.params, state, headerOut);
-      const headerBatch = buildResultBatch(
-        method.headerSchema,
-        headerValues,
-        ctx.serverId,
-        parsed.requestId,
-      );
-      const headerBatches = [
-        ...headerOut.batches.map((b) => b.batch),
-        headerBatch,
-      ];
+      const headerBatch = buildResultBatch(method.headerSchema, headerValues, ctx.serverId, parsed.requestId);
+      const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
       headerBytes = serializeIpcStream(method.headerSchema, headerBatches);
     } catch (error: any) {
-      const errBatch = buildErrorBatch(
-        method.headerSchema,
-        error,
-        ctx.serverId,
-        parsed.requestId,
-      );
+      const errBatch = buildErrorBatch(method.headerSchema, error, ctx.serverId, parsed.requestId);
       return arrowResponse(serializeIpcStream(method.headerSchema, [errBatch]), 500);
     }
   }
@@ -154,26 +121,13 @@ export async function httpDispatchStreamInit(
     // Producer method — produce data inline in the init response.
     // For exchange-registered methods acting as producers (__isProducer),
     // produceStreamResponse falls back to exchangeFn with tick batches.
-    return produceStreamResponse(
-      method,
-      state,
-      resolvedOutputSchema,
-      inputSchema,
-      ctx,
-      parsed.requestId,
-      headerBytes,
-    );
+    return produceStreamResponse(method, state, resolvedOutputSchema, inputSchema, ctx, parsed.requestId, headerBytes);
   } else {
     // Exchange: serialize state into signed token, return zero-row batch with token
     const stateBytes = ctx.stateSerializer.serialize(state);
     const schemaBytes = serializeSchema(resolvedOutputSchema);
     const inputSchemaBytes = serializeSchema(inputSchema);
-    const token = packStateToken(
-      stateBytes,
-      schemaBytes,
-      inputSchemaBytes,
-      ctx.signingKey,
-    );
+    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.signingKey);
 
     const tokenMeta = new Map<string, string>();
     tokenMeta.set(STATE_KEY, token);
@@ -207,7 +161,7 @@ export async function httpDispatchStreamExchange(
     throw new HttpRpcError("Missing state token in exchange request", 400);
   }
 
-  let unpacked;
+  let unpacked: import("./token.js").UnpackedToken;
   try {
     unpacked = unpackStateToken(tokenBase64, ctx.signingKey, ctx.tokenTtl);
   } catch (error: any) {
@@ -237,20 +191,15 @@ export async function httpDispatchStreamExchange(
     inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
   }
   const effectiveProducer = state?.__isProducer ?? isProducer;
-  if (process.env.VGI_DISPATCH_DEBUG) console.error(`[httpDispatchStreamExchange] method=${method.name} effectiveProducer=${effectiveProducer} stateKeys=${Object.keys(state || {})}`);
+  if (process.env.VGI_DISPATCH_DEBUG)
+    console.error(
+      `[httpDispatchStreamExchange] method=${method.name} effectiveProducer=${effectiveProducer} stateKeys=${Object.keys(state || {})}`,
+    );
 
   if (effectiveProducer) {
     // Producer continuation — produce more data inline.
     // For exchange-registered methods, falls back to exchangeFn with tick batches.
-    return produceStreamResponse(
-      method,
-      state,
-      outputSchema,
-      inputSchema,
-      ctx,
-      null,
-      null,
-    );
+    return produceStreamResponse(method, state, outputSchema, inputSchema, ctx, null, null);
   } else {
     // Exchange path — also handles exchange-registered methods acting as
     // producers (__isProducer=true). Use producer mode on the OutputCollector
@@ -264,7 +213,12 @@ export async function httpDispatchStreamExchange(
         await method.producerFn!(state, out);
       }
     } catch (error: any) {
-      if (process.env.VGI_DISPATCH_DEBUG) console.error(`[httpDispatchStreamExchange] exchange handler error:`, error.message, error.stack?.split('\n').slice(0,5).join('\n'));
+      if (process.env.VGI_DISPATCH_DEBUG)
+        console.error(
+          `[httpDispatchStreamExchange] exchange handler error:`,
+          error.message,
+          error.stack?.split("\n").slice(0, 5).join("\n"),
+        );
       const errBatch = buildErrorBatch(outputSchema, error, ctx.serverId, null);
       return arrowResponse(serializeIpcStream(outputSchema, [errBatch]), 500);
     }
@@ -283,12 +237,7 @@ export async function httpDispatchStreamExchange(
       const stateBytes = ctx.stateSerializer.serialize(state);
       const schemaBytes = serializeSchema(outputSchema);
       const inputSchemaBytes = serializeSchema(inputSchema);
-      const token = packStateToken(
-        stateBytes,
-        schemaBytes,
-        inputSchemaBytes,
-        ctx.signingKey,
-      );
+      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.signingKey);
 
       for (const emitted of out.batches) {
         const batch = emitted.batch;
@@ -304,7 +253,7 @@ export async function httpDispatchStreamExchange(
       // Safety net: if no batch carries a state token (e.g. all rows were
       // filtered out by pushdown filters), emit an empty batch with the
       // token so the client knows to continue exchanging.
-      if (!batches.some(b => b.metadata?.get(STATE_KEY))) {
+      if (!batches.some((b) => b.metadata?.get(STATE_KEY))) {
         const tokenMeta = new Map<string, string>();
         tokenMeta.set(STATE_KEY, token);
         batches.push(buildEmptyBatch(outputSchema, tokenMeta));
@@ -344,7 +293,8 @@ async function produceStreamResponse(
         await method.exchangeFn!(state, tickBatch, out);
       }
     } catch (error: any) {
-      if (process.env.VGI_DISPATCH_DEBUG) console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split('\n').slice(0,3).join('\n'));
+      if (process.env.VGI_DISPATCH_DEBUG)
+        console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));
       allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
       break;
     }
@@ -365,12 +315,7 @@ async function produceStreamResponse(
       const stateBytes = ctx.stateSerializer.serialize(state);
       const schemaBytes = serializeSchema(outputSchema);
       const inputSchemaBytes = serializeSchema(inputSchema);
-      const token = packStateToken(
-        stateBytes,
-        schemaBytes,
-        inputSchemaBytes,
-        ctx.signingKey,
-      );
+      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.signingKey);
       const tokenMeta = new Map<string, string>();
       tokenMeta.set(STATE_KEY, token);
       allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));

@@ -34,16 +34,12 @@ export interface StateSerializer {
 export const jsonStateSerializer: StateSerializer = {
   serialize(state: any): Uint8Array {
     return new TextEncoder().encode(
-      JSON.stringify(state, (_key, value) =>
-        typeof value === "bigint" ? `__bigint__:${value}` : value,
-      ),
+      JSON.stringify(state, (_key, value) => (typeof value === "bigint" ? `__bigint__:${value}` : value)),
     );
   },
   deserialize(bytes: Uint8Array): any {
     return JSON.parse(new TextDecoder().decode(bytes), (_key, value) =>
-      typeof value === "string" && value.startsWith("__bigint__:")
-        ? BigInt(value.slice(11))
-        : value,
+      typeof value === "string" && value.startsWith("__bigint__:") ? BigInt(value.slice(11)) : value,
     );
   },
 };

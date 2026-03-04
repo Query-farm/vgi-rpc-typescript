@@ -1,15 +1,10 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatchReader, RecordBatch, type Schema } from "@query-farm/apache-arrow";
-import {
-  DESCRIBE_METHOD_NAME,
-  PROTOCOL_NAME_KEY,
-  DESCRIBE_VERSION_KEY,
-} from "../constants.js";
+import { Schema as ArrowSchema, type RecordBatch, RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
+import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY } from "../constants.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
-import { buildRequestIpc, readResponseBatches, dispatchLogOrError } from "./ipc.js";
-import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
+import { buildRequestIpc, dispatchLogOrError, readResponseBatches } from "./ipc.js";
 import type { LogMessage } from "./types.js";
 
 export interface MethodInfo {
@@ -68,7 +63,7 @@ export async function parseDescribeResponse(
     const name = dataBatch.getChildAt(0)!.get(i) as string; // name
     const methodType = dataBatch.getChildAt(1)!.get(i) as string; // method_type
     const doc = dataBatch.getChildAt(2)?.get(i) as string | null; // doc
-    const hasReturn = dataBatch.getChildAt(3)!.get(i) as boolean; // has_return
+    const _hasReturn = dataBatch.getChildAt(3)!.get(i) as boolean; // has_return
     const paramsIpc = dataBatch.getChildAt(4)!.get(i) as Uint8Array; // params_schema_ipc
     const resultIpc = dataBatch.getChildAt(5)!.get(i) as Uint8Array; // result_schema_ipc
     const paramTypesJson = dataBatch.getChildAt(6)?.get(i) as string | null; // param_types_json
@@ -81,12 +76,16 @@ export async function parseDescribeResponse(
 
     let paramTypes: Record<string, string> | undefined;
     if (paramTypesJson) {
-      try { paramTypes = JSON.parse(paramTypesJson); } catch {}
+      try {
+        paramTypes = JSON.parse(paramTypesJson);
+      } catch {}
     }
 
     let defaults: Record<string, any> | undefined;
     if (paramDefaultsJson) {
-      try { defaults = JSON.parse(paramDefaultsJson); } catch {}
+      try {
+        defaults = JSON.parse(paramDefaultsJson);
+      } catch {}
     }
 
     const info: MethodInfo = {
@@ -117,10 +116,7 @@ export async function parseDescribeResponse(
 /**
  * Send a __describe__ request and return a ServiceDescription.
  */
-export async function httpIntrospect(
-  baseUrl: string,
-  options?: { prefix?: string },
-): Promise<ServiceDescription> {
+export async function httpIntrospect(baseUrl: string, options?: { prefix?: string }): Promise<ServiceDescription> {
   const prefix = options?.prefix ?? "/vgi";
   const emptySchema = new ArrowSchema([]);
   const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);

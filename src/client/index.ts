@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export { httpConnect, type RpcClient } from "./connect.js";
-export { httpIntrospect, parseDescribeResponse, type ServiceDescription, type MethodInfo } from "./introspect.js";
+export { httpIntrospect, type MethodInfo, parseDescribeResponse, type ServiceDescription } from "./introspect.js";
+export { PipeStreamSession, pipeConnect, subprocessConnect } from "./pipe.js";
 export { HttpStreamSession } from "./stream.js";
-export { pipeConnect, subprocessConnect, PipeStreamSession } from "./pipe.js";
-export {
-  type HttpConnectOptions,
-  type LogMessage,
-  type StreamSession,
-  type PipeConnectOptions,
-  type SubprocessConnectOptions,
+export type {
+  HttpConnectOptions,
+  LogMessage,
+  PipeConnectOptions,
+  StreamSession,
+  SubprocessConnectOptions,
 } from "./types.js";

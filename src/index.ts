@@ -1,55 +1,55 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-export { VgiRpcServer } from "./server.js";
-export { Protocol } from "./protocol.js";
+export * from "./client/index.js";
 export {
-  MethodType,
-  OutputCollector,
-  type LogContext,
-  type MethodDefinition,
-  type UnaryHandler,
-  type HeaderInit,
-  type ProducerInit,
-  type ProducerFn,
-  type ExchangeInit,
-  type ExchangeFn,
-} from "./types.js";
-export {
-  type SchemaLike,
-  toSchema,
-  inferParamTypes,
-  str,
-  bytes,
-  int,
-  int32,
-  float,
-  float32,
-  bool,
-} from "./schema.js";
-export { RpcError, VersionError } from "./errors.js";
-export {
-  createHttpHandler,
-  ARROW_CONTENT_TYPE,
-  type HttpHandlerOptions,
-  type StateSerializer,
-  jsonStateSerializer,
-  unpackStateToken,
-  type UnpackedToken,
-} from "./http/index.js";
-export {
-  RPC_METHOD_KEY,
-  REQUEST_VERSION_KEY,
-  REQUEST_VERSION,
+  DESCRIBE_METHOD_NAME,
+  DESCRIBE_VERSION,
+  DESCRIBE_VERSION_KEY,
+  LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
-  LOG_EXTRA_KEY,
-  SERVER_ID_KEY,
-  REQUEST_ID_KEY,
   PROTOCOL_NAME_KEY,
-  DESCRIBE_VERSION_KEY,
-  DESCRIBE_VERSION,
-  DESCRIBE_METHOD_NAME,
+  REQUEST_ID_KEY,
+  REQUEST_VERSION,
+  REQUEST_VERSION_KEY,
+  RPC_METHOD_KEY,
+  SERVER_ID_KEY,
   STATE_KEY,
 } from "./constants.js";
-export * from "./client/index.js";
+export { RpcError, VersionError } from "./errors.js";
+export {
+  ARROW_CONTENT_TYPE,
+  createHttpHandler,
+  type HttpHandlerOptions,
+  jsonStateSerializer,
+  type StateSerializer,
+  type UnpackedToken,
+  unpackStateToken,
+} from "./http/index.js";
+export { Protocol } from "./protocol.js";
+export {
+  bool,
+  bytes,
+  float,
+  float32,
+  inferParamTypes,
+  int,
+  int32,
+  type SchemaLike,
+  str,
+  toSchema,
+} from "./schema.js";
+export { VgiRpcServer } from "./server.js";
+export {
+  type ExchangeFn,
+  type ExchangeInit,
+  type HeaderInit,
+  type LogContext,
+  type MethodDefinition,
+  MethodType,
+  OutputCollector,
+  type ProducerFn,
+  type ProducerInit,
+  type UnaryHandler,
+} from "./types.js";

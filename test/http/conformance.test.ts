@@ -8,22 +8,20 @@
  * These tests start a Bun HTTP server with the conformance protocol,
  * then use the Python CLI to interact with it.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { unlinkSync } from "node:fs";
 import {
-  RecordBatchReader,
-  RecordBatchStreamWriter,
-  Table,
-  Schema,
   Field,
   Float64,
   makeData,
-  Struct,
-  vectorFromArray,
   RecordBatch,
+  RecordBatchReader,
+  RecordBatchStreamWriter,
+  Schema,
+  Struct,
+  Table,
+  vectorFromArray,
 } from "@query-farm/apache-arrow";
-import { unlinkSync } from "node:fs";
-import { protocol } from "../../examples/conformance-protocol.js";
-import { createHttpHandler } from "../../src/http/index.js";
 
 const VGI_CLI = "/Users/rusty/Development/vgi-rpc/.venv/bin/vgi-rpc";
 const TS_DIR = "/Users/rusty/Development/vgi-rpc-typescript";
@@ -40,7 +38,9 @@ function tmpFile(name: string, ext = "arrow"): string {
 
 afterEach(() => {
   for (const f of tmpFiles) {
-    try { unlinkSync(f); } catch {}
+    try {
+      unlinkSync(f);
+    } catch {}
   }
   tmpFiles.length = 0;
 });
@@ -48,7 +48,9 @@ afterEach(() => {
 beforeAll(async () => {
   // Write a minimal server script that imports the shared protocol
   const scriptPath = `${TS_DIR}/test/http/_conformance_server.ts`;
-  await Bun.write(scriptPath, `
+  await Bun.write(
+    scriptPath,
+    `
 import { protocol } from "../../examples/conformance-protocol.js";
 import { createHttpHandler } from "../../src/http/index.js";
 
@@ -63,7 +65,8 @@ const srv = Bun.serve({
 });
 
 console.log(\`HTTP conformance server listening on http://localhost:\${srv.port}\`);
-`);
+`,
+  );
 
   // Start the subprocess server
   const proc = Bun.spawn(["bun", "run", scriptPath], {
@@ -90,14 +93,13 @@ afterAll(() => {
     proc.kill();
   }
   // Clean up the server script
-  try { unlinkSync(`${TS_DIR}/test/http/_conformance_server.ts`); } catch {}
+  try {
+    unlinkSync(`${TS_DIR}/test/http/_conformance_server.ts`);
+  } catch {}
 });
 
 // Helpers
-async function run(
-  args: string[],
-  timeoutMs = 5000,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+async function run(args: string[], timeoutMs = 5000): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   const exitCode = await proc.exited;
@@ -201,9 +203,7 @@ describe("HTTP conformance: unary", () => {
   });
 
   it("raise_value_error", async () => {
-    const { stdout, stderr, exitCode } = await run(
-      cliHttp("call", "raise_value_error", "message=boom"),
-    );
+    const { stdout, stderr, exitCode } = await run(cliHttp("call", "raise_value_error", "message=boom"));
     expect(exitCode).not.toBe(0);
     const combined = stdout + stderr;
     expect(combined).toContain("boom");
@@ -231,9 +231,7 @@ describe("HTTP conformance: producer streams", () => {
   });
 
   it("produce_error_on_init", async () => {
-    const { stderr, exitCode } = await run(
-      cliHttp("call", "produce_error_on_init"),
-    );
+    const { stderr, exitCode } = await run(cliHttp("call", "produce_error_on_init"));
     expect(exitCode).toBe(1);
     expect(stderr).toContain("intentional init error");
   });
@@ -274,9 +272,7 @@ describe("HTTP conformance: exchange streams", () => {
 
   it("exchange_error_on_init", async () => {
     const inputFile = await writeExchangeInput([1.0]);
-    const { stderr, exitCode } = await run(
-      cliHttp("call", "exchange_error_on_init", "--input", inputFile),
-    );
+    const { stderr, exitCode } = await run(cliHttp("call", "exchange_error_on_init", "--input", inputFile));
     expect(exitCode).toBe(1);
     expect(stderr).toContain("intentional exchange init error");
   });

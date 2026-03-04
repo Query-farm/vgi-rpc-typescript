@@ -1,23 +1,9 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect } from "bun:test";
-import {
-  Schema,
-  Field,
-  Utf8,
-  Binary,
-  Float64,
-  Float32,
-  Int64,
-  Int32,
-  Int16,
-  Bool,
-  List,
-  Map_,
-  Dictionary,
-} from "@query-farm/apache-arrow";
-import { toSchema, inferParamTypes, str, bytes, int, int32, float, float32, bool } from "../src/schema.js";
+import { describe, expect, it } from "bun:test";
+import { Dictionary, Field, Int16, Int32, Int64, List, Schema, Utf8 } from "@query-farm/apache-arrow";
+import { bool, bytes, float, float32, inferParamTypes, int, int32, str, toSchema } from "../src/schema.js";
 
 describe("toSchema", () => {
   it("passes Schema through unchanged", () => {
@@ -117,16 +103,12 @@ describe("inferParamTypes", () => {
   });
 
   it("returns undefined if any field is a List", () => {
-    const schema = new Schema([
-      new Field("items", new List(new Field("item", new Utf8(), false)), false),
-    ]);
+    const schema = new Schema([new Field("items", new List(new Field("item", new Utf8(), false)), false)]);
     expect(inferParamTypes(schema)).toBeUndefined();
   });
 
   it("returns undefined if any field is a Dictionary", () => {
-    const schema = new Schema([
-      new Field("cat", new Dictionary(new Utf8(), new Int32()), false),
-    ]);
+    const schema = new Schema([new Field("cat", new Dictionary(new Utf8(), new Int32()), false)]);
     expect(inferParamTypes(schema)).toBeUndefined();
   });
 

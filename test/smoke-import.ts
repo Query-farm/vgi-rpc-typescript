@@ -16,35 +16,35 @@
  */
 
 import {
-  // Server
-  Protocol,
-  VgiRpcServer,
+  ARROW_CONTENT_TYPE,
+  bool,
+  bytes,
   // HTTP handler
   createHttpHandler,
-  ARROW_CONTENT_TYPE,
+  float,
+  float32,
   // Client
   httpConnect,
-  // Schema shorthand
-  str,
-  int,
-  float,
-  bool,
-  int32,
-  float32,
-  bytes,
-  toSchema,
   inferParamTypes,
-  // Errors
-  RpcError,
-  VersionError,
+  int,
+  int32,
+  LOG_LEVEL_KEY,
+  LOG_MESSAGE_KEY,
   // Types
   MethodType,
   OutputCollector,
+  // Server
+  Protocol,
+  REQUEST_VERSION_KEY,
   // Constants
   RPC_METHOD_KEY,
-  REQUEST_VERSION_KEY,
-  LOG_LEVEL_KEY,
-  LOG_MESSAGE_KEY,
+  // Errors
+  RpcError,
+  // Schema shorthand
+  str,
+  toSchema,
+  VersionError,
+  VgiRpcServer,
 } from "../src/index.js";
 
 // ---------------------------------------------------------------------------

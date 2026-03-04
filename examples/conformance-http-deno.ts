@@ -1,6 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHttpHandler } from "../src/http/index.js";
 /**
  * HTTP conformance server for Deno — serves the conformance protocol over HTTP.
  * Prints PORT:<n> on stdout so test fixtures can discover the port.
@@ -10,10 +11,9 @@
  * Run: deno run --allow-all examples/conformance-http-deno.ts
  */
 import { protocol } from "./conformance-protocol.js";
-import { createHttpHandler } from "../src/http/index.js";
 
 const compressionLevel = Deno.env.get("VGI_COMPRESSION_LEVEL")
-  ? parseInt(Deno.env.get("VGI_COMPRESSION_LEVEL")!)
+  ? parseInt(Deno.env.get("VGI_COMPRESSION_LEVEL")!, 10)
   : undefined;
 
 const handler = createHttpHandler(protocol, {

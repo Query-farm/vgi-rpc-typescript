@@ -19,10 +19,7 @@ export function zstdCompress(data: Uint8Array, level: number): Uint8Array<ArrayB
   }
   const fn = (zlib as any).zstdCompressSync;
   if (typeof fn !== "function") {
-    throw new Error(
-      "zstd is not available in this runtime. " +
-        "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.",
-    );
+    throw new Error("zstd is not available in this runtime. " + "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.");
   }
   return new Uint8Array(
     fn(data, {
@@ -40,10 +37,7 @@ export function zstdDecompress(data: Uint8Array): Uint8Array<ArrayBuffer> {
   }
   const fn = (zlib as any).zstdDecompressSync;
   if (typeof fn !== "function") {
-    throw new Error(
-      "zstd is not available in this runtime. " +
-        "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.",
-    );
+    throw new Error("zstd is not available in this runtime. " + "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.");
   }
   return new Uint8Array(fn(data));
 }

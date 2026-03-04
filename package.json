@@ -25,6 +25,7 @@
     "@query-farm/apache-arrow": "*"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.5",
     "@types/bun": "latest"
   },
   "scripts": {
@@ -32,6 +33,9 @@
     "build:types": "bunx tsc -p tsconfig.build.json",
     "build:js": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
     "postinstall": "cd node_modules/@query-farm/apache-arrow && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.main='src/Arrow.node.ts';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n')\"",
-    "test": "bun test"
+    "test": "bun test",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
   }
 }

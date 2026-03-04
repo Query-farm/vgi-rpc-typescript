@@ -1,34 +1,32 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
+import { closeSync, openSync, readFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
-  Schema,
   Field,
   Float64,
-  Utf8,
-  Int32,
-  RecordBatch,
-  RecordBatchStreamWriter,
-  RecordBatchReader,
-  vectorFromArray,
   makeData,
+  RecordBatch,
+  RecordBatchReader,
+  RecordBatchStreamWriter,
+  Schema,
   Struct,
+  Utf8,
+  vectorFromArray,
 } from "@query-farm/apache-arrow";
-import { buildResultBatch, buildErrorBatch, buildEmptyBatch } from "../src/wire/response.js";
-import { parseRequest } from "../src/wire/request.js";
-import { IpcStreamWriter } from "../src/wire/writer.js";
-import { IpcStreamReader } from "../src/wire/reader.js";
-import { RpcError, VersionError } from "../src/errors.js";
 import {
-  RPC_METHOD_KEY,
-  REQUEST_VERSION_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
+  REQUEST_VERSION_KEY,
+  RPC_METHOD_KEY,
   SERVER_ID_KEY,
 } from "../src/constants.js";
-import { openSync, closeSync, readFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { RpcError, VersionError } from "../src/errors.js";
+import { parseRequest } from "../src/wire/request.js";
+import { buildErrorBatch, buildResultBatch } from "../src/wire/response.js";
+import { IpcStreamWriter } from "../src/wire/writer.js";
 
 describe("buildResultBatch", () => {
   it("builds a 1-row result batch with metadata", () => {
@@ -77,10 +75,7 @@ describe("buildErrorBatch", () => {
 
 describe("parseRequest", () => {
   it("parses a valid request", () => {
-    const schema = new Schema([
-      new Field("a", new Float64(), false),
-      new Field("b", new Float64(), false),
-    ]);
+    const schema = new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]);
     const md = new Map([
       [RPC_METHOD_KEY, "add"],
       [REQUEST_VERSION_KEY, "1"],

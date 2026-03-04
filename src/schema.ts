@@ -2,17 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  Schema,
-  Field,
-  DataType,
-  Utf8,
   Binary,
-  Int64,
-  Int32,
-  Int16,
-  Float64,
-  Float32,
   Bool,
+  DataType,
+  Field,
+  Float32,
+  Float64,
+  Int16,
+  Int32,
+  Int64,
+  Schema,
+  Utf8,
 } from "@query-farm/apache-arrow";
 
 // ---------------------------------------------------------------------------
@@ -64,9 +64,7 @@ export function toSchema(spec: SchemaLike): Schema {
     } else if (value instanceof DataType) {
       fields.push(new Field(name, value, false));
     } else {
-      throw new TypeError(
-        `Invalid schema value for "${name}": expected DataType or Field, got ${typeof value}`,
-      );
+      throw new TypeError(`Invalid schema value for "${name}": expected DataType or Field, got ${typeof value}`);
     }
   }
   return new Schema(fields);
@@ -92,9 +90,7 @@ const TYPE_MAP: [new (...args: any[]) => DataType, string][] = [
  * Maps common Arrow scalar types to Python-style type strings.
  * Returns `undefined` if any field has a complex type (List, Map_, Dictionary, etc.).
  */
-export function inferParamTypes(
-  spec: SchemaLike,
-): Record<string, string> | undefined {
+export function inferParamTypes(spec: SchemaLike): Record<string, string> | undefined {
   const schema = toSchema(spec);
   if (schema.fields.length === 0) return undefined;
 

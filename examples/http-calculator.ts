@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Protocol, float, createHttpHandler } from "../src/index.js";
+import { createHttpHandler, float, Protocol } from "../src/index.js";
 
 const protocol = new Protocol("Calculator");
 

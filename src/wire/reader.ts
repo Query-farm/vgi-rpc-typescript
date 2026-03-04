@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatchReader, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
+import { type RecordBatch, RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
 
 export interface StreamMessage {
   schema: Schema;
@@ -23,9 +23,7 @@ export class IpcStreamReader {
     this.reader = reader;
   }
 
-  static async create(
-    input: ReadableStream<Uint8Array> | NodeJS.ReadableStream,
-  ): Promise<IpcStreamReader> {
+  static async create(input: ReadableStream<Uint8Array> | NodeJS.ReadableStream): Promise<IpcStreamReader> {
     const reader = await RecordBatchReader.from(input as any);
     await reader.open({ autoDestroy: false });
     if (reader.closed) {

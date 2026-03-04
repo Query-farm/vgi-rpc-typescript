@@ -1,21 +1,14 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect } from "bun:test";
-import { Schema, Field, Utf8, Int64, Float64, RecordBatch } from "@query-farm/apache-arrow";
+import { describe, expect, it } from "bun:test";
+import { Field, Float64, Int64, Schema, Utf8 } from "@query-farm/apache-arrow";
 import { OutputCollector } from "../src/types.js";
 import { buildResultBatch } from "../src/wire/response.js";
-import { SERVER_ID_KEY } from "../src/constants.js";
 
-const textSchema = new Schema([
-  new Field("name", new Utf8(), false),
-  new Field("value", new Float64(), false),
-]);
+const textSchema = new Schema([new Field("name", new Utf8(), false), new Field("value", new Float64(), false)]);
 
-const int64Schema = new Schema([
-  new Field("id", new Int64(), false),
-  new Field("name", new Utf8(), false),
-]);
+const int64Schema = new Schema([new Field("id", new Int64(), false), new Field("name", new Utf8(), false)]);
 
 describe("OutputCollector.emit(columns)", () => {
   it("builds batch from Record<string, any[]>", () => {
@@ -37,9 +30,7 @@ describe("OutputCollector.emit(columns)", () => {
   it("throws on second data batch emission", () => {
     const out = new OutputCollector(textSchema);
     out.emit({ name: ["alice"], value: [1.0] });
-    expect(() => out.emit({ name: ["bob"], value: [2.0] })).toThrow(
-      "Only one data batch may be emitted per call",
-    );
+    expect(() => out.emit({ name: ["bob"], value: [2.0] })).toThrow("Only one data batch may be emitted per call");
   });
 });
 
@@ -90,23 +81,13 @@ describe("OutputCollector.finish", () => {
 
 describe("buildResultBatch validation", () => {
   it("throws on missing required field", () => {
-    const schema = new Schema([
-      new Field("name", new Utf8(), false),
-      new Field("value", new Float64(), false),
-    ]);
-    expect(() => buildResultBatch(schema, { name: "alice" }, "srv", null)).toThrow(
-      /missing required field 'value'/,
-    );
+    const schema = new Schema([new Field("name", new Utf8(), false), new Field("value", new Float64(), false)]);
+    expect(() => buildResultBatch(schema, { name: "alice" }, "srv", null)).toThrow(/missing required field 'value'/);
   });
 
   it("includes got keys in error message", () => {
-    const schema = new Schema([
-      new Field("name", new Utf8(), false),
-      new Field("value", new Float64(), false),
-    ]);
-    expect(() => buildResultBatch(schema, { naem: "typo" }, "srv", null)).toThrow(
-      /Got keys: \[naem\]/,
-    );
+    const schema = new Schema([new Field("name", new Utf8(), false), new Field("value", new Float64(), false)]);
+    expect(() => buildResultBatch(schema, { naem: "typo" }, "srv", null)).toThrow(/Got keys: \[naem\]/);
   });
 
   it("allows extra keys silently", () => {
@@ -116,10 +97,7 @@ describe("buildResultBatch validation", () => {
   });
 
   it("allows undefined for nullable fields", () => {
-    const schema = new Schema([
-      new Field("name", new Utf8(), false),
-      new Field("value", new Float64(), true),
-    ]);
+    const schema = new Schema([new Field("name", new Utf8(), false), new Field("value", new Float64(), true)]);
     const batch = buildResultBatch(schema, { name: "alice" }, "srv", null);
     expect(batch.numRows).toBe(1);
   });

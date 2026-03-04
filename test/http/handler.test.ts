@@ -1,28 +1,28 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import {
-  RecordBatchStreamWriter,
-  RecordBatchReader,
-  RecordBatch,
-  Schema,
   Field,
   Float64,
   Int32,
-  Utf8,
+  RecordBatch,
+  RecordBatchReader,
+  RecordBatchStreamWriter,
   recordBatchFromArrays,
+  Schema,
+  Utf8,
 } from "@query-farm/apache-arrow";
-import { Protocol, float, int32, str, createHttpHandler } from "../../src/index.js";
 import {
-  RPC_METHOD_KEY,
-  REQUEST_VERSION_KEY,
-  REQUEST_VERSION,
-  STATE_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
+  REQUEST_VERSION,
+  REQUEST_VERSION_KEY,
+  RPC_METHOD_KEY,
+  STATE_KEY,
 } from "../../src/constants.js";
 import { ARROW_CONTENT_TYPE } from "../../src/http/common.js";
+import { createHttpHandler, float, int32, Protocol, str } from "../../src/index.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -47,9 +47,7 @@ function buildRequestIpc(
   return writer.toUint8Array(true);
 }
 
-async function readResponseBatches(
-  response: Response,
-): Promise<{ schema: Schema; batches: RecordBatch[] }> {
+async function readResponseBatches(response: Response): Promise<{ schema: Schema; batches: RecordBatch[] }> {
   const body = new Uint8Array(await response.arrayBuffer());
   const reader = await RecordBatchReader.from(body);
   const schema = reader.schema!;
@@ -141,11 +139,7 @@ describe("HTTP Handler", () => {
   // -- Basic routing --
 
   test("POST to unknown path returns 404", async () => {
-    const body = buildRequestIpc(
-      new Schema([]),
-      {},
-      "nope",
-    );
+    const body = buildRequestIpc(new Schema([]), {}, "nope");
     const res = await handler(
       new Request(`${BASE}/vgi/nope`, {
         method: "POST",
@@ -157,9 +151,7 @@ describe("HTTP Handler", () => {
   });
 
   test("GET returns 405", async () => {
-    const res = await handler(
-      new Request(`${BASE}/vgi/add`, { method: "GET" }),
-    );
+    const res = await handler(new Request(`${BASE}/vgi/add`, { method: "GET" }));
     expect(res.status).toBe(405);
   });
 
@@ -177,10 +169,7 @@ describe("HTTP Handler", () => {
   // -- Unary dispatch --
 
   test("unary add", async () => {
-    const paramSchema = new Schema([
-      new Field("a", new Float64(), false),
-      new Field("b", new Float64(), false),
-    ]);
+    const paramSchema = new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]);
     const body = buildRequestIpc(paramSchema, { a: [3], b: [4] }, "add");
 
     const res = await handler(
@@ -297,9 +286,7 @@ describe("HTTP Handler", () => {
       corsOrigins: "*",
     });
 
-    const res = await handlerWithCaps(
-      new Request(`${BASE}/vgi/__capabilities__`, { method: "OPTIONS" }),
-    );
+    const res = await handlerWithCaps(new Request(`${BASE}/vgi/__capabilities__`, { method: "OPTIONS" }));
 
     expect(res.status).toBe(204);
     expect(res.headers.get("VGI-Max-Request-Bytes")).toBe("1048576");
@@ -315,10 +302,7 @@ describe("HTTP Handler", () => {
       serverId: "cors-test",
     });
 
-    const paramSchema = new Schema([
-      new Field("a", new Float64(), false),
-      new Field("b", new Float64(), false),
-    ]);
+    const paramSchema = new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]);
     const body = buildRequestIpc(paramSchema, { a: [1], b: [2] }, "add");
 
     const res = await handlerWithCors(
@@ -339,9 +323,7 @@ describe("HTTP Handler", () => {
       corsOrigins: "*",
     });
 
-    const res = await handlerWithCors(
-      new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }),
-    );
+    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
 
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
@@ -398,12 +380,7 @@ describe("HTTP Handler", () => {
     const inputSchema = new Schema([new Field("value", new Float64(), false)]);
     const exchangeMeta = new Map<string, string>();
     exchangeMeta.set(STATE_KEY, stateToken!);
-    const exchangeBody = buildRequestIpc(
-      inputSchema,
-      { value: [5] },
-      "scale",
-      exchangeMeta,
-    );
+    const exchangeBody = buildRequestIpc(inputSchema, { value: [5] }, "scale", exchangeMeta);
 
     const exchangeRes = await handler(
       new Request(`${BASE}/vgi/scale/exchange`, {
@@ -438,7 +415,7 @@ describe("HTTP Handler", () => {
     );
 
     const { batches: initBatches } = await readResponseBatches(initRes);
-    let token = initBatches[0].metadata?.get(STATE_KEY)!;
+    let token = initBatches[0].metadata?.get(STATE_KEY) ?? "";
 
     // Multiple exchange rounds
     for (const inputVal of [3, 7, 11]) {
@@ -459,7 +436,7 @@ describe("HTTP Handler", () => {
       const { batches } = await readResponseBatches(res);
       expect(batches[0].getChildAt(0)?.get(0)).toBe(inputVal * 2);
       // Token is merged into the data batch's metadata
-      token = batches[0].metadata?.get(STATE_KEY)!;
+      token = batches[0].metadata?.get(STATE_KEY) ?? "";
       expect(token).toBeDefined();
     }
   });

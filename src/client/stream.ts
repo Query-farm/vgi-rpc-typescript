@@ -1,23 +1,11 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  RecordBatch,
-  Schema,
-  Field,
-  makeData,
-  Struct,
-  vectorFromArray,
-} from "@query-farm/apache-arrow";
+import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
 import { STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
-import {
-  inferArrowType,
-  dispatchLogOrError,
-  extractBatchRows,
-  readResponseBatches,
-} from "./ipc.js";
+import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
 import type { LogMessage, StreamSession } from "./types.js";
 
 type CompressFn = (data: Uint8Array, level: number) => Uint8Array;
@@ -103,11 +91,7 @@ export class HttpStreamSession implements StreamSession {
    */
   async exchange(input: Record<string, any>[]): Promise<Record<string, any>[]> {
     if (this._stateToken === null) {
-      throw new RpcError(
-        "ProtocolError",
-        "Stream has finished \u2014 no state token available",
-        "",
-      );
+      throw new RpcError("ProtocolError", "Stream has finished \u2014 no state token available", "");
     }
 
     // We need to determine the input schema from the data.
@@ -122,11 +106,7 @@ export class HttpStreamSession implements StreamSession {
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
       const metadata = new Map<string, string>();
       metadata.set(STATE_KEY, this._stateToken);
-      const batchWithMeta = new RecordBatch(
-        zeroSchema,
-        emptyBatch.data,
-        metadata,
-      );
+      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, metadata);
       return this._doExchange(zeroSchema, [batchWithMeta]);
     }
 
@@ -134,9 +114,12 @@ export class HttpStreamSession implements StreamSession {
     const keys = Object.keys(input[0]);
     const fields = keys.map((key) => {
       // Find first non-null value to infer type
-      let sample: any = undefined;
+      let sample: any;
       for (const row of input) {
-        if (row[key] != null) { sample = row[key]; break; }
+        if (row[key] != null) {
+          sample = row[key];
+          break;
+        }
       }
       const arrowType = inferArrowType(sample);
       const nullable = input.some((row) => row[key] == null);
@@ -164,19 +147,13 @@ export class HttpStreamSession implements StreamSession {
     return this._doExchange(inputSchema, [batch]);
   }
 
-  private async _doExchange(
-    schema: Schema,
-    batches: RecordBatch[],
-  ): Promise<Record<string, any>[]> {
+  private async _doExchange(schema: Schema, batches: RecordBatch[]): Promise<Record<string, any>[]> {
     const body = serializeIpcStream(schema, batches);
-    const resp = await fetch(
-      `${this._baseUrl}${this._prefix}/${this._method}/exchange`,
-      {
-        method: "POST",
-        headers: this._buildHeaders(),
-        body: this._prepareBody(body) as unknown as BodyInit,
-      },
-    );
+    const resp = await fetch(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, {
+      method: "POST",
+      headers: this._buildHeaders(),
+      body: this._prepareBody(body) as unknown as BodyInit,
+    });
 
     const responseBody = await this._readResponse(resp);
     const { batches: responseBatches } = await readResponseBatches(responseBody);
@@ -279,14 +256,11 @@ export class HttpStreamSession implements StreamSession {
     const batch = new RecordBatch(emptySchema, data, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
 
-    const resp = await fetch(
-      `${this._baseUrl}${this._prefix}/${this._method}/exchange`,
-      {
-        method: "POST",
-        headers: this._buildHeaders(),
-        body: this._prepareBody(body) as unknown as BodyInit,
-      },
-    );
+    const resp = await fetch(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, {
+      method: "POST",
+      headers: this._buildHeaders(),
+      body: this._prepareBody(body) as unknown as BodyInit,
+    });
 
     return this._readResponse(resp);
   }

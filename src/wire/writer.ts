@@ -1,12 +1,8 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  RecordBatchStreamWriter,
-  type RecordBatch,
-  type Schema,
-} from "@query-farm/apache-arrow";
 import { writeSync } from "node:fs";
+import { type RecordBatch, RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
 
 const STDOUT_FD = 1;
 

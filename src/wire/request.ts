@@ -1,13 +1,8 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { DataType, type Schema, type RecordBatch } from "@query-farm/apache-arrow";
-import {
-  RPC_METHOD_KEY,
-  REQUEST_VERSION_KEY,
-  REQUEST_VERSION,
-  REQUEST_ID_KEY,
-} from "../constants.js";
+import { DataType, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
+import { REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError, VersionError } from "../errors.js";
 
 export interface ParsedRequest {
@@ -23,10 +18,7 @@ export interface ParsedRequest {
  * Parse a request from a RecordBatch with metadata.
  * Extracts method name, version, and params from the batch.
  */
-export function parseRequest(
-  schema: Schema,
-  batch: RecordBatch,
-): ParsedRequest {
+export function parseRequest(schema: Schema, batch: RecordBatch): ParsedRequest {
   const metadata: Map<string, string> = batch.metadata ?? new Map();
 
   const methodName = metadata.get(RPC_METHOD_KEY);
@@ -77,10 +69,7 @@ export function parseRequest(
     let value = batch.getChildAt(i)?.get(0);
     // Convert BigInt to Number when safe
     if (typeof value === "bigint") {
-      if (
-        value >= BigInt(Number.MIN_SAFE_INTEGER) &&
-        value <= BigInt(Number.MAX_SAFE_INTEGER)
-      ) {
+      if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
         value = Number(value);
       }
     }

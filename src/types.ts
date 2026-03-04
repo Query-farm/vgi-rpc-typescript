@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { type Schema, RecordBatch, recordBatchFromArrays } from "@query-farm/apache-arrow";
+import { RecordBatch, recordBatchFromArrays, type Schema } from "@query-farm/apache-arrow";
 import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
 export enum MethodType {
@@ -21,32 +21,17 @@ export type UnaryHandler = (
 ) => Promise<Record<string, any>> | Record<string, any>;
 
 /** Initialization function for producer streams. Returns the initial state object. */
-export type ProducerInit<S = any> = (
-  params: Record<string, any>,
-) => Promise<S> | S;
+export type ProducerInit<S = any> = (params: Record<string, any>) => Promise<S> | S;
 /** Called repeatedly to produce output batches. Call `out.finish()` to end the stream. */
-export type ProducerFn<S = any> = (
-  state: S,
-  out: OutputCollector,
-) => Promise<void> | void;
+export type ProducerFn<S = any> = (state: S, out: OutputCollector) => Promise<void> | void;
 
 /** Initialization function for exchange streams. Returns the initial state object. */
-export type ExchangeInit<S = any> = (
-  params: Record<string, any>,
-) => Promise<S> | S;
+export type ExchangeInit<S = any> = (params: Record<string, any>) => Promise<S> | S;
 /** Called once per input batch. Must emit exactly one output batch per call. */
-export type ExchangeFn<S = any> = (
-  state: S,
-  input: RecordBatch,
-  out: OutputCollector,
-) => Promise<void> | void;
+export type ExchangeFn<S = any> = (state: S, input: RecordBatch, out: OutputCollector) => Promise<void> | void;
 
 /** Produces a header batch sent before the first output batch in a stream. */
-export type HeaderInit = (
-  params: Record<string, any>,
-  state: any,
-  ctx: LogContext,
-) => Record<string, any>;
+export type HeaderInit = (params: Record<string, any>, state: any, ctx: LogContext) => Record<string, any>;
 
 export interface MethodDefinition {
   name: string;
@@ -108,10 +93,7 @@ export class OutputCollector implements LogContext {
   emit(batch: RecordBatch, metadata?: Map<string, string>): void;
   /** Emit a data batch from column arrays keyed by field name. Int64 Number values are coerced to BigInt. */
   emit(columns: Record<string, any[]>): void;
-  emit(
-    batchOrColumns: RecordBatch | Record<string, any[]>,
-    metadata?: Map<string, string>,
-  ): void {
+  emit(batchOrColumns: RecordBatch | Record<string, any[]>, metadata?: Map<string, string>): void {
     let batch: RecordBatch;
     if (batchOrColumns instanceof RecordBatch) {
       batch = batchOrColumns;
@@ -139,8 +121,7 @@ export class OutputCollector implements LogContext {
   finish(): void {
     if (!this._producerMode) {
       throw new Error(
-        "finish() is not allowed on exchange streams; " +
-          "exchange streams must emit exactly one data batch per call",
+        "finish() is not allowed on exchange streams; " + "exchange streams must emit exactly one data batch per call",
       );
     }
     this._finished = true;
@@ -148,15 +129,7 @@ export class OutputCollector implements LogContext {
 
   /** Emit a zero-row client-directed log batch. */
   clientLog(level: string, message: string, extra?: Record<string, string>): void {
-    const batch = buildLogBatch(
-      this._outputSchema,
-      level,
-      message,
-      extra,
-      this._serverId,
-      this._requestId,
-    );
+    const batch = buildLogBatch(this._outputSchema, level, message, extra, this._serverId, this._requestId);
     this._batches.push({ batch });
   }
-
 }

@@ -1,9 +1,9 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect, afterEach } from "bun:test";
-import { RecordBatchReader, Table } from "@query-farm/apache-arrow";
+import { afterEach, describe, expect, it } from "bun:test";
 import { unlinkSync } from "node:fs";
+import { RecordBatchReader, Table } from "@query-farm/apache-arrow";
 
 const VGI_CLI = "/Users/rusty/Development/vgi-rpc/.venv/bin/vgi-rpc";
 const TS_DIR = "/Users/rusty/Development/vgi-rpc-typescript";
@@ -25,10 +25,7 @@ afterEach(() => {
   tmpFiles.length = 0;
 });
 
-async function run(
-  args: string[],
-  timeoutMs = 5000,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+async function run(args: string[], timeoutMs = 5000): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   const exitCode = await proc.exited;
@@ -54,9 +51,7 @@ async function callArrow(
     cliArgs(example, "--format", "arrow", "-o", outFile, "call", method, ...params),
   );
   if (exitCode !== 0) {
-    throw new Error(
-      `CLI exited ${exitCode}: ${stdout} ${stderr}`,
-    );
+    throw new Error(`CLI exited ${exitCode}: ${stdout} ${stderr}`);
   }
   const bytes = await Bun.file(outFile).arrayBuffer();
   const reader = await RecordBatchReader.from(new Uint8Array(bytes));
@@ -67,9 +62,7 @@ async function callArrow(
 
 describe("integration: describe", () => {
   it("describes the calculator service", async () => {
-    const { stdout, exitCode } = await run(
-      cliArgs("calculator", "describe"),
-    );
+    const { stdout, exitCode } = await run(cliArgs("calculator", "describe"));
     expect(exitCode).toBe(0);
     const data = JSON.parse(stdout);
     expect(data.protocol_name).toBe("Calculator");
@@ -81,9 +74,7 @@ describe("integration: describe", () => {
   });
 
   it("describes the greeter service", async () => {
-    const { stdout, exitCode } = await run(
-      cliArgs("greeter", "describe"),
-    );
+    const { stdout, exitCode } = await run(cliArgs("greeter", "describe"));
     expect(exitCode).toBe(0);
     const data = JSON.parse(stdout);
     expect(data.protocol_name).toBe("Greeter");
@@ -92,9 +83,7 @@ describe("integration: describe", () => {
   });
 
   it("describes the streaming service", async () => {
-    const { stdout, exitCode } = await run(
-      cliArgs("streaming", "describe"),
-    );
+    const { stdout, exitCode } = await run(cliArgs("streaming", "describe"));
     expect(exitCode).toBe(0);
     const data = JSON.parse(stdout);
     expect(data.protocol_name).toBe("Streaming");
@@ -158,10 +147,7 @@ describe("integration: streaming calls", () => {
   });
 
   it("streams 100000 rows in batches of 1000", async () => {
-    const { table } = await callArrow("streaming", "count", [
-      "limit=100000",
-      "batch_size=1000",
-    ]);
+    const { table } = await callArrow("streaming", "count", ["limit=100000", "batch_size=1000"]);
     expect(table.numRows).toBe(100000);
 
     const n = table.getChildAt(0)!;

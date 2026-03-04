@@ -4,9 +4,9 @@
 import { Schema } from "@query-farm/apache-arrow";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
-import type { IpcStreamWriter } from "../wire/writer.js";
 import type { IpcStreamReader } from "../wire/reader.js";
-import { buildResultBatch, buildErrorBatch } from "../wire/response.js";
+import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
+import type { IpcStreamWriter } from "../wire/writer.js";
 
 const EMPTY_SCHEMA = new Schema([]);
 
@@ -70,16 +70,8 @@ export async function dispatchStream(
     try {
       const headerOut = new OutputCollector(method.headerSchema, true, serverId, requestId);
       const headerValues = method.headerInit(params, state, headerOut);
-      const headerBatch = buildResultBatch(
-        method.headerSchema,
-        headerValues,
-        serverId,
-        requestId,
-      );
-      const headerBatches = [
-        ...headerOut.batches.map((b) => b.batch),
-        headerBatch,
-      ];
+      const headerBatch = buildResultBatch(method.headerSchema, headerValues, serverId, requestId);
+      const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
       writer.writeStream(method.headerSchema, headerBatches);
     } catch (error: any) {
       const errBatch = buildErrorBatch(method.headerSchema, error, serverId, requestId);
@@ -96,12 +88,7 @@ export async function dispatchStream(
   // Open the input IPC stream (ticks or data from client)
   const inputSchema = await reader.openNextStream();
   if (!inputSchema) {
-    const errBatch = buildErrorBatch(
-      outputSchema,
-      new Error("Expected input stream but got EOF"),
-      serverId,
-      requestId,
-    );
+    const errBatch = buildErrorBatch(outputSchema, new Error("Expected input stream but got EOF"), serverId, requestId);
     writer.writeStream(outputSchema, [errBatch]);
     return;
   }

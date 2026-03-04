@@ -9,30 +9,30 @@
  * stdio server (conformance.ts) and the HTTP conformance tests.
  */
 import {
-  Schema,
-  Field,
-  Data,
-  Utf8,
   Binary,
-  Int64,
-  Int32,
-  Int16,
-  Float64,
-  Float32,
   Bool,
+  type Data,
+  Dictionary,
+  Field,
+  Float32,
+  Float64,
+  Int16,
+  Int32,
+  Int64,
   List,
   Map_,
-  Dictionary,
-  RecordBatch,
-  RecordBatchStreamWriter,
-  RecordBatchReader,
-  recordBatchFromArrays,
   makeData,
-  vectorFromArray,
+  type RecordBatch,
+  RecordBatchReader,
+  RecordBatchStreamWriter,
+  recordBatchFromArrays,
+  Schema,
   Struct,
+  Utf8,
+  vectorFromArray,
 } from "@query-farm/apache-arrow";
-import { Protocol, type OutputCollector, type LogContext } from "../src/index.js";
-import { str, bytes, int, float, float32, int32, bool } from "../src/schema.js";
+import { Protocol } from "../src/index.js";
+import { bool, bytes, float, float32, int, int32, str } from "../src/schema.js";
 
 // ---------------------------------------------------------------------------
 // Error classes
@@ -69,10 +69,7 @@ function makeMapType(keyField: Field, valueField: Field): Map_ {
 // Shared schemas
 // ---------------------------------------------------------------------------
 
-const COUNTER_SCHEMA = new Schema([
-  new Field("index", new Int64(), false),
-  new Field("value", new Int64(), false),
-]);
+const COUNTER_SCHEMA = new Schema([new Field("index", new Int64(), false), new Field("value", new Int64(), false)]);
 
 const HEADER_SCHEMA = new Schema([
   new Field("total_expected", new Int64(), false),
@@ -92,23 +89,14 @@ const ACCUM_OUTPUT = new Schema([
 // RichHeader schema — 18 fields matching Python's RichHeader dataclass
 // ---------------------------------------------------------------------------
 
-const POINT_FIELDS = [
-  new Field("x", new Float64(), false),
-  new Field("y", new Float64(), false),
-];
+const POINT_FIELDS = [new Field("x", new Float64(), false), new Field("y", new Float64(), false)];
 const POINT_STRUCT = new Struct(POINT_FIELDS);
 
 const STATUS_CYCLE = ["PENDING", "ACTIVE", "CLOSED"];
 
-const richMapStrInt = makeMapType(
-  new Field("key", new Utf8(), false),
-  new Field("value", new Int64(), false),
-);
+const richMapStrInt = makeMapType(new Field("key", new Utf8(), false), new Field("value", new Int64(), false));
 
-const richMapStrStr = makeMapType(
-  new Field("key", new Utf8(), false),
-  new Field("value", new Utf8(), false),
-);
+const richMapStrStr = makeMapType(new Field("key", new Utf8(), false), new Field("value", new Utf8(), false));
 
 const RICH_HEADER_SCHEMA = new Schema([
   new Field("str_field", new Utf8(), false),
@@ -162,8 +150,14 @@ function buildNullStructPointData(): Data {
 
 function buildListOfPointsData(points: { x: number; y: number }[]): Data {
   const offsets = new Int32Array([0, points.length]);
-  const xData = vectorFromArray(points.map((p) => p.x), new Float64()).data[0];
-  const yData = vectorFromArray(points.map((p) => p.y), new Float64()).data[0];
+  const xData = vectorFromArray(
+    points.map((p) => p.x),
+    new Float64(),
+  ).data[0];
+  const yData = vectorFromArray(
+    points.map((p) => p.y),
+    new Float64(),
+  ).data[0];
   const structData = makeData({
     type: POINT_STRUCT,
     length: points.length,
@@ -180,12 +174,7 @@ function buildListOfPointsData(points: { x: number; y: number }[]): Data {
   } as any);
 }
 
-function buildMapDataFromEntries(
-  keyField: Field,
-  valueField: Field,
-  keys: any[],
-  values: any[],
-): Data {
+function buildMapDataFromEntries(keyField: Field, valueField: Field, keys: any[], values: any[]): Data {
   const offsets = new Int32Array([0, keys.length]);
   const keyData = vectorFromArray(keys, keyField.type).data[0];
   const valData = vectorFromArray(values, valueField.type).data[0];
@@ -230,10 +219,7 @@ function buildRichHeader(seed: number): Record<string, any> {
     nested_point: buildStructPointData(seed, seed * 2),
     optional_str: seed % 2 === 0 ? `opt-${seed}` : null,
     optional_int: seed % 2 === 1 ? seed * 3 : null,
-    optional_nested:
-      seed % 3 === 0
-        ? buildStructPointData(seed, 0)
-        : buildNullStructPointData(),
+    optional_nested: seed % 3 === 0 ? buildStructPointData(seed, 0) : buildNullStructPointData(),
     list_of_nested: buildListOfPointsData([{ x: seed, y: seed + 1 }]),
     nested_list: [[s, s + 1n], [s + 2n]],
     annotated_int32: seed % 1000,
@@ -270,7 +256,7 @@ function formatFloat(n: number): string {
 }
 
 /** Serialize an IPC stream with a single batch to bytes (for dataclass binary). */
-function serializeBatch(schema: Schema, batch: RecordBatch): Uint8Array {
+function _serializeBatch(schema: Schema, batch: RecordBatch): Uint8Array {
   const writer = new RecordBatchStreamWriter();
   writer.reset(undefined, schema);
   writer.write(batch);
@@ -354,10 +340,7 @@ protocol.unary("echo_list", {
   },
 });
 
-const mapStrInt = makeMapType(
-  new Field("key", new Utf8(), false),
-  new Field("value", new Int64(), false),
-);
+const mapStrInt = makeMapType(new Field("key", new Utf8(), false), new Field("value", new Int64(), false));
 
 protocol.unary("echo_dict", {
   params: new Schema([new Field("mapping", mapStrInt, false)]),
@@ -366,9 +349,7 @@ protocol.unary("echo_dict", {
   handler: (p) => ({ result: p.mapping }),
 });
 
-const nestedList = new List(
-  new Field("item", new List(new Field("item", new Int64(), false)), false),
-);
+const nestedList = new List(new Field("item", new List(new Field("item", new Int64(), false)), false));
 
 protocol.unary("echo_nested_list", {
   params: new Schema([new Field("matrix", nestedList, false)]),
@@ -559,7 +540,7 @@ protocol.producer<{ count: number; current: number }>("produce_n", {
   paramTypes: { count: "int" },
 });
 
-protocol.producer<{}>("produce_empty", {
+protocol.producer<Record<string, never>>("produce_empty", {
   params: {},
   outputSchema: COUNTER_SCHEMA,
   init: () => ({}),
@@ -630,9 +611,7 @@ protocol.producer<{ emitBeforeError: number; current: number }>("produce_error_m
   init: ({ emit_before_error }) => ({ emitBeforeError: emit_before_error, current: 0 }),
   produce: (state, out) => {
     if (state.current >= state.emitBeforeError) {
-      throw new RuntimeError(
-        `intentional error after ${state.emitBeforeError} batches`,
-      );
+      throw new RuntimeError(`intentional error after ${state.emitBeforeError} batches`);
     }
     out.emitRow({ index: state.current, value: state.current * 10 });
     state.current++;
@@ -726,7 +705,7 @@ protocol.exchange<{ runningSum: number; exchangeCount: number }>("exchange_accum
   },
 });
 
-protocol.exchange<{}>("exchange_with_logs", {
+protocol.exchange<Record<string, never>>("exchange_with_logs", {
   params: {},
   inputSchema: SCALE_INPUT,
   outputSchema: SCALE_OUTPUT,
@@ -746,9 +725,7 @@ protocol.exchange<{ failOn: number; exchangeCount: number }>("exchange_error_on_
   exchange: (state, input: RecordBatch, out) => {
     state.exchangeCount++;
     if (state.exchangeCount >= state.failOn) {
-      throw new RuntimeError(
-        `intentional error on exchange ${state.exchangeCount}`,
-      );
+      throw new RuntimeError(`intentional error on exchange ${state.exchangeCount}`);
     }
     out.emit(input);
   },
