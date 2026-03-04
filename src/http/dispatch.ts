@@ -85,8 +85,7 @@ export async function httpDispatchStreamInit(
   body: Uint8Array,
   ctx: DispatchContext,
 ): Promise<Response> {
-  const isProducer =
-    !method.inputSchema || method.inputSchema.fields.length === 0;
+  const isProducer = !!method.producerFn;
   const outputSchema = method.outputSchema!;
   const inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
 
@@ -198,8 +197,7 @@ export async function httpDispatchStreamExchange(
   body: Uint8Array,
   ctx: DispatchContext,
 ): Promise<Response> {
-  const isProducer =
-    !method.inputSchema || method.inputSchema.fields.length === 0;
+  const isProducer = !!method.producerFn;
 
   const { batch: reqBatch } = await readRequestFromBody(body);
 

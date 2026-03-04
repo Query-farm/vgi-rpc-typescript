@@ -33,8 +33,7 @@ export async function dispatchStream(
   serverId: string,
   requestId: string | null,
 ): Promise<void> {
-  const isProducer =
-    !method.inputSchema || method.inputSchema.fields.length === 0;
+  const isProducer = !!method.producerFn;
 
   let state: any;
   try {

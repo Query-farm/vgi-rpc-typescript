@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance protocol — 46-method reference RPC service exercising all framework
+ * Conformance protocol — 47-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * This module exports the Protocol instance so it can be reused by both the
@@ -753,6 +753,19 @@ protocol.exchange<{ failOn: number; exchangeCount: number }>("exchange_error_on_
     out.emit(input);
   },
   paramTypes: { fail_on: "int" },
+});
+
+const EMPTY_EXCHANGE_SCHEMA = new Schema([]);
+
+protocol.exchange<{ callCount: number }>("exchange_zero_columns", {
+  params: {},
+  inputSchema: EMPTY_EXCHANGE_SCHEMA,
+  outputSchema: EMPTY_EXCHANGE_SCHEMA,
+  init: () => ({ callCount: 0 }),
+  exchange: (state, _input: RecordBatch, out) => {
+    state.callCount++;
+    out.emit(recordBatchFromArrays({}, EMPTY_EXCHANGE_SCHEMA));
+  },
 });
 
 protocol.exchange<never>("exchange_error_on_init", {
