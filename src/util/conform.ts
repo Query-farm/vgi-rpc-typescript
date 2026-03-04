@@ -3,11 +3,11 @@
 
 import {
   type DataType,
+  makeData,
   RecordBatch,
+  type Schema,
   Struct,
   Type,
-  makeData,
-  type Schema,
   vectorFromArray,
 } from "@query-farm/apache-arrow";
 
@@ -47,9 +47,7 @@ export function conformBatchToSchema(batch: RecordBatch, schema: Schema): Record
 
   // Validate field count and names match before attempting any cast.
   if (batch.schema.fields.length !== schema.fields.length) {
-    throw new TypeError(
-      `Field count mismatch: expected ${schema.fields.length}, got ${batch.schema.fields.length}`,
-    );
+    throw new TypeError(`Field count mismatch: expected ${schema.fields.length}, got ${batch.schema.fields.length}`);
   }
   for (let i = 0; i < schema.fields.length; i++) {
     if (batch.schema.fields[i].name !== schema.fields[i].name) {
