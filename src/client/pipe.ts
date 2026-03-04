@@ -9,7 +9,7 @@ import {
   Struct,
   makeData,
   vectorFromArray,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { DESCRIBE_METHOD_NAME } from "../constants.js";
 import { serializeIpcStream } from "../http/common.js";
 import { IpcStreamReader } from "../wire/reader.js";

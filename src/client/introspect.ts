@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatchReader, RecordBatch, type Schema } from "apache-arrow";
+import { RecordBatchReader, RecordBatch, type Schema } from "@query-farm/apache-arrow";
 import {
   DESCRIBE_METHOD_NAME,
   PROTOCOL_NAME_KEY,
@@ -9,7 +9,7 @@ import {
 } from "../constants.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import { buildRequestIpc, readResponseBatches, dispatchLogOrError } from "./ipc.js";
-import { Schema as ArrowSchema } from "apache-arrow";
+import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
 import type { LogMessage } from "./types.js";
 
 export interface MethodInfo {

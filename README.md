@@ -45,7 +45,7 @@ const client = httpConnect("https://api.example.com");
 const result = await client.call("add", { a: 2, b: 3 });
 ```
 
-You will need a bundler (Vite, esbuild, webpack, etc.) that can resolve the `apache-arrow` dependency. Server-only exports (`VgiRpcServer`, `createHttpHandler`, `subprocessConnect`, `pipeConnect`) are not available in browsers.
+You will need a bundler (Vite, esbuild, webpack, etc.) that can resolve the `@query-farm/apache-arrow` dependency. Server-only exports (`VgiRpcServer`, `createHttpHandler`, `subprocessConnect`, `pipeConnect`) are not available in browsers.
 
 ## Quick Start
 
@@ -214,7 +214,7 @@ protocol.unary("echo", {
 });
 
 // Equivalent verbose form
-import { Schema, Field, Utf8, Int64, Float64 } from "apache-arrow";
+import { Schema, Field, Utf8, Int64, Float64 } from "@query-farm/apache-arrow";
 
 protocol.unary("echo", {
   params: new Schema([
@@ -239,7 +239,7 @@ protocol.unary("echo", {
 | `float32` | Float32 | `Annotated[float, ArrowType(pa.float32())]` |
 | `bool` | Bool | `bool` |
 
-For complex types (List, Map, Dictionary, nullable fields), use the full `Schema`/`Field` constructors from `apache-arrow`.
+For complex types (List, Map, Dictionary, nullable fields), use the full `Schema`/`Field` constructors from `@query-farm/apache-arrow`.
 
 ## Emitting Output
 

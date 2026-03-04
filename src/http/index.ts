@@ -3,4 +3,6 @@
 
 export { createHttpHandler } from "./handler.js";
 export type { HttpHandlerOptions, StateSerializer } from "./types.js";
+export { jsonStateSerializer } from "./types.js";
 export { ARROW_CONTENT_TYPE } from "./common.js";
+export { unpackStateToken, type UnpackedToken } from "./token.js";

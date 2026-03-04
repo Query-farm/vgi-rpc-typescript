@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema } from "apache-arrow";
+import { Schema } from "@query-farm/apache-arrow";
 import { type SchemaLike, toSchema, inferParamTypes } from "./schema.js";
 import {
   MethodType,

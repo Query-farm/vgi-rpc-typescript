@@ -14,7 +14,7 @@ import {
   vectorFromArray,
   makeData,
   Struct,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { buildResultBatch, buildErrorBatch, buildEmptyBatch } from "../src/wire/response.js";
 import { parseRequest } from "../src/wire/request.js";
 import { IpcStreamWriter } from "../src/wire/writer.js";

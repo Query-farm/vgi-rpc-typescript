@@ -8,7 +8,7 @@ import {
   makeData,
   Struct,
   vectorFromArray,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";

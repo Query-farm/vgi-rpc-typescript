@@ -12,7 +12,7 @@ import {
   Int32,
   Utf8,
   recordBatchFromArrays,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { Protocol, float, int32, str, createHttpHandler } from "../../src/index.js";
 import {
   RPC_METHOD_KEY,

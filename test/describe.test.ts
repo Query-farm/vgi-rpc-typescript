@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect } from "bun:test";
-import { Schema, Field, Float64, Utf8 } from "apache-arrow";
+import { Schema, Field, Float64, Utf8 } from "@query-farm/apache-arrow";
 import { Protocol } from "../src/protocol.js";
 import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../src/dispatch/describe.js";
 import {

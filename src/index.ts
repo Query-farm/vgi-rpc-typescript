@@ -33,6 +33,9 @@ export {
   ARROW_CONTENT_TYPE,
   type HttpHandlerOptions,
   type StateSerializer,
+  jsonStateSerializer,
+  unpackStateToken,
+  type UnpackedToken,
 } from "./http/index.js";
 export {
   RPC_METHOD_KEY,

@@ -22,7 +22,7 @@ protocol.unary("echo", {
 This is equivalent to the verbose form:
 
 ```typescript
-import { Schema, Field, Utf8, Int64, Float64 } from "apache-arrow";
+import { Schema, Field, Utf8, Int64, Float64 } from "@query-farm/apache-arrow";
 
 protocol.unary("echo", {
   params: new Schema([
@@ -59,10 +59,10 @@ The `toSchema()` function converts a shorthand record into a proper Arrow `Schem
 
 ## Complex types
 
-For types not covered by the singletons — `List`, `Map`, `Dictionary`, `Struct`, or nullable fields — use the full `Schema`/`Field` constructors from `apache-arrow`:
+For types not covered by the singletons — `List`, `Map`, `Dictionary`, `Struct`, or nullable fields — use the full `Schema`/`Field` constructors from `@query-farm/apache-arrow`:
 
 ```typescript
-import { Schema, Field, List, new Utf8 } from "apache-arrow";
+import { Schema, Field, List, new Utf8 } from "@query-farm/apache-arrow";
 
 protocol.unary("tags", {
   params: new Schema([

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, afterEach } from "bun:test";
-import { RecordBatchReader, Table } from "apache-arrow";
+import { RecordBatchReader, Table } from "@query-farm/apache-arrow";
 import { unlinkSync } from "node:fs";
 
 const VGI_CLI = "/Users/rusty/Development/vgi-rpc/.venv/bin/vgi-rpc";
@@ -48,7 +48,7 @@ async function callArrow(
   example: string,
   method: string,
   params: string[],
-): Promise<{ table: import("apache-arrow").Table; exitCode: number }> {
+): Promise<{ table: import("@query-farm/apache-arrow").Table; exitCode: number }> {
   const outFile = tmpArrow(`${example}-${method}`);
   const { exitCode, stdout, stderr } = await run(
     cliArgs(example, "--format", "arrow", "-o", outFile, "call", method, ...params),

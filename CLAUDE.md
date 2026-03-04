@@ -68,8 +68,8 @@ The project uses a Makefile for common tasks. Run `make help` to see all targets
 ## Dependencies
 
 - Runtime: Bun
-- Arrow: Query-farm fork of arrow-js (`github:Query-farm/arrow-js#feat_query_farm_1`) — ships TypeScript source only
-- The `postinstall` script patches `node_modules/apache-arrow/package.json` to add `"main": "index.ts"` for Bun resolution
+- Arrow: `@query-farm/apache-arrow` (published on npm) — ships TypeScript source only
+- The `postinstall` script patches `node_modules/@query-farm/apache-arrow/package.json` to add `"main": "src/Arrow.node.ts"` for Bun resolution
 - If `bun install` is run, re-run `bun run postinstall` if arrow imports break
 
 ## Wire Protocol

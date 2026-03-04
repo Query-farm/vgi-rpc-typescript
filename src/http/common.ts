@@ -8,7 +8,7 @@ import {
   Schema,
   Struct,
   makeData,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
 

@@ -5,7 +5,7 @@ import {
   RecordBatchStreamWriter,
   type RecordBatch,
   type Schema,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { writeSync } from "node:fs";
 
 const STDOUT_FD = 1;

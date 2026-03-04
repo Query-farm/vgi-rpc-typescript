@@ -20,7 +20,7 @@ import {
   Struct,
   vectorFromArray,
   RecordBatch,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { unlinkSync } from "node:fs";
 import { protocol } from "../../examples/conformance-protocol.js";
 import { createHttpHandler } from "../../src/http/index.js";

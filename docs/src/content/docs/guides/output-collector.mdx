@@ -30,7 +30,7 @@ out.emitRow({ name: "alice", value: 1.0 });
 Pass a RecordBatch directly:
 
 ```typescript
-import { recordBatchFromArrays } from "apache-arrow";
+import { recordBatchFromArrays } from "@query-farm/apache-arrow";
 
 const batch = recordBatchFromArrays(
   { name: ["alice"], value: [1.0] },

@@ -13,7 +13,7 @@ import {
   Float64,
   Float32,
   Bool,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 
 // ---------------------------------------------------------------------------
 // Convenient DataType singletons — re-export so users avoid arrow imports

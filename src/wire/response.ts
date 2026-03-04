@@ -10,7 +10,7 @@ import {
   makeData,
   Struct,
   vectorFromArray,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import {
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,

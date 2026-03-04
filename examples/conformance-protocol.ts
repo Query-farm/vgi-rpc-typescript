@@ -30,7 +30,7 @@ import {
   makeData,
   vectorFromArray,
   Struct,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { Protocol, type OutputCollector, type LogContext } from "../src/index.js";
 import { str, bytes, int, float, float32, int32, bool } from "../src/schema.js";
 

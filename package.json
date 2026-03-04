@@ -1,6 +1,6 @@
 {
   "name": "@query-farm/vgi-rpc",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "homepage": "https://vgi-rpc-typescript.query.farm",
   "repository": {
@@ -22,7 +22,7 @@
     "src"
   ],
   "dependencies": {
-    "apache-arrow": "github:Query-farm/arrow-js#feat_query_farm_1"
+    "@query-farm/apache-arrow": "*"
   },
   "devDependencies": {
     "@types/bun": "latest"
@@ -30,8 +30,8 @@
   "scripts": {
     "build": "bun run build:types && bun run build:js",
     "build:types": "bunx tsc -p tsconfig.build.json",
-    "build:js": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external apache-arrow",
-    "postinstall": "cd node_modules/apache-arrow && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.main='index.ts';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n')\"",
+    "build:js": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
+    "postinstall": "cd node_modules/@query-farm/apache-arrow && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.main='src/Arrow.node.ts';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n')\"",
     "test": "bun test"
   }
 }

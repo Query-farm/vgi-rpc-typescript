@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatchStreamWriter, type Schema } from "apache-arrow";
+import { RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
 
 /**
  * Serialize a Schema to the Arrow IPC Schema message format.

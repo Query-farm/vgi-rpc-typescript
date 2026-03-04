@@ -14,7 +14,7 @@ import {
   vectorFromArray,
   makeData,
   Struct,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { httpConnect, subprocessConnect, type RpcClient, type LogMessage } from "../src/client/index.js";
 import { httpIntrospect, parseDescribeResponse } from "../src/client/introspect.js";
 import { RpcError } from "../src/errors.js";

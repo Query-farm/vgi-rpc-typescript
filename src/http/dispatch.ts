@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema, RecordBatch } from "apache-arrow";
+import { Schema, RecordBatch, RecordBatchReader } from "@query-farm/apache-arrow";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
 import { parseRequest } from "../wire/request.js";
@@ -21,6 +21,12 @@ import {
 } from "./common.js";
 import { packStateToken, unpackStateToken } from "./token.js";
 import type { StateSerializer } from "./types.js";
+
+async function deserializeSchema(bytes: Uint8Array): Promise<Schema> {
+  const reader = await RecordBatchReader.from(bytes);
+  await reader.open();
+  return reader.schema!;
+}
 
 const EMPTY_SCHEMA = new Schema([]);
 
@@ -146,6 +152,9 @@ export async function httpDispatchStreamInit(
   }
 
   if (effectiveProducer) {
+    // Producer method — produce data inline in the init response.
+    // For exchange-registered methods acting as producers (__isProducer),
+    // produceStreamResponse falls back to exchangeFn with tick batches.
     return produceStreamResponse(
       method,
       state,
@@ -207,14 +216,34 @@ export async function httpDispatchStreamExchange(
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
 
-  const state = ctx.stateSerializer.deserialize(unpacked.stateBytes);
+  let state: any;
+  try {
+    state = ctx.stateSerializer.deserialize(unpacked.stateBytes);
+  } catch (error: any) {
+    console.error(`[httpDispatchStreamExchange] state deserialize error:`, error.message);
+    throw new HttpRpcError(`State deserialization failed: ${error.message}`, 500);
+  }
 
-  // Support dynamic output schemas (same as pipe transport)
-  const outputSchema = state?.__outputSchema ?? method.outputSchema!;
-  const inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
+  // Recover schemas from the token (the state itself may not contain
+  // Schema objects after JSON round-trip — always prefer the token).
+  let outputSchema: Schema;
+  if (unpacked.schemaBytes.length > 0) {
+    outputSchema = await deserializeSchema(unpacked.schemaBytes);
+  } else {
+    outputSchema = state?.__outputSchema ?? method.outputSchema!;
+  }
+  let inputSchema: Schema;
+  if (unpacked.inputSchemaBytes.length > 0) {
+    inputSchema = await deserializeSchema(unpacked.inputSchemaBytes);
+  } else {
+    inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
+  }
   const effectiveProducer = state?.__isProducer ?? isProducer;
+  if (process.env.VGI_DISPATCH_DEBUG) console.error(`[httpDispatchStreamExchange] method=${method.name} effectiveProducer=${effectiveProducer} stateKeys=${Object.keys(state || {})}`);
 
   if (effectiveProducer) {
+    // Producer continuation — produce more data inline.
+    // For exchange-registered methods, falls back to exchangeFn with tick batches.
     return produceStreamResponse(
       method,
       state,
@@ -225,39 +254,62 @@ export async function httpDispatchStreamExchange(
       null,
     );
   } else {
-    const out = new OutputCollector(outputSchema, false, ctx.serverId, null);
+    // Exchange path — also handles exchange-registered methods acting as
+    // producers (__isProducer=true). Use producer mode on the OutputCollector
+    // when effectiveProducer so finish() is allowed.
+    const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null);
 
     try {
-      await method.exchangeFn!(state, reqBatch, out);
+      if (method.exchangeFn) {
+        await method.exchangeFn(state, reqBatch, out);
+      } else {
+        await method.producerFn!(state, out);
+      }
     } catch (error: any) {
+      if (process.env.VGI_DISPATCH_DEBUG) console.error(`[httpDispatchStreamExchange] exchange handler error:`, error.message, error.stack?.split('\n').slice(0,5).join('\n'));
       const errBatch = buildErrorBatch(outputSchema, error, ctx.serverId, null);
       return arrowResponse(serializeIpcStream(outputSchema, [errBatch]), 500);
     }
 
-    // Repack updated state into new token
-    const stateBytes = ctx.stateSerializer.serialize(state);
-    const schemaBytes = serializeSchema(outputSchema);
-    const inputSchemaBytes = serializeSchema(inputSchema);
-    const token = packStateToken(
-      stateBytes,
-      schemaBytes,
-      inputSchemaBytes,
-      ctx.signingKey,
-    );
-
-    // Merge token into the data batch's metadata (matching Python behavior).
-    // The Python client expects the token on the data batch itself, not a
-    // separate zero-row batch.
+    // Collect emitted batches
     const batches: RecordBatch[] = [];
-    for (const emitted of out.batches) {
-      const batch = emitted.batch;
-      if (batch.numRows > 0) {
-        // This is the data batch — merge token into its metadata
-        const mergedMeta = new Map<string, string>(batch.metadata ?? []);
-        mergedMeta.set(STATE_KEY, token);
-        batches.push(new RecordBatch(batch.schema, batch.data, mergedMeta));
-      } else {
-        batches.push(batch);
+
+    if (out.finished) {
+      // Stream is done — return data WITHOUT state token.
+      // The absence of a token tells the client there's no more data.
+      for (const emitted of out.batches) {
+        batches.push(emitted.batch);
+      }
+    } else {
+      // More data may follow — repack state into token for next exchange.
+      const stateBytes = ctx.stateSerializer.serialize(state);
+      const schemaBytes = serializeSchema(outputSchema);
+      const inputSchemaBytes = serializeSchema(inputSchema);
+      const token = packStateToken(
+        stateBytes,
+        schemaBytes,
+        inputSchemaBytes,
+        ctx.signingKey,
+      );
+
+      for (const emitted of out.batches) {
+        const batch = emitted.batch;
+        if (batch.numRows > 0) {
+          const mergedMeta = new Map<string, string>(batch.metadata ?? []);
+          mergedMeta.set(STATE_KEY, token);
+          batches.push(new RecordBatch(batch.schema, batch.data, mergedMeta));
+        } else {
+          batches.push(batch);
+        }
+      }
+
+      // Safety net: if no batch carries a state token (e.g. all rows were
+      // filtered out by pushdown filters), emit an empty batch with the
+      // token so the client knows to continue exchanging.
+      if (!batches.some(b => b.metadata?.get(STATE_KEY))) {
+        const tokenMeta = new Map<string, string>();
+        tokenMeta.set(STATE_KEY, token);
+        batches.push(buildEmptyBatch(outputSchema, tokenMeta));
       }
     }
 
@@ -283,8 +335,18 @@ async function produceStreamResponse(
     const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId);
 
     try {
-      await method.producerFn!(state, out);
+      if (method.producerFn) {
+        await method.producerFn(state, out);
+      } else {
+        // Exchange-registered method acting as producer (e.g. VGI's "init"
+        // method which is registered as exchange but may produce based on
+        // the __isProducer state flag). Call exchangeFn with an empty tick
+        // batch, matching how the subprocess transport dispatches these.
+        const tickBatch = buildEmptyBatch(inputSchema);
+        await method.exchangeFn!(state, tickBatch, out);
+      }
     } catch (error: any) {
+      if (process.env.VGI_DISPATCH_DEBUG) console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split('\n').slice(0,3).join('\n'));
       allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
       break;
     }

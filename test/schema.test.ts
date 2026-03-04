@@ -16,7 +16,7 @@ import {
   List,
   Map_,
   Dictionary,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import { toSchema, inferParamTypes, str, bytes, int, int32, float, float32, bool } from "../src/schema.js";
 
 describe("toSchema", () => {

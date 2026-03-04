@@ -11,7 +11,7 @@ import {
   vectorFromArray,
   makeData,
   Struct,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import type { MethodDefinition } from "../types.js";
 import {
   PROTOCOL_NAME_KEY,

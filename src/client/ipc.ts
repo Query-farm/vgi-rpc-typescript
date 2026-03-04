@@ -14,7 +14,7 @@ import {
   vectorFromArray,
   makeData,
   Struct,
-} from "apache-arrow";
+} from "@query-farm/apache-arrow";
 import {
   RPC_METHOD_KEY,
   REQUEST_VERSION_KEY,

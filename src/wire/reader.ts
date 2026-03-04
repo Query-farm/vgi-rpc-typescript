@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatchReader, type RecordBatch, type Schema } from "apache-arrow";
+import { RecordBatchReader, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
 
 export interface StreamMessage {
   schema: Schema;

@@ -26,7 +26,7 @@ dist/index.d.ts: $(SRC) tsconfig.build.json tsconfig.json | node_modules
 	bunx tsc -p tsconfig.build.json
 
 dist/index.js: $(SRC) tsconfig.json | node_modules
-	bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external apache-arrow
+	bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow
 
 test: node_modules ## Run all tests (integration/conformance need Python CLI)
 	bun test

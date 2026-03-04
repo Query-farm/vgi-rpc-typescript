@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatch, Schema } from "apache-arrow";
+import { RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { STATE_KEY, LOG_LEVEL_KEY, DESCRIBE_METHOD_NAME } from "../constants.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import {
