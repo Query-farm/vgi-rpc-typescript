@@ -4,9 +4,9 @@ TypeScript server library for the vgi-rpc framework. Communicates over stdin/std
 
 ## Related Projects
 
-- **Python reference implementation**: `git@github.com:Query-farm/vgi-rpc-python.git` (local checkout at `/Users/rusty/Development/vgi-rpc`)
+- **Python reference implementation**: `git@github.com:Query-farm/vgi-rpc-python.git`
   - The Python implementation is the canonical reference for wire protocol behavior
-  - The Python CLI (`vgi-rpc`) is used for integration/conformance testing
+  - The Python CLI (`vgi-rpc`) and conformance suite are installed from PyPI: `pip install "vgi-rpc[http]"`
   - When in doubt about wire protocol details, check the Python implementation
 
 ## Project Structure
@@ -35,7 +35,7 @@ test/
   schema.test.ts    — Unit tests for toSchema and inferParamTypes
   output-collector.test.ts — Unit tests for OutputCollector and result validation
   integration.test.ts      — Integration tests (requires Python CLI)
-test_ts_conformance.py     — Python conformance suite runner (imports tests from vgi-rpc Python)
+test_ts_conformance.py     — Python conformance suite runner (imports from vgi-rpc package)
 ```
 
 ## Makefile
@@ -47,6 +47,7 @@ The project uses a Makefile for common tasks. Run `make help` to see all targets
 - `make test-integration` — Run integration tests (requires Python CLI)
 - `make test-conformance` — Run conformance tests (requires Python CLI)
 - `make test` — Run all tests
+- `make lint` — Run Biome linter/formatter checks
 - `make typecheck` — Type-check without emitting
 - `make docs` / `make docs-dev` — Build or serve the documentation site
 - `make clean` — Remove `dist/`
@@ -59,9 +60,10 @@ The project uses a Makefile for common tasks. Run `make help` to see all targets
 - Run conformance tests: `make test-conformance` (runs Python conformance suite against bun worker)
 - All individual tests must complete in 5 seconds or less
 - **Always use a 60-second timeout when running tests** (e.g., `timeout 60 make test-conformance`)
-- Integration and conformance tests require the Python venv at `/Users/rusty/Development/vgi-rpc/.venv/bin/python3`
-  - Conformance tests use `test_ts_conformance.py` which imports Python conformance suite and runs against `bun run examples/conformance.ts`
-  - Integration tests spawn the Python CLI, which in turn runs `bun run examples/<server>.ts` as a subprocess
+- Integration and conformance tests require `vgi-rpc[http]` installed: `pip install "vgi-rpc[http]"`
+  - Conformance tests use `test_ts_conformance.py` which imports `vgi_rpc.conformance._pytest_suite` and runs against `bun run examples/conformance.ts`
+  - Integration tests use the `vgi-rpc` CLI (must be on PATH)
+  - Client tests use `vgi-rpc-conformance` to spawn Python servers (set `VGI_RPC_PYTHON_BIN` to override python binary)
 - Always use timeouts on subprocess spawns to prevent hangs
 - Build: `make build` or `bun run build` (runs TypeScript type-checking then bundles)
 
@@ -85,6 +87,8 @@ This library must remain wire-compatible with the Python vgi-rpc implementation.
 ## CI
 
 GitHub Actions workflow at `.github/workflows/ci.yml`:
-- **test** job: runs unit tests (excludes integration/conformance that need Python CLI)
+- **lint** job: runs Biome linter/formatter checks
+- **test** job: runs unit tests and client tests (bun transports only)
 - **build** job: runs full build and verifies dist outputs
+- **conformance** job: installs `vgi-rpc[http]` from PyPI, runs conformance + client tests with all transports
 - Dependabot configured for npm and github-actions updates

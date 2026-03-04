@@ -1,11 +1,10 @@
 .PHONY: all build build-types build-js test test-unit test-integration test-conformance test-smoke typecheck lint clean distclean docs docs-dev help
 
-# Python reference implementation (required for integration/conformance tests)
-VGI_CLI := /Users/rusty/Development/vgi-rpc/.venv/bin/vgi-rpc
-PYTHON_VENV := /Users/rusty/Development/vgi-rpc/.venv/bin/python3
+# Python with vgi-rpc installed (override: make PYTHON=python3.13)
+PYTHON ?= python3
 
 # Unit test files (no external dependencies)
-UNIT_TESTS := test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts
+UNIT_TESTS := test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/token.test.ts
 
 SRC := $(wildcard src/**/*.ts src/*.ts)
 
@@ -28,16 +27,14 @@ dist/index.d.ts: $(SRC) tsconfig.build.json tsconfig.json | node_modules
 dist/index.js: $(SRC) tsconfig.json | node_modules
 	bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow
 
-test: node_modules ## Run all tests (integration/conformance need Python CLI)
+test: node_modules ## Run all tests (integration/conformance need vgi-rpc Python package)
 	bun test
-	@test -x $(PYTHON_VENV) || { echo "error: Python venv not found at $(PYTHON_VENV)"; exit 1; }
-	$(PYTHON_VENV) -m pytest test_ts_conformance.py -x -v
+	$(PYTHON) -m pytest test_ts_conformance.py -x -v
 
 test-unit: node_modules ## Run unit tests only (no Python CLI needed)
 	bun test $(UNIT_TESTS)
 
-test-integration: node_modules ## Run integration tests (requires Python CLI)
-	@test -x $(VGI_CLI) || { echo "error: Python CLI not found at $(VGI_CLI)"; exit 1; }
+test-integration: node_modules ## Run integration tests (requires vgi-rpc CLI on PATH)
 	bun test test/integration.test.ts
 
 test-smoke: node_modules ## Run cross-runtime smoke tests (Bun + Node.js)
@@ -47,8 +44,7 @@ test-smoke: node_modules ## Run cross-runtime smoke tests (Bun + Node.js)
 	node .smoke-bundle/smoke.js
 
 test-conformance: node_modules ## Run Python conformance suite against bun worker
-	@test -x $(PYTHON_VENV) || { echo "error: Python venv not found at $(PYTHON_VENV)"; exit 1; }
-	$(PYTHON_VENV) -m pytest test_ts_conformance.py -x -v
+	$(PYTHON) -m pytest test_ts_conformance.py -x -v
 
 lint: node_modules ## Run linter and formatter checks
 	bunx biome check .

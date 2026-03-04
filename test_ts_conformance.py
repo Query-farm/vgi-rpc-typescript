@@ -3,18 +3,12 @@ import contextlib
 import os
 import shutil
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
 import httpx
 import pytest
-
-_VGI_RPC_PYTHON_PATH = os.environ.get(
-    "VGI_RPC_PYTHON_PATH", "/Users/rusty/Development/vgi-rpc"
-)
-sys.path.insert(0, _VGI_RPC_PYTHON_PATH)
 
 from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.http import http_connect
@@ -230,8 +224,8 @@ def conformance_conn(
     return factory
 
 
-# Import all tests from the conformance test module
-from tests.test_conformance import *  # noqa: F401,F403,E402
+# Import all test classes from the conformance pytest suite (shipped with the package)
+from vgi_rpc.conformance._pytest_suite import *  # noqa: F401,F403,E402
 
 
 from vgi_rpc.rpc import AnnotatedBatch, RpcError  # noqa: E402

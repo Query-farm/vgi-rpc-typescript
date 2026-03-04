@@ -22,14 +22,13 @@ import { RpcError } from "../src/errors.js";
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-const PYTHON_CWD = process.env.VGI_RPC_PYTHON_PATH ?? "/Users/rusty/Development/vgi-rpc";
-const PYTHON = process.env.VGI_RPC_PYTHON_BIN ?? `${PYTHON_CWD}/.venv/bin/python3`;
+const PYTHON = process.env.VGI_RPC_PYTHON_BIN ?? "python3";
 
-/** Check if the Python conformance server is available. */
+/** Check if the vgi_rpc package is importable. */
 let hasPython = false;
 try {
-  const fs = require("node:fs");
-  hasPython = fs.existsSync(PYTHON) && fs.existsSync(PYTHON_CWD);
+  const result = Bun.spawnSync([PYTHON, "-c", "import vgi_rpc.conformance"]);
+  hasPython = result.exitCode === 0;
 } catch {}
 
 /** Serialize a 1-row batch as IPC bytes (for dataclass params). */
@@ -1300,10 +1299,21 @@ defineHttpConformanceTests("bun-http", () =>
   }),
 );
 
+const PYTHON_HTTP_SERVER = [
+  PYTHON,
+  "-c",
+  "from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl; from vgi_rpc.rpc import RpcServer; from vgi_rpc.http import serve_http; serve_http(RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True))",
+];
+
+const PYTHON_PIPE_SERVER = [
+  PYTHON,
+  "-c",
+  "from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl; from vgi_rpc.rpc import RpcServer, serve_stdio; serve_stdio(RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True))",
+];
+
 if (hasPython) {
   defineHttpConformanceTests("python-http", () =>
-    Bun.spawn([PYTHON, "-m", "tests.serve_conformance_http", "--http", "--describe"], {
-      cwd: PYTHON_CWD,
+    Bun.spawn(PYTHON_HTTP_SERVER, {
       stdout: "pipe",
       stderr: "pipe",
     }),
@@ -1315,8 +1325,8 @@ definePipeConformanceTests("bun-pipe", ["bun", "run", "examples/conformance.ts"]
 if (hasPython) {
   definePipeConformanceTests(
     "python-pipe",
-    [PYTHON, "-m", "tests.serve_conformance_pipe", "--describe"],
-    { cwd: PYTHON_CWD },
+    PYTHON_PIPE_SERVER,
+    undefined,
     // Python server strictly validates input schema. The pipe transport can't
     // know the correct schema for zero-row exchange since the describe response
     // doesn't include stream IO schemas (HTTP gets it from the init response).

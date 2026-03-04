@@ -23,8 +23,8 @@ import {
   vectorFromArray,
 } from "@query-farm/apache-arrow";
 
-const VGI_CLI = "/Users/rusty/Development/vgi-rpc/.venv/bin/vgi-rpc";
-const TS_DIR = "/Users/rusty/Development/vgi-rpc-typescript";
+const VGI_CLI = process.env.VGI_RPC_CLI ?? "vgi-rpc";
+const TS_DIR = import.meta.dir.replace(/\/test\/http$/, "");
 const PORT = 19876; // high port to avoid conflicts
 const BASE_URL = `http://localhost:${PORT}`;
 
