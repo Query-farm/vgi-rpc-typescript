@@ -156,12 +156,12 @@ async function writeExchangeInput(values: number[]): Promise<string> {
 // ==========================================================================
 
 describe("HTTP conformance: describe", () => {
-  it("lists all 47 methods via HTTP", async () => {
+  it("lists all 48 methods via HTTP", async () => {
     const { stdout, exitCode, stderr } = await run(cliHttp("describe"));
     if (exitCode !== 0) throw new Error(`exit ${exitCode}: ${stdout}\n${stderr}`);
     const data = JSON.parse(stdout);
     expect(data.protocol_name).toBe("Conformance");
-    expect(Object.keys(data.methods).length).toBe(47);
+    expect(Object.keys(data.methods).length).toBe(48);
   });
 });
 
