@@ -1302,7 +1302,7 @@ defineHttpConformanceTests("bun-http", () =>
 
 if (hasPython) {
   defineHttpConformanceTests("python-http", () =>
-    Bun.spawn([PYTHON, "-m", "tests.serve_conformance_describe_http"], {
+    Bun.spawn([PYTHON, "-m", "tests.serve_conformance_http", "--http", "--describe"], {
       cwd: PYTHON_CWD,
       stdout: "pipe",
       stderr: "pipe",
@@ -1315,7 +1315,7 @@ definePipeConformanceTests("bun-pipe", ["bun", "run", "examples/conformance.ts"]
 if (hasPython) {
   definePipeConformanceTests(
     "python-pipe",
-    [PYTHON, "-m", "tests.serve_conformance_describe"],
+    [PYTHON, "-m", "tests.serve_conformance_pipe", "--describe"],
     { cwd: PYTHON_CWD },
     // Python server strictly validates input schema. The pipe transport can't
     // know the correct schema for zero-row exchange since the describe response
