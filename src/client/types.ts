@@ -5,6 +5,8 @@ export interface HttpConnectOptions {
   prefix?: string;
   onLog?: (msg: LogMessage) => void;
   compressionLevel?: number;
+  /** Authorization header value (e.g. "Bearer <token>"). Sent with every request. */
+  authorization?: string;
 }
 
 export interface LogMessage {

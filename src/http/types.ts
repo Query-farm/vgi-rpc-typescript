@@ -1,6 +1,8 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
+
 /** Configuration options for createHttpHandler(). */
 export interface HttpHandlerOptions {
   /** URL path prefix for all endpoints. Default: "/vgi" */
@@ -22,6 +24,10 @@ export interface HttpHandlerOptions {
   /** zstd compression level for responses (1-22). If set, responses are
    *  compressed when the client sends Accept-Encoding: zstd. */
   compressionLevel?: number;
+  /** Optional authentication callback. Called for each request before dispatch. */
+  authenticate?: AuthenticateFn;
+  /** Optional RFC 9728 OAuth Protected Resource Metadata. Served at well-known endpoint. */
+  oauthResourceMetadata?: OAuthResourceMetadata;
 }
 
 /** Serializer for stream state objects stored in state tokens. */

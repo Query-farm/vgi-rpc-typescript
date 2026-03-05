@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordBatch, recordBatchFromArrays, type Schema } from "@query-farm/apache-arrow";
+import { AuthContext } from "./auth.js";
 import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
 export enum MethodType {
@@ -12,6 +13,11 @@ export enum MethodType {
 /** Logging interface available to handlers. */
 export interface LogContext {
   clientLog(level: string, message: string, extra?: Record<string, string>): void;
+}
+
+/** Extended context with authentication info, available to handlers. */
+export interface CallContext extends LogContext {
+  readonly auth: AuthContext;
 }
 
 /** Handler for unary (request-response) RPC methods. */
@@ -61,7 +67,7 @@ export interface EmittedBatch {
  * Accumulates output batches during a produce/exchange call.
  * Enforces that exactly one data batch is emitted per call (plus any number of log batches).
  */
-export class OutputCollector implements LogContext {
+export class OutputCollector implements CallContext {
   private _batches: EmittedBatch[] = [];
   private _dataBatchIdx: number | null = null;
   private _finished = false;
@@ -69,12 +75,20 @@ export class OutputCollector implements LogContext {
   private _outputSchema: Schema;
   private _serverId: string;
   private _requestId: string | null;
+  readonly auth: AuthContext;
 
-  constructor(outputSchema: Schema, producerMode = true, serverId = "", requestId: string | null = null) {
+  constructor(
+    outputSchema: Schema,
+    producerMode = true,
+    serverId = "",
+    requestId: string | null = null,
+    authContext?: AuthContext,
+  ) {
     this._outputSchema = outputSchema;
     this._producerMode = producerMode;
     this._serverId = serverId;
     this._requestId = requestId;
+    this.auth = authContext ?? AuthContext.anonymous();
   }
 
   get outputSchema(): Schema {

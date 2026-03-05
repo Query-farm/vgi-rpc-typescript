@@ -22,7 +22,8 @@
     "src"
   ],
   "dependencies": {
-    "@query-farm/apache-arrow": "*"
+    "@query-farm/apache-arrow": "*",
+    "oauth4webapi": "^3.8.5"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.5",

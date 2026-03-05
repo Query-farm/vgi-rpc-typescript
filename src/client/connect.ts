@@ -3,6 +3,7 @@
 
 import type { RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
+import { RpcError } from "../errors.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import { httpIntrospect, type MethodInfo, type ServiceDescription } from "./introspect.js";
 import {
@@ -29,6 +30,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
   const prefix = (options?.prefix ?? "/vgi").replace(/\/+$/, "");
   const onLog = options?.onLog;
   const compressionLevel = options?.compressionLevel;
+  const authorization = options?.authorization;
 
   let methodCache: Map<string, MethodInfo> | null = null;
   let compressFn: CompressFn | undefined;
@@ -55,6 +57,9 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       headers["Content-Encoding"] = "zstd";
       headers["Accept-Encoding"] = "zstd";
     }
+    if (authorization) {
+      headers.Authorization = authorization;
+    }
     return headers;
   }
 
@@ -63,6 +68,12 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       return compressFn(content, compressionLevel);
     }
     return content;
+  }
+
+  function checkAuth(resp: Response): void {
+    if (resp.status === 401) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
   }
 
   async function readResponse(resp: Response): Promise<Uint8Array<ArrayBuffer>> {
@@ -75,7 +86,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
 
   async function ensureMethodCache(): Promise<Map<string, MethodInfo>> {
     if (methodCache) return methodCache;
-    const desc = await httpIntrospect(baseUrl, { prefix });
+    const desc = await httpIntrospect(baseUrl, { prefix, authorization });
     methodCache = new Map(desc.methods.map((m) => [m.name, m]));
     return methodCache;
   }
@@ -98,6 +109,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
         headers: buildHeaders(),
         body: prepareBody(body) as unknown as BodyInit,
       });
+      checkAuth(resp);
 
       const responseBody = await readResponse(resp);
       const { batches } = await readResponseBatches(responseBody);
@@ -146,6 +158,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
         headers: buildHeaders(),
         body: prepareBody(body) as unknown as BodyInit,
       });
+      checkAuth(resp);
 
       const responseBody = await readResponse(resp);
 
@@ -288,6 +301,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
         compressionLevel,
         compressFn,
         decompressFn,
+        authorization,
       });
     },
 

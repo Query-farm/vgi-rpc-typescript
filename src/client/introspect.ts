@@ -3,6 +3,7 @@
 
 import { Schema as ArrowSchema, type RecordBatch, RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
 import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY } from "../constants.js";
+import { RpcError } from "../errors.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import { buildRequestIpc, dispatchLogOrError, readResponseBatches } from "./ipc.js";
 import type { LogMessage } from "./types.js";
@@ -116,16 +117,27 @@ export async function parseDescribeResponse(
 /**
  * Send a __describe__ request and return a ServiceDescription.
  */
-export async function httpIntrospect(baseUrl: string, options?: { prefix?: string }): Promise<ServiceDescription> {
+export async function httpIntrospect(
+  baseUrl: string,
+  options?: { prefix?: string; authorization?: string },
+): Promise<ServiceDescription> {
   const prefix = options?.prefix ?? "/vgi";
   const emptySchema = new ArrowSchema([]);
   const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
 
+  const headers: Record<string, string> = { "Content-Type": ARROW_CONTENT_TYPE };
+  if (options?.authorization) {
+    headers.Authorization = options.authorization;
+  }
+
   const response = await fetch(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
     method: "POST",
-    headers: { "Content-Type": ARROW_CONTENT_TYPE },
+    headers,
     body: body as unknown as BodyInit,
   });
+  if (response.status === 401) {
+    throw new RpcError("AuthenticationError", "Authentication required", "");
+  }
 
   const responseBody = new Uint8Array(await response.arrayBuffer());
   const { batches } = await readResponseBatches(responseBody);

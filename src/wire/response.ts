@@ -152,7 +152,9 @@ function makeEmptyData(type: DataType): Data {
   }
   if (DataType.isMap(type)) {
     const entryType = type.children[0]?.type;
-    const entryData = entryType ? makeEmptyData(entryType) : makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
+    const entryData = entryType
+      ? makeEmptyData(entryType)
+      : makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
     return makeData({ type, length: 0, children: [entryData], nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
   }
   return makeData({ type, length: 0, nullCount: 0 });

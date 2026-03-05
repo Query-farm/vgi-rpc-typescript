@@ -1,6 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+export { AuthContext } from "./auth.js";
 export * from "./client/index.js";
 export {
   DESCRIBE_METHOD_NAME,
@@ -20,9 +21,14 @@ export {
 export { RpcError, VersionError } from "./errors.js";
 export {
   ARROW_CONTENT_TYPE,
+  type AuthenticateFn,
   createHttpHandler,
   type HttpHandlerOptions,
+  type JwtAuthenticateOptions,
   jsonStateSerializer,
+  jwtAuthenticate,
+  type OAuthResourceMetadata,
+  oauthResourceMetadataToJson,
   type StateSerializer,
   type UnpackedToken,
   unpackStateToken,
@@ -42,6 +48,7 @@ export {
 } from "./schema.js";
 export { VgiRpcServer } from "./server.js";
 export {
+  type CallContext,
   type ExchangeFn,
   type ExchangeInit,
   type HeaderInit,

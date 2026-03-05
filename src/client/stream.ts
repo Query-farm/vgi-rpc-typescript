@@ -25,6 +25,7 @@ export class HttpStreamSession implements StreamSession {
   private _compressionLevel?: number;
   private _compressFn?: CompressFn;
   private _decompressFn?: DecompressFn;
+  private _authorization?: string;
 
   constructor(opts: {
     baseUrl: string;
@@ -40,6 +41,7 @@ export class HttpStreamSession implements StreamSession {
     compressionLevel?: number;
     compressFn?: CompressFn;
     decompressFn?: DecompressFn;
+    authorization?: string;
   }) {
     this._baseUrl = opts.baseUrl;
     this._prefix = opts.prefix;
@@ -54,6 +56,7 @@ export class HttpStreamSession implements StreamSession {
     this._compressionLevel = opts.compressionLevel;
     this._compressFn = opts.compressFn;
     this._decompressFn = opts.decompressFn;
+    this._authorization = opts.authorization;
   }
 
   get header(): Record<string, any> | null {
@@ -67,6 +70,9 @@ export class HttpStreamSession implements StreamSession {
     if (this._compressionLevel != null) {
       headers["Content-Encoding"] = "zstd";
       headers["Accept-Encoding"] = "zstd";
+    }
+    if (this._authorization) {
+      headers.Authorization = this._authorization;
     }
     return headers;
   }
@@ -154,6 +160,9 @@ export class HttpStreamSession implements StreamSession {
       headers: this._buildHeaders(),
       body: this._prepareBody(body) as unknown as BodyInit,
     });
+    if (resp.status === 401) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
 
     const responseBody = await this._readResponse(resp);
     const { batches: responseBatches } = await readResponseBatches(responseBody);
@@ -261,6 +270,9 @@ export class HttpStreamSession implements StreamSession {
       headers: this._buildHeaders(),
       body: this._prepareBody(body) as unknown as BodyInit,
     });
+    if (resp.status === 401) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
 
     return this._readResponse(resp);
   }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordBatch, RecordBatchReader, Schema } from "@query-farm/apache-arrow";
+import type { AuthContext } from "../auth.js";
 import { STATE_KEY } from "../constants.js";
 import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
 import type { MethodDefinition } from "../types.js";
@@ -28,6 +29,7 @@ export interface DispatchContext {
   serverId: string;
   maxStreamResponseBytes?: number;
   stateSerializer: StateSerializer;
+  authContext?: AuthContext;
 }
 
 /** Dispatch a __describe__ request. */
@@ -55,7 +57,7 @@ export async function httpDispatchUnary(
     throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
   }
 
-  const out = new OutputCollector(schema, true, ctx.serverId, parsed.requestId);
+  const out = new OutputCollector(schema, true, ctx.serverId, parsed.requestId, ctx.authContext);
 
   try {
     const result = await method.handler!(parsed.params, out);
@@ -107,7 +109,7 @@ export async function httpDispatchStreamInit(
   let headerBytes: Uint8Array | null = null;
   if (method.headerSchema && method.headerInit) {
     try {
-      const headerOut = new OutputCollector(method.headerSchema, true, ctx.serverId, parsed.requestId);
+      const headerOut = new OutputCollector(method.headerSchema, true, ctx.serverId, parsed.requestId, ctx.authContext);
       const headerValues = method.headerInit(parsed.params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, ctx.serverId, parsed.requestId);
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
@@ -205,7 +207,7 @@ export async function httpDispatchStreamExchange(
     // Exchange path — also handles exchange-registered methods acting as
     // producers (__isProducer=true). Use producer mode on the OutputCollector
     // when effectiveProducer so finish() is allowed.
-    const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null);
+    const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext);
 
     // Cast compatible input types (e.g., decimal→double, int32→int64)
     const conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
@@ -283,7 +285,7 @@ async function produceStreamResponse(
   let estimatedBytes = 0;
 
   while (true) {
-    const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId);
+    const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId, ctx.authContext);
 
     try {
       if (method.producerFn) {

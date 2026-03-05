@@ -3,11 +3,13 @@
 
 import { randomBytes } from "node:crypto";
 import { Schema } from "@query-farm/apache-arrow";
+import type { AuthContext } from "../auth.js";
 import { DESCRIBE_METHOD_NAME } from "../constants.js";
 import type { Protocol } from "../protocol.js";
 import { MethodType } from "../types.js";
 import { zstdCompress, zstdDecompress } from "../util/zstd.js";
 import { buildErrorBatch } from "../wire/response.js";
+import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
 import { ARROW_CONTENT_TYPE, arrowResponse, HttpRpcError, serializeIpcStream } from "./common.js";
 import {
   httpDispatchDescribe,
@@ -43,12 +45,16 @@ export function createHttpHandler(
   const maxStreamResponseBytes = options?.maxStreamResponseBytes;
   const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
+  const authenticate = options?.authenticate;
+  const oauthMetadata = options?.oauthResourceMetadata;
+
   const methods = protocol.getMethods();
 
   const compressionLevel = options?.compressionLevel;
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
 
-  const ctx = {
+  // ctx is built per-request to include authContext; base fields set here
+  const baseCtx = {
     signingKey,
     tokenTtl,
     serverId,
@@ -87,6 +93,20 @@ export function createHttpHandler(
   return async function handler(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // Well-known endpoint: RFC 9728 OAuth Protected Resource Metadata
+    if (oauthMetadata && path === wellKnownPath(prefix)) {
+      if (request.method !== "GET") {
+        return new Response("Method Not Allowed", { status: 405 });
+      }
+      const body = JSON.stringify(oauthResourceMetadataToJson(oauthMetadata));
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=3600",
+      });
+      addCorsHeaders(headers);
+      return new Response(body, { status: 200, headers });
+    }
 
     // CORS preflight
     if (request.method === "OPTIONS") {
@@ -133,6 +153,26 @@ export function createHttpHandler(
     const contentEncoding = request.headers.get("Content-Encoding");
     if (contentEncoding === "zstd") {
       body = zstdDecompress(body);
+    }
+
+    // Build per-request dispatch context
+    const ctx = { ...baseCtx } as typeof baseCtx & { authContext?: AuthContext };
+
+    // Authentication
+    if (authenticate) {
+      try {
+        ctx.authContext = await authenticate(request);
+      } catch (error: any) {
+        const headers = new Headers({ "Content-Type": "text/plain" });
+        addCorsHeaders(headers);
+        if (oauthMetadata) {
+          const metadataUrl = new URL(request.url);
+          metadataUrl.pathname = wellKnownPath(prefix);
+          metadataUrl.search = "";
+          headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString()));
+        }
+        return new Response(error.message || "Unauthorized", { status: 401, headers });
+      }
     }
 
     // Route: {prefix}/__describe__
