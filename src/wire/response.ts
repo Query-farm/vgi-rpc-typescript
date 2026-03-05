@@ -142,10 +142,13 @@ function makeEmptyData(type: DataType): Data {
     const children = type.children.map((f: Field) => makeEmptyData(f.type));
     return makeData({ type, length: 0, children, nullCount: 0 });
   }
-  if (DataType.isList(type) || DataType.isFixedSizeList(type)) {
-    const childType = type.children[0]?.type ?? type.valueType;
-    const childData = makeEmptyData(childType);
+  if (DataType.isList(type)) {
+    const childData = makeEmptyData(type.children[0].type);
     return makeData({ type, length: 0, children: [childData], nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
+  }
+  if (DataType.isFixedSizeList(type)) {
+    const childData = makeEmptyData(type.children[0].type);
+    return makeData({ type, length: 0, child: childData, nullCount: 0 } as any);
   }
   if (DataType.isMap(type)) {
     const entryType = type.children[0]?.type;
