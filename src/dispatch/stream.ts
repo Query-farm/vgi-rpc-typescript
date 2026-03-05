@@ -115,9 +115,11 @@ export async function dispatchStream(
         try {
           inputBatch = conformBatchToSchema(inputBatch, expectedInputSchema);
         } catch (e) {
-          // Pass through — let the exchange handler deal with the actual schema.
-          // This happens when the registered input schema is a dummy placeholder
-          // (e.g., table-in-out functions) and actual data has a different schema.
+          if (e instanceof TypeError) {
+            // Field name/count mismatch — propagate as error (matches Python behavior).
+            throw e;
+          }
+          // Other conformance failures: pass through for dynamic schema handlers.
           console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
         }
       }
