@@ -157,6 +157,85 @@ const desc = await parseDescribeResponse(batches: RecordBatch[], onLog?: (msg: L
 // Returns: Promise<ServiceDescription>
 ```
 
+## Authentication factories
+
+Built-in factories for creating `AuthenticateFn` callbacks. Pass the result to `createHttpHandler(protocol, { authenticate })`.
+
+See [HTTP Transport — Authentication](/guides/http-transport/#authentication) for usage examples.
+
+### jwtAuthenticate
+
+Create a JWT-validating authenticate callback using `oauth4webapi`.
+
+```typescript
+import { jwtAuthenticate } from "vgi-rpc";
+
+const auth = jwtAuthenticate({
+  issuer: "https://auth.example.com",
+  audience: "https://api.example.com/vgi",
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `issuer` | `string` | required | Expected `iss` claim (used for OIDC discovery) |
+| `audience` | `string` | required | Expected `aud` claim |
+| `jwksUri` | `string` | `undefined` | Explicit JWKS URL (discovered from issuer if omitted) |
+| `principalClaim` | `string` | `"sub"` | JWT claim to use as `AuthContext.principal` |
+| `domain` | `string` | `"jwt"` | `AuthContext.domain` value |
+
+### bearerAuthenticate
+
+Create a bearer-token authenticate callback with a custom validate function.
+
+```typescript
+import { bearerAuthenticate } from "vgi-rpc";
+
+const auth = bearerAuthenticate({
+  validate: (token: string) => { /* return AuthContext or throw */ },
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `validate` | `BearerValidateFn` | Receives the raw token, returns `AuthContext` on success, throws on failure |
+
+### bearerAuthenticateStatic
+
+Create a bearer-token authenticate callback from a static token map. Uses constant-time comparison for token lookup.
+
+```typescript
+import { bearerAuthenticateStatic } from "vgi-rpc";
+
+const auth = bearerAuthenticateStatic({
+  tokens: { "key-abc": aliceContext, "key-def": bobContext },
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `tokens` | `Record<string, AuthContext> \| ReadonlyMap<string, AuthContext>` | Maps bearer token strings to `AuthContext` values |
+
+### chainAuthenticate
+
+Chain multiple authenticate callbacks, trying each in order.
+
+```typescript
+import { chainAuthenticate } from "vgi-rpc";
+
+const auth = chainAuthenticate(jwtAuth, apiKeyAuth);
+```
+
+| Behaviour | Exception type | Result |
+|-----------|----------------|--------|
+| Credentials accepted | *(none)* | Returns `AuthContext`, stops chain |
+| Bad / missing credentials | Plain `Error` (`constructor === Error`) | Tries next authenticator |
+| Authenticated but forbidden | `Error` with `name === "PermissionError"` | Propagates immediately |
+| Bug in authenticator | `TypeError`, `RangeError`, etc. | Propagates immediately |
+| Non-Error throw | any | Propagates immediately |
+
+Throws at construction time if called with no authenticators.
+
 ## Client classes
 
 ### HttpStreamSession

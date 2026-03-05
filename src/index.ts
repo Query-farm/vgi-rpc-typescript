@@ -22,6 +22,10 @@ export { RpcError, VersionError } from "./errors.js";
 export {
   ARROW_CONTENT_TYPE,
   type AuthenticateFn,
+  bearerAuthenticate,
+  bearerAuthenticateStatic,
+  type BearerValidateFn,
+  chainAuthenticate,
   createHttpHandler,
   type HttpHandlerOptions,
   type JwtAuthenticateOptions,
