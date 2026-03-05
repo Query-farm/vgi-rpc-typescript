@@ -134,24 +134,33 @@ export function buildLogBatch(
 }
 
 /**
+ * Recursively create empty (0-row) Data for any Arrow type,
+ * including complex types (Struct, List, FixedSizeList, Map).
+ */
+function makeEmptyData(type: DataType): Data {
+  if (DataType.isStruct(type)) {
+    const children = type.children.map((f: Field) => makeEmptyData(f.type));
+    return makeData({ type, length: 0, children, nullCount: 0 });
+  }
+  if (DataType.isList(type) || DataType.isFixedSizeList(type)) {
+    const childType = type.children[0]?.type ?? type.valueType;
+    const childData = makeEmptyData(childType);
+    return makeData({ type, length: 0, children: [childData], nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
+  }
+  if (DataType.isMap(type)) {
+    const entryType = type.children[0]?.type;
+    const entryData = entryType ? makeEmptyData(entryType) : makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
+    return makeData({ type, length: 0, children: [entryData], nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
+  }
+  return makeData({ type, length: 0, nullCount: 0 });
+}
+
+/**
  * Build a 0-row batch from a schema with metadata.
  * Used for error/log batches.
  */
 export function buildEmptyBatch(schema: Schema, metadata?: Map<string, string>): RecordBatch {
-  const children = schema.fields.map((f: Field) => {
-    return makeData({ type: f.type, length: 0, nullCount: 0 });
-  });
-
-  if (schema.fields.length === 0) {
-    const structType = new Struct(schema.fields);
-    const data = makeData({
-      type: structType,
-      length: 0,
-      children: [],
-      nullCount: 0,
-    });
-    return new RecordBatch(schema, data, metadata);
-  }
+  const children = schema.fields.map((f: Field) => makeEmptyData(f.type));
 
   const structType = new Struct(schema.fields);
   const data = makeData({

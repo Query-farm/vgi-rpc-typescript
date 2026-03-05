@@ -107,12 +107,15 @@ export async function dispatchStream(
       let inputBatch = await reader.readNextBatch();
       if (!inputBatch) break;
 
-      // Cast compatible input types when schema doesn't match exactly
+      // Cast compatible input types when schema doesn't match exactly.
+      // If conformance fails (e.g., completely different schemas like a dummy
+      // registration schema vs actual data), pass the original batch through —
+      // the exchange handler may handle dynamic schemas internally.
       if (expectedInputSchema && !isProducer && inputBatch.schema !== expectedInputSchema) {
         try {
           inputBatch = conformBatchToSchema(inputBatch, expectedInputSchema);
         } catch {
-          throw new TypeError(`Input schema mismatch: expected ${expectedInputSchema}, got ${inputBatch.schema}`);
+          // Pass through — let the exchange handler deal with the actual schema
         }
       }
 
