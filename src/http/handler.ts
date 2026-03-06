@@ -102,7 +102,7 @@ export function createHttpHandler(
       const body = JSON.stringify(oauthResourceMetadataToJson(oauthMetadata));
       const headers = new Headers({
         "Content-Type": "application/json",
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": "public, max-age=60",
       });
       addCorsHeaders(headers);
       return new Response(body, { status: 200, headers });
@@ -169,7 +169,7 @@ export function createHttpHandler(
           const metadataUrl = new URL(request.url);
           metadataUrl.pathname = wellKnownPath(prefix);
           metadataUrl.search = "";
-          headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString()));
+          headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString(), oauthMetadata.clientId, oauthMetadata.clientSecret, oauthMetadata.useIdTokenAsBearer));
         }
         return new Response(error.message || "Unauthorized", { status: 401, headers });
       }

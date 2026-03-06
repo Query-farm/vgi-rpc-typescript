@@ -236,6 +236,146 @@ const auth = chainAuthenticate(jwtAuth, apiKeyAuth);
 
 Throws at construction time if called with no authenticators.
 
+### mtlsAuthenticate
+
+Create an mTLS authenticate callback with custom certificate validation. Parses a URL-encoded PEM from the specified header.
+
+```typescript
+import { mtlsAuthenticate } from "vgi-rpc";
+
+const auth = mtlsAuthenticate({
+  validate: (cert) => new AuthContext("mtls", true, "principal", {}),
+  header: "X-SSL-Client-Cert",
+  checkExpiry: false,
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `validate` | `CertValidateFn` | required | Receives `X509Certificate`, returns `AuthContext` or throws |
+| `header` | `string` | `"X-SSL-Client-Cert"` | Header containing URL-encoded PEM |
+| `checkExpiry` | `boolean` | `false` | Check validity period before calling validate |
+
+### mtlsAuthenticateFingerprint
+
+Create an mTLS authenticate callback using certificate fingerprint lookup. Fingerprints must be lowercase hex without colons.
+
+```typescript
+import { mtlsAuthenticateFingerprint } from "vgi-rpc";
+
+const auth = mtlsAuthenticateFingerprint({
+  fingerprints: { "a1b2c3...": new AuthContext("mtls", true, "service-a") },
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `fingerprints` | `Record<string, AuthContext> \| ReadonlyMap<string, AuthContext>` | required | Fingerprint-to-context map |
+| `header` | `string` | `"X-SSL-Client-Cert"` | Header containing URL-encoded PEM |
+| `algorithm` | `string` | `"sha256"` | Hash algorithm (`sha256`, `sha1`, `sha384`, `sha512`) |
+| `checkExpiry` | `boolean` | `false` | Reject expired certificates |
+
+### mtlsAuthenticateSubject
+
+Create an mTLS authenticate callback using certificate subject CN. Populates claims with `subject_dn`, `serial`, and `not_valid_after`.
+
+```typescript
+import { mtlsAuthenticateSubject } from "vgi-rpc";
+
+const auth = mtlsAuthenticateSubject({
+  allowedSubjects: new Set(["my-service"]),
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `header` | `string` | `"X-SSL-Client-Cert"` | Header containing URL-encoded PEM |
+| `domain` | `string` | `"mtls"` | `AuthContext.domain` value |
+| `allowedSubjects` | `ReadonlySet<string> \| null` | `null` | Restrict accepted CNs |
+| `checkExpiry` | `boolean` | `false` | Reject expired certificates |
+
+### mtlsAuthenticateXfcc
+
+Create an authenticate callback from the Envoy `x-forwarded-client-cert` header. No crypto dependencies required.
+
+```typescript
+import { mtlsAuthenticateXfcc } from "vgi-rpc";
+
+const auth = mtlsAuthenticateXfcc({ selectElement: "first" });
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `validate` | `XfccValidateFn` | — | Custom validation (default: extract CN from Subject) |
+| `domain` | `string` | `"mtls"` | `AuthContext.domain` value |
+| `selectElement` | `"first" \| "last"` | `"first"` | Which element to use when multiple are present |
+
+### parseXfcc
+
+Parse an `x-forwarded-client-cert` header value into structured elements. Exported for testability.
+
+```typescript
+import { parseXfcc } from "vgi-rpc";
+
+const elements = parseXfcc(headerValue);
+// Returns: XfccElement[]
+```
+
+### httpOAuthMetadata
+
+Discover OAuth Protected Resource Metadata (RFC 9728) from a vgi-rpc server.
+
+```typescript
+import { httpOAuthMetadata } from "vgi-rpc";
+
+const metadata = await httpOAuthMetadata(baseUrl: string, prefix?: string);
+// Returns: Promise<OAuthResourceMetadataResponse | null>
+```
+
+### parseResourceMetadataUrl
+
+Extract the `resource_metadata` URL from a `WWW-Authenticate` Bearer challenge.
+
+```typescript
+import { parseResourceMetadataUrl } from "vgi-rpc";
+
+const url = parseResourceMetadataUrl(wwwAuthenticate: string);
+// Returns: string | null
+```
+
+### parseClientId
+
+Extract the `client_id` from a `WWW-Authenticate` Bearer challenge.
+
+```typescript
+import { parseClientId } from "vgi-rpc";
+
+const clientId = parseClientId(wwwAuthenticate: string);
+// Returns: string | null
+```
+
+### parseClientSecret
+
+Extract the `client_secret` from a `WWW-Authenticate` Bearer challenge.
+
+```typescript
+import { parseClientSecret } from "vgi-rpc";
+
+const clientSecret = parseClientSecret(wwwAuthenticate: string);
+// Returns: string | null
+```
+
+### parseUseIdTokenAsBearer
+
+Extract the `use_id_token_as_bearer` flag from a `WWW-Authenticate` Bearer challenge.
+
+```typescript
+import { parseUseIdTokenAsBearer } from "vgi-rpc";
+
+const useIdToken = parseUseIdTokenAsBearer(wwwAuthenticate: string);
+// Returns: boolean
+```
+
 ## Client classes
 
 ### HttpStreamSession
@@ -312,9 +452,70 @@ type HeaderInit = (
 ) => Record<string, any>;
 
 type SchemaLike = Schema | Record<string, DataType>;
+
+type AuthenticateFn = (request: Request) => AuthContext | Promise<AuthContext>;
+
+type BearerValidateFn = (token: string) => AuthContext | Promise<AuthContext>;
+
+type CertValidateFn = (cert: X509Certificate) => AuthContext | Promise<AuthContext>;
+
+type XfccValidateFn = (element: XfccElement) => AuthContext | Promise<AuthContext>;
 ```
 
 ## Interfaces
+
+### XfccElement
+
+```typescript
+interface XfccElement {
+  hash: string | null;
+  cert: string | null;
+  subject: string | null;
+  uri: string | null;
+  dns: readonly string[];
+  by: string | null;
+}
+```
+
+### OAuthResourceMetadata
+
+Server-side configuration for RFC 9728 OAuth Protected Resource Metadata.
+
+```typescript
+interface OAuthResourceMetadata {
+  resource: string;
+  authorizationServers: string[];
+  scopesSupported?: string[];
+  bearerMethodsSupported?: string[];
+  resourceName?: string;
+  resourceDocumentation?: string;
+  resourcePolicyUri?: string;
+  resourceTosUri?: string;
+  clientId?: string;
+  clientSecret?: string;
+  useIdTokenAsBearer?: boolean;
+}
+```
+
+### OAuthResourceMetadataResponse
+
+Client-side response from OAuth Protected Resource Metadata discovery.
+
+```typescript
+interface OAuthResourceMetadataResponse {
+  resource: string;
+  authorizationServers: string[];
+  scopesSupported?: string[];
+  bearerMethodsSupported?: string[];
+  resourceName?: string;
+  resourceDocumentation?: string;
+  resourcePolicyUri?: string;
+  resourceTosUri?: string;
+  clientId?: string;
+  clientSecret?: string;
+  useIdTokenAsBearer?: boolean;
+}
+```
 
 ### LogContext
 

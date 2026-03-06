@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { AuthContext } from "../src/auth.js";
 import { httpConnect } from "../src/client/connect.js";
-import { parseResourceMetadataUrl } from "../src/client/oauth.js";
+import { parseClientId, parseClientSecret, parseResourceMetadataUrl, parseUseIdTokenAsBearer } from "../src/client/oauth.js";
 import { RpcError } from "../src/errors.js";
 import { createHttpHandler } from "../src/http/handler.js";
 import { Protocol } from "../src/protocol.js";
@@ -26,6 +26,68 @@ describe("parseResourceMetadataUrl", () => {
   test("returns null for Bearer without resource_metadata", () => {
     const url = parseResourceMetadataUrl('Bearer realm="test"');
     expect(url).toBeNull();
+  });
+});
+
+describe("parseClientId", () => {
+  test("extracts client_id from Bearer challenge", () => {
+    const id = parseClientId(
+      'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi", client_id="my-app"',
+    );
+    expect(id).toBe("my-app");
+  });
+
+  test("returns null when client_id absent", () => {
+    const id = parseClientId('Bearer resource_metadata="https://example.com/foo"');
+    expect(id).toBeNull();
+  });
+
+  test("returns null for non-Bearer headers", () => {
+    const id = parseClientId('Basic realm="test"');
+    expect(id).toBeNull();
+  });
+});
+
+describe("parseClientSecret", () => {
+  test("extracts client_secret from Bearer challenge", () => {
+    const secret = parseClientSecret(
+      'Bearer resource_metadata="https://example.com/meta", client_id="my-app", client_secret="s3cret"',
+    );
+    expect(secret).toBe("s3cret");
+  });
+
+  test("returns null when client_secret absent", () => {
+    const secret = parseClientSecret('Bearer resource_metadata="https://example.com/foo"');
+    expect(secret).toBeNull();
+  });
+
+  test("returns null for non-Bearer headers", () => {
+    const secret = parseClientSecret('Basic realm="test"');
+    expect(secret).toBeNull();
+  });
+});
+
+describe("parseUseIdTokenAsBearer", () => {
+  test("returns true when use_id_token_as_bearer is true", () => {
+    const result = parseUseIdTokenAsBearer(
+      'Bearer resource_metadata="https://example.com/meta", use_id_token_as_bearer="true"',
+    );
+    expect(result).toBe(true);
+  });
+
+  test("returns false when use_id_token_as_bearer is absent", () => {
+    const result = parseUseIdTokenAsBearer('Bearer resource_metadata="https://example.com/foo"');
+    expect(result).toBe(false);
+  });
+
+  test("returns false for non-Bearer headers", () => {
+    const result = parseUseIdTokenAsBearer('Basic realm="test"');
+    expect(result).toBe(false);
+  });
+
+  test("returns false when value is not true", () => {
+    const result = parseUseIdTokenAsBearer('Bearer use_id_token_as_bearer="false"');
+    expect(result).toBe(false);
   });
 });
 

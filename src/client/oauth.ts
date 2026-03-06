@@ -11,6 +11,12 @@ export interface OAuthResourceMetadataResponse {
   resourceDocumentation?: string;
   resourcePolicyUri?: string;
   resourceTosUri?: string;
+  /** OAuth client_id advertised by the server. */
+  clientId?: string;
+  /** OAuth client_secret advertised by the server. */
+  clientSecret?: string;
+  /** When true, use the OIDC id_token as the Bearer token instead of access_token. */
+  useIdTokenAsBearer?: boolean;
 }
 
 function parseMetadataJson(json: Record<string, any>): OAuthResourceMetadataResponse {
@@ -24,6 +30,9 @@ function parseMetadataJson(json: Record<string, any>): OAuthResourceMetadataResp
   if (json.resource_documentation) result.resourceDocumentation = json.resource_documentation;
   if (json.resource_policy_uri) result.resourcePolicyUri = json.resource_policy_uri;
   if (json.resource_tos_uri) result.resourceTosUri = json.resource_tos_uri;
+  if (json.client_id) result.clientId = json.client_id;
+  if (json.client_secret) result.clientSecret = json.client_secret;
+  if (json.use_id_token_as_bearer) result.useIdTokenAsBearer = json.use_id_token_as_bearer;
   return result;
 }
 
@@ -71,4 +80,49 @@ export function parseResourceMetadataUrl(wwwAuthenticate: string): string | null
   if (!metadataMatch) return null;
 
   return metadataMatch[1];
+}
+
+/**
+ * Extract the `client_id` from a WWW-Authenticate Bearer challenge.
+ * Returns `null` if no client_id parameter is found.
+ */
+export function parseClientId(wwwAuthenticate: string): string | null {
+  const bearerMatch = wwwAuthenticate.match(/^Bearer\s+(.*)/i);
+  if (!bearerMatch) return null;
+
+  const params = bearerMatch[1];
+  const clientIdMatch = params.match(/client_id="([^"]+)"/);
+  if (!clientIdMatch) return null;
+
+  return clientIdMatch[1];
+}
+
+/**
+ * Extract the `client_secret` from a WWW-Authenticate Bearer challenge.
+ * Returns `null` if no client_secret parameter is found.
+ */
+export function parseClientSecret(wwwAuthenticate: string): string | null {
+  const bearerMatch = wwwAuthenticate.match(/^Bearer\s+(.*)/i);
+  if (!bearerMatch) return null;
+
+  const params = bearerMatch[1];
+  const match = params.match(/client_secret="([^"]+)"/);
+  if (!match) return null;
+
+  return match[1];
+}
+
+/**
+ * Extract the `use_id_token_as_bearer` flag from a WWW-Authenticate Bearer challenge.
+ * Returns `true` if the parameter is present and set to "true", `false` otherwise.
+ */
+export function parseUseIdTokenAsBearer(wwwAuthenticate: string): boolean {
+  const bearerMatch = wwwAuthenticate.match(/^Bearer\s+(.*)/i);
+  if (!bearerMatch) return false;
+
+  const params = bearerMatch[1];
+  const match = params.match(/use_id_token_as_bearer="([^"]+)"/);
+  if (!match) return false;
+
+  return match[1] === "true";
 }

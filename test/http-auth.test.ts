@@ -122,7 +122,7 @@ describe("HTTP Auth", () => {
     );
     expect(resp.status).toBe(200);
     expect(resp.headers.get("Content-Type")).toBe("application/json");
-    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
 
     const json = await resp.json();
     expect(json.resource).toBe("https://api.example.com/vgi");
@@ -150,6 +150,116 @@ describe("HTTP Auth", () => {
     );
     expect(resp.status).toBe(200);
     expect(authCalled).toBe(false);
+  });
+
+  test("well-known endpoint includes client_id when configured", async () => {
+    const handler = createHttpHandler(makeProtocol(), {
+      oauthResourceMetadata: {
+        resource: "https://api.example.com/vgi",
+        authorizationServers: ["https://auth.example.com"],
+        clientId: "my-app",
+      },
+    });
+
+    const resp = await handler(
+      new Request("http://localhost/.well-known/oauth-protected-resource/vgi", {
+        method: "GET",
+      }),
+    );
+    expect(resp.status).toBe(200);
+    const json = await resp.json();
+    expect(json.client_id).toBe("my-app");
+  });
+
+  test("well-known endpoint includes client_secret when configured", async () => {
+    const handler = createHttpHandler(makeProtocol(), {
+      oauthResourceMetadata: {
+        resource: "https://api.example.com/vgi",
+        authorizationServers: ["https://auth.example.com"],
+        clientSecret: "s3cret",
+      },
+    });
+
+    const resp = await handler(
+      new Request("http://localhost/.well-known/oauth-protected-resource/vgi", {
+        method: "GET",
+      }),
+    );
+    expect(resp.status).toBe(200);
+    const json = await resp.json();
+    expect(json.client_secret).toBe("s3cret");
+  });
+
+  test("well-known endpoint includes use_id_token_as_bearer when configured", async () => {
+    const handler = createHttpHandler(makeProtocol(), {
+      oauthResourceMetadata: {
+        resource: "https://api.example.com/vgi",
+        authorizationServers: ["https://auth.example.com"],
+        useIdTokenAsBearer: true,
+      },
+    });
+
+    const resp = await handler(
+      new Request("http://localhost/.well-known/oauth-protected-resource/vgi", {
+        method: "GET",
+      }),
+    );
+    expect(resp.status).toBe(200);
+    const json = await resp.json();
+    expect(json.use_id_token_as_bearer).toBe(true);
+  });
+
+  test("401 WWW-Authenticate header includes client_secret and use_id_token_as_bearer", async () => {
+    const handler = createHttpHandler(makeProtocol(), {
+      authenticate: async () => {
+        throw new Error("Unauthorized");
+      },
+      oauthResourceMetadata: {
+        resource: "https://api.example.com/vgi",
+        authorizationServers: ["https://auth.example.com"],
+        clientId: "my-app",
+        clientSecret: "s3cret",
+        useIdTokenAsBearer: true,
+      },
+    });
+
+    const body = makeArrowBody();
+    const resp = await handler(
+      new Request("http://localhost/vgi/echo", {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body,
+      }),
+    );
+    expect(resp.status).toBe(401);
+    const wwwAuth = resp.headers.get("WWW-Authenticate");
+    expect(wwwAuth).toContain('client_secret="s3cret"');
+    expect(wwwAuth).toContain('use_id_token_as_bearer="true"');
+  });
+
+  test("401 WWW-Authenticate header includes client_id when configured", async () => {
+    const handler = createHttpHandler(makeProtocol(), {
+      authenticate: async () => {
+        throw new Error("Unauthorized");
+      },
+      oauthResourceMetadata: {
+        resource: "https://api.example.com/vgi",
+        authorizationServers: ["https://auth.example.com"],
+        clientId: "my-app",
+      },
+    });
+
+    const body = makeArrowBody();
+    const resp = await handler(
+      new Request("http://localhost/vgi/echo", {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body,
+      }),
+    );
+    expect(resp.status).toBe(401);
+    const wwwAuth = resp.headers.get("WWW-Authenticate");
+    expect(wwwAuth).toContain('client_id="my-app"');
   });
 
   test("401 includes WWW-Authenticate header when metadata configured", async () => {
@@ -222,6 +332,70 @@ describe("oauthResourceMetadataToJson", () => {
     expect(json.resource_name).toBe("My API");
     expect(json.bearer_methods_supported).toBeUndefined();
   });
+
+  test("includes client_id when set", () => {
+    const json = oauthResourceMetadataToJson({
+      resource: "https://api.example.com",
+      authorizationServers: ["https://auth.example.com"],
+      clientId: "my-client-app",
+    });
+    expect(json.client_id).toBe("my-client-app");
+  });
+
+  test("omits client_id when not set", () => {
+    const json = oauthResourceMetadataToJson({
+      resource: "https://api.example.com",
+      authorizationServers: ["https://auth.example.com"],
+    });
+    expect(json.client_id).toBeUndefined();
+  });
+
+  test("includes client_secret when set", () => {
+    const json = oauthResourceMetadataToJson({
+      resource: "https://api.example.com",
+      authorizationServers: ["https://auth.example.com"],
+      clientSecret: "s3cret",
+    });
+    expect(json.client_secret).toBe("s3cret");
+  });
+
+  test("throws on invalid client_secret characters", () => {
+    expect(() =>
+      oauthResourceMetadataToJson({
+        resource: "https://api.example.com",
+        authorizationServers: ["https://auth.example.com"],
+        clientSecret: "bad secret!",
+      }),
+    ).toThrow("Invalid client_secret");
+  });
+
+  test("includes use_id_token_as_bearer when true", () => {
+    const json = oauthResourceMetadataToJson({
+      resource: "https://api.example.com",
+      authorizationServers: ["https://auth.example.com"],
+      useIdTokenAsBearer: true,
+    });
+    expect(json.use_id_token_as_bearer).toBe(true);
+  });
+
+  test("omits use_id_token_as_bearer when false or unset", () => {
+    const json = oauthResourceMetadataToJson({
+      resource: "https://api.example.com",
+      authorizationServers: ["https://auth.example.com"],
+      useIdTokenAsBearer: false,
+    });
+    expect(json.use_id_token_as_bearer).toBeUndefined();
+  });
+
+  test("throws on invalid client_id characters", () => {
+    expect(() =>
+      oauthResourceMetadataToJson({
+        resource: "https://api.example.com",
+        authorizationServers: ["https://auth.example.com"],
+        clientId: "bad client id!",
+      }),
+    ).toThrow("Invalid client_id");
+  });
 });
 
 describe("wellKnownPath", () => {
@@ -239,5 +413,30 @@ describe("buildWwwAuthenticateHeader", () => {
   test("with metadata URL", () => {
     const header = buildWwwAuthenticateHeader("https://example.com/.well-known/oauth-protected-resource/vgi");
     expect(header).toBe('Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi"');
+  });
+
+  test("with metadata URL and client_id", () => {
+    const header = buildWwwAuthenticateHeader("https://example.com/.well-known/oauth-protected-resource/vgi", "my-client");
+    expect(header).toBe('Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi", client_id="my-client"');
+  });
+
+  test("with client_id only", () => {
+    const header = buildWwwAuthenticateHeader(undefined, "my-client");
+    expect(header).toBe('Bearer, client_id="my-client"');
+  });
+
+  test("with client_secret", () => {
+    const header = buildWwwAuthenticateHeader(undefined, undefined, "s3cret");
+    expect(header).toBe('Bearer, client_secret="s3cret"');
+  });
+
+  test("with use_id_token_as_bearer", () => {
+    const header = buildWwwAuthenticateHeader(undefined, undefined, undefined, true);
+    expect(header).toBe('Bearer, use_id_token_as_bearer="true"');
+  });
+
+  test("with all parameters", () => {
+    const header = buildWwwAuthenticateHeader("https://example.com/meta", "my-client", "s3cret", true);
+    expect(header).toBe('Bearer resource_metadata="https://example.com/meta", client_id="my-client", client_secret="s3cret", use_id_token_as_bearer="true"');
   });
 });
