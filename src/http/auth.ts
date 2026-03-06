@@ -20,6 +20,10 @@ export interface OAuthResourceMetadata {
   clientId?: string;
   /** OAuth client_secret that clients should use with the authorization server. */
   clientSecret?: string;
+  /** OAuth client_id for device code flow. */
+  deviceCodeClientId?: string;
+  /** OAuth client_secret for device code flow. */
+  deviceCodeClientSecret?: string;
   /** When true, clients should use the OIDC id_token as the Bearer token instead of access_token. */
   useIdTokenAsBearer?: boolean;
 }
@@ -48,6 +52,18 @@ export function oauthResourceMetadataToJson(metadata: OAuthResourceMetadata): Re
     }
     json.client_secret = metadata.clientSecret;
   }
+  if (metadata.deviceCodeClientId) {
+    if (!/^[A-Za-z0-9\-._~]+$/.test(metadata.deviceCodeClientId)) {
+      throw new Error(`Invalid device_code_client_id: must contain only URL-safe characters [A-Za-z0-9\\-._~]`);
+    }
+    json.device_code_client_id = metadata.deviceCodeClientId;
+  }
+  if (metadata.deviceCodeClientSecret) {
+    if (!/^[A-Za-z0-9\-._~]+$/.test(metadata.deviceCodeClientSecret)) {
+      throw new Error(`Invalid device_code_client_secret: must contain only URL-safe characters [A-Za-z0-9\\-._~]`);
+    }
+    json.device_code_client_secret = metadata.deviceCodeClientSecret;
+  }
   if (metadata.useIdTokenAsBearer) {
     json.use_id_token_as_bearer = true;
   }
@@ -59,12 +75,14 @@ export function wellKnownPath(prefix: string): string {
   return `/.well-known/oauth-protected-resource${prefix}`;
 }
 
-/** Build a WWW-Authenticate header value with optional resource_metadata URL, client_id, client_secret, and use_id_token_as_bearer. */
+/** Build a WWW-Authenticate header value with optional resource_metadata URL, client_id, client_secret, device_code_client_id, device_code_client_secret, and use_id_token_as_bearer. */
 export function buildWwwAuthenticateHeader(
   metadataUrl?: string,
   clientId?: string,
   clientSecret?: string,
   useIdTokenAsBearer?: boolean,
+  deviceCodeClientId?: string,
+  deviceCodeClientSecret?: string,
 ): string {
   let header = "Bearer";
   if (metadataUrl) {
@@ -75,6 +93,12 @@ export function buildWwwAuthenticateHeader(
   }
   if (clientSecret) {
     header += `, client_secret="${clientSecret}"`;
+  }
+  if (deviceCodeClientId) {
+    header += `, device_code_client_id="${deviceCodeClientId}"`;
+  }
+  if (deviceCodeClientSecret) {
+    header += `, device_code_client_secret="${deviceCodeClientSecret}"`;
   }
   if (useIdTokenAsBearer) {
     header += `, use_id_token_as_bearer="true"`;

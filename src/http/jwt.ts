@@ -8,8 +8,8 @@ import type { AuthenticateFn } from "./auth.js";
 export interface JwtAuthenticateOptions {
   /** The expected `iss` claim (also used to discover AS metadata). */
   issuer: string;
-  /** The expected `aud` claim. */
-  audience: string;
+  /** The expected `aud` claim. If an array, tries each audience in order. */
+  audience: string | string[];
   /** Explicit JWKS URI. If omitted, discovered from issuer metadata. */
   jwksUri?: string;
   /** JWT claim to use as the principal. Default: "sub". */
@@ -58,7 +58,21 @@ export function jwtAuthenticate(options: JwtAuthenticateOptions): AuthenticateFn
     }
 
     // validateJwtAccessToken throws on failure, returns claims on success
-    const claims = await oauth.validateJwtAccessToken(as, request, audience);
+    // oauth4webapi only accepts a single string, so iterate if multiple audiences
+    const audiences = Array.isArray(audience) ? audience : [audience];
+    let claims: oauth.JWTAccessTokenClaims | undefined;
+    let lastError: unknown;
+    for (const aud of audiences) {
+      try {
+        claims = await oauth.validateJwtAccessToken(as, request, aud);
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!claims) {
+      throw lastError;
+    }
     const principal = (claims[principalClaim] as string | undefined) ?? null;
 
     return new AuthContext(domain, true, principal, claims as unknown as Record<string, any>);

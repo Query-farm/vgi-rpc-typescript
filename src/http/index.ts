@@ -9,6 +9,14 @@ export { ARROW_CONTENT_TYPE } from "./common.js";
 export { createHttpHandler } from "./handler.js";
 export type { JwtAuthenticateOptions } from "./jwt.js";
 export { jwtAuthenticate } from "./jwt.js";
+export type { CertValidateFn, XfccElement, XfccValidateFn } from "./mtls.js";
+export {
+  mtlsAuthenticate,
+  mtlsAuthenticateFingerprint,
+  mtlsAuthenticateSubject,
+  mtlsAuthenticateXfcc,
+  parseXfcc,
+} from "./mtls.js";
 export { type UnpackedToken, unpackStateToken } from "./token.js";
 export type { HttpHandlerOptions, StateSerializer } from "./types.js";
 export { jsonStateSerializer } from "./types.js";

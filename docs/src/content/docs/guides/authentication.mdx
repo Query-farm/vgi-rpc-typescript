@@ -1,0 +1,264 @@
+---
+title: Authentication
+description: Authenticate HTTP requests with bearer tokens, JWT, mTLS, or custom strategies.
+---
+
+vgi-rpc provides built-in authentication factories for common strategies. Each factory returns an `AuthenticateFn` that you pass to `createHttpHandler`. You can also combine multiple strategies with `chainAuthenticate`.
+
+## AuthContext
+
+Every authenticate callback returns an `AuthContext` on success:
+
+```typescript
+import { AuthContext } from "@query-farm/vgi-rpc";
+
+const ctx = new AuthContext(
+  "mtls",        // domain — identifies the auth method
+  true,          // authenticated
+  "alice",       // principal — the identity
+  { role: "admin" }, // claims — arbitrary metadata
+);
+```
+
+Handlers access the context via `ctx.auth`:
+
+```typescript
+handler: (params, ctx) => {
+  ctx.auth.requireAuthenticated(); // throws if not authenticated
+  return { user: ctx.auth.principal };
+},
+```
+
+## Bearer token
+
+### Custom validation
+
+For API keys, opaque tokens, or tokens validated against an external service:
+
+```typescript
+import { bearerAuthenticate, AuthContext } from "@query-farm/vgi-rpc";
+
+const auth = bearerAuthenticate({
+  validate: (token) => {
+    const user = db.getUserByApiKey(token);
+    if (!user) throw new Error("Invalid API key");
+    return new AuthContext("apikey", true, user.name, { role: user.role });
+  },
+});
+```
+
+### Static token map
+
+For development, testing, or a small number of pre-shared keys. Uses constant-time comparison:
+
+```typescript
+import { bearerAuthenticateStatic, AuthContext } from "@query-farm/vgi-rpc";
+
+const auth = bearerAuthenticateStatic({
+  tokens: {
+    "key-abc123": new AuthContext("apikey", true, "alice"),
+    "key-def456": new AuthContext("apikey", true, "bob", { role: "admin" }),
+  },
+});
+```
+
+Accepts `Record<string, AuthContext>` or `ReadonlyMap<string, AuthContext>`.
+
+## JWT
+
+Validates JWT tokens using OIDC discovery. Requires the `oauth4webapi` peer dependency.
+
+```typescript
+import { jwtAuthenticate } from "@query-farm/vgi-rpc";
+
+const auth = jwtAuthenticate({
+  issuer: "https://auth.example.com",
+  audience: "https://api.example.com/vgi",
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `issuer` | `string` | required | Expected `iss` claim (used for OIDC discovery) |
+| `audience` | `string` | required | Expected `aud` claim |
+| `jwksUri` | `string` | — | Explicit JWKS URL (discovered from issuer if omitted) |
+| `principalClaim` | `string` | `"sub"` | JWT claim to use as `principal` |
+| `domain` | `string` | `"jwt"` | `AuthContext.domain` value |
+
+## Mutual TLS (mTLS)
+
+For proxy-terminated mTLS connections where the reverse proxy forwards client certificate information in HTTP headers. Two approaches are supported:
+
+- **PEM-in-header** — the proxy forwards the URL-encoded PEM certificate (e.g., nginx `X-SSL-Client-Cert`, AWS ALB `X-Amzn-Mtls-Clientcert`)
+- **XFCC** — the proxy forwards an Envoy `x-forwarded-client-cert` structured header
+
+:::caution[Header spoofing]
+The reverse proxy **must** strip client-supplied certificate headers before forwarding. These factories trust the header unconditionally. No certificate chain validation is performed — that is the proxy's responsibility.
+:::
+
+### Subject CN (simplest)
+
+Extracts the Subject Common Name as `principal` and populates claims with the DN, serial number, and expiry:
+
+```typescript
+import { mtlsAuthenticateSubject } from "@query-farm/vgi-rpc";
+
+const auth = mtlsAuthenticateSubject({
+  allowedSubjects: new Set(["my-service", "other-service"]),
+  checkExpiry: true,
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `header` | `string` | `"X-SSL-Client-Cert"` | Header containing URL-encoded PEM |
+| `domain` | `string` | `"mtls"` | `AuthContext.domain` value |
+| `allowedSubjects` | `ReadonlySet<string> \| null` | `null` | Restrict accepted CNs (null = accept any) |
+| `checkExpiry` | `boolean` | `false` | Reject expired or not-yet-valid certificates |
+
+The returned `AuthContext` has these claims:
+
+| Claim | Description |
+|-------|-------------|
+| `subject_dn` | Full DN string (e.g., `"CN=my-service"`) |
+| `serial` | Serial number as hex string |
+| `not_valid_after` | Expiry as ISO 8601 string |
+
+### Fingerprint lookup
+
+Maps certificate fingerprints to pre-configured identities. Useful when you have a known set of client certificates:
+
+```typescript
+import { mtlsAuthenticateFingerprint, AuthContext } from "@query-farm/vgi-rpc";
+
+const auth = mtlsAuthenticateFingerprint({
+  fingerprints: {
+    "a1b2c3d4...": new AuthContext("mtls", true, "service-a"),
+    "e5f6a7b8...": new AuthContext("mtls", true, "service-b", { env: "prod" }),
+  },
+  algorithm: "sha256", // default; also supports sha1, sha384, sha512
+});
+```
+
+Fingerprints must be **lowercase hex without colons**. Throws at construction time if the algorithm is unsupported.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `fingerprints` | `Record<string, AuthContext> \| ReadonlyMap<string, AuthContext>` | required | Fingerprint-to-context map |
+| `header` | `string` | `"X-SSL-Client-Cert"` | Header containing URL-encoded PEM |
+| `algorithm` | `string` | `"sha256"` | Hash algorithm |
+| `checkExpiry` | `boolean` | `false` | Reject expired certificates |
+
+### Custom validation
+
+For full control over certificate inspection:
+
+```typescript
+import { mtlsAuthenticate, AuthContext } from "@query-farm/vgi-rpc";
+import type { X509Certificate } from "node:crypto";
+
+const auth = mtlsAuthenticate({
+  validate: (cert: X509Certificate) => {
+    // Inspect cert.subject, cert.issuer, cert.serialNumber, etc.
+    return new AuthContext("mtls", true, "my-principal", {});
+  },
+  header: "X-Amzn-Mtls-Clientcert", // AWS ALB header
+  checkExpiry: true,
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `validate` | `CertValidateFn` | required | Receives `X509Certificate`, returns `AuthContext` or throws |
+| `header` | `string` | `"X-SSL-Client-Cert"` | Header containing URL-encoded PEM |
+| `checkExpiry` | `boolean` | `false` | Check validity period before calling validate |
+
+### XFCC (Envoy)
+
+Parses the `x-forwarded-client-cert` structured header set by Envoy proxy. Does not require certificate parsing — works with the structured fields directly:
+
+```typescript
+import { mtlsAuthenticateXfcc } from "@query-farm/vgi-rpc";
+
+const auth = mtlsAuthenticateXfcc();
+// Extracts CN from Subject field as principal
+```
+
+With custom validation:
+
+```typescript
+import { mtlsAuthenticateXfcc, AuthContext } from "@query-farm/vgi-rpc";
+import type { XfccElement } from "@query-farm/vgi-rpc";
+
+const auth = mtlsAuthenticateXfcc({
+  validate: (element: XfccElement) => {
+    if (element.hash !== "expected-hash") throw new Error("Unknown client");
+    return new AuthContext("xfcc", true, "trusted-service", {});
+  },
+  selectElement: "first", // "first" (original client) or "last" (nearest proxy)
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `validate` | `XfccValidateFn` | — | Custom validation (default: extract CN from Subject) |
+| `domain` | `string` | `"mtls"` | `AuthContext.domain` value |
+| `selectElement` | `"first" \| "last"` | `"first"` | Which element to use when multiple are present |
+
+## Chaining authenticators
+
+Accept multiple authentication methods on the same endpoint with `chainAuthenticate`. Authenticators are tried in order — credential errors (plain `Error`) fall through to the next; other exceptions propagate immediately.
+
+```typescript
+import {
+  chainAuthenticate,
+  mtlsAuthenticateSubject,
+  bearerAuthenticateStatic,
+  AuthContext,
+} from "@query-farm/vgi-rpc";
+
+const auth = chainAuthenticate(
+  mtlsAuthenticateSubject({ allowedSubjects: new Set(["my-service"]) }),
+  bearerAuthenticateStatic({
+    tokens: { "sk-ci-bot": new AuthContext("apikey", true, "ci-bot") },
+  }),
+);
+
+const handler = createHttpHandler(protocol, {
+  signingKey: myKey,
+  authenticate: auth,
+});
+```
+
+When a request arrives with a client certificate header, mTLS is tried first. If the header is missing, the chain falls through to bearer token authentication.
+
+| Scenario | Exception type | Result |
+|----------|----------------|--------|
+| Credentials accepted | *(none)* | Returns `AuthContext`, stops chain |
+| Bad / missing credentials | Plain `Error` | Tries next authenticator |
+| Authenticated but forbidden | `Error` with `name === "PermissionError"` | Propagates immediately |
+| Bug in authenticator | `TypeError`, `RangeError`, etc. | Propagates immediately |
+
+## Wiring it up
+
+Pass any authenticate callback to `createHttpHandler`:
+
+```typescript
+import { Protocol, createHttpHandler, float } from "@query-farm/vgi-rpc";
+
+const protocol = new Protocol("MyService");
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: ({ a, b }) => ({ result: a + b }),
+});
+
+const handler = createHttpHandler(protocol, {
+  signingKey: myKey,
+  authenticate: auth, // any AuthenticateFn from above
+});
+
+Bun.serve({ port: 8080, fetch: handler });
+```
+
+Unauthenticated requests receive a `401 Unauthorized` response.

@@ -90,68 +90,34 @@ The handler automatically responds to `OPTIONS` preflight requests.
 
 ## Authentication
 
-### Bearer token authentication
+Pass an `authenticate` callback to protect your endpoints. vgi-rpc ships with factories for bearer tokens, JWT, mTLS, and XFCC. See the [Authentication guide](/guides/authentication/) for full details.
 
-For API keys, opaque tokens, or any non-JWT bearer token, use `bearerAuthenticate`:
-
-```typescript
-import { Protocol, createHttpHandler, bearerAuthenticate, AuthContext } from "vgi-rpc";
-
-const auth = bearerAuthenticate({
-  validate: (token) => {
-    // Look up token in database, call an introspection endpoint, etc.
-    const user = db.getUserByApiKey(token);
-    if (!user) throw new Error("Invalid API key");
-    return new AuthContext("apikey", true, user.name, { role: user.role });
-  },
-});
-
-const handler = createHttpHandler(protocol, {
-  signingKey: myKey,
-  authenticate: auth,
-});
-```
-
-### Static token map
-
-For development, testing, or a small number of pre-shared API keys:
+Quick example with bearer tokens:
 
 ```typescript
-import { bearerAuthenticateStatic, AuthContext } from "vgi-rpc";
+import { createHttpHandler, bearerAuthenticateStatic, AuthContext } from "vgi-rpc";
 
 const auth = bearerAuthenticateStatic({
   tokens: {
     "key-abc123": new AuthContext("apikey", true, "alice"),
-    "key-def456": new AuthContext("apikey", true, "bob", { role: "admin" }),
   },
 });
-```
-
-### Chaining authenticators
-
-Accept **both** JWT and API key tokens on the same server with `chainAuthenticate`. Authenticators are tried in order — credential errors fall through to the next; other exceptions propagate immediately.
-
-```typescript
-import { chainAuthenticate, jwtAuthenticate, bearerAuthenticateStatic, AuthContext } from "vgi-rpc";
-
-const jwtAuth = jwtAuthenticate({
-  issuer: "https://auth.example.com",
-  audience: "https://api.example.com/vgi",
-});
-
-const apiKeyAuth = bearerAuthenticateStatic({
-  tokens: {
-    "sk-service-account": new AuthContext("apikey", true, "ci-bot"),
-  },
-});
-
-// Try JWT first, fall back to API key lookup
-const auth = chainAuthenticate(jwtAuth, apiKeyAuth);
 
 const handler = createHttpHandler(protocol, {
   signingKey: myKey,
   authenticate: auth,
 });
+```
+
+Multiple strategies can be combined with `chainAuthenticate` — for example, accepting both mTLS and bearer tokens:
+
+```typescript
+import { chainAuthenticate, mtlsAuthenticateSubject, bearerAuthenticateStatic } from "vgi-rpc";
+
+const auth = chainAuthenticate(
+  mtlsAuthenticateSubject({ allowedSubjects: new Set(["my-service"]) }),
+  bearerAuthenticateStatic({ tokens: { "sk-ci": new AuthContext("apikey", true, "ci-bot") } }),
+);
 ```
 
 ## Testing with the CLI

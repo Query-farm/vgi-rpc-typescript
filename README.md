@@ -15,6 +15,7 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 - **Type-safe streaming state** — generic `<S>` parameter threads state types through init and produce/exchange functions
 - **Runtime introspection** — opt-in `__describe__` method for dynamic service discovery via the CLI
 - **Result validation** — missing required fields in handler results throw descriptive errors at emit time
+- **Authentication** — bearer tokens, JWT, mTLS (PEM-in-header and XFCC), with chainable authenticators
 - **Three client transports** — HTTP, subprocess, and raw pipe, all sharing a unified `RpcClient` interface
 
 ## Installation
@@ -296,6 +297,52 @@ handler: async ({ a, b }) => {
 ```
 
 Errors are transmitted as zero-row Arrow batches with `EXCEPTION`-level metadata. The transport remains clean for subsequent requests.
+
+## Authentication
+
+The HTTP handler supports pluggable authentication. Built-in factories cover common strategies:
+
+```typescript
+import {
+  createHttpHandler,
+  chainAuthenticate,
+  mtlsAuthenticateSubject,
+  bearerAuthenticateStatic,
+  jwtAuthenticate,
+  AuthContext,
+} from "@query-farm/vgi-rpc";
+
+// mTLS via proxy-forwarded client certificate
+const mtlsAuth = mtlsAuthenticateSubject({
+  allowedSubjects: new Set(["my-service"]),
+});
+
+// Static API key map
+const apiKeyAuth = bearerAuthenticateStatic({
+  tokens: { "sk-abc123": new AuthContext("apikey", true, "ci-bot") },
+});
+
+// Chain: try mTLS first, fall back to API key
+const auth = chainAuthenticate(mtlsAuth, apiKeyAuth);
+
+const handler = createHttpHandler(protocol, {
+  signingKey: myKey,
+  authenticate: auth,
+});
+```
+
+Available factories:
+
+| Factory | Description |
+|---------|-------------|
+| `bearerAuthenticate` | Custom bearer token validation |
+| `bearerAuthenticateStatic` | Static token map with constant-time comparison |
+| `jwtAuthenticate` | JWT validation via OIDC discovery |
+| `mtlsAuthenticate` | Custom X.509 certificate validation |
+| `mtlsAuthenticateFingerprint` | Certificate fingerprint lookup |
+| `mtlsAuthenticateSubject` | Subject CN extraction with optional allowlist |
+| `mtlsAuthenticateXfcc` | Envoy `x-forwarded-client-cert` header |
+| `chainAuthenticate` | Try multiple strategies in order |
 
 ## Testing with the Python CLI
 

@@ -169,7 +169,7 @@ export function createHttpHandler(
           const metadataUrl = new URL(request.url);
           metadataUrl.pathname = wellKnownPath(prefix);
           metadataUrl.search = "";
-          headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString(), oauthMetadata.clientId, oauthMetadata.clientSecret, oauthMetadata.useIdTokenAsBearer));
+          headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString(), oauthMetadata.clientId, oauthMetadata.clientSecret, oauthMetadata.useIdTokenAsBearer, oauthMetadata.deviceCodeClientId, oauthMetadata.deviceCodeClientSecret));
         }
         return new Response(error.message || "Unauthorized", { status: 401, headers });
       }
