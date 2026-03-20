@@ -7,6 +7,7 @@ export interface OAuthResourceMetadataResponse {
   authorizationServers: string[];
   scopesSupported?: string[];
   bearerMethodsSupported?: string[];
+  resourceSigningAlgValuesSupported?: string[];
   resourceName?: string;
   resourceDocumentation?: string;
   resourcePolicyUri?: string;
@@ -17,6 +18,10 @@ export interface OAuthResourceMetadataResponse {
   clientSecret?: string;
   /** When true, use the OIDC id_token as the Bearer token instead of access_token. */
   useIdTokenAsBearer?: boolean;
+  /** OAuth client_id for device code flow. */
+  deviceCodeClientId?: string;
+  /** OAuth client_secret for device code flow. */
+  deviceCodeClientSecret?: string;
 }
 
 function parseMetadataJson(json: Record<string, any>): OAuthResourceMetadataResponse {
@@ -26,6 +31,7 @@ function parseMetadataJson(json: Record<string, any>): OAuthResourceMetadataResp
   };
   if (json.scopes_supported) result.scopesSupported = json.scopes_supported;
   if (json.bearer_methods_supported) result.bearerMethodsSupported = json.bearer_methods_supported;
+  if (json.resource_signing_alg_values_supported) result.resourceSigningAlgValuesSupported = json.resource_signing_alg_values_supported;
   if (json.resource_name) result.resourceName = json.resource_name;
   if (json.resource_documentation) result.resourceDocumentation = json.resource_documentation;
   if (json.resource_policy_uri) result.resourcePolicyUri = json.resource_policy_uri;
@@ -33,6 +39,8 @@ function parseMetadataJson(json: Record<string, any>): OAuthResourceMetadataResp
   if (json.client_id) result.clientId = json.client_id;
   if (json.client_secret) result.clientSecret = json.client_secret;
   if (json.use_id_token_as_bearer) result.useIdTokenAsBearer = json.use_id_token_as_bearer;
+  if (json.device_code_client_id) result.deviceCodeClientId = json.device_code_client_id;
+  if (json.device_code_client_secret) result.deviceCodeClientSecret = json.device_code_client_secret;
   return result;
 }
 
@@ -125,4 +133,34 @@ export function parseUseIdTokenAsBearer(wwwAuthenticate: string): boolean {
   if (!match) return false;
 
   return match[1] === "true";
+}
+
+/**
+ * Extract the `device_code_client_id` from a WWW-Authenticate Bearer challenge.
+ * Returns `null` if no device_code_client_id parameter is found.
+ */
+export function parseDeviceCodeClientId(wwwAuthenticate: string): string | null {
+  const bearerMatch = wwwAuthenticate.match(/^Bearer\s+(.*)/i);
+  if (!bearerMatch) return null;
+
+  const params = bearerMatch[1];
+  const match = params.match(/device_code_client_id="([^"]+)"/);
+  if (!match) return null;
+
+  return match[1];
+}
+
+/**
+ * Extract the `device_code_client_secret` from a WWW-Authenticate Bearer challenge.
+ * Returns `null` if no device_code_client_secret parameter is found.
+ */
+export function parseDeviceCodeClientSecret(wwwAuthenticate: string): string | null {
+  const bearerMatch = wwwAuthenticate.match(/^Bearer\s+(.*)/i);
+  if (!bearerMatch) return null;
+
+  const params = bearerMatch[1];
+  const match = params.match(/device_code_client_secret="([^"]+)"/);
+  if (!match) return null;
+
+  return match[1];
 }

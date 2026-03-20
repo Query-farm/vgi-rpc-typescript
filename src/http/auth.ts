@@ -12,6 +12,7 @@ export interface OAuthResourceMetadata {
   authorizationServers: string[];
   scopesSupported?: string[];
   bearerMethodsSupported?: string[];
+  resourceSigningAlgValuesSupported?: string[];
   resourceName?: string;
   resourceDocumentation?: string;
   resourcePolicyUri?: string;
@@ -36,6 +37,7 @@ export function oauthResourceMetadataToJson(metadata: OAuthResourceMetadata): Re
   };
   if (metadata.scopesSupported) json.scopes_supported = metadata.scopesSupported;
   if (metadata.bearerMethodsSupported) json.bearer_methods_supported = metadata.bearerMethodsSupported;
+  if (metadata.resourceSigningAlgValuesSupported) json.resource_signing_alg_values_supported = metadata.resourceSigningAlgValuesSupported;
   if (metadata.resourceName) json.resource_name = metadata.resourceName;
   if (metadata.resourceDocumentation) json.resource_documentation = metadata.resourceDocumentation;
   if (metadata.resourcePolicyUri) json.resource_policy_uri = metadata.resourcePolicyUri;

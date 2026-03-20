@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { AuthContext } from "../src/auth.js";
 import { httpConnect } from "../src/client/connect.js";
-import { parseClientId, parseClientSecret, parseResourceMetadataUrl, parseUseIdTokenAsBearer } from "../src/client/oauth.js";
+import { parseClientId, parseClientSecret, parseDeviceCodeClientId, parseDeviceCodeClientSecret, parseResourceMetadataUrl, parseUseIdTokenAsBearer } from "../src/client/oauth.js";
 import { RpcError } from "../src/errors.js";
 import { createHttpHandler } from "../src/http/handler.js";
 import { Protocol } from "../src/protocol.js";
@@ -88,6 +88,50 @@ describe("parseUseIdTokenAsBearer", () => {
   test("returns false when value is not true", () => {
     const result = parseUseIdTokenAsBearer('Bearer use_id_token_as_bearer="false"');
     expect(result).toBe(false);
+  });
+});
+
+describe("parseDeviceCodeClientId", () => {
+  test("extracts device_code_client_id from Bearer challenge", () => {
+    const id = parseDeviceCodeClientId(
+      'Bearer resource_metadata="https://example.com/meta", device_code_client_id="my-device-app"',
+    );
+    expect(id).toBe("my-device-app");
+  });
+
+  test("returns null when device_code_client_id absent", () => {
+    const id = parseDeviceCodeClientId('Bearer resource_metadata="https://example.com/foo"');
+    expect(id).toBeNull();
+  });
+
+  test("returns null for non-Bearer headers", () => {
+    expect(parseDeviceCodeClientId('Basic realm="test"')).toBeNull();
+  });
+
+  test("returns null for empty string", () => {
+    expect(parseDeviceCodeClientId("")).toBeNull();
+  });
+});
+
+describe("parseDeviceCodeClientSecret", () => {
+  test("extracts device_code_client_secret from Bearer challenge", () => {
+    const secret = parseDeviceCodeClientSecret(
+      'Bearer resource_metadata="https://example.com/meta", device_code_client_secret="my-device-secret"',
+    );
+    expect(secret).toBe("my-device-secret");
+  });
+
+  test("returns null when device_code_client_secret absent", () => {
+    const secret = parseDeviceCodeClientSecret('Bearer resource_metadata="https://example.com/foo"');
+    expect(secret).toBeNull();
+  });
+
+  test("returns null for non-Bearer headers", () => {
+    expect(parseDeviceCodeClientSecret('Basic realm="test"')).toBeNull();
+  });
+
+  test("returns null for empty string", () => {
+    expect(parseDeviceCodeClientSecret("")).toBeNull();
   });
 });
 
