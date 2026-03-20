@@ -15,14 +15,7 @@
 //   vgi-rpc --url http://localhost:8080 -H "Authorization: Bearer alice" call whoami
 //   vgi-rpc --url http://localhost:8080 -H "Authorization: Bearer alice" call secret_data
 
-import {
-  AuthContext,
-  bearerAuthenticate,
-  createHttpHandler,
-  Protocol,
-  str,
-  type CallContext,
-} from "../src/index.js";
+import { AuthContext, bearerAuthenticate, type CallContext, createHttpHandler, Protocol, str } from "../src/index.js";
 
 // ---------------------------------------------------------------------------
 // 1. Define an authenticate callback
@@ -74,7 +67,6 @@ protocol.unary("secret_data", {
 // ---------------------------------------------------------------------------
 
 const handler = createHttpHandler(protocol, {
-  prefix: "/vgi",
   authenticate,
   oauthResourceMetadata: {
     resource: "https://api.example.com/vgi",

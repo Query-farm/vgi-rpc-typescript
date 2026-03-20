@@ -37,7 +37,7 @@ export function createHttpHandler(
   protocol: Protocol,
   options?: HttpHandlerOptions,
 ): (request: Request) => Response | Promise<Response> {
-  const prefix = (options?.prefix ?? "/vgi").replace(/\/+$/, "");
+  const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
   const signingKey = options?.signingKey ?? randomBytes(32);
   const tokenTtl = options?.tokenTtl ?? 3600;
   const corsOrigins = options?.corsOrigins;
@@ -169,7 +169,17 @@ export function createHttpHandler(
           const metadataUrl = new URL(request.url);
           metadataUrl.pathname = wellKnownPath(prefix);
           metadataUrl.search = "";
-          headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString(), oauthMetadata.clientId, oauthMetadata.clientSecret, oauthMetadata.useIdTokenAsBearer, oauthMetadata.deviceCodeClientId, oauthMetadata.deviceCodeClientSecret));
+          headers.set(
+            "WWW-Authenticate",
+            buildWwwAuthenticateHeader(
+              metadataUrl.toString(),
+              oauthMetadata.clientId,
+              oauthMetadata.clientSecret,
+              oauthMetadata.useIdTokenAsBearer,
+              oauthMetadata.deviceCodeClientId,
+              oauthMetadata.deviceCodeClientSecret,
+            ),
+          );
         }
         return new Response(error.message || "Unauthorized", { status: 401, headers });
       }

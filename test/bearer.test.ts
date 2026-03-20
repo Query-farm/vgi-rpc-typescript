@@ -5,8 +5,8 @@ import { describe, expect, it } from "bun:test";
 import { RecordBatch, RecordBatchStreamWriter, recordBatchFromArrays } from "@query-farm/apache-arrow";
 import { AuthContext } from "../src/auth.js";
 import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../src/constants.js";
-import { ARROW_CONTENT_TYPE } from "../src/http/common.js";
 import { bearerAuthenticate, bearerAuthenticateStatic, chainAuthenticate } from "../src/http/bearer.js";
+import { ARROW_CONTENT_TYPE } from "../src/http/common.js";
 import { createHttpHandler } from "../src/http/handler.js";
 import { Protocol } from "../src/protocol.js";
 import { str, toSchema } from "../src/schema.js";
@@ -17,7 +17,7 @@ const BOB = new AuthContext("apikey", true, "bob", { role: "admin" });
 function makeRequest(authorization?: string): Request {
   const headers: Record<string, string> = {};
   if (authorization) headers.Authorization = authorization;
-  return new Request("http://localhost/vgi/test", { method: "POST", headers });
+  return new Request("http://localhost/test", { method: "POST", headers });
 }
 
 function makeArrowBody(methodName: string): Uint8Array {
@@ -185,7 +185,7 @@ describe("bearer + HTTP handler integration", () => {
     const handler = createHttpHandler(makeProtocol(), { authenticate: auth });
     const body = makeArrowBody("whoami");
     const resp = await handler(
-      new Request("http://localhost/vgi/whoami", {
+      new Request("http://localhost/whoami", {
         method: "POST",
         headers: {
           "Content-Type": ARROW_CONTENT_TYPE,
@@ -202,7 +202,7 @@ describe("bearer + HTTP handler integration", () => {
     const handler = createHttpHandler(makeProtocol(), { authenticate: auth });
     const body = makeArrowBody("whoami");
     const resp = await handler(
-      new Request("http://localhost/vgi/whoami", {
+      new Request("http://localhost/whoami", {
         method: "POST",
         headers: {
           "Content-Type": ARROW_CONTENT_TYPE,
@@ -221,7 +221,7 @@ describe("bearer + HTTP handler integration", () => {
     const handler = createHttpHandler(makeProtocol(), { authenticate: auth });
     const body = makeArrowBody("whoami");
     const resp = await handler(
-      new Request("http://localhost/vgi/whoami", {
+      new Request("http://localhost/whoami", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -237,7 +237,7 @@ describe("bearer + HTTP handler integration", () => {
     const handler = createHttpHandler(makeProtocol(), { authenticate: auth });
     const body = makeArrowBody("whoami");
     const resp = await handler(
-      new Request("http://localhost/vgi/whoami", {
+      new Request("http://localhost/whoami", {
         method: "POST",
         headers: {
           "Content-Type": ARROW_CONTENT_TYPE,

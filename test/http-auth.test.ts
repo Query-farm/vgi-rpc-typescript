@@ -44,7 +44,7 @@ describe("HTTP Auth", () => {
     const handler = createHttpHandler(makeProtocol());
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/vgi/echo", {
+      new Request("http://localhost/echo", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -73,7 +73,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/vgi/echo", {
+      new Request("http://localhost/echo", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -94,7 +94,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/vgi/echo", {
+      new Request("http://localhost/echo", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -116,7 +116,7 @@ describe("HTTP Auth", () => {
     });
 
     const resp = await handler(
-      new Request("http://localhost/.well-known/oauth-protected-resource/vgi", {
+      new Request("http://localhost/.well-known/oauth-protected-resource", {
         method: "GET",
       }),
     );
@@ -144,7 +144,7 @@ describe("HTTP Auth", () => {
     });
 
     const resp = await handler(
-      new Request("http://localhost/.well-known/oauth-protected-resource/vgi", {
+      new Request("http://localhost/.well-known/oauth-protected-resource", {
         method: "GET",
       }),
     );
@@ -162,7 +162,7 @@ describe("HTTP Auth", () => {
     });
 
     const resp = await handler(
-      new Request("http://localhost/.well-known/oauth-protected-resource/vgi", {
+      new Request("http://localhost/.well-known/oauth-protected-resource", {
         method: "GET",
       }),
     );
@@ -181,7 +181,7 @@ describe("HTTP Auth", () => {
     });
 
     const resp = await handler(
-      new Request("http://localhost/.well-known/oauth-protected-resource/vgi", {
+      new Request("http://localhost/.well-known/oauth-protected-resource", {
         method: "GET",
       }),
     );
@@ -200,7 +200,7 @@ describe("HTTP Auth", () => {
     });
 
     const resp = await handler(
-      new Request("http://localhost/.well-known/oauth-protected-resource/vgi", {
+      new Request("http://localhost/.well-known/oauth-protected-resource", {
         method: "GET",
       }),
     );
@@ -225,7 +225,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/vgi/echo", {
+      new Request("http://localhost/echo", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -251,7 +251,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/vgi/echo", {
+      new Request("http://localhost/echo", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -275,7 +275,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/vgi/echo", {
+      new Request("http://localhost/echo", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -285,7 +285,7 @@ describe("HTTP Auth", () => {
     const wwwAuth = resp.headers.get("WWW-Authenticate");
     expect(wwwAuth).toContain("Bearer");
     expect(wwwAuth).toContain("resource_metadata=");
-    expect(wwwAuth).toContain("/.well-known/oauth-protected-resource/vgi");
+    expect(wwwAuth).toContain("/.well-known/oauth-protected-resource");
   });
 
   test("CORS headers present on 401 responses", async () => {
@@ -298,7 +298,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/vgi/echo", {
+      new Request("http://localhost/echo", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -400,6 +400,7 @@ describe("oauthResourceMetadataToJson", () => {
 
 describe("wellKnownPath", () => {
   test("returns correct path", () => {
+    expect(wellKnownPath("")).toBe("/.well-known/oauth-protected-resource");
     expect(wellKnownPath("/vgi")).toBe("/.well-known/oauth-protected-resource/vgi");
     expect(wellKnownPath("/api/v1")).toBe("/.well-known/oauth-protected-resource/api/v1");
   });
@@ -416,8 +417,13 @@ describe("buildWwwAuthenticateHeader", () => {
   });
 
   test("with metadata URL and client_id", () => {
-    const header = buildWwwAuthenticateHeader("https://example.com/.well-known/oauth-protected-resource/vgi", "my-client");
-    expect(header).toBe('Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi", client_id="my-client"');
+    const header = buildWwwAuthenticateHeader(
+      "https://example.com/.well-known/oauth-protected-resource/vgi",
+      "my-client",
+    );
+    expect(header).toBe(
+      'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource/vgi", client_id="my-client"',
+    );
   });
 
   test("with client_id only", () => {
@@ -437,6 +443,8 @@ describe("buildWwwAuthenticateHeader", () => {
 
   test("with all parameters", () => {
     const header = buildWwwAuthenticateHeader("https://example.com/meta", "my-client", "s3cret", true);
-    expect(header).toBe('Bearer resource_metadata="https://example.com/meta", client_id="my-client", client_secret="s3cret", use_id_token_as_bearer="true"');
+    expect(header).toBe(
+      'Bearer resource_metadata="https://example.com/meta", client_id="my-client", client_secret="s3cret", use_id_token_as_bearer="true"',
+    );
   });
 });

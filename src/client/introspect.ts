@@ -121,7 +121,7 @@ export async function httpIntrospect(
   baseUrl: string,
   options?: { prefix?: string; authorization?: string },
 ): Promise<ServiceDescription> {
-  const prefix = options?.prefix ?? "/vgi";
+  const prefix = options?.prefix ?? "";
   const emptySchema = new ArrowSchema([]);
   const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
 

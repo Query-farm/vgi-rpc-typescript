@@ -5,7 +5,7 @@ import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 
 /** Configuration options for createHttpHandler(). */
 export interface HttpHandlerOptions {
-  /** URL path prefix for all endpoints. Default: "/vgi" */
+  /** URL path prefix for all endpoints. Default: "" (root). */
   prefix?: string;
   /** HMAC-SHA256 signing key for state tokens. Random 32 bytes if omitted. */
   signingKey?: Uint8Array;

@@ -11,7 +11,6 @@ import { createHttpHandler } from "../src/http/index.js";
 import { protocol } from "./conformance-protocol.js";
 
 const handler = createHttpHandler(protocol, {
-  prefix: "/vgi",
   serverId: "conformance-http",
 });
 

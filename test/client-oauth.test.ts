@@ -4,7 +4,14 @@
 import { describe, expect, test } from "bun:test";
 import { AuthContext } from "../src/auth.js";
 import { httpConnect } from "../src/client/connect.js";
-import { parseClientId, parseClientSecret, parseDeviceCodeClientId, parseDeviceCodeClientSecret, parseResourceMetadataUrl, parseUseIdTokenAsBearer } from "../src/client/oauth.js";
+import {
+  parseClientId,
+  parseClientSecret,
+  parseDeviceCodeClientId,
+  parseDeviceCodeClientSecret,
+  parseResourceMetadataUrl,
+  parseUseIdTokenAsBearer,
+} from "../src/client/oauth.js";
 import { RpcError } from "../src/errors.js";
 import { createHttpHandler } from "../src/http/handler.js";
 import { Protocol } from "../src/protocol.js";

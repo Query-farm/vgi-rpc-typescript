@@ -30,7 +30,6 @@ protocol.unary("divide", {
 });
 
 const handler = createHttpHandler(protocol, {
-  prefix: "/vgi",
   corsOrigins: "*",
 });
 

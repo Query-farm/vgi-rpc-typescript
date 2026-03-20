@@ -31,7 +31,8 @@ function parseMetadataJson(json: Record<string, any>): OAuthResourceMetadataResp
   };
   if (json.scopes_supported) result.scopesSupported = json.scopes_supported;
   if (json.bearer_methods_supported) result.bearerMethodsSupported = json.bearer_methods_supported;
-  if (json.resource_signing_alg_values_supported) result.resourceSigningAlgValuesSupported = json.resource_signing_alg_values_supported;
+  if (json.resource_signing_alg_values_supported)
+    result.resourceSigningAlgValuesSupported = json.resource_signing_alg_values_supported;
   if (json.resource_name) result.resourceName = json.resource_name;
   if (json.resource_documentation) result.resourceDocumentation = json.resource_documentation;
   if (json.resource_policy_uri) result.resourcePolicyUri = json.resource_policy_uri;
@@ -52,7 +53,7 @@ export async function httpOAuthMetadata(
   baseUrl: string,
   prefix?: string,
 ): Promise<OAuthResourceMetadataResponse | null> {
-  const effectivePrefix = (prefix ?? "/vgi").replace(/\/+$/, "");
+  const effectivePrefix = (prefix ?? "").replace(/\/+$/, "");
   const metadataUrl = `${baseUrl.replace(/\/+$/, "")}/.well-known/oauth-protected-resource${effectivePrefix}`;
 
   try {

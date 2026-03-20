@@ -27,7 +27,7 @@ export interface RpcClient {
 }
 
 export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcClient {
-  const prefix = (options?.prefix ?? "/vgi").replace(/\/+$/, "");
+  const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
   const onLog = options?.onLog;
   const compressionLevel = options?.compressionLevel;
   const authorization = options?.authorization;

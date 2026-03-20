@@ -75,7 +75,7 @@ async function startServer(proc: Subprocess): Promise<string> {
   // Wait for the server to accept connections
   for (let i = 0; i < 20; i++) {
     try {
-      await fetch(`${baseUrl}/vgi/__describe__`, { method: "POST" });
+      await fetch(`${baseUrl}/__describe__`, { method: "POST" });
       return baseUrl;
     } catch {
       await new Promise((r) => setTimeout(r, 100));
