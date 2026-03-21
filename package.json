@@ -15,6 +15,11 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts",
       "bun": "./src/index.ts"
+    },
+    "./otel": {
+      "import": "./dist/otel.js",
+      "types": "./dist/otel.d.ts",
+      "bun": "./src/otel.ts"
     }
   },
   "files": [
@@ -25,8 +30,17 @@
     "@query-farm/apache-arrow": "*",
     "oauth4webapi": "^3.8.5"
   },
+  "peerDependencies": {
+    "@opentelemetry/api": ">=1.4.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.4.5",
+    "@opentelemetry/api": "^1.9.0",
     "@types/bun": "latest"
   },
   "scripts": {
