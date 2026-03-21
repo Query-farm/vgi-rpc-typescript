@@ -150,9 +150,10 @@ describe("HTTP Handler", () => {
     expect(res.status).toBe(404);
   });
 
-  test("GET returns 405", async () => {
+  test("GET returns 404 HTML page", async () => {
     const res = await handler(new Request(`${BASE}/vgi/add`, { method: "GET" }));
-    expect(res.status).toBe(405);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Content-Type")).toContain("text/html");
   });
 
   test("wrong Content-Type returns 415", async () => {

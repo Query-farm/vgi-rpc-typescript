@@ -17,6 +17,7 @@ import {
   httpDispatchStreamInit,
   httpDispatchUnary,
 } from "./dispatch.js";
+import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
 import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
 
 const EMPTY_SCHEMA = new Schema([]);
@@ -53,6 +54,20 @@ export function createHttpHandler(
   const compressionLevel = options?.compressionLevel;
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
   const dispatchHook = options?.dispatchHook;
+
+  // HTML page configuration
+  const enableLandingPage = options?.enableLandingPage ?? true;
+  const enableDescribePage = options?.enableDescribePage ?? true;
+  const enableNotFoundPage = options?.enableNotFoundPage ?? true;
+  const displayName = options?.protocolName ?? protocol.name;
+  const repoUrl = options?.repositoryUrl ?? null;
+
+  // Pre-render HTML pages for zero per-request overhead
+  const landingHtml = enableLandingPage
+    ? buildLandingPage(displayName, serverId, enableDescribePage ? `${prefix}/describe` : null, repoUrl)
+    : null;
+  const describeHtml = enableDescribePage ? buildDescribePage(displayName, serverId, methods, repoUrl) : null;
+  const notFoundHtml = enableNotFoundPage ? buildNotFoundPage(prefix, displayName) : null;
 
   // ctx is built per-request to include authContext; base fields set here
   const baseCtx = {
@@ -127,6 +142,32 @@ export function createHttpHandler(
       }
 
       return new Response(null, { status: 405 });
+    }
+
+    // HTML pages for GET requests
+    if (request.method === "GET") {
+      // Landing page: GET {prefix}/ or GET {prefix}
+      if (landingHtml && (path === prefix || path === `${prefix}/`)) {
+        const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
+        addCorsHeaders(headers);
+        return new Response(landingHtml, { status: 200, headers });
+      }
+
+      // Describe page: GET {prefix}/describe
+      if (describeHtml && path === `${prefix}/describe`) {
+        const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
+        addCorsHeaders(headers);
+        return new Response(describeHtml, { status: 200, headers });
+      }
+
+      // 404 page for any other GET
+      if (notFoundHtml) {
+        const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
+        addCorsHeaders(headers);
+        return new Response(notFoundHtml, { status: 404, headers });
+      }
+
+      return new Response("Not Found", { status: 404 });
     }
 
     if (request.method !== "POST") {

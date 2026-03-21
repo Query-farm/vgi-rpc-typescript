@@ -31,6 +31,16 @@ export interface HttpHandlerOptions {
   oauthResourceMetadata?: OAuthResourceMetadata;
   /** Optional dispatch hook for observability (tracing, metrics). */
   dispatchHook?: DispatchHook;
+  /** Enable HTML landing page at GET {prefix}/. Default: true. */
+  enableLandingPage?: boolean;
+  /** Enable HTML describe/API reference page at GET {prefix}/describe. Default: true. */
+  enableDescribePage?: boolean;
+  /** Enable HTML 404 page for unmatched GET routes. Default: true. */
+  enableNotFoundPage?: boolean;
+  /** Protocol name shown in HTML pages. Defaults to the Protocol's name. */
+  protocolName?: string;
+  /** URL to service's source repository, shown in landing/describe pages. */
+  repositoryUrl?: string;
 }
 
 /** Serializer for stream state objects stored in state tokens. */
