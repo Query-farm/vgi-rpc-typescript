@@ -1,6 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import type { DispatchHook } from "../types.js";
 import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 
 /** Configuration options for createHttpHandler(). */
@@ -28,6 +29,8 @@ export interface HttpHandlerOptions {
   authenticate?: AuthenticateFn;
   /** Optional RFC 9728 OAuth Protected Resource Metadata. Served at well-known endpoint. */
   oauthResourceMetadata?: OAuthResourceMetadata;
+  /** Optional dispatch hook for observability (tracing, metrics). */
+  dispatchHook?: DispatchHook;
 }
 
 /** Serializer for stream state objects stored in state tokens. */

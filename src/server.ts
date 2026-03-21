@@ -8,7 +8,7 @@ import { dispatchStream } from "./dispatch/stream.js";
 import { dispatchUnary } from "./dispatch/unary.js";
 import { RpcError, VersionError } from "./errors.js";
 import type { Protocol } from "./protocol.js";
-import { MethodType } from "./types.js";
+import { type CallStatistics, type DispatchHook, type DispatchInfo, MethodType } from "./types.js";
 import { IpcStreamReader } from "./wire/reader.js";
 import { parseRequest } from "./wire/request.js";
 import { buildErrorBatch } from "./wire/response.js";
@@ -25,11 +25,16 @@ export class VgiRpcServer {
   private enableDescribe: boolean;
   private serverId: string;
   private describeBatch: import("@query-farm/apache-arrow").RecordBatch | null = null;
+  private dispatchHook: DispatchHook | null = null;
 
-  constructor(protocol: Protocol, options?: { enableDescribe?: boolean; serverId?: string }) {
+  constructor(
+    protocol: Protocol,
+    options?: { enableDescribe?: boolean; serverId?: string; dispatchHook?: DispatchHook },
+  ) {
     this.protocol = protocol;
     this.enableDescribe = options?.enableDescribe ?? true;
     this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    this.dispatchHook = options?.dispatchHook ?? null;
 
     if (this.enableDescribe) {
       const { batch } = buildDescribeBatch(protocol.name, protocol.getMethods(), this.serverId);
@@ -129,11 +134,32 @@ export class VgiRpcServer {
       return;
     }
 
-    // Dispatch based on method type
-    if (method.type === MethodType.UNARY) {
-      await dispatchUnary(method, params, writer, this.serverId, requestId);
-    } else {
-      await dispatchStream(method, params, writer, reader, this.serverId, requestId);
+    // Dispatch based on method type, with optional hook
+    const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
+    const info: DispatchInfo = { method: methodName, methodType, serverId: this.serverId, requestId };
+    const stats: CallStatistics = {
+      inputBatches: 0,
+      outputBatches: 0,
+      inputRows: 0,
+      outputRows: 0,
+      inputBytes: 0,
+      outputBytes: 0,
+    };
+
+    const token = this.dispatchHook?.onDispatchStart(info);
+    let dispatchError: Error | undefined;
+
+    try {
+      if (method.type === MethodType.UNARY) {
+        await dispatchUnary(method, params, writer, this.serverId, requestId);
+      } else {
+        await dispatchStream(method, params, writer, reader, this.serverId, requestId);
+      }
+    } catch (e) {
+      dispatchError = e instanceof Error ? e : new Error(String(e));
+      throw e;
+    } finally {
+      this.dispatchHook?.onDispatchEnd(token, info, stats, dispatchError);
     }
   }
 }

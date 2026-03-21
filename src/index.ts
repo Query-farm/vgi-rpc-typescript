@@ -61,9 +61,13 @@ export {
 export { VgiRpcServer } from "./server.js";
 export {
   type CallContext,
+  type CallStatistics,
+  type DispatchHook,
+  type DispatchInfo,
   type ExchangeFn,
   type ExchangeInit,
   type HeaderInit,
+  type HookToken,
   type LogContext,
   type MethodDefinition,
   MethodType,

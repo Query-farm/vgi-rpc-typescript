@@ -58,6 +58,40 @@ export interface MethodDefinition {
   paramTypes?: Record<string, string>;
 }
 
+/** Metadata passed to dispatch hooks before and after RPC method execution. */
+export interface DispatchInfo {
+  /** RPC method name. */
+  method: string;
+  /** "unary" or "stream". */
+  methodType: string;
+  /** Server identifier. */
+  serverId: string;
+  /** Client-supplied request identifier, or null. */
+  requestId: string | null;
+}
+
+/** Per-call I/O counters, matching Python's CallStatistics. */
+export interface CallStatistics {
+  inputBatches: number;
+  outputBatches: number;
+  inputRows: number;
+  outputRows: number;
+  inputBytes: number;
+  outputBytes: number;
+}
+
+/** Opaque token returned by onDispatchStart, passed back to onDispatchEnd. */
+export type HookToken = unknown;
+
+/**
+ * Observability hook called around RPC dispatch.
+ * Implementations must be safe for concurrent use (HTTP transport is concurrent).
+ */
+export interface DispatchHook {
+  onDispatchStart(info: DispatchInfo): HookToken;
+  onDispatchEnd(token: HookToken, info: DispatchInfo, stats: CallStatistics, error?: Error): void;
+}
+
 export interface EmittedBatch {
   batch: RecordBatch;
   metadata?: Map<string, string>;

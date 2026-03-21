@@ -6,7 +6,7 @@ import { Schema } from "@query-farm/apache-arrow";
 import type { AuthContext } from "../auth.js";
 import { DESCRIBE_METHOD_NAME } from "../constants.js";
 import type { Protocol } from "../protocol.js";
-import { MethodType } from "../types.js";
+import { type CallStatistics, type DispatchInfo, MethodType } from "../types.js";
 import { zstdCompress, zstdDecompress } from "../util/zstd.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
@@ -52,6 +52,7 @@ export function createHttpHandler(
 
   const compressionLevel = options?.compressionLevel;
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
+  const dispatchHook = options?.dispatchHook;
 
   // ctx is built per-request to include authContext; base fields set here
   const baseCtx = {
@@ -224,6 +225,20 @@ export function createHttpHandler(
       return compressIfAccepted(makeErrorResponse(err, 404), clientAcceptsZstd);
     }
 
+    const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
+    const info: DispatchInfo = { method: methodName, methodType, serverId, requestId: null };
+    const stats: CallStatistics = {
+      inputBatches: 0,
+      outputBatches: 0,
+      inputRows: 0,
+      outputRows: 0,
+      inputBytes: 0,
+      outputBytes: 0,
+    };
+
+    const hookToken = dispatchHook?.onDispatchStart(info);
+    let dispatchError: Error | undefined;
+
     try {
       let response: Response;
 
@@ -253,10 +268,13 @@ export function createHttpHandler(
       addCorsHeaders(response.headers);
       return compressIfAccepted(response, clientAcceptsZstd);
     } catch (error: any) {
+      dispatchError = error instanceof Error ? error : new Error(String(error));
       if (error instanceof HttpRpcError) {
         return compressIfAccepted(makeErrorResponse(error, error.statusCode), clientAcceptsZstd);
       }
       return compressIfAccepted(makeErrorResponse(error, 500), clientAcceptsZstd);
+    } finally {
+      dispatchHook?.onDispatchEnd(hookToken, info, stats, dispatchError);
     }
   };
 }
