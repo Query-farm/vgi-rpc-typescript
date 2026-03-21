@@ -37,6 +37,8 @@ export const DESCRIBE_SCHEMA = new Schema([
   new Field("param_defaults_json", new Utf8(), true),
   new Field("has_header", new Bool(), false),
   new Field("header_schema_ipc", new Binary(), true),
+  new Field("is_exchange", new Bool(), true),
+  new Field("param_docs_json", new Utf8(), true),
 ]);
 
 /**
@@ -60,6 +62,8 @@ export function buildDescribeBatch(
   const paramDefaultsJsons: (string | null)[] = [];
   const hasHeaders: boolean[] = [];
   const headerSchemas: (Uint8Array | null)[] = [];
+  const isExchanges: (boolean | null)[] = [];
+  const paramDocsJsons: (string | null)[] = [];
 
   for (const [name, method] of sortedEntries) {
     names.push(name);
@@ -95,6 +99,18 @@ export function buildDescribeBatch(
 
     hasHeaders.push(!!method.headerSchema);
     headerSchemas.push(method.headerSchema ? serializeSchema(method.headerSchema) : null);
+
+    // is_exchange: true for exchange, false for producer, null for unary
+    if (method.exchangeFn) {
+      isExchanges.push(true);
+    } else if (method.producerFn) {
+      isExchanges.push(false);
+    } else {
+      isExchanges.push(null);
+    }
+
+    // param_docs_json: no docstring source in TypeScript, always null
+    paramDocsJsons.push(null);
   }
 
   // Build the batch using vectorFromArray for each column
@@ -108,6 +124,8 @@ export function buildDescribeBatch(
   const paramDefaultsArr = vectorFromArray(paramDefaultsJsons, new Utf8());
   const hasHeaderArr = vectorFromArray(hasHeaders, new Bool());
   const headerSchemaArr = vectorFromArray(headerSchemas, new Binary());
+  const isExchangeArr = vectorFromArray(isExchanges, new Bool());
+  const paramDocsArr = vectorFromArray(paramDocsJsons, new Utf8());
 
   const children = [
     nameArr.data[0],
@@ -120,6 +138,8 @@ export function buildDescribeBatch(
     paramDefaultsArr.data[0],
     hasHeaderArr.data[0],
     headerSchemaArr.data[0],
+    isExchangeArr.data[0],
+    paramDocsArr.data[0],
   ];
 
   const structType = new Struct(DESCRIBE_SCHEMA.fields);
