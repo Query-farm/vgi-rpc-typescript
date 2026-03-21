@@ -20,14 +20,15 @@ function escapeHtml(s: string): string {
 
 function arrowTypeToString(type: import("@query-farm/apache-arrow").DataType): string {
   const id = type.typeId;
-  // Match the type names used by Python and Go
-  if (id === 5) return "utf8"; // Utf8
-  if (id === 4) return "binary"; // Binary
-  if (id === 2 || id === 3) return "int"; // Int32/Int64
-  if (id === 10 || id === 11) return "float"; // Float32/Float64
+  // Match the human-friendly type names used by the Python reference implementation
+  if (id === 5) return "str"; // Utf8
+  if (id === 4) return "bytes"; // Binary
+  if (id === 2) return "int"; // Int32/Int64
+  if (id === 3) return "float"; // Float32/Float64
   if (id === 6) return "bool"; // Bool
   if (id === 12) return "list"; // List
   if (id === 17) return "map"; // Map
+  if (id === 24) return "enum"; // Dictionary
   return type.toString();
 }
 
@@ -144,17 +145,13 @@ p { line-height: 1.6; }
 function buildMethodCard(method: MethodDefinition): string {
   const name = escapeHtml(method.name);
   const isUnary = method.type === "unary";
-  const isExchange = !!method.exchangeFn;
-  const isProducer = !!method.producerFn;
   const hasHeader = !!method.headerSchema;
 
-  // Badges
+  // Badges — match Python reference (unary/stream/header only)
   const badges: string[] = [];
   badges.push(
     isUnary ? `<span class="badge badge-unary">unary</span>` : `<span class="badge badge-stream">stream</span>`,
   );
-  if (isExchange) badges.push(`<span class="badge badge-exchange">exchange</span>`);
-  if (isProducer) badges.push(`<span class="badge badge-producer">producer</span>`);
   if (hasHeader) badges.push(`<span class="badge badge-header">header</span>`);
 
   // Parameters table
@@ -165,13 +162,11 @@ function buildMethodCard(method: MethodDefinition): string {
       const paramName = escapeHtml(f.name);
       const paramType = escapeHtml(arrowTypeToString(f.type));
       const defaultVal =
-        method.defaults && f.name in method.defaults
-          ? `<code>${escapeHtml(JSON.stringify(method.defaults[f.name]))}</code>`
-          : "&mdash;";
-      return `<tr><td><code>${paramName}</code></td><td><code>${paramType}</code></td><td>${defaultVal}</td></tr>`;
+        method.defaults && f.name in method.defaults ? escapeHtml(JSON.stringify(method.defaults[f.name])) : "&mdash;";
+      return `<tr><td><code>${paramName}</code></td><td><code>${paramType}</code></td><td>${defaultVal}</td><td>&mdash;</td></tr>`;
     });
     paramsHtml = `<div class="section-label">Parameters</div>
-<table><tr><th>Name</th><th>Type</th><th>Default</th></tr>
+<table><tr><th>Name</th><th>Type</th><th>Default</th><th>Description</th></tr>
 ${rows.join("\n")}
 </table>`;
   } else {
