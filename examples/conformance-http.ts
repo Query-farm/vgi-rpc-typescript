@@ -10,8 +10,8 @@
  * Run: bun run examples/conformance-http.ts
  */
 import { createHttpHandler } from "../src/http/index.js";
-import { protocol } from "./conformance-protocol.js";
 import type { DispatchHook } from "../src/types.js";
+import { protocol } from "./conformance-protocol.js";
 
 const otelFile = process.env.VGI_OTEL_FILE;
 

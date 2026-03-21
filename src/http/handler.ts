@@ -265,6 +265,11 @@ export function createHttpHandler(
         response = await httpDispatchStreamExchange(method, body, ctx);
       }
 
+      // Check if the dispatch function caught an error internally
+      const internalError = (response as any).__dispatchError;
+      if (internalError) {
+        dispatchError = internalError instanceof Error ? internalError : new Error(String(internalError));
+      }
       addCorsHeaders(response.headers);
       return compressIfAccepted(response, clientAcceptsZstd);
     } catch (error: any) {

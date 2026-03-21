@@ -66,7 +66,10 @@ export async function httpDispatchUnary(
     return arrowResponse(serializeIpcStream(schema, batches));
   } catch (error: any) {
     const errBatch = buildErrorBatch(schema, error, ctx.serverId, parsed.requestId);
-    return arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
+    const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
+    // Attach the error so the dispatch hook can see it
+    (response as any).__dispatchError = error;
+    return response;
   }
 }
 
@@ -98,7 +101,9 @@ export async function httpDispatchStreamInit(
   } catch (error: any) {
     const errSchema = method.headerSchema ?? EMPTY_SCHEMA;
     const errBatch = buildErrorBatch(errSchema, error, ctx.serverId, parsed.requestId);
-    return arrowResponse(serializeIpcStream(errSchema, [errBatch]), 500);
+    const response = arrowResponse(serializeIpcStream(errSchema, [errBatch]), 500);
+    (response as any).__dispatchError = error;
+    return response;
   }
 
   // Support dynamic output schemas (same as pipe transport)
@@ -116,7 +121,9 @@ export async function httpDispatchStreamInit(
       headerBytes = serializeIpcStream(method.headerSchema, headerBatches);
     } catch (error: any) {
       const errBatch = buildErrorBatch(method.headerSchema, error, ctx.serverId, parsed.requestId);
-      return arrowResponse(serializeIpcStream(method.headerSchema, [errBatch]), 500);
+      const response = arrowResponse(serializeIpcStream(method.headerSchema, [errBatch]), 500);
+      (response as any).__dispatchError = error;
+      return response;
     }
   }
 
@@ -226,7 +233,9 @@ export async function httpDispatchStreamExchange(
           error.stack?.split("\n").slice(0, 5).join("\n"),
         );
       const errBatch = buildErrorBatch(outputSchema, error, ctx.serverId, null);
-      return arrowResponse(serializeIpcStream(outputSchema, [errBatch]), 500);
+      const response = arrowResponse(serializeIpcStream(outputSchema, [errBatch]), 500);
+      (response as any).__dispatchError = error;
+      return response;
     }
 
     // Collect emitted batches
@@ -283,6 +292,7 @@ async function produceStreamResponse(
   const allBatches: RecordBatch[] = [];
   const maxBytes = ctx.maxStreamResponseBytes;
   let estimatedBytes = 0;
+  let producerError: Error | undefined;
 
   while (true) {
     const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId, ctx.authContext);
@@ -302,6 +312,7 @@ async function produceStreamResponse(
       if (process.env.VGI_DISPATCH_DEBUG)
         console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));
       allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
+      producerError = error instanceof Error ? error : new Error(String(error));
       break;
     }
 
@@ -336,7 +347,11 @@ async function produceStreamResponse(
   } else {
     responseBody = dataBytes;
   }
-  return arrowResponse(responseBody);
+  const response = arrowResponse(responseBody);
+  if (producerError) {
+    (response as any).__dispatchError = producerError;
+  }
+  return response;
 }
 
 function concatBytes(...arrays: Uint8Array[]): Uint8Array {
