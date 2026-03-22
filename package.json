@@ -25,6 +25,11 @@
       "import": "./dist/s3.js",
       "types": "./dist/s3.d.ts",
       "bun": "./src/s3.ts"
+    },
+    "./gcs": {
+      "import": "./dist/gcs.js",
+      "types": "./dist/gcs.d.ts",
+      "bun": "./src/gcs.ts"
     }
   },
   "files": [
@@ -38,7 +43,8 @@
   "peerDependencies": {
     "@opentelemetry/api": ">=1.4.0",
     "@aws-sdk/client-s3": ">=3.0.0",
-    "@aws-sdk/s3-request-presigner": ">=3.0.0"
+    "@aws-sdk/s3-request-presigner": ">=3.0.0",
+    "@google-cloud/storage": ">=7.0.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
@@ -48,6 +54,9 @@
       "optional": true
     },
     "@aws-sdk/s3-request-presigner": {
+      "optional": true
+    },
+    "@google-cloud/storage": {
       "optional": true
     }
   },
@@ -60,6 +69,7 @@
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "@aws-sdk/client-s3": "^3.750.0",
     "@aws-sdk/s3-request-presigner": "^3.750.0",
+    "@google-cloud/storage": "^7.15.0",
     "@types/bun": "latest"
   },
   "scripts": {
