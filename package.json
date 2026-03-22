@@ -20,6 +20,11 @@
       "import": "./dist/otel.js",
       "types": "./dist/otel.d.ts",
       "bun": "./src/otel.ts"
+    },
+    "./s3": {
+      "import": "./dist/s3.js",
+      "types": "./dist/s3.d.ts",
+      "bun": "./src/s3.ts"
     }
   },
   "files": [
@@ -31,10 +36,18 @@
     "oauth4webapi": "^3.8.5"
   },
   "peerDependencies": {
-    "@opentelemetry/api": ">=1.4.0"
+    "@opentelemetry/api": ">=1.4.0",
+    "@aws-sdk/client-s3": ">=3.0.0",
+    "@aws-sdk/s3-request-presigner": ">=3.0.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
+      "optional": true
+    },
+    "@aws-sdk/client-s3": {
+      "optional": true
+    },
+    "@aws-sdk/s3-request-presigner": {
       "optional": true
     }
   },
@@ -45,6 +58,8 @@
     "@opentelemetry/sdk-metrics": "^2.6.0",
     "@opentelemetry/sdk-trace-base": "^2.6.0",
     "@opentelemetry/semantic-conventions": "^1.40.0",
+    "@aws-sdk/client-s3": "^3.750.0",
+    "@aws-sdk/s3-request-presigner": "^3.750.0",
     "@types/bun": "latest"
   },
   "scripts": {
