@@ -20,3 +20,6 @@ export const DESCRIBE_VERSION = "3";
 export const DESCRIBE_METHOD_NAME = "__describe__";
 
 export const STATE_KEY = "vgi_rpc.stream_state#b64";
+
+export const LOCATION_KEY = "vgi_rpc.location";
+export const LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";

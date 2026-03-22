@@ -20,6 +20,15 @@ export {
 } from "./constants.js";
 export { RpcError, VersionError } from "./errors.js";
 export {
+  type ExternalLocationConfig,
+  type ExternalStorage,
+  httpsOnlyValidator,
+  isExternalLocationBatch,
+  makeExternalLocationBatch,
+  maybeExternalizeBatch,
+  resolveExternalLocation,
+} from "./external.js";
+export {
   ARROW_CONTENT_TYPE,
   type AuthenticateFn,
   type BearerValidateFn,
