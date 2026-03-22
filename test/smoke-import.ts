@@ -129,7 +129,6 @@ if (Object.keys(paramTypes).length !== 2) {
 // 4. Create HTTP handler and start a server
 // ---------------------------------------------------------------------------
 const handler = createHttpHandler(protocol, {
-  prefix: "/vgi",
   serverId: "smoke-test",
   enableDescribe: true,
 });
