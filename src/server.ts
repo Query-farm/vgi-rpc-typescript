@@ -7,6 +7,7 @@ import { buildDescribeBatch } from "./dispatch/describe.js";
 import { dispatchStream } from "./dispatch/stream.js";
 import { dispatchUnary } from "./dispatch/unary.js";
 import { RpcError, VersionError } from "./errors.js";
+import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
 import { type CallStatistics, type DispatchHook, type DispatchInfo, MethodType } from "./types.js";
 import { IpcStreamReader } from "./wire/reader.js";
@@ -26,15 +27,22 @@ export class VgiRpcServer {
   private serverId: string;
   private describeBatch: import("@query-farm/apache-arrow").RecordBatch | null = null;
   private dispatchHook: DispatchHook | null = null;
+  private externalConfig: ExternalLocationConfig | undefined;
 
   constructor(
     protocol: Protocol,
-    options?: { enableDescribe?: boolean; serverId?: string; dispatchHook?: DispatchHook },
+    options?: {
+      enableDescribe?: boolean;
+      serverId?: string;
+      dispatchHook?: DispatchHook;
+      externalLocation?: ExternalLocationConfig;
+    },
   ) {
     this.protocol = protocol;
     this.enableDescribe = options?.enableDescribe ?? true;
     this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
     this.dispatchHook = options?.dispatchHook ?? null;
+    this.externalConfig = options?.externalLocation;
 
     if (this.enableDescribe) {
       const { batch } = buildDescribeBatch(protocol.name, protocol.getMethods(), this.serverId);
@@ -151,9 +159,9 @@ export class VgiRpcServer {
 
     try {
       if (method.type === MethodType.UNARY) {
-        await dispatchUnary(method, params, writer, this.serverId, requestId);
+        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig);
       } else {
-        await dispatchStream(method, params, writer, reader, this.serverId, requestId);
+        await dispatchStream(method, params, writer, reader, this.serverId, requestId, this.externalConfig);
       }
     } catch (e) {
       dispatchError = e instanceof Error ? e : new Error(String(e));

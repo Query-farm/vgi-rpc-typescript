@@ -5,6 +5,7 @@ import { RecordBatch, RecordBatchReader, Schema } from "@query-farm/apache-arrow
 import type { AuthContext } from "../auth.js";
 import { STATE_KEY } from "../constants.js";
 import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
+import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
 import { conformBatchToSchema } from "../util/conform.js";
@@ -30,6 +31,7 @@ export interface DispatchContext {
   maxStreamResponseBytes?: number;
   stateSerializer: StateSerializer;
   authContext?: AuthContext;
+  externalLocation?: ExternalLocationConfig;
 }
 
 /** Dispatch a __describe__ request. */
@@ -61,7 +63,10 @@ export async function httpDispatchUnary(
 
   try {
     const result = await method.handler!(parsed.params, out);
-    const resultBatch = buildResultBatch(schema, result, ctx.serverId, parsed.requestId);
+    let resultBatch = buildResultBatch(schema, result, ctx.serverId, parsed.requestId);
+    if (ctx.externalLocation) {
+      resultBatch = await maybeExternalizeBatch(resultBatch, ctx.externalLocation);
+    }
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
     return arrowResponse(serializeIpcStream(schema, batches));
   } catch (error: any) {

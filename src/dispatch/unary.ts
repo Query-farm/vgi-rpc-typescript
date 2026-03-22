@@ -1,6 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
@@ -17,13 +18,17 @@ export async function dispatchUnary(
   writer: IpcStreamWriter,
   serverId: string,
   requestId: string | null,
+  externalConfig?: ExternalLocationConfig,
 ): Promise<void> {
   const schema = method.resultSchema;
   const out = new OutputCollector(schema, true, serverId, requestId);
 
   try {
     const result = await method.handler!(params, out);
-    const resultBatch = buildResultBatch(schema, result, serverId, requestId);
+    let resultBatch = buildResultBatch(schema, result, serverId, requestId);
+    if (externalConfig) {
+      resultBatch = await maybeExternalizeBatch(resultBatch, externalConfig);
+    }
     // Collect log batches (from clientLog) + result batch
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
     writer.writeStream(schema, batches);

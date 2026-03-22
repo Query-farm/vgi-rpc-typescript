@@ -1,6 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ExternalLocationConfig } from "../external.js";
 import type { DispatchHook } from "../types.js";
 import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 
@@ -41,6 +42,8 @@ export interface HttpHandlerOptions {
   protocolName?: string;
   /** URL to service's source repository, shown in landing/describe pages. */
   repositoryUrl?: string;
+  /** External storage config for externalizing large response batches. */
+  externalLocation?: ExternalLocationConfig;
 }
 
 /** Serializer for stream state objects stored in state tokens. */

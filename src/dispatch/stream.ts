@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Schema } from "@query-farm/apache-arrow";
+import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
 import { conformBatchToSchema } from "../util/conform.js";
@@ -33,6 +34,7 @@ export async function dispatchStream(
   reader: IpcStreamReader,
   serverId: string,
   requestId: string | null,
+  externalConfig?: ExternalLocationConfig,
 ): Promise<void> {
   const isProducer = !!method.producerFn;
 
@@ -133,7 +135,11 @@ export async function dispatchStream(
       }
 
       for (const emitted of out.batches) {
-        stream.write(emitted.batch);
+        let batch = emitted.batch;
+        if (externalConfig) {
+          batch = await maybeExternalizeBatch(batch, externalConfig);
+        }
+        stream.write(batch);
       }
 
       if (out.finished) {

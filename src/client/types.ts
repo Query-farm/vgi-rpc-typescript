@@ -26,6 +26,8 @@ export interface StreamSession {
 
 export interface PipeConnectOptions {
   onLog?: (msg: LogMessage) => void;
+  /** External storage config for resolving externalized batches. */
+  externalLocation?: import("../external.js").ExternalLocationConfig;
 }
 
 export interface SubprocessConnectOptions extends PipeConnectOptions {

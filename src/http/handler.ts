@@ -69,6 +69,8 @@ export function createHttpHandler(
   const describeHtml = enableDescribePage ? buildDescribePage(displayName, serverId, methods, repoUrl) : null;
   const notFoundHtml = enableNotFoundPage ? buildNotFoundPage(prefix, displayName) : null;
 
+  const externalLocation = options?.externalLocation;
+
   // ctx is built per-request to include authContext; base fields set here
   const baseCtx = {
     signingKey,
@@ -76,6 +78,7 @@ export function createHttpHandler(
     serverId,
     maxStreamResponseBytes,
     stateSerializer,
+    externalLocation,
   };
 
   function addCorsHeaders(headers: Headers): void {

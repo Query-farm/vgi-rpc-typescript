@@ -12,6 +12,7 @@ import {
 } from "@query-farm/apache-arrow";
 import { DESCRIBE_METHOD_NAME } from "../constants.js";
 import { RpcError } from "../errors.js";
+import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { serializeIpcStream } from "../http/common.js";
 import { IpcStreamReader } from "../wire/reader.js";
 import type { RpcClient } from "./connect.js";
@@ -86,6 +87,7 @@ export class PipeStreamSession implements StreamSession {
   private _outputSchema: Schema;
   private _releaseBusy: () => void;
   private _setDrainPromise: (p: Promise<void>) => void;
+  private _externalConfig?: ExternalLocationConfig;
 
   constructor(opts: {
     reader: IpcStreamReader;
@@ -95,6 +97,7 @@ export class PipeStreamSession implements StreamSession {
     outputSchema: Schema;
     releaseBusy: () => void;
     setDrainPromise: (p: Promise<void>) => void;
+    externalConfig?: ExternalLocationConfig;
   }) {
     this._reader = opts.reader;
     this._writeFn = opts.writeFn;
@@ -103,6 +106,7 @@ export class PipeStreamSession implements StreamSession {
     this._outputSchema = opts.outputSchema;
     this._releaseBusy = opts.releaseBusy;
     this._setDrainPromise = opts.setDrainPromise;
+    this._externalConfig = opts.externalConfig;
   }
 
   get header(): Record<string, any> | null {
@@ -120,6 +124,10 @@ export class PipeStreamSession implements StreamSession {
       if (batch === null) return null; // Server closed output stream
 
       if (batch.numRows === 0) {
+        // Check for external location pointer batch
+        if (isExternalLocationBatch(batch)) {
+          return await resolveExternalLocation(batch, this._externalConfig);
+        }
         // Check if it's a log/error batch. If so, dispatch and continue.
         // Otherwise it's a zero-row data batch — return it.
         if (dispatchLogOrError(batch, this._onLog)) {
@@ -375,6 +383,7 @@ export function pipeConnect(
   options?: PipeConnectOptions,
 ): RpcClient {
   const onLog = options?.onLog;
+  const externalConfig = options?.externalLocation;
 
   let reader: IpcStreamReader | null = null;
   let readerPromise: Promise<IpcStreamReader> | null = null;
@@ -483,12 +492,16 @@ export function pipeConnect(
           throw new Error("EOF reading response");
         }
 
-        // Process batches: dispatch logs, find result
+        // Process batches: dispatch logs, resolve external pointers, find result
         let resultBatch: RecordBatch | null = null;
-        for (const batch of response.batches) {
+        for (let batch of response.batches) {
           if (batch.numRows === 0) {
-            dispatchLogOrError(batch, onLog);
-            continue;
+            if (isExternalLocationBatch(batch)) {
+              batch = await resolveExternalLocation(batch, externalConfig);
+            } else {
+              dispatchLogOrError(batch, onLog);
+              continue;
+            }
           }
           resultBatch = batch;
         }
@@ -557,6 +570,7 @@ export function pipeConnect(
           outputSchema,
           releaseBusy,
           setDrainPromise,
+          externalConfig,
         });
       } catch (e) {
         // Init error (e.g., server raised exception during init).
@@ -624,6 +638,7 @@ export function subprocessConnect(cmd: string[], options?: SubprocessConnectOpti
 
   const client = pipeConnect(stdout, writable, {
     onLog: options?.onLog,
+    externalLocation: options?.externalLocation,
   });
 
   // Wrap close to also kill the subprocess
