@@ -4,6 +4,7 @@
 import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
 import { STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
+import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
 import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
 import type { LogMessage, StreamSession } from "./types.js";
@@ -26,6 +27,7 @@ export class HttpStreamSession implements StreamSession {
   private _compressFn?: CompressFn;
   private _decompressFn?: DecompressFn;
   private _authorization?: string;
+  private _externalConfig?: ExternalLocationConfig;
 
   constructor(opts: {
     baseUrl: string;
@@ -42,6 +44,7 @@ export class HttpStreamSession implements StreamSession {
     compressFn?: CompressFn;
     decompressFn?: DecompressFn;
     authorization?: string;
+    externalConfig?: ExternalLocationConfig;
   }) {
     this._baseUrl = opts.baseUrl;
     this._prefix = opts.prefix;
@@ -57,6 +60,7 @@ export class HttpStreamSession implements StreamSession {
     this._compressFn = opts.compressFn;
     this._decompressFn = opts.decompressFn;
     this._authorization = opts.authorization;
+    this._externalConfig = opts.externalConfig;
   }
 
   get header(): Record<string, any> | null {
@@ -211,10 +215,14 @@ export class HttpStreamSession implements StreamSession {
    */
   async *[Symbol.asyncIterator](): AsyncIterableIterator<Record<string, any>[]> {
     // Yield pre-loaded batches from init
-    for (const batch of this._pendingBatches) {
+    for (let batch of this._pendingBatches) {
       if (batch.numRows === 0) {
-        dispatchLogOrError(batch, this._onLog);
-        continue;
+        if (isExternalLocationBatch(batch)) {
+          batch = await resolveExternalLocation(batch, this._externalConfig);
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
       }
       yield extractBatchRows(batch);
     }
@@ -229,7 +237,7 @@ export class HttpStreamSession implements StreamSession {
       const { batches } = await readResponseBatches(responseBody);
 
       let gotContinuation = false;
-      for (const batch of batches) {
+      for (let batch of batches) {
         if (batch.numRows === 0) {
           // Check for continuation token
           const token = batch.metadata?.get(STATE_KEY);
@@ -238,9 +246,14 @@ export class HttpStreamSession implements StreamSession {
             gotContinuation = true;
             continue;
           }
-          // Log/error batch
-          dispatchLogOrError(batch, this._onLog);
-          continue;
+          // Check for external location pointer
+          if (isExternalLocationBatch(batch)) {
+            batch = await resolveExternalLocation(batch, this._externalConfig);
+          } else {
+            // Log/error batch
+            dispatchLogOrError(batch, this._onLog);
+            continue;
+          }
         }
 
         yield extractBatchRows(batch);

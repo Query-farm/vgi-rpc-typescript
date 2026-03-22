@@ -309,6 +309,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
         compressFn,
         decompressFn,
         authorization,
+        externalConfig,
       });
     },
 
