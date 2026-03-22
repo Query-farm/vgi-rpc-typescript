@@ -4,6 +4,7 @@
 import type { RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
+import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import { httpIntrospect, type MethodInfo, type ServiceDescription } from "./introspect.js";
 import {
@@ -31,6 +32,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
   const onLog = options?.onLog;
   const compressionLevel = options?.compressionLevel;
   const authorization = options?.authorization;
+  const externalConfig = options?.externalLocation;
 
   let methodCache: Map<string, MethodInfo> | null = null;
   let compressFn: CompressFn | undefined;
@@ -114,12 +116,17 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       const responseBody = await readResponse(resp);
       const { batches } = await readResponseBatches(responseBody);
 
-      // Process batches: dispatch logs, find result
+      // Process batches: dispatch logs, resolve external pointers, find result
       let resultBatch: RecordBatch | null = null;
-      for (const batch of batches) {
+      for (let batch of batches) {
         if (batch.numRows === 0) {
-          dispatchLogOrError(batch, onLog);
-          continue;
+          // Check for external location pointer batch
+          if (isExternalLocationBatch(batch)) {
+            batch = await resolveExternalLocation(batch, externalConfig);
+          } else {
+            dispatchLogOrError(batch, onLog);
+            continue;
+          }
         }
         resultBatch = batch;
       }

@@ -7,6 +7,8 @@ export interface HttpConnectOptions {
   compressionLevel?: number;
   /** Authorization header value (e.g. "Bearer <token>"). Sent with every request. */
   authorization?: string;
+  /** External storage config for resolving externalized batches. */
+  externalLocation?: import("../external.js").ExternalLocationConfig;
 }
 
 export interface LogMessage {
