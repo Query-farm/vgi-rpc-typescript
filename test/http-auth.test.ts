@@ -288,6 +288,22 @@ describe("HTTP Auth", () => {
     expect(wwwAuth).toContain("/.well-known/oauth-protected-resource");
   });
 
+  test("OPTIONS preflight bypasses authentication", async () => {
+    let authCalled = false;
+    const handler = createHttpHandler(makeProtocol(), {
+      corsOrigins: "*",
+      authenticate: async () => {
+        authCalled = true;
+        throw new Error("Should not be called for OPTIONS");
+      },
+    });
+
+    const resp = await handler(new Request("http://localhost/echo", { method: "OPTIONS" }));
+    expect(resp.status).toBe(204);
+    expect(authCalled).toBe(false);
+    expect(resp.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  });
+
   test("CORS headers present on 401 responses", async () => {
     const handler = createHttpHandler(makeProtocol(), {
       corsOrigins: "*",
