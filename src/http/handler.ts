@@ -85,7 +85,8 @@ export function createHttpHandler(
     if (corsOrigins) {
       headers.set("Access-Control-Allow-Origin", corsOrigins);
       headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
-      headers.set("Access-Control-Allow-Headers", "Content-Type");
+      headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      headers.set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID");
     }
   }
 

@@ -316,6 +316,7 @@ describe("HTTP Handler", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe("WWW-Authenticate, X-Request-ID");
   });
 
   test("CORS preflight", async () => {
@@ -329,6 +330,8 @@ describe("HTTP Handler", () => {
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe("POST, OPTIONS");
+    expect(res.headers.get("Access-Control-Allow-Headers")).toBe("Content-Type, Authorization");
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe("WWW-Authenticate, X-Request-ID");
   });
 
   // -- Producer stream --
