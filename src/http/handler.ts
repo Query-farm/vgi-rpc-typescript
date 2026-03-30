@@ -42,6 +42,7 @@ export function createHttpHandler(
   const signingKey = options?.signingKey ?? randomBytes(32);
   const tokenTtl = options?.tokenTtl ?? 3600;
   const corsOrigins = options?.corsOrigins;
+  const corsMaxAge = options?.corsMaxAge === undefined ? 7200 : options.corsMaxAge;
   const maxRequestBytes = options?.maxRequestBytes;
   const maxStreamResponseBytes = options?.maxStreamResponseBytes;
   const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
@@ -81,12 +82,15 @@ export function createHttpHandler(
     externalLocation,
   };
 
-  function addCorsHeaders(headers: Headers): void {
+  function addCorsHeaders(headers: Headers, isOptions = false): void {
     if (corsOrigins) {
       headers.set("Access-Control-Allow-Origin", corsOrigins);
       headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
       headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
       headers.set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding");
+      if (isOptions && corsMaxAge != null) {
+        headers.set("Access-Control-Max-Age", String(corsMaxAge));
+      }
     }
   }
 
@@ -132,7 +136,7 @@ export function createHttpHandler(
     if (request.method === "OPTIONS") {
       if (path === `${prefix}/__capabilities__`) {
         const headers = new Headers();
-        addCorsHeaders(headers);
+        addCorsHeaders(headers, true);
         if (maxRequestBytes != null) {
           headers.set("VGI-Max-Request-Bytes", String(maxRequestBytes));
         }
@@ -141,7 +145,7 @@ export function createHttpHandler(
 
       if (corsOrigins) {
         const headers = new Headers();
-        addCorsHeaders(headers);
+        addCorsHeaders(headers, true);
         return new Response(null, { status: 204, headers });
       }
 

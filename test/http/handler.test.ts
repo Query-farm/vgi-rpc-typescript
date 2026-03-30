@@ -338,6 +338,60 @@ describe("HTTP Handler", () => {
     );
   });
 
+  test("CORS preflight includes Access-Control-Max-Age by default", async () => {
+    const handlerWithCors = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      corsOrigins: "*",
+    });
+
+    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    expect(res.headers.get("Access-Control-Max-Age")).toBe("7200");
+  });
+
+  test("CORS preflight custom corsMaxAge", async () => {
+    const handlerWithCors = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      corsOrigins: "*",
+      corsMaxAge: 3600,
+    });
+
+    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    expect(res.headers.get("Access-Control-Max-Age")).toBe("3600");
+  });
+
+  test("CORS preflight corsMaxAge=null omits header", async () => {
+    const handlerWithCors = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      corsOrigins: "*",
+      corsMaxAge: null,
+    });
+
+    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    expect(res.headers.get("Access-Control-Max-Age")).toBeNull();
+  });
+
+  test("Access-Control-Max-Age not set on non-OPTIONS", async () => {
+    const handlerWithCors = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      corsOrigins: "*",
+      serverId: "max-age-test",
+    });
+
+    const paramSchema = new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]);
+    const body = buildRequestIpc(paramSchema, { a: [1], b: [2] }, "add");
+
+    const res = await handlerWithCors(
+      new Request(`${BASE}/vgi/add`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Max-Age")).toBeNull();
+  });
+
   // -- Producer stream --
 
   test("producer stream init", async () => {
