@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
+import { RPC_ERROR_HEADER } from "../constants.js";
 import { conformBatchToSchema } from "../util/conform.js";
 
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
@@ -27,10 +28,21 @@ export function serializeIpcStream(schema: Schema, batches: RecordBatch[]): Uint
   return writer.toUint8Array(true);
 }
 
-/** Create a Response with Arrow IPC content type. Casts Uint8Array for TS lib compat. */
+/**
+ * Create a Response with Arrow IPC content type.
+ *
+ * Server errors (status 500) are translated to HTTP 200 with an
+ * ``X-VGI-RPC-Error: true`` header so that clients which discard
+ * response bodies on 5xx still receive the Arrow IPC error metadata.
+ * Client errors (400, 401, 404, 415) are passed through unchanged.
+ */
 export function arrowResponse(body: Uint8Array, status = 200, extraHeaders?: Headers): Response {
   const headers = extraHeaders ?? new Headers();
   headers.set("Content-Type", ARROW_CONTENT_TYPE);
+  if (status === 500) {
+    headers.set(RPC_ERROR_HEADER, "true");
+    return new Response(body as unknown as BodyInit, { status: 200, headers });
+  }
   return new Response(body as unknown as BodyInit, { status, headers });
 }
 

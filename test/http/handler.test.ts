@@ -208,7 +208,7 @@ describe("HTTP Handler", () => {
     expect(greeting).toBe("Hello, World!");
   });
 
-  test("unary error returns 500 with error batch", async () => {
+  test("unary error returns 200 with X-VGI-RPC-Error header", async () => {
     const body = buildRequestIpc(new Schema([]), {}, "fail");
 
     const res = await handler(
@@ -219,7 +219,8 @@ describe("HTTP Handler", () => {
       }),
     );
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-VGI-RPC-Error")).toBe("true");
     const { batches } = await readResponseBatches(res);
     expect(batches.length).toBe(1);
     const meta = batches[0].metadata;
@@ -317,7 +318,7 @@ describe("HTTP Handler", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect(res.headers.get("Access-Control-Expose-Headers")).toBe(
-      "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding",
+      "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error",
     );
   });
 
@@ -334,7 +335,7 @@ describe("HTTP Handler", () => {
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe("POST, OPTIONS");
     expect(res.headers.get("Access-Control-Allow-Headers")).toBe("Content-Type, Authorization");
     expect(res.headers.get("Access-Control-Expose-Headers")).toBe(
-      "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding",
+      "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error",
     );
   });
 

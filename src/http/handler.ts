@@ -4,7 +4,7 @@
 import { randomBytes } from "node:crypto";
 import { Schema } from "@query-farm/apache-arrow";
 import type { AuthContext } from "../auth.js";
-import { DESCRIBE_METHOD_NAME } from "../constants.js";
+import { DESCRIBE_METHOD_NAME, RPC_ERROR_HEADER } from "../constants.js";
 import type { Protocol } from "../protocol.js";
 import { type CallStatistics, type DispatchInfo, MethodType } from "../types.js";
 import { zstdCompress, zstdDecompress } from "../util/zstd.js";
@@ -87,7 +87,10 @@ export function createHttpHandler(
       headers.set("Access-Control-Allow-Origin", corsOrigins);
       headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
       headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
-      headers.set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding");
+      headers.set(
+        "Access-Control-Expose-Headers",
+        `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}`,
+      );
       if (isOptions && corsMaxAge != null) {
         headers.set("Access-Control-Max-Age", String(corsMaxAge));
       }

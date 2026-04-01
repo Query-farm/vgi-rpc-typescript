@@ -23,3 +23,5 @@ export const STATE_KEY = "vgi_rpc.stream_state#b64";
 
 export const LOCATION_KEY = "vgi_rpc.location";
 export const LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
+
+export const RPC_ERROR_HEADER = "X-VGI-RPC-Error";
