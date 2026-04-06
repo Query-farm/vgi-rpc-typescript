@@ -10,6 +10,7 @@ import { type CallStatistics, type DispatchInfo, MethodType } from "../types.js"
 import { zstdCompress, zstdDecompress } from "../util/zstd.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
+import { chainAuthenticate } from "./bearer.js";
 import { ARROW_CONTENT_TYPE, arrowResponse, HttpRpcError, serializeIpcStream } from "./common.js";
 import {
   httpDispatchDescribe,
@@ -17,6 +18,14 @@ import {
   httpDispatchStreamInit,
   httpDispatchUnary,
 } from "./dispatch.js";
+import {
+  configureOAuthPkce,
+  handleBrowserGetRedirect,
+  handleEarlyReturnTo,
+  handleOAuthCallback,
+  handleOAuthLogout,
+  type OAuthPkceConfig,
+} from "./oauth-pkce.js";
 import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
 import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
 
@@ -47,8 +56,36 @@ export function createHttpHandler(
   const maxStreamResponseBytes = options?.maxStreamResponseBytes;
   const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
-  const authenticate = options?.authenticate;
+  let authenticate = options?.authenticate;
   const oauthMetadata = options?.oauthResourceMetadata;
+
+  // PKCE setup: when both authenticate and oauthMetadata.clientId are present
+  let pkceConfig: OAuthPkceConfig | null = null;
+  if (authenticate && oauthMetadata?.clientId) {
+    const resourceUrl = new URL(oauthMetadata.resource);
+    const secureCookie = resourceUrl.protocol === "https:";
+    const redirectUri = `${oauthMetadata.resource.replace(/\/+$/, "")}${prefix}/_oauth/callback`;
+    const issuer = oauthMetadata.authorizationServers[0];
+    if (issuer) {
+      const originalAuth = authenticate;
+      pkceConfig = configureOAuthPkce(
+        {
+          signingKey,
+          issuer,
+          clientId: oauthMetadata.clientId,
+          clientSecret: oauthMetadata.clientSecret,
+          useIdToken: oauthMetadata.useIdTokenAsBearer,
+          prefix,
+          secureCookie,
+          redirectUri,
+          scope: options?.oauthPkceScope,
+          allowedReturnOrigins: options?.allowedReturnOrigins,
+        },
+        originalAuth,
+      );
+      authenticate = chainAuthenticate(originalAuth, pkceConfig.cookieAuthenticate);
+    }
+  }
 
   const methods = protocol.getMethods();
 
@@ -64,11 +101,22 @@ export function createHttpHandler(
   const repoUrl = options?.repositoryUrl ?? null;
 
   // Pre-render HTML pages for zero per-request overhead
-  const landingHtml = enableLandingPage
+  let landingHtml = enableLandingPage
     ? buildLandingPage(displayName, serverId, enableDescribePage ? `${prefix}/describe` : null, repoUrl)
     : null;
-  const describeHtml = enableDescribePage ? buildDescribePage(displayName, serverId, methods, repoUrl) : null;
+  let describeHtml = enableDescribePage ? buildDescribePage(displayName, serverId, methods, repoUrl) : null;
   const notFoundHtml = enableNotFoundPage ? buildNotFoundPage(prefix, displayName) : null;
+
+  // Inject user-info HTML snippet when PKCE is active
+  if (pkceConfig) {
+    const snippet = pkceConfig.userInfoHtml;
+    if (landingHtml) {
+      landingHtml = landingHtml.replace("</body>", `${snippet}\n</body>`);
+    }
+    if (describeHtml) {
+      describeHtml = describeHtml.replace("</body>", `${snippet}\n</body>`);
+    }
+  }
 
   const externalLocation = options?.externalLocation;
 
@@ -157,6 +205,33 @@ export function createHttpHandler(
 
     // HTML pages for GET requests
     if (request.method === "GET") {
+      // OAuth callback and logout routes (exempt from auth)
+      if (pkceConfig) {
+        if (path === `${prefix}/_oauth/callback`) {
+          return handleOAuthCallback(request, pkceConfig);
+        }
+        if (path === `${prefix}/_oauth/logout`) {
+          return handleOAuthLogout(request, pkceConfig);
+        }
+
+        // Early return-to redirect for already-authenticated users
+        const earlyRedirect = handleEarlyReturnTo(request, pkceConfig);
+        if (earlyRedirect) return earlyRedirect;
+      }
+
+      // If authenticate is configured, try to authenticate GET requests for pages
+      // On auth failure with PKCE, redirect browsers to OAuth instead of 401
+      if (authenticate && pkceConfig) {
+        try {
+          await authenticate(request);
+        } catch {
+          // Auth failed — redirect browser GETs to OAuth authorization
+          const redirect = await handleBrowserGetRedirect(request, pkceConfig);
+          if (redirect) return redirect;
+          // Not a browser or OIDC discovery failed — fall through to normal page serving
+        }
+      }
+
       // Landing page: GET {prefix}/ or GET {prefix}
       if (landingHtml && (path === prefix || path === `${prefix}/`)) {
         const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });

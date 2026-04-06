@@ -46,6 +46,10 @@ export interface HttpHandlerOptions {
   repositoryUrl?: string;
   /** External storage config for externalizing large response batches. */
   externalLocation?: ExternalLocationConfig;
+  /** OAuth scope for PKCE authorization requests. Default: "openid email". */
+  oauthPkceScope?: string;
+  /** Allowed return-to origins for external frontend redirects. Default: Set(["https://cupola.query-farm.services"]). */
+  allowedReturnOrigins?: ReadonlySet<string>;
 }
 
 /** Serializer for stream state objects stored in state tokens. */
