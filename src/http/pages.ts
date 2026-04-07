@@ -8,11 +8,32 @@
 
 import type { MethodDefinition } from "../types.js";
 
-const LOGO_URL = "https://vgi-rpc-python.query.farm/assets/logo-hero.png";
+export const LOGO_URL = "https://vgi-rpc-python.query.farm/assets/logo-hero.png";
 
-const FONTS = `<link rel="preconnect" href="https://fonts.googleapis.com">
+export const FONTS = `<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">`;
+
+export const ERROR_PAGE_STYLE = `<style>
+body { font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 600px;
+       margin: 0 auto; padding: 60px 20px 0; color: #2c2c1e; text-align: center;
+       background: #faf8f0; }
+.logo { margin-bottom: 24px; }
+.logo img { width: 120px; height: 120px; border-radius: 50%;
+             box-shadow: 0 4px 24px rgba(0,0,0,0.12); }
+h1 { color: #2d5016; margin-bottom: 8px; font-weight: 700; }
+code { font-family: 'JetBrains Mono', monospace; background: #f0ece0;
+        padding: 2px 6px; border-radius: 3px; font-size: 0.9em; color: #2c2c1e; }
+a { color: #2d5016; text-decoration: none; }
+a:hover { color: #4a7c23; }
+p { line-height: 1.7; color: #6b6b5a; }
+.detail { margin-top: 12px; padding: 12px 16px; background: #f0ece0;
+           border-radius: 6px; font-size: 0.9em; color: #6b6b5a; }
+footer { margin-top: 48px; padding: 20px 0; border-top: 1px solid #f0ece0;
+          color: #6b6b5a; font-size: 0.85em; line-height: 1.8; }
+footer a { color: #2d5016; font-weight: 600; }
+footer a:hover { color: #4a7c23; }
+</style>`;
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -114,17 +135,9 @@ export function buildNotFoundPage(prefix: string, protocolName: string): string 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>404 \u2014 vgi-rpc endpoint</title>
-<style>
-body { font-family: system-ui, -apple-system, sans-serif; max-width: 600px;
-       margin: 60px auto; padding: 0 20px; color: #333; text-align: center; }
-.logo { margin-bottom: 24px; }
-.logo img { width: 120px; height: 120px; }
-h1 { color: #555; }
-code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.95em; }
-a { color: #0066cc; }
-p { line-height: 1.6; }
-</style>
+<title>404 \u2014 vgi-rpc</title>
+${FONTS}
+${ERROR_PAGE_STYLE}
 </head>
 <body>
 <div class="logo">
@@ -133,7 +146,9 @@ p { line-height: 1.6; }
 <h1>404 \u2014 Not Found</h1>
 <p>This is a <code>vgi-rpc</code> service endpoint${nameFragment}.</p>
 <p>RPC methods are available under <code>${escapeHtml(prefixDisplay)}/&lt;method&gt;</code>.</p>
-<p>Learn more at <a href="https://vgi-rpc.query.farm">vgi-rpc.query.farm</a>.</p>
+<footer>
+  Powered by <a href="https://vgi-rpc.query.farm"><code>vgi-rpc</code></a>
+</footer>
 </body>
 </html>`;
 }

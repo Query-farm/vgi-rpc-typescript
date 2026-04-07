@@ -18,6 +18,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AuthContext } from "../auth.js";
 import type { AuthenticateFn } from "./auth.js";
+import { ERROR_PAGE_STYLE, FONTS, LOGO_URL } from "./pages.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -442,22 +443,21 @@ export function buildOAuthErrorPage(message: string, detail: string | null, retr
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Authentication Error</title>
-<style>
-  body { font-family: system-ui, -apple-system, sans-serif; max-width: 600px;
-         margin: 0 auto; padding: 60px 20px; color: #2c2c1e; text-align: center;
-         background: #faf8f0; }
-  h1 { color: #8b0000; }
-  .detail { background: #f0ece0; padding: 12px 20px; border-radius: 6px;
-             font-family: monospace; margin: 20px 0; text-align: left; }
-  a { color: #2d5016; }
-</style>
+<title>Authentication Error \u2014 vgi-rpc</title>
+${FONTS}
+${ERROR_PAGE_STYLE}
 </head>
 <body>
+<div class="logo">
+  <img src="${LOGO_URL}" alt="vgi-rpc logo">
+</div>
 <h1>Authentication Error</h1>
 <p>${escapeHtml(message)}</p>
 ${detailHtml}
 <p><a href="${escapeHtml(retryUrl)}">Try again</a></p>
+<footer>
+  Powered by <a href="https://vgi-rpc.query.farm"><code>vgi-rpc</code></a>
+</footer>
 </body>
 </html>`;
 }
@@ -831,6 +831,17 @@ export function handleEarlyReturnTo(request: Request, config: OAuthPkceConfig): 
   const cookies = parseCookies(request);
   const token = cookies.get(AUTH_COOKIE_NAME);
   if (!token) return null;
+
+  // Don't redirect with an expired token — let the OAuth flow run again
+  try {
+    const parts = token.split(".");
+    if (parts.length >= 2) {
+      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
+      if (typeof payload.exp === "number" && payload.exp <= Math.floor(Date.now() / 1000)) {
+        return null;
+      }
+    }
+  } catch { /* not a JWT or can't decode — proceed with redirect */ }
 
   // Already authenticated with a return_to — redirect back with the token
   const separator = returnTo.includes("#") ? "&" : "#";
