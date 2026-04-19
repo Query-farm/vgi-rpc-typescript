@@ -3,7 +3,7 @@
 
 import { RecordBatch, RecordBatchReader, Schema } from "@query-farm/apache-arrow";
 import type { AuthContext } from "../auth.js";
-import { STATE_KEY } from "../constants.js";
+import { CANCEL_KEY, STATE_KEY } from "../constants.js";
 import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
 import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
 import type { MethodDefinition } from "../types.js";
@@ -176,6 +176,11 @@ export async function httpDispatchStreamExchange(
     throw new HttpRpcError("Missing state token in exchange request", 400);
   }
 
+  // Cancel signal — observed alongside the state token. Must be checked
+  // before conformBatchToSchema so that zero-row empty-schema cancel batches
+  // don't fail the cast.
+  const cancelled = reqBatch.metadata?.get(CANCEL_KEY) != null;
+
   let unpacked: import("./token.js").UnpackedToken;
   try {
     unpacked = unpackStateToken(tokenBase64, ctx.signingKey, ctx.tokenTtl);
@@ -210,6 +215,20 @@ export async function httpDispatchStreamExchange(
     console.error(
       `[httpDispatchStreamExchange] method=${method.name} effectiveProducer=${effectiveProducer} stateKeys=${Object.keys(state || {})}`,
     );
+
+  if (cancelled) {
+    // Client asked for cancellation. Invoke the optional hook once and
+    // return an empty IPC stream (no continuation token) so the client
+    // knows the stream has ended.
+    if (method.onCancel) {
+      try {
+        await method.onCancel(state);
+      } catch (err) {
+        console.debug?.(`onCancel hook failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    return arrowResponse(serializeIpcStream(outputSchema, []));
+  }
 
   if (effectiveProducer) {
     // Producer continuation — produce more data inline.

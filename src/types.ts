@@ -39,6 +39,14 @@ export type ExchangeFn<S = any> = (state: S, input: RecordBatch, out: OutputColl
 /** Produces a header batch sent before the first output batch in a stream. */
 export type HeaderInit = (params: Record<string, any>, state: any, ctx: LogContext) => Record<string, any>;
 
+/**
+ * Optional handler invoked when the client signals cancellation by writing an
+ * input batch carrying the ``vgi_rpc.cancel`` metadata key. The server runs
+ * this hook once, before breaking out of the streaming loop, giving state
+ * objects a chance to release resources. Errors are logged and swallowed.
+ */
+export type OnCancelFn<S = any> = (state: S) => Promise<void> | void;
+
 export interface MethodDefinition {
   name: string;
   type: MethodType;
@@ -53,6 +61,7 @@ export interface MethodDefinition {
   exchangeFn?: ExchangeFn;
   headerSchema?: Schema;
   headerInit?: HeaderInit;
+  onCancel?: OnCancelFn;
   doc?: string;
   defaults?: Record<string, any>;
   paramTypes?: Record<string, string>;

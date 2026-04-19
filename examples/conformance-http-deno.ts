@@ -19,6 +19,7 @@ const compressionLevel = Deno.env.get("VGI_COMPRESSION_LEVEL")
 const handler = createHttpHandler(protocol, {
   serverId: compressionLevel ? "conformance-deno-zstd" : "conformance-deno",
   compressionLevel,
+  maxStreamResponseBytes: 1,
 });
 
 Deno.serve(

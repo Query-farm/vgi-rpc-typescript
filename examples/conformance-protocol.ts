@@ -855,3 +855,56 @@ protocol.exchange<{ factor: number }>("exchange_with_rich_header", {
     out.emit({ value: values });
   },
 });
+
+// ===== Cancellation (4) =====
+// Process-wide counters observed by the cancel conformance tests. They live in
+// the server process, so the same counters are visible across pipe, subprocess,
+// and HTTP transports (read back via cancel_probe_counters).
+const cancelProbe = { produceCalls: 0, exchangeCalls: 0, onCancelCalls: 0 };
+
+protocol.producer<{ current: number }>("cancellable_producer", {
+  params: {},
+  outputSchema: COUNTER_SCHEMA,
+  init: () => ({ current: 0 }),
+  produce: (state, out) => {
+    cancelProbe.produceCalls++;
+    out.emitRow({ index: state.current, value: state.current * 10 });
+    state.current++;
+  },
+  onCancel: () => {
+    cancelProbe.onCancelCalls++;
+  },
+});
+
+protocol.exchange<Record<string, never>>("cancellable_exchange", {
+  params: {},
+  inputSchema: SCALE_INPUT,
+  outputSchema: SCALE_OUTPUT,
+  init: () => ({}),
+  exchange: (_state, input: RecordBatch, out) => {
+    cancelProbe.exchangeCalls++;
+    out.emit(input);
+  },
+  onCancel: () => {
+    cancelProbe.onCancelCalls++;
+  },
+});
+
+protocol.unary("cancel_probe_counters", {
+  params: {},
+  result: new Schema([new Field("result", new List(new Field("item", new Int64(), false)), false)]),
+  handler: () => ({
+    result: [BigInt(cancelProbe.produceCalls), BigInt(cancelProbe.exchangeCalls), BigInt(cancelProbe.onCancelCalls)],
+  }),
+});
+
+protocol.unary("reset_cancel_probe", {
+  params: {},
+  result: {},
+  handler: () => {
+    cancelProbe.produceCalls = 0;
+    cancelProbe.exchangeCalls = 0;
+    cancelProbe.onCancelCalls = 0;
+    return {};
+  },
+});

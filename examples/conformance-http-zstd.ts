@@ -13,6 +13,7 @@ import { protocol } from "./conformance-protocol.js";
 const handler = createHttpHandler(protocol, {
   serverId: "conformance-http-zstd",
   compressionLevel: 3,
+  maxStreamResponseBytes: 1,
 });
 
 const server = Bun.serve({ port: 0, fetch: handler });

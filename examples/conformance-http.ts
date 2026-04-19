@@ -53,6 +53,11 @@ if (otelFile) {
 
 const handler = createHttpHandler(protocol, {
   serverId: "conformance-http",
+  // Bound per-response size so infinite producers (e.g. ``cancellable_producer``)
+  // return promptly and the client can follow continuation tokens or cancel
+  // mid-stream. Any positive value works; 1 byte forces a continuation after
+  // every produce cycle, matching the Python reference server's default.
+  maxStreamResponseBytes: 1,
   ...(dispatchHook ? { dispatchHook } : {}),
 });
 

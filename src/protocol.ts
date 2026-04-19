@@ -9,6 +9,7 @@ import {
   type HeaderInit,
   type MethodDefinition,
   MethodType,
+  type OnCancelFn,
   type ProducerFn,
   type ProducerInit,
   type UnaryHandler,
@@ -74,6 +75,7 @@ export class Protocol {
       outputSchema: SchemaLike;
       init: ProducerInit<S>;
       produce: ProducerFn<S>;
+      onCancel?: OnCancelFn<S>;
       headerSchema?: SchemaLike;
       headerInit?: HeaderInit;
       doc?: string;
@@ -91,6 +93,7 @@ export class Protocol {
       inputSchema: EMPTY_SCHEMA,
       producerInit: config.init as ProducerInit,
       producerFn: config.produce as ProducerFn,
+      onCancel: config.onCancel as OnCancelFn | undefined,
       headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
       headerInit: config.headerInit,
       doc: config.doc,
@@ -112,6 +115,7 @@ export class Protocol {
       outputSchema: SchemaLike;
       init: ExchangeInit<S>;
       exchange: ExchangeFn<S>;
+      onCancel?: OnCancelFn<S>;
       headerSchema?: SchemaLike;
       headerInit?: HeaderInit;
       doc?: string;
@@ -129,6 +133,7 @@ export class Protocol {
       outputSchema: toSchema(config.outputSchema),
       exchangeInit: config.init as ExchangeInit,
       exchangeFn: config.exchange as ExchangeFn,
+      onCancel: config.onCancel as OnCancelFn | undefined,
       headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
       headerInit: config.headerInit,
       doc: config.doc,

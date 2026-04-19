@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Schema } from "@query-farm/apache-arrow";
+import { CANCEL_KEY } from "../constants.js";
 import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
@@ -108,6 +109,21 @@ export async function dispatchStream(
     while (true) {
       let inputBatch = await reader.readNextBatch();
       if (!inputBatch) break;
+
+      // Client cancellation: if the input batch carries vgi_rpc.cancel metadata,
+      // end the stream cleanly without calling the producer/exchange handler.
+      // The onCancel hook (if registered) runs once so state objects can
+      // release resources.
+      if (inputBatch.metadata?.get(CANCEL_KEY)) {
+        if (method.onCancel) {
+          try {
+            await method.onCancel(state);
+          } catch (err) {
+            console.debug?.(`onCancel hook failed: ${err instanceof Error ? err.message : err}`);
+          }
+        }
+        break;
+      }
 
       // Cast compatible input types when schema doesn't match exactly.
       // If conformance fails (e.g., completely different schemas like a dummy
