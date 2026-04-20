@@ -573,6 +573,29 @@ export interface OAuthPkceOptions {
   allowedReturnOrigins?: ReadonlySet<string>;
 }
 
+/**
+ * Resolve the OAuth PKCE `scope` string from available sources.
+ *
+ * Precedence:
+ *   1. `scopesSupported` from OAuth resource metadata (space-joined), when non-empty.
+ *   2. Explicit `optionsScope` override (e.g. `HttpHandlerOptions.oauthPkceScope`).
+ *   3. `undefined`, which lets `configureOAuthPkce` apply its built-in default of
+ *      `"openid email"`.
+ *
+ * Mirrors the Python reference behavior introduced in vgi-rpc v0.6.12: authorization
+ * requests should use the scopes the server publishes in its protected resource
+ * metadata, so clients ask for exactly what the resource advertises.
+ */
+export function resolvePkceScope(
+  scopesSupported: readonly string[] | undefined,
+  optionsScope: string | undefined,
+): string | undefined {
+  if (scopesSupported && scopesSupported.length > 0) {
+    return scopesSupported.join(" ");
+  }
+  return optionsScope;
+}
+
 /** Factory function wiring all PKCE components. */
 export function configureOAuthPkce(opts: OAuthPkceOptions, innerAuth: AuthenticateFn): OAuthPkceConfig {
   const sessionKey = deriveSessionKey(opts.signingKey);

@@ -17,6 +17,7 @@ import {
   handleOAuthLogout,
   packOAuthCookie,
   parseCookies,
+  resolvePkceScope,
   unpackOAuthCookie,
   validateOriginalUrl,
   validateReturnTo,
@@ -448,5 +449,36 @@ describe("Python wire format compatibility", () => {
     // The cookie should be decodable by both Python and TypeScript
     const unpacked = unpackOAuthCookie(packed, sessionKey, 0);
     expect(unpacked.codeVerifier).toBe("verifier");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolvePkceScope — scope precedence for OAuth PKCE middleware
+// ---------------------------------------------------------------------------
+
+describe("resolvePkceScope", () => {
+  test("prefers scopesSupported from resource metadata (space-joined)", () => {
+    expect(resolvePkceScope(["openid", "email", "profile"], undefined)).toBe("openid email profile");
+  });
+
+  test("scopesSupported wins over explicit optionsScope", () => {
+    expect(resolvePkceScope(["openid", "offline_access"], "custom override")).toBe("openid offline_access");
+  });
+
+  test("single scopesSupported entry is returned as-is", () => {
+    expect(resolvePkceScope(["openid"], undefined)).toBe("openid");
+  });
+
+  test("falls back to optionsScope when scopesSupported is undefined", () => {
+    expect(resolvePkceScope(undefined, "custom scope")).toBe("custom scope");
+  });
+
+  test("falls back to optionsScope when scopesSupported is empty", () => {
+    expect(resolvePkceScope([], "fallback")).toBe("fallback");
+  });
+
+  test("returns undefined when neither source is provided (lets configureOAuthPkce apply default)", () => {
+    expect(resolvePkceScope(undefined, undefined)).toBeUndefined();
+    expect(resolvePkceScope([], undefined)).toBeUndefined();
   });
 });

@@ -25,6 +25,7 @@ import {
   handleOAuthCallback,
   handleOAuthLogout,
   type OAuthPkceConfig,
+  resolvePkceScope,
 } from "./oauth-pkce.js";
 import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
 import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
@@ -78,7 +79,7 @@ export function createHttpHandler(
           prefix,
           secureCookie,
           redirectUri,
-          scope: options?.oauthPkceScope,
+          scope: resolvePkceScope(oauthMetadata.scopesSupported, options?.oauthPkceScope),
           allowedReturnOrigins: options?.allowedReturnOrigins,
         },
         originalAuth,
