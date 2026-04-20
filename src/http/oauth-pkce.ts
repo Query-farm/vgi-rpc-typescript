@@ -864,7 +864,9 @@ export function handleEarlyReturnTo(request: Request, config: OAuthPkceConfig): 
         return null;
       }
     }
-  } catch { /* not a JWT or can't decode — proceed with redirect */ }
+  } catch {
+    /* not a JWT or can't decode — proceed with redirect */
+  }
 
   // Already authenticated with a return_to — redirect back with the token
   const separator = returnTo.includes("#") ? "&" : "#";
