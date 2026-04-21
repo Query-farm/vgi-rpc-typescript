@@ -20,11 +20,7 @@ import { createHttpHandler, int32, Protocol, str } from "../../src/index.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildRequestIpc(
-  schema: Schema,
-  values: Record<string, any[]>,
-  methodName: string,
-): Uint8Array {
+function buildRequestIpc(schema: Schema, values: Record<string, any[]>, methodName: string): Uint8Array {
   const batch = recordBatchFromArrays(values, schema);
   const meta = new Map<string, string>();
   meta.set(RPC_METHOD_KEY, methodName);
@@ -156,10 +152,7 @@ describe("HTTP cookies", () => {
   });
 
   test("setCookie emits a Set-Cookie header with the expected attributes", async () => {
-    const paramsSchema = new Schema([
-      new Field("value", new Utf8(), false),
-      new Field("maxAge", new Int32(), false),
-    ]);
+    const paramsSchema = new Schema([new Field("value", new Utf8(), false), new Field("maxAge", new Int32(), false)]);
     const body = buildRequestIpc(paramsSchema, { value: ["xyz"], maxAge: [60] }, "set_sid");
     const res = await handler(
       new Request(`${BASE}/set_sid`, {

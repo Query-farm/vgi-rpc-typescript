@@ -127,7 +127,14 @@ export async function httpDispatchStreamInit(
   let headerBytes: Uint8Array | null = null;
   if (method.headerSchema && method.headerInit) {
     try {
-      const headerOut = new OutputCollector(method.headerSchema, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies);
+      const headerOut = new OutputCollector(
+        method.headerSchema,
+        true,
+        ctx.serverId,
+        parsed.requestId,
+        ctx.authContext,
+        ctx.cookies,
+      );
       const headerValues = method.headerInit(parsed.params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, ctx.serverId, parsed.requestId);
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
