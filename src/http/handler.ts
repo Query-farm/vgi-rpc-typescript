@@ -32,6 +32,26 @@ import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
 
 const EMPTY_SCHEMA = new Schema([]);
 
+const EMPTY_COOKIES: ReadonlyMap<string, string> = new Map();
+
+/**
+ * Parse the Cookie request header into a Map.  Returns an empty map when
+ * the header is absent.
+ */
+function parseRequestCookies(request: Request): ReadonlyMap<string, string> {
+  const header = request.headers.get("cookie");
+  if (!header) return EMPTY_COOKIES;
+  const out = new Map<string, string>();
+  for (const part of header.split(";")) {
+    const pair = part.trim();
+    if (!pair) continue;
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    out.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+  }
+  return out;
+}
+
 /**
  * Create a fetch-compatible HTTP handler for a vgi-rpc Protocol.
  *
@@ -285,7 +305,10 @@ export function createHttpHandler(
     }
 
     // Build per-request dispatch context
-    const ctx = { ...baseCtx } as typeof baseCtx & { authContext?: AuthContext };
+    const ctx = { ...baseCtx, cookies: parseRequestCookies(request) } as typeof baseCtx & {
+      authContext?: AuthContext;
+      cookies: ReadonlyMap<string, string>;
+    };
 
     // Authentication
     if (authenticate) {

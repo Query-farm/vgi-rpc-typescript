@@ -3,9 +3,37 @@
 
 import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
 import { RPC_ERROR_HEADER } from "../constants.js";
+import type { CookieSpec } from "../types.js";
 import { conformBatchToSchema } from "../util/conform.js";
 
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
+
+/** Serialize a CookieSpec into a Set-Cookie header value. */
+export function formatSetCookieHeader(c: CookieSpec): string {
+  const parts: string[] = [];
+  if (c.delete) {
+    parts.push(`${c.name}=`);
+    parts.push("Max-Age=0");
+  } else {
+    parts.push(`${c.name}=${c.value}`);
+    if (c.maxAge !== undefined) parts.push(`Max-Age=${c.maxAge}`);
+    if (c.expires) parts.push(`Expires=${c.expires.toUTCString()}`);
+  }
+  if (c.path) parts.push(`Path=${c.path}`);
+  if (c.domain) parts.push(`Domain=${c.domain}`);
+  if (c.secure) parts.push("Secure");
+  if (c.httpOnly) parts.push("HttpOnly");
+  if (c.sameSite) parts.push(`SameSite=${c.sameSite}`);
+  if (c.partitioned) parts.push("Partitioned");
+  return parts.join("; ");
+}
+
+/** Append Set-Cookie headers for each queued CookieSpec onto an existing Headers object. */
+export function appendCookieHeaders(headers: Headers, cookies: readonly CookieSpec[]): void {
+  for (const c of cookies) {
+    headers.append("Set-Cookie", formatSetCookieHeader(c));
+  }
+}
 
 export class HttpRpcError extends Error {
   constructor(

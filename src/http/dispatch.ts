@@ -12,7 +12,7 @@ import { conformBatchToSchema } from "../util/conform.js";
 import { serializeSchema } from "../util/schema.js";
 import { parseRequest } from "../wire/request.js";
 import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
-import { arrowResponse, HttpRpcError, readRequestFromBody, serializeIpcStream } from "./common.js";
+import { appendCookieHeaders, arrowResponse, HttpRpcError, readRequestFromBody, serializeIpcStream } from "./common.js";
 import { packStateToken, unpackStateToken } from "./token.js";
 import type { StateSerializer } from "./types.js";
 
@@ -32,6 +32,8 @@ export interface DispatchContext {
   stateSerializer: StateSerializer;
   authContext?: AuthContext;
   externalLocation?: ExternalLocationConfig;
+  /** Incoming HTTP request cookies.  Empty/absent on non-HTTP paths. */
+  cookies?: ReadonlyMap<string, string>;
 }
 
 /** Dispatch a __describe__ request. */
@@ -59,7 +61,8 @@ export async function httpDispatchUnary(
     throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
   }
 
-  const out = new OutputCollector(schema, true, ctx.serverId, parsed.requestId, ctx.authContext);
+  const out = new OutputCollector(schema, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies);
+  out.enableCookieSink();
 
   try {
     const result = await method.handler!(parsed.params, out);
@@ -68,10 +71,15 @@ export async function httpDispatchUnary(
       resultBatch = await maybeExternalizeBatch(resultBatch, ctx.externalLocation);
     }
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
-    return arrowResponse(serializeIpcStream(schema, batches));
+    const response = arrowResponse(serializeIpcStream(schema, batches));
+    appendCookieHeaders(response.headers, out.drainResponseCookies());
+    return response;
   } catch (error: any) {
     const errBatch = buildErrorBatch(schema, error, ctx.serverId, parsed.requestId);
     const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
+    // Apply any cookies queued before the exception — matches Python's
+    // "cookies-on-error" behavior.
+    appendCookieHeaders(response.headers, out.drainResponseCookies());
     // Attach the error so the dispatch hook can see it
     (response as any).__dispatchError = error;
     return response;
@@ -119,7 +127,7 @@ export async function httpDispatchStreamInit(
   let headerBytes: Uint8Array | null = null;
   if (method.headerSchema && method.headerInit) {
     try {
-      const headerOut = new OutputCollector(method.headerSchema, true, ctx.serverId, parsed.requestId, ctx.authContext);
+      const headerOut = new OutputCollector(method.headerSchema, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies);
       const headerValues = method.headerInit(parsed.params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, ctx.serverId, parsed.requestId);
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
@@ -238,7 +246,7 @@ export async function httpDispatchStreamExchange(
     // Exchange path — also handles exchange-registered methods acting as
     // producers (__isProducer=true). Use producer mode on the OutputCollector
     // when effectiveProducer so finish() is allowed.
-    const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext);
+    const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext, ctx.cookies);
 
     // Cast compatible input types (e.g., decimal→double, int32→int64)
     const conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
@@ -319,7 +327,7 @@ async function produceStreamResponse(
   let producerError: Error | undefined;
 
   while (true) {
-    const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId, ctx.authContext);
+    const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId, ctx.authContext, ctx.cookies);
 
     try {
       if (method.producerFn) {

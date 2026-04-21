@@ -15,9 +15,54 @@ export interface LogContext {
   clientLog(level: string, message: string, extra?: Record<string, string>): void;
 }
 
+/**
+ * Attributes for a Set-Cookie directive queued via {@link CallContext.setCookie}.
+ * All fields are optional; omitted attributes are not serialized onto the header.
+ */
+export interface CookieAttrs {
+  expires?: Date;
+  maxAge?: number;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: "Strict" | "Lax" | "None";
+  partitioned?: boolean;
+}
+
+/**
+ * A queued cookie mutation for the HTTP response. Internal — callers
+ * interact through {@link CallContext.setCookie} / {@link CallContext.deleteCookie}.
+ */
+export interface CookieSpec extends CookieAttrs {
+  name: string;
+  value: string;
+  delete: boolean;
+}
+
 /** Extended context with authentication info, available to handlers. */
 export interface CallContext extends LogContext {
   readonly auth: AuthContext;
+  /**
+   * Incoming request cookies.  Empty for non-HTTP transports.
+   */
+  readonly cookies: ReadonlyMap<string, string>;
+  /**
+   * Queue a Set-Cookie header on the HTTP response.  Only valid inside a
+   * unary RPC method served over HTTP; throws otherwise.
+   */
+  setCookie(name: string, value: string, attrs?: CookieAttrs): void;
+  /**
+   * Queue an unset-cookie directive on the HTTP response.  Only valid
+   * inside a unary RPC method served over HTTP; throws otherwise.
+   */
+  deleteCookie(name: string, opts?: { path?: string; domain?: string }): void;
+}
+
+const EMPTY_COOKIES: ReadonlyMap<string, string> = new Map();
+
+function cookieNotUnaryHttpError(): Error {
+  return new Error("setCookie/deleteCookie is only supported inside unary RPC methods served over HTTP");
 }
 
 /** Handler for unary (request-response) RPC methods. */
@@ -118,7 +163,10 @@ export class OutputCollector implements CallContext {
   private _outputSchema: Schema;
   private _serverId: string;
   private _requestId: string | null;
+  private _cookieSinkEnabled = false;
+  private _responseCookies: CookieSpec[] = [];
   readonly auth: AuthContext;
+  readonly cookies: ReadonlyMap<string, string>;
 
   constructor(
     outputSchema: Schema,
@@ -126,12 +174,55 @@ export class OutputCollector implements CallContext {
     serverId = "",
     requestId: string | null = null,
     authContext?: AuthContext,
+    cookies?: ReadonlyMap<string, string>,
   ) {
     this._outputSchema = outputSchema;
     this._producerMode = producerMode;
     this._serverId = serverId;
     this._requestId = requestId;
     this.auth = authContext ?? AuthContext.anonymous();
+    this.cookies = cookies ?? EMPTY_COOKIES;
+  }
+
+  /**
+   * Mark this collector as able to accept Set-Cookie directives.  Called
+   * by the unary HTTP dispatcher only; streaming and non-HTTP paths leave
+   * the sink disabled so setCookie/deleteCookie throw.
+   * @internal
+   */
+  enableCookieSink(): void {
+    this._cookieSinkEnabled = true;
+  }
+
+  /**
+   * Return and clear all queued cookie mutations.
+   * @internal
+   */
+  drainResponseCookies(): CookieSpec[] {
+    const cookies = this._responseCookies;
+    this._responseCookies = [];
+    return cookies;
+  }
+
+  setCookie(name: string, value: string, attrs?: CookieAttrs): void {
+    if (!this._cookieSinkEnabled) throw cookieNotUnaryHttpError();
+    this._responseCookies.push({
+      name,
+      value,
+      delete: false,
+      ...(attrs ?? {}),
+    });
+  }
+
+  deleteCookie(name: string, opts?: { path?: string; domain?: string }): void {
+    if (!this._cookieSinkEnabled) throw cookieNotUnaryHttpError();
+    this._responseCookies.push({
+      name,
+      value: "",
+      delete: true,
+      path: opts?.path,
+      domain: opts?.domain,
+    });
   }
 
   get outputSchema(): Schema {
