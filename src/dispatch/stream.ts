@@ -102,8 +102,11 @@ export async function dispatchStream(
   // same stream. We use IncrementalStream which writes bytes synchronously.
   const stream = writer.openStream(outputSchema);
 
-  // Expected input schema for casting compatible types (e.g., decimal→double)
-  const expectedInputSchema = method.inputSchema;
+  // Expected input schema for casting compatible types (e.g., decimal→double).
+  // State.__inputSchema overrides the method-registration schema per call,
+  // mirroring the __outputSchema pattern. Used by dynamic-input exchange
+  // methods (e.g., VGI's init, which binds to a user-supplied input shape).
+  const expectedInputSchema = state?.__inputSchema ?? method.inputSchema;
 
   try {
     while (true) {
@@ -126,18 +129,15 @@ export async function dispatchStream(
       }
 
       // Cast compatible input types when schema doesn't match exactly.
-      // If conformance fails (e.g., completely different schemas like a dummy
-      // registration schema vs actual data), pass the original batch through —
-      // the exchange handler may handle dynamic schemas internally.
-      if (expectedInputSchema && !isProducer && inputBatch.schema !== expectedInputSchema) {
+      // Gated on effectiveProducer (not isProducer) so methods that flip to
+      // producer mode via state.__isProducer skip the conform entirely — the
+      // tick batches they receive have a dummy shape that shouldn't be checked.
+      // Any conformance failure falls through with the original batch; the
+      // exchange handler owns input-shape validation if it cares.
+      if (expectedInputSchema && !effectiveProducer && inputBatch.schema !== expectedInputSchema) {
         try {
           inputBatch = conformBatchToSchema(inputBatch, expectedInputSchema);
         } catch (e) {
-          if (e instanceof TypeError) {
-            // Field name/count mismatch — propagate as error (matches Python behavior).
-            throw e;
-          }
-          // Other conformance failures: pass through for dynamic schema handlers.
           console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
         }
       }
