@@ -223,7 +223,11 @@ export async function httpDispatchStreamExchange(
   if (unpacked.inputSchemaBytes.length > 0) {
     inputSchema = await deserializeSchema(unpacked.inputSchemaBytes);
   } else {
-    inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
+    // state.__inputSchema mirrors the __outputSchema pattern — set by
+    // dynamic-input exchange methods (e.g. VGI's init, which binds to a
+    // user-supplied input shape per invocation). Matches the fix already
+    // applied in src/dispatch/stream.ts for the subprocess path.
+    inputSchema = state?.__inputSchema ?? method.inputSchema ?? EMPTY_SCHEMA;
   }
   const effectiveProducer = state?.__isProducer ?? isProducer;
   if (process.env.VGI_DISPATCH_DEBUG)
@@ -255,8 +259,21 @@ export async function httpDispatchStreamExchange(
     // when effectiveProducer so finish() is allowed.
     const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext, ctx.cookies);
 
-    // Cast compatible input types (e.g., decimal→double, int32→int64)
-    const conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
+    // Cast compatible input types (e.g., decimal→double, int32→int64).
+    // Gated on effectiveProducer (not isProducer) so methods that flip to
+    // producer mode via state.__isProducer skip the conform entirely — the
+    // tick batches they receive have a dummy shape that shouldn't be
+    // checked against the declared input schema. Any conformance failure
+    // falls through with the original batch; the handler owns input-shape
+    // validation if it cares. Mirrors dispatch/stream.ts.
+    let conformedBatch = reqBatch;
+    if (!effectiveProducer && inputSchema !== EMPTY_SCHEMA && reqBatch.schema !== inputSchema) {
+      try {
+        conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
+      } catch (e) {
+        console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
+      }
+    }
 
     try {
       if (method.exchangeFn) {
