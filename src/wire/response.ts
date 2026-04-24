@@ -143,19 +143,25 @@ function makeEmptyData(type: DataType): Data {
     return makeData({ type, length: 0, children, nullCount: 0 });
   }
   if (DataType.isList(type)) {
+    // Arrow-JS's makeData for List expects `child` (singular), not
+    // `children` — the latter is silently ignored (cast `as any` hides
+    // the mismatch). Without the correct key Data.children[0] is
+    // undefined, which blows up VectorAssembler when the zero-row batch
+    // is serialized into the IPC stream.
     const childData = makeEmptyData(type.children[0].type);
-    return makeData({ type, length: 0, children: [childData], nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
+    return makeData({ type, length: 0, child: childData, nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
   }
   if (DataType.isFixedSizeList(type)) {
     const childData = makeEmptyData(type.children[0].type);
     return makeData({ type, length: 0, child: childData, nullCount: 0 } as any);
   }
   if (DataType.isMap(type)) {
+    // Same story as List above: Map's makeData takes `child` (singular).
     const entryType = type.children[0]?.type;
     const entryData = entryType
       ? makeEmptyData(entryType)
       : makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
-    return makeData({ type, length: 0, children: [entryData], nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
+    return makeData({ type, length: 0, child: entryData, nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
   }
   return makeData({ type, length: 0, nullCount: 0 });
 }
