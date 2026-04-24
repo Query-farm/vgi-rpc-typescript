@@ -114,13 +114,27 @@ export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, to
     }
   }
 
+  // Copy each bytes section out of the shared Buffer into a freshly-
+  // allocated Uint8Array with byteOffset=0. Buffer.slice returns a VIEW
+  // into the shared backing buffer at an arbitrary byte offset — when
+  // downstream code (arrow-js's schema deserializer) wraps the result
+  // as an Int32Array it throws 'RangeError: Byte offset is not aligned'
+  // if the slice happens to start at a non-4-aligned offset (e.g.
+  // because the union schema's length shifted the next field by 1-3
+  // bytes). Copying normalizes the alignment.
+  const copyAligned = (start: number, len: number) => {
+    const out = new Uint8Array(len);
+    out.set(payload.subarray(start, start + len));
+    return out;
+  };
+
   // state bytes
   const stateLen = payload.readUInt32LE(offset);
   offset += 4;
   if (offset + stateLen > payload.length) {
     throw new Error("State token truncated (state)");
   }
-  const stateBytes = payload.slice(offset, offset + stateLen);
+  const stateBytes = copyAligned(offset, stateLen);
   offset += stateLen;
 
   // output schema bytes
@@ -129,7 +143,7 @@ export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, to
   if (offset + schemaLen > payload.length) {
     throw new Error("State token truncated (schema)");
   }
-  const schemaBytes = payload.slice(offset, offset + schemaLen);
+  const schemaBytes = copyAligned(offset, schemaLen);
   offset += schemaLen;
 
   // input schema bytes
@@ -138,7 +152,7 @@ export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, to
   if (offset + inputSchemaLen > payload.length) {
     throw new Error("State token truncated (input schema)");
   }
-  const inputSchemaBytes = payload.slice(offset, offset + inputSchemaLen);
+  const inputSchemaBytes = copyAligned(offset, inputSchemaLen);
 
   return { stateBytes, schemaBytes, inputSchemaBytes, createdAt };
 }

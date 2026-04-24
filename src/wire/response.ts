@@ -163,6 +163,22 @@ function makeEmptyData(type: DataType): Data {
       : makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
     return makeData({ type, length: 0, child: entryData, nullCount: 0, valueOffsets: new Int32Array([0]) } as any);
   }
+  if (DataType.isUnion(type)) {
+    // Union's makeData needs typeIds (Int8Array) plus one child per arm.
+    // Dense union also needs valueOffsets. Without these the resulting Data
+    // fails IPC serialization on zero-row token batches (arrow-js's
+    // visitUnion expects populated typeId + children buffers).
+    const children = type.children.map((f: Field) => makeEmptyData(f.type));
+    if (DataType.isDenseUnion(type)) {
+      return makeData({
+        type, length: 0, typeIds: new Int8Array(0),
+        valueOffsets: new Int32Array(0), children, nullCount: 0,
+      } as any);
+    }
+    return makeData({
+      type, length: 0, typeIds: new Int8Array(0), children, nullCount: 0,
+    } as any);
+  }
   return makeData({ type, length: 0, nullCount: 0 });
 }
 
