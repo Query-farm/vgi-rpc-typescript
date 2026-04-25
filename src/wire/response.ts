@@ -171,12 +171,20 @@ function makeEmptyData(type: DataType): Data {
     const children = type.children.map((f: Field) => makeEmptyData(f.type));
     if (DataType.isDenseUnion(type)) {
       return makeData({
-        type, length: 0, typeIds: new Int8Array(0),
-        valueOffsets: new Int32Array(0), children, nullCount: 0,
+        type,
+        length: 0,
+        typeIds: new Int8Array(0),
+        valueOffsets: new Int32Array(0),
+        children,
+        nullCount: 0,
       } as any);
     }
     return makeData({
-      type, length: 0, typeIds: new Int8Array(0), children, nullCount: 0,
+      type,
+      length: 0,
+      typeIds: new Int8Array(0),
+      children,
+      nullCount: 0,
     } as any);
   }
   return makeData({ type, length: 0, nullCount: 0 });
