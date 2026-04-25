@@ -13,7 +13,7 @@ import { serializeSchema } from "../util/schema.js";
 import { parseRequest } from "../wire/request.js";
 import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import { appendCookieHeaders, arrowResponse, HttpRpcError, readRequestFromBody, serializeIpcStream } from "./common.js";
-import { packStateToken, unpackStateToken } from "./token.js";
+import { derivePrincipalKey, packStateToken, unpackStateToken } from "./token.js";
 import type { StateSerializer } from "./types.js";
 
 async function deserializeSchema(bytes: Uint8Array): Promise<Schema> {
@@ -157,7 +157,8 @@ export async function httpDispatchStreamInit(
     const stateBytes = ctx.stateSerializer.serialize(state);
     const schemaBytes = serializeSchema(resolvedOutputSchema);
     const inputSchemaBytes = serializeSchema(inputSchema);
-    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.signingKey);
+    const tokenKey = derivePrincipalKey(ctx.signingKey, ctx.authContext?.principal);
+    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey);
 
     const tokenMeta = new Map<string, string>();
     tokenMeta.set(STATE_KEY, token);
@@ -196,9 +197,14 @@ export async function httpDispatchStreamExchange(
   // don't fail the cast.
   const cancelled = reqBatch.metadata?.get(CANCEL_KEY) != null;
 
+  // Bind verification to the caller's identity — a token signed for principal
+  // A will fail HMAC verification when replayed by principal B (or by an
+  // anonymous caller, and vice versa).
+  const tokenKey = derivePrincipalKey(ctx.signingKey, ctx.authContext?.principal);
+
   let unpacked: import("./token.js").UnpackedToken;
   try {
-    unpacked = unpackStateToken(tokenBase64, ctx.signingKey, ctx.tokenTtl);
+    unpacked = unpackStateToken(tokenBase64, tokenKey, ctx.tokenTtl);
   } catch (error: any) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
@@ -308,7 +314,7 @@ export async function httpDispatchStreamExchange(
       const stateBytes = ctx.stateSerializer.serialize(state);
       const schemaBytes = serializeSchema(outputSchema);
       const inputSchemaBytes = serializeSchema(inputSchema);
-      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.signingKey);
+      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey);
 
       for (const emitted of out.batches) {
         const batch = emitted.batch;
@@ -388,7 +394,8 @@ async function produceStreamResponse(
       const stateBytes = ctx.stateSerializer.serialize(state);
       const schemaBytes = serializeSchema(outputSchema);
       const inputSchemaBytes = serializeSchema(inputSchema);
-      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.signingKey);
+      const tokenKey = derivePrincipalKey(ctx.signingKey, ctx.authContext?.principal);
+      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey);
       const tokenMeta = new Map<string, string>();
       tokenMeta.set(STATE_KEY, token);
       allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));

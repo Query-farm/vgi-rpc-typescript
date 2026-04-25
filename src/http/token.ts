@@ -3,6 +3,20 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+/**
+ * Derive a per-principal signing key so that a state token issued to one
+ * authenticated identity cannot be replayed by another. When `principal` is
+ * null or empty (anonymous request), the base key is returned unchanged so
+ * that wire-compatible behavior with non-authenticated peers is preserved.
+ *
+ * The derivation domain-separator ("vgi_rpc.principal\0") prevents collision
+ * with other key-derivation uses of the same base key (e.g. oauth-pkce).
+ */
+export function derivePrincipalKey(signingKey: Uint8Array, principal: string | null | undefined): Uint8Array {
+  if (!principal) return signingKey;
+  return createHmac("sha256", signingKey).update(`vgi_rpc.principal\0${principal}`).digest();
+}
+
 const TOKEN_VERSION = 2;
 const HMAC_LEN = 32;
 // 1 (version) + 8 (created_at) + 4*3 (three length prefixes) + 32 (hmac)

@@ -3,7 +3,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { packStateToken, unpackStateToken } from "../../src/http/token.js";
+import { derivePrincipalKey, packStateToken, unpackStateToken } from "../../src/http/token.js";
 import { jsonStateSerializer } from "../../src/http/types.js";
 
 describe("State Token", () => {
@@ -90,6 +90,39 @@ describe("State Token", () => {
     expect(restored.count).toBe(5);
     expect(restored.bigVal).toBe(BigInt("9007199254740993"));
     expect(restored.nested.x).toBe(BigInt(-42));
+  });
+
+  test("derivePrincipalKey returns base key when principal is empty", () => {
+    expect(derivePrincipalKey(signingKey, null)).toBe(signingKey);
+    expect(derivePrincipalKey(signingKey, undefined)).toBe(signingKey);
+    expect(derivePrincipalKey(signingKey, "")).toBe(signingKey);
+  });
+
+  test("derivePrincipalKey produces distinct keys per principal", () => {
+    const a = derivePrincipalKey(signingKey, "alice");
+    const b = derivePrincipalKey(signingKey, "bob");
+    const a2 = derivePrincipalKey(signingKey, "alice");
+    expect(Buffer.from(a).equals(a2)).toBe(true);
+    expect(Buffer.from(a).equals(b)).toBe(false);
+    expect(Buffer.from(a).equals(signingKey)).toBe(false);
+  });
+
+  test("token signed for one principal cannot be verified by another", () => {
+    const stateBytes = new TextEncoder().encode("{}");
+    const schemaBytes = new Uint8Array([1]);
+    const inputSchemaBytes = new Uint8Array([2]);
+
+    const aliceKey = derivePrincipalKey(signingKey, "alice");
+    const bobKey = derivePrincipalKey(signingKey, "bob");
+
+    const aliceToken = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, aliceKey);
+
+    // Alice can verify her own token.
+    expect(() => unpackStateToken(aliceToken, aliceKey, 3600)).not.toThrow();
+    // Bob cannot replay Alice's token.
+    expect(() => unpackStateToken(aliceToken, bobKey, 3600)).toThrow("HMAC verification failed");
+    // Anonymous (base key) cannot replay it either.
+    expect(() => unpackStateToken(aliceToken, signingKey, 3600)).toThrow("HMAC verification failed");
   });
 
   test("handles large state", () => {
