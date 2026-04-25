@@ -277,6 +277,10 @@ export async function httpDispatchStreamExchange(
       try {
         conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
       } catch (e) {
+        // Field name/count mismatch is a hard contract violation — surface it
+        // as an error rather than letting handlers see a wrong-shape batch
+        // (mirrors the subprocess dispatch in src/dispatch/stream.ts).
+        if (e instanceof TypeError) throw e;
         console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
       }
     }

@@ -138,6 +138,13 @@ export async function dispatchStream(
         try {
           inputBatch = conformBatchToSchema(inputBatch, expectedInputSchema);
         } catch (e) {
+          // Field name/count mismatch (TypeError) is a hard contract violation —
+          // propagate as an RpcError so callers see a structured failure instead
+          // of a downstream hang or silent garbage. Other conform failures (e.g.
+          // type-cast issues for dynamic-input handlers) fall through with the
+          // original batch — handlers that bind their input shape per-call
+          // should set state.__inputSchema so the conform doesn't run at all.
+          if (e instanceof TypeError) throw e;
           console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
         }
       }
