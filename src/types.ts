@@ -124,6 +124,10 @@ export interface DispatchInfo {
   requestId: string | null;
   /** Logical service / protocol name. */
   protocol?: string;
+  /** SHA-256 hex of the canonical __describe__ payload (always required in access log). */
+  protocolHash?: string;
+  /** Operator-supplied protocol-contract version label (optional). */
+  protocolVersion?: string;
   /** Authenticated principal, empty string when anonymous. */
   principal?: string;
   /** Authentication domain, empty string when anonymous. */

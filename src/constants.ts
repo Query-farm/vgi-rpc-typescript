@@ -15,7 +15,8 @@ export const REQUEST_ID_KEY = "vgi_rpc.request_id";
 
 export const PROTOCOL_NAME_KEY = "vgi_rpc.protocol_name";
 export const DESCRIBE_VERSION_KEY = "vgi_rpc.describe_version";
-export const DESCRIBE_VERSION = "3";
+export const PROTOCOL_HASH_KEY = "vgi_rpc.protocol_hash";
+export const DESCRIBE_VERSION = "4";
 
 export const DESCRIBE_METHOD_NAME = "__describe__";
 

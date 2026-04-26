@@ -90,6 +90,7 @@ export class AccessLogHook implements DispatchHook {
       message: `${protocol}.${info.method} ${status}`,
       server_id: info.serverId,
       protocol,
+      protocol_hash: info.protocolHash ?? "",
       method: info.method,
       method_type: info.methodType,
       principal: info.principal ?? "",
@@ -103,6 +104,7 @@ export class AccessLogHook implements DispatchHook {
 
     if (errMsg) rec.error_message = errMsg;
     if (this.serverVersion) rec.server_version = this.serverVersion;
+    if (info.protocolVersion) rec.protocol_version = info.protocolVersion;
     if (info.requestId) rec.request_id = info.requestId;
     if (info.requestData && info.requestData.length > 0) {
       rec.request_data = base64(info.requestData);

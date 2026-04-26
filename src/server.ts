@@ -36,6 +36,8 @@ export class VgiRpcServer {
   private enableDescribe: boolean;
   private serverId: string;
   private describeBatch: import("@query-farm/apache-arrow").RecordBatch | null = null;
+  private protocolHash: string;
+  private protocolVersion: string;
   private dispatchHook: DispatchHook | null = null;
   private externalConfig: ExternalLocationConfig | undefined;
 
@@ -46,6 +48,7 @@ export class VgiRpcServer {
       serverId?: string;
       dispatchHook?: DispatchHook;
       externalLocation?: ExternalLocationConfig;
+      protocolVersion?: string;
     },
   ) {
     this.protocol = protocol;
@@ -53,9 +56,13 @@ export class VgiRpcServer {
     this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
     this.dispatchHook = options?.dispatchHook ?? null;
     this.externalConfig = options?.externalLocation;
+    this.protocolVersion = options?.protocolVersion ?? "";
 
+    // Build the describe batch once, regardless of enableDescribe — its
+    // metadata carries the protocol_hash that every access-log record needs.
+    const { batch, metadata } = buildDescribeBatch(protocol.name, protocol.getMethods(), this.serverId);
+    this.protocolHash = metadata.get("vgi_rpc.protocol_hash") ?? "";
     if (this.enableDescribe) {
-      const { batch } = buildDescribeBatch(protocol.name, protocol.getMethods(), this.serverId);
       this.describeBatch = batch;
     }
   }
@@ -179,6 +186,8 @@ export class VgiRpcServer {
       serverId: this.serverId,
       requestId,
       protocol: this.protocol.name,
+      protocolHash: this.protocolHash,
+      protocolVersion: this.protocolVersion,
       principal: "",
       authDomain: "",
       authenticated: false,
