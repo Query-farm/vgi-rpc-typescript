@@ -122,6 +122,22 @@ export interface DispatchInfo {
   serverId: string;
   /** Client-supplied request identifier, or null. */
   requestId: string | null;
+  /** Logical service / protocol name. */
+  protocol?: string;
+  /** Authenticated principal, empty string when anonymous. */
+  principal?: string;
+  /** Authentication domain, empty string when anonymous. */
+  authDomain?: string;
+  /** True when the call was authenticated. */
+  authenticated?: boolean;
+  /** HTTP transport: remote IP:port. */
+  remoteAddr?: string;
+  /** Self-contained Arrow IPC stream of the request batch (unary + stream init only). */
+  requestData?: Uint8Array;
+  /** Stream lifecycle identifier (32-char lowercase hex); empty on unary. */
+  streamId?: string;
+  /** True when a stream was cancelled by the client. */
+  cancelled?: boolean;
 }
 
 /** Per-call I/O counters, matching Python's CallStatistics. */

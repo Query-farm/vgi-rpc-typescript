@@ -1,6 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+export { AccessLogHook, type AccessLogSink, FdSink } from "./access-log.js";
 export { AuthContext } from "./auth.js";
 export * from "./client/index.js";
 export {
@@ -63,10 +64,16 @@ export {
   float32,
   inferParamTypes,
   int,
+  int8,
+  int16,
   int32,
   type SchemaLike,
   str,
   toSchema,
+  uint8,
+  uint16,
+  uint32,
+  uint64,
 } from "./schema.js";
 export { VgiRpcServer } from "./server.js";
 export {

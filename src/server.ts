@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema } from "@query-farm/apache-arrow";
+import { RecordBatchStreamWriter, Schema } from "@query-farm/apache-arrow";
 import { DESCRIBE_METHOD_NAME } from "./constants.js";
 import { buildDescribeBatch } from "./dispatch/describe.js";
 import { dispatchStream } from "./dispatch/stream.js";
@@ -16,6 +16,16 @@ import { buildErrorBatch } from "./wire/response.js";
 import { IpcStreamWriter } from "./wire/writer.js";
 
 const EMPTY_SCHEMA = new Schema([]);
+
+function randomStreamId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    out += bytes[i].toString(16).padStart(2, "0");
+  }
+  return out;
+}
 
 /**
  * RPC server that reads Arrow IPC requests from stdin and writes responses to stdout.
@@ -144,7 +154,38 @@ export class VgiRpcServer {
 
     // Dispatch based on method type, with optional hook
     const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
-    const info: DispatchInfo = { method: methodName, methodType, serverId: this.serverId, requestId };
+
+    // Capture self-contained IPC bytes of the request batch for the access log.
+    let requestData: Uint8Array | undefined;
+    try {
+      const w = new RecordBatchStreamWriter();
+      w.reset(undefined, batch.schema);
+      // biome-ignore lint/suspicious/noExplicitAny: bypass schema-cmp like elsewhere in this file
+      (w as any)._writeRecordBatch(batch);
+      w.close();
+      requestData = w.toUint8Array(true);
+    } catch {
+      // best-effort; observability must not fail dispatch
+    }
+
+    let streamId: string | undefined;
+    if (methodType === "stream") {
+      streamId = randomStreamId();
+    }
+
+    const info: DispatchInfo = {
+      method: methodName,
+      methodType,
+      serverId: this.serverId,
+      requestId,
+      protocol: this.protocol.name,
+      principal: "",
+      authDomain: "",
+      authenticated: false,
+      remoteAddr: "",
+      requestData,
+      streamId,
+    };
     const stats: CallStatistics = {
       inputBatches: 0,
       outputBatches: 0,
