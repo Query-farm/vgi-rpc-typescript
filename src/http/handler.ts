@@ -2,16 +2,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomBytes } from "node:crypto";
-import { Schema } from "@query-farm/apache-arrow";
+import {
+  Field,
+  Int64,
+  RecordBatch,
+  Schema,
+  TimestampMicrosecond,
+  Utf8,
+  vectorFromArray,
+} from "@query-farm/apache-arrow";
 import type { AuthContext } from "../auth.js";
 import { DESCRIBE_METHOD_NAME, RPC_ERROR_HEADER } from "../constants.js";
 import type { Protocol } from "../protocol.js";
 import { type CallStatistics, type DispatchInfo, MethodType } from "../types.js";
 import { zstdCompress, zstdDecompress } from "../util/zstd.js";
+import { parseRequest } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
 import { chainAuthenticate } from "./bearer.js";
-import { ARROW_CONTENT_TYPE, arrowResponse, HttpRpcError, serializeIpcStream } from "./common.js";
+import {
+  ARROW_CONTENT_TYPE,
+  arrowResponse,
+  HttpRpcError,
+  readRequestFromBody as readRequestFromBodyImported,
+  serializeIpcStream,
+} from "./common.js";
 import {
   httpDispatchDescribe,
   httpDispatchStreamExchange,
@@ -24,6 +39,7 @@ import {
   handleEarlyReturnTo,
   handleOAuthCallback,
   handleOAuthLogout,
+  handleOAuthTokenProxy,
   type OAuthPkceConfig,
   resolvePkceScope,
 } from "./oauth-pkce.js";
@@ -140,6 +156,37 @@ export function createHttpHandler(
   }
 
   const externalLocation = options?.externalLocation;
+  const uploadUrlProvider = options?.uploadUrlProvider;
+  const maxUploadBytes = options?.maxUploadBytes;
+
+  // Pre-built schemas for the synthetic __upload_url__ endpoint.
+  const UPLOAD_URL_REQUEST_SCHEMA = new Schema([new Field("count", new Int64(), false)]);
+  const UPLOAD_URL_RESPONSE_SCHEMA = new Schema([
+    new Field("upload_url", new Utf8(), false),
+    new Field("download_url", new Utf8(), false),
+    new Field("expires_at", new TimestampMicrosecond("UTC"), false),
+  ]);
+  const UPLOAD_URL_METHOD = "__upload_url__";
+  const MAX_UPLOAD_URL_COUNT = 100;
+
+  /** Append capability headers (advertised on every response when configured). */
+  function addCapabilityHeaders(headers: Headers, isOptions = false): void {
+    if (maxRequestBytes != null) {
+      headers.set("VGI-Max-Request-Bytes", String(maxRequestBytes));
+    }
+    if (uploadUrlProvider) {
+      headers.set("VGI-Upload-URL-Support", "true");
+      if (maxUploadBytes != null) {
+        headers.set("VGI-Max-Upload-Bytes", String(maxUploadBytes));
+      }
+    }
+    if (isOptions && (maxRequestBytes != null || uploadUrlProvider)) {
+      // Match Python: cache discovery results for 5 minutes.
+      if (!headers.has("Cache-Control")) {
+        headers.set("Cache-Control", "public, max-age=300");
+      }
+    }
+  }
 
   // ctx is built per-request to include authContext; base fields set here
   const baseCtx = {
@@ -186,16 +233,47 @@ export function createHttpHandler(
     return resp;
   }
 
+  const enableHealthEndpoint = options?.enableHealthEndpoint ?? true;
+  const healthPath = `${prefix}/health`;
+  const healthBody = enableHealthEndpoint
+    ? JSON.stringify({ status: "ok", server_id: serverId, protocol: displayName })
+    : null;
+
   return async function handler(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // OAuth token-exchange proxy — exempt from auth (it's the mechanism by
+    // which a client *gets* an auth token). Handled before the global OPTIONS
+    // catch-all so the proxy can apply its own Origin-allowlist CORS.
+    if (pkceConfig && path === `${prefix}/_oauth/token` &&
+        (request.method === "POST" || request.method === "OPTIONS")) {
+      return handleOAuthTokenProxy(request, pkceConfig);
+    }
+
+    // Health endpoint — exempt from authentication so orchestrators / load
+    // balancers can probe even when every RPC endpoint requires auth.
+    if (healthBody !== null && request.method === "GET" && path === healthPath) {
+      const headers = new Headers({ "Content-Type": "application/json" });
+      addCorsHeaders(headers);
+      addCapabilityHeaders(headers);
+      return new Response(healthBody, { status: 200, headers });
+    }
 
     // Well-known endpoint: RFC 9728 OAuth Protected Resource Metadata
     if (oauthMetadata && path === wellKnownPath(prefix)) {
       if (request.method !== "GET") {
         return new Response("Method Not Allowed", { status: 405 });
       }
-      const body = JSON.stringify(oauthResourceMetadataToJson(oauthMetadata));
+      const metaJson = oauthResourceMetadataToJson(oauthMetadata);
+      // When PKCE + a server-side client_secret are configured, advertise the
+      // token-proxy URL so SPA PKCE clients can complete token exchanges
+      // without holding the secret themselves.
+      if (pkceConfig && oauthMetadata.clientSecret) {
+        const resourceUrl = new URL(oauthMetadata.resource);
+        metaJson.token_endpoint = `${resourceUrl.protocol}//${resourceUrl.host}${prefix}/_oauth/token`;
+      }
+      const body = JSON.stringify(metaJson);
       const headers = new Headers({
         "Content-Type": "application/json",
         "Cache-Control": "public, max-age=60",
@@ -204,23 +282,17 @@ export function createHttpHandler(
       return new Response(body, { status: 200, headers });
     }
 
-    // CORS preflight
+    // CORS preflight + capability discovery
     if (request.method === "OPTIONS") {
-      if (path === `${prefix}/__capabilities__`) {
-        const headers = new Headers();
-        addCorsHeaders(headers, true);
-        if (maxRequestBytes != null) {
-          headers.set("VGI-Max-Request-Bytes", String(maxRequestBytes));
-        }
+      const headers = new Headers();
+      addCorsHeaders(headers, true);
+      addCapabilityHeaders(headers, true);
+      // Always answer OPTIONS so capability discovery via OPTIONS /health (or
+      // any other path) works even when CORS isn't enabled.  Falls back to
+      // 405 only if no capability/CORS configuration exists.
+      if (corsOrigins || maxRequestBytes != null || uploadUrlProvider || path === `${prefix}/__capabilities__`) {
         return new Response(null, { status: 204, headers });
       }
-
-      if (corsOrigins) {
-        const headers = new Headers();
-        addCorsHeaders(headers, true);
-        return new Response(null, { status: 204, headers });
-      }
-
       return new Response(null, { status: 405 });
     }
 
@@ -281,36 +353,14 @@ export function createHttpHandler(
       return new Response("Method Not Allowed", { status: 405 });
     }
 
-    // Validate Content-Type
-    const contentType = request.headers.get("Content-Type");
-    if (!contentType || !contentType.includes(ARROW_CONTENT_TYPE)) {
-      return new Response(`Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`, { status: 415 });
-    }
-
-    // Check request body size
-    if (maxRequestBytes != null) {
-      const contentLength = request.headers.get("Content-Length");
-      if (contentLength && parseInt(contentLength, 10) > maxRequestBytes) {
-        return new Response("Request body too large", { status: 413 });
-      }
-    }
-
-    const clientAcceptsZstd = (request.headers.get("Accept-Encoding") ?? "").includes("zstd");
-
-    // Read body, decompressing if needed
-    let body = new Uint8Array(await request.arrayBuffer());
-    const contentEncoding = request.headers.get("Content-Encoding");
-    if (contentEncoding === "zstd") {
-      body = zstdDecompress(body);
-    }
-
     // Build per-request dispatch context
     const ctx = { ...baseCtx, cookies: parseRequestCookies(request) } as typeof baseCtx & {
       authContext?: AuthContext;
       cookies: ReadonlyMap<string, string>;
     };
 
-    // Authentication
+    // Authentication — run before content-type validation so unauthenticated
+    // requests get 401 regardless of body shape.
     if (authenticate) {
       try {
         ctx.authContext = await authenticate(request);
@@ -334,6 +384,103 @@ export function createHttpHandler(
           );
         }
         return new Response(error.message || "Unauthorized", { status: 401, headers });
+      }
+    }
+
+    // Validate Content-Type
+    const contentType = request.headers.get("Content-Type");
+    if (!contentType || !contentType.includes(ARROW_CONTENT_TYPE)) {
+      return new Response(`Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`, { status: 415 });
+    }
+
+    // Check request body size (exempt the upload-URL and health endpoints —
+    // their payloads are intrinsically tiny, and __upload_url__ exists
+    // precisely to escape this limit).
+    const exemptFromMaxBytes =
+      path === healthPath || path === `${prefix}/${UPLOAD_URL_METHOD}/init` || path === `${prefix}/__capabilities__`;
+    if (maxRequestBytes != null && !exemptFromMaxBytes) {
+      const contentLength = request.headers.get("Content-Length");
+      if (contentLength && parseInt(contentLength, 10) > maxRequestBytes) {
+        return new Response("Request body too large", { status: 413 });
+      }
+    }
+
+    const clientAcceptsZstd = (request.headers.get("Accept-Encoding") ?? "").includes("zstd");
+
+    // Read body, decompressing if needed
+    let body = new Uint8Array(await request.arrayBuffer());
+    if (maxRequestBytes != null && !exemptFromMaxBytes && body.byteLength > maxRequestBytes) {
+      return new Response("Request body too large", { status: 413 });
+    }
+    const contentEncoding = request.headers.get("Content-Encoding");
+    if (contentEncoding === "zstd") {
+      body = zstdDecompress(body);
+    }
+
+    // Route: {prefix}/__upload_url__/init — vend pre-signed upload URL pairs
+    if (path === `${prefix}/${UPLOAD_URL_METHOD}/init`) {
+      if (!uploadUrlProvider) {
+        return new Response("Not Found", { status: 404 });
+      }
+      try {
+        const { schema: reqSchema, batch: reqBatch } = await readRequestFromBodyImported(body);
+        const parsed = parseRequest(reqSchema, reqBatch);
+        if (parsed.methodName !== UPLOAD_URL_METHOD) {
+          throw new HttpRpcError(
+            `Method name in request '${parsed.methodName}' does not match URL '${UPLOAD_URL_METHOD}'`,
+            400,
+          );
+        }
+        const rawCount = parsed.params.count;
+        let count = typeof rawCount === "bigint" ? Number(rawCount) : Number(rawCount ?? 1);
+        if (!Number.isFinite(count) || count < 1) count = 1;
+        if (count > MAX_UPLOAD_URL_COUNT) count = MAX_UPLOAD_URL_COUNT;
+
+        const urls: { uploadUrl: string; downloadUrl: string; expiresAt: Date }[] = [];
+        for (let i = 0; i < count; i++) {
+          urls.push(await uploadUrlProvider.generateUploadUrl());
+        }
+
+        const arrow = await import("@query-farm/apache-arrow");
+        const uploadUrlVec = vectorFromArray(
+          urls.map((u) => u.uploadUrl),
+          new Utf8(),
+        );
+        const downloadUrlVec = vectorFromArray(
+          urls.map((u) => u.downloadUrl),
+          new Utf8(),
+        );
+        // TimestampMicrosecond stores int64 microseconds since the epoch.
+        // Build the BigInt64 backing buffer directly — vectorFromArray for
+        // Timestamp types is finicky about input type coercion.
+        const tsType = new TimestampMicrosecond("UTC");
+        const tsValues = new BigInt64Array(urls.length);
+        for (let i = 0; i < urls.length; i++) {
+          tsValues[i] = BigInt(urls[i].expiresAt.getTime()) * 1000n;
+        }
+        const expiresData = arrow.makeData({ type: tsType, length: urls.length, data: tsValues, nullCount: 0 });
+
+        const data = arrow.makeData({
+          type: new arrow.Struct(UPLOAD_URL_RESPONSE_SCHEMA.fields),
+          length: urls.length,
+          children: [uploadUrlVec.data[0], downloadUrlVec.data[0], expiresData],
+          nullCount: 0,
+        });
+        const resultBatch = new RecordBatch(UPLOAD_URL_RESPONSE_SCHEMA, data);
+        const responseBody = serializeIpcStream(UPLOAD_URL_RESPONSE_SCHEMA, [resultBatch]);
+        const response = arrowResponse(responseBody);
+        addCorsHeaders(response.headers);
+        addCapabilityHeaders(response.headers);
+        return compressIfAccepted(response, clientAcceptsZstd);
+      } catch (error: any) {
+        if (error instanceof HttpRpcError) {
+          const r = makeErrorResponse(error, error.statusCode, UPLOAD_URL_RESPONSE_SCHEMA);
+          addCapabilityHeaders(r.headers);
+          return compressIfAccepted(r, clientAcceptsZstd);
+        }
+        const r = makeErrorResponse(error, 500, UPLOAD_URL_RESPONSE_SCHEMA);
+        addCapabilityHeaders(r.headers);
+        return compressIfAccepted(r, clientAcceptsZstd);
       }
     }
 
@@ -422,13 +569,18 @@ export function createHttpHandler(
         dispatchError = internalError instanceof Error ? internalError : new Error(String(internalError));
       }
       addCorsHeaders(response.headers);
+      addCapabilityHeaders(response.headers);
       return compressIfAccepted(response, clientAcceptsZstd);
     } catch (error: any) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
       if (error instanceof HttpRpcError) {
-        return compressIfAccepted(makeErrorResponse(error, error.statusCode), clientAcceptsZstd);
+        const r = makeErrorResponse(error, error.statusCode);
+        addCapabilityHeaders(r.headers);
+        return compressIfAccepted(r, clientAcceptsZstd);
       }
-      return compressIfAccepted(makeErrorResponse(error, 500), clientAcceptsZstd);
+      const r = makeErrorResponse(error, 500);
+      addCapabilityHeaders(r.headers);
+      return compressIfAccepted(r, clientAcceptsZstd);
     } finally {
       dispatchHook?.onDispatchEnd(hookToken, info, stats, dispatchError);
     }

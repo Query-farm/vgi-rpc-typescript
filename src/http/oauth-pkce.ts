@@ -617,6 +617,137 @@ export function configureOAuthPkce(opts: OAuthPkceOptions, innerAuth: Authentica
 }
 
 // ---------------------------------------------------------------------------
+// OAuth token-exchange proxy
+// ---------------------------------------------------------------------------
+
+const ALLOWED_TOKEN_GRANT_TYPES: ReadonlySet<string> = new Set(["authorization_code", "refresh_token"]);
+
+function isLocalhostHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+/** Set Access-Control-Allow-Origin when the request's Origin is in the allowlist (or is localhost). */
+function setProxyCors(headers: Headers, request: Request, config: OAuthPkceConfig): void {
+  headers.append("Vary", "Origin");
+  const origin = request.headers.get("Origin");
+  if (!origin) return;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  if (!parsed.hostname) return;
+  if (isLocalhostHost(parsed.hostname) && parsed.protocol === "http:") {
+    headers.set("Access-Control-Allow-Origin", origin);
+    return;
+  }
+  if (config.allowedReturnOrigins.has(origin)) {
+    headers.set("Access-Control-Allow-Origin", origin);
+  }
+}
+
+function jsonErrorResponse(headers: Headers, status: number, error: string, description: string): Response {
+  headers.set("Content-Type", "application/json");
+  return new Response(JSON.stringify({ error, error_description: description }), { status, headers });
+}
+
+/**
+ * Handle POST/OPTIONS {prefix}/_oauth/token — the PKCE token-exchange proxy.
+ *
+ * SPA PKCE clients cannot safely hold a client_secret, but some IdPs
+ * (notably Google) reject token-endpoint requests from "Web application"
+ * clients without one. This handler accepts authorization_code/refresh_token
+ * exchanges from a browser, injects the configured server-side
+ * client_secret, and forwards the request to the IdP's real token_endpoint.
+ * The IdP response is returned verbatim (status code + body).
+ */
+export async function handleOAuthTokenProxy(request: Request, config: OAuthPkceConfig): Promise<Response> {
+  const headers = new Headers();
+  setProxyCors(headers, request, config);
+
+  if (request.method === "OPTIONS") {
+    headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+    headers.set("Access-Control-Allow-Headers", "Content-Type");
+    headers.set("Access-Control-Max-Age", "7200");
+    return new Response(null, { status: 204, headers });
+  }
+
+  if (request.method !== "POST") {
+    return new Response(null, { status: 405, headers });
+  }
+
+  const ctype = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
+  if (ctype !== "application/x-www-form-urlencoded") {
+    return jsonErrorResponse(headers, 415, "invalid_request",
+      "Content-Type must be application/x-www-form-urlencoded");
+  }
+
+  let raw: string;
+  try {
+    raw = await request.text();
+  } catch {
+    return jsonErrorResponse(headers, 400, "invalid_request", "Could not read request body");
+  }
+
+  let form: URLSearchParams;
+  try {
+    form = new URLSearchParams(raw);
+  } catch {
+    return jsonErrorResponse(headers, 400, "invalid_request", "Could not parse form body");
+  }
+
+  const grantType = form.get("grant_type") ?? "";
+  if (!ALLOWED_TOKEN_GRANT_TYPES.has(grantType)) {
+    return jsonErrorResponse(headers, 400, "unsupported_grant_type",
+      "grant_type must be authorization_code or refresh_token");
+  }
+
+  const submittedClientId = form.get("client_id");
+  if (submittedClientId && submittedClientId !== config.clientId) {
+    return jsonErrorResponse(headers, 400, "invalid_client",
+      "client_id does not match the configured client");
+  }
+
+  const endpoints = await config.oidcDiscovery();
+  if (!endpoints) {
+    return jsonErrorResponse(headers, 502, "server_error", "Authorization server discovery failed");
+  }
+
+  const upstream = new URLSearchParams();
+  upstream.set("grant_type", grantType);
+  upstream.set("client_id", config.clientId);
+  if (config.clientSecret) {
+    upstream.set("client_secret", config.clientSecret);
+  }
+  for (const key of ["code", "code_verifier", "redirect_uri", "refresh_token", "scope"]) {
+    const value = form.get(key);
+    if (value !== null && value !== "") {
+      upstream.set(key, value);
+    }
+  }
+
+  let upstreamResp: Response;
+  try {
+    upstreamResp = await fetch(endpoints.tokenEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: upstream.toString(),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (err: any) {
+    return jsonErrorResponse(headers, 502, "server_error",
+      `Upstream token endpoint failed: ${err?.message ?? err}`);
+  }
+
+  const body = new Uint8Array(await upstreamResp.arrayBuffer());
+  const ct = upstreamResp.headers.get("content-type") ?? "application/json";
+  headers.set("Content-Type", ct);
+  return new Response(body, { status: upstreamResp.status, headers });
+}
+
+// ---------------------------------------------------------------------------
 // OAuth callback handler
 // ---------------------------------------------------------------------------
 
