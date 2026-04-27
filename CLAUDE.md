@@ -82,7 +82,16 @@ This library must remain wire-compatible with the Python vgi-rpc implementation.
 - Request batches carry `vgi_rpc.method` and `vgi_rpc.request_version` in batch metadata
 - Streaming uses lockstep: one output batch per input batch (interleaved reads/writes to avoid deadlock)
 - Log/error messages are zero-row batches with `vgi_rpc.log_level` and `vgi_rpc.log_message` metadata
-- `__describe__` introspection returns service metadata as an Arrow batch
+- `__describe__` introspection returns service metadata as an Arrow batch (slim DESCRIBE_VERSION 4 schema; see "Cross-language wire alignment" below)
+
+## Cross-language wire alignment
+
+This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
+
+- **`__describe__`** — `DESCRIBE_VERSION = "4"` (`src/constants.ts`). The response batch is the slim 8-column schema (`src/dispatch/describe.ts`): `name`, `method_type`, `has_return`, `params_schema_ipc`, `result_schema_ipc`, `has_header`, `header_schema_ipc`, `is_exchange`. Python-flavoured columns (`doc`, `param_types_json`, `param_defaults_json`, `param_docs_json`) are not on the wire — the Protocol class is the source of truth for human-readable type info. The response's custom metadata carries `vgi_rpc.protocol_hash`, a SHA-256 hex digest computed by `computeProtocolHash` to mirror Python's `compute_protocol_hash` byte-for-byte. Within-port stable; cross-port byte equality is *not* guaranteed because Arrow IPC schema bytes vary across language Arrow libraries.
+- **Access log** — `AccessLogHook` in `src/access-log.ts` writes one JSONL record per dispatch when installed via `new VgiRpcServer(protocol, { dispatchHook })`. The record shape conforms to `vgi_rpc/access_log.schema.json` in the Python repo and validates under `vgi-rpc-test --access-log <path>`. `DispatchInfo` (`src/types.ts`) carries `protocol`, `protocolHash`, `protocolVersion`, `remoteAddr`, `requestData`, `streamId`, `cancelled`. Configure `protocolVersion` via the `VgiRpcServer` constructor option.
+
+The conformance worker (`examples/conformance.ts`) accepts `--access-log <path>` anywhere on the CLI.
 
 ## CI
 
