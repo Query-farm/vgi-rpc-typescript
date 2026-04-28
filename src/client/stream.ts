@@ -12,6 +12,13 @@ import type { LogMessage, StreamSession } from "./types.js";
 type CompressFn = (data: Uint8Array, level: number) => Uint8Array;
 type DecompressFn = (data: Uint8Array) => Uint8Array;
 
+/**
+ * Posts an Arrow IPC request body to *url*, transparently handling
+ * client-vended request externalization. Provided by the parent connection
+ * so a single capability cache can drive both unary and stream call paths.
+ */
+export type PostFn = (url: string, body: Uint8Array) => Promise<Response>;
+
 export class HttpStreamSession implements StreamSession {
   private _baseUrl: string;
   private _prefix: string;
@@ -28,6 +35,7 @@ export class HttpStreamSession implements StreamSession {
   private _decompressFn?: DecompressFn;
   private _authorization?: string;
   private _externalConfig?: ExternalLocationConfig;
+  private _postFn?: PostFn;
 
   constructor(opts: {
     baseUrl: string;
@@ -45,6 +53,7 @@ export class HttpStreamSession implements StreamSession {
     decompressFn?: DecompressFn;
     authorization?: string;
     externalConfig?: ExternalLocationConfig;
+    postFn?: PostFn;
   }) {
     this._baseUrl = opts.baseUrl;
     this._prefix = opts.prefix;
@@ -61,6 +70,16 @@ export class HttpStreamSession implements StreamSession {
     this._decompressFn = opts.decompressFn;
     this._authorization = opts.authorization;
     this._externalConfig = opts.externalConfig;
+    this._postFn = opts.postFn;
+  }
+
+  private async _post(url: string, body: Uint8Array): Promise<Response> {
+    if (this._postFn) return this._postFn(url, body);
+    return fetch(url, {
+      method: "POST",
+      headers: this._buildHeaders(),
+      body: this._prepareBody(body) as unknown as BodyInit,
+    });
   }
 
   get header(): Record<string, any> | null {
@@ -71,8 +90,10 @@ export class HttpStreamSession implements StreamSession {
     const headers: Record<string, string> = {
       "Content-Type": ARROW_CONTENT_TYPE,
     };
-    if (this._compressionLevel != null) {
+    if (this._compressionLevel != null && this._compressFn) {
       headers["Content-Encoding"] = "zstd";
+    }
+    if (this._compressionLevel != null && this._decompressFn) {
       headers["Accept-Encoding"] = "zstd";
     }
     if (this._authorization) {
@@ -159,11 +180,7 @@ export class HttpStreamSession implements StreamSession {
 
   private async _doExchange(schema: Schema, batches: RecordBatch[]): Promise<Record<string, any>[]> {
     const body = serializeIpcStream(schema, batches);
-    const resp = await fetch(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, {
-      method: "POST",
-      headers: this._buildHeaders(),
-      body: this._prepareBody(body) as unknown as BodyInit,
-    });
+    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
     if (resp.status === 401) {
       throw new RpcError("AuthenticationError", "Authentication required", "");
     }
@@ -278,11 +295,7 @@ export class HttpStreamSession implements StreamSession {
     const batch = new RecordBatch(emptySchema, data, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
 
-    const resp = await fetch(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, {
-      method: "POST",
-      headers: this._buildHeaders(),
-      body: this._prepareBody(body) as unknown as BodyInit,
-    });
+    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
     if (resp.status === 401) {
       throw new RpcError("AuthenticationError", "Authentication required", "");
     }

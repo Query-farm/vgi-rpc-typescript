@@ -98,7 +98,11 @@ export function buildRequestIpc(schema: Schema, params: Record<string, any>, met
   }
 
   const children = schema.fields.map((f) => {
-    const val = coerceForArrow(f.type, params[f.name]);
+    const raw = params[f.name];
+    // Missing values must be sent as null. arrow-js's typed-array builders
+    // throw "Invalid argument type in ToBigInt" when handed `undefined` for
+    // an Int64 column; null builds a proper validity bitmap entry instead.
+    const val = raw === undefined ? null : coerceForArrow(f.type, raw);
     return vectorFromArray([val], f.type).data[0];
   });
 

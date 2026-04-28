@@ -20,6 +20,7 @@ _BUNDLE_DIR = os.path.join(_TS_DIR, ".conformance-bundles")
 BUN_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance.ts")]
 BUN_HTTP_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http.ts")]
 BUN_HTTP_ZSTD_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-zstd.ts")]
+BUN_HTTP_AUTH_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-auth.ts")]
 
 
 def _start_http_server(
@@ -69,6 +70,80 @@ def ts_transport() -> Iterator[SubprocessTransport]:
 def ts_http_port() -> Iterator[int]:
     """Start Bun conformance HTTP server."""
     proc, port = _start_http_server(BUN_HTTP_WORKER)
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_port(ts_http_port: int) -> int:
+    """Alias used by the upstream TestHealth conformance suite."""
+    return ts_http_port
+
+
+@pytest.fixture(scope="session")
+def conformance_http_auth_port() -> Iterator[int]:
+    """Bun conformance HTTP server with reject-all authenticate, for TestHealth."""
+    proc, port = _start_http_server(BUN_HTTP_AUTH_WORKER)
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_fake_storage() -> Iterator[str]:
+    """Run the in-process Python fake-storage HTTP service."""
+    from vgi_rpc.conformance.fake_storage import serve_in_thread
+
+    base_url, shutdown = serve_in_thread()
+    try:
+        yield base_url
+    finally:
+        shutdown()
+
+
+@pytest.fixture(scope="session")
+def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Bun conformance HTTP server wired to the fake storage (no compression)."""
+    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--fake-storage", conformance_fake_storage])
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Bun conformance HTTP server wired to the fake storage with zstd compression."""
+    proc, port = _start_http_server(
+        [*BUN_HTTP_WORKER, "--fake-storage", conformance_fake_storage, "--compression", "zstd"]
+    )
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_externalize_always_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Bun conformance HTTP server that externalizes EVERY non-empty response batch.
+
+    Server-side externalization threshold is 1 byte (so every data-bearing
+    batch flows through the upload-URL pointer mechanism), while the
+    inline-request cap stays at 1 MiB so normal-sized client requests are
+    not 413-rejected. Used as a transport variant in ``conformance_conn``
+    so the entire conformance suite verifies that externalization is
+    observationally indistinguishable from inline transmission.
+    """
+    proc, port = _start_http_server(
+        [
+            *BUN_HTTP_WORKER,
+            "--fake-storage",
+            conformance_fake_storage,
+            "--externalize-threshold",
+            "1",
+            "--max-request-bytes",
+            "1048576",
+        ]
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -147,6 +222,7 @@ ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 @pytest.fixture(params=[
     "pipe", "subprocess",
     "http", "http-zstd",
+    "http_externalize_always",
     "node-http", "node-http-zstd",
     "deno-http", "deno-http-zstd",
 ])
@@ -182,6 +258,18 @@ def conformance_conn(
                 f"http://127.0.0.1:{ts_http_zstd_port}",
                 on_log=on_log,
                 compression_level=3,
+            )
+        elif request.param == "http_externalize_always":
+            from vgi_rpc.external import ExternalLocationConfig
+
+            ext_port = request.getfixturevalue("conformance_http_externalize_always_port")
+            return http_connect(
+                ConformanceService,
+                f"http://127.0.0.1:{ext_port}",
+                on_log=on_log,
+                # Server hands out http://127.0.0.1 download URLs from the
+                # in-process fake storage; disable the HTTPS-only validator.
+                external_location=ExternalLocationConfig(url_validator=None),
             )
         elif request.param == "node-http":
             port = request.getfixturevalue("ts_node_http_port")

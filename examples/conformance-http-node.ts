@@ -19,6 +19,7 @@ const compressionLevel = process.env.VGI_COMPRESSION_LEVEL
 
 const handler = createHttpHandler(protocol, {
   serverId: compressionLevel ? "conformance-node-zstd" : "conformance-node",
+  protocolName: "ConformanceService",
   compressionLevel,
   maxStreamResponseBytes: 1,
 });

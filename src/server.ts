@@ -11,7 +11,7 @@ import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
 import { type CallStatistics, type DispatchHook, type DispatchInfo, MethodType } from "./types.js";
 import { IpcStreamReader } from "./wire/reader.js";
-import { parseRequest } from "./wire/request.js";
+import { applyDefaults, parseRequest } from "./wire/request.js";
 import { buildErrorBatch } from "./wire/response.js";
 import { IpcStreamWriter } from "./wire/writer.js";
 
@@ -206,6 +206,8 @@ export class VgiRpcServer {
 
     const token = this.dispatchHook?.onDispatchStart(info);
     let dispatchError: Error | undefined;
+
+    applyDefaults(params, method.defaults);
 
     try {
       if (method.type === MethodType.UNARY) {

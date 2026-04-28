@@ -8,10 +8,15 @@ import {
   Field,
   Float32,
   Float64,
+  Int8,
   Int16,
   Int32,
   Int64,
   Schema,
+  Uint8,
+  Uint16,
+  Uint32,
+  Uint64,
   Utf8,
 } from "@query-farm/apache-arrow";
 
@@ -27,6 +32,18 @@ export const bytes = new Binary();
 export const int = new Int64();
 /** Apache Arrow Int32 type. Use as schema shorthand: `{ count: int32 }` */
 export const int32 = new Int32();
+/** Apache Arrow Int16 type. Use as schema shorthand: `{ count: int16 }` */
+export const int16 = new Int16();
+/** Apache Arrow Int8 type. Use as schema shorthand: `{ count: int8 }` */
+export const int8 = new Int8();
+/** Apache Arrow Uint8 type. Use as schema shorthand: `{ count: uint8 }` */
+export const uint8 = new Uint8();
+/** Apache Arrow Uint16 type. Use as schema shorthand: `{ count: uint16 }` */
+export const uint16 = new Uint16();
+/** Apache Arrow Uint32 type. Use as schema shorthand: `{ count: uint32 }` */
+export const uint32 = new Uint32();
+/** Apache Arrow Uint64 type. Use as schema shorthand: `{ count: uint64 }` */
+export const uint64 = new Uint64();
 /** Apache Arrow Float64 type. Use as schema shorthand: `{ value: float }` */
 export const float = new Float64();
 /** Apache Arrow Float32 type. Use as schema shorthand: `{ value: float32 }` */
@@ -83,6 +100,11 @@ const TYPE_MAP: [new (...args: any[]) => DataType, string][] = [
   [Int64, "int"],
   [Int32, "int"],
   [Int16, "int"],
+  [Int8, "int"],
+  [Uint64, "int"],
+  [Uint32, "int"],
+  [Uint16, "int"],
+  [Uint8, "int"],
 ];
 
 /**

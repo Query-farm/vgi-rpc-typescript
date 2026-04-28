@@ -12,13 +12,19 @@ import {
   Binary,
   Bool,
   type Data,
+  DateDay,
+  Decimal,
   Dictionary,
+  DurationMicrosecond,
   Field,
+  FixedSizeBinary,
   Float32,
   Float64,
   Int16,
   Int32,
   Int64,
+  LargeBinary,
+  LargeUtf8,
   List,
   Map_,
   makeData,
@@ -28,11 +34,27 @@ import {
   recordBatchFromArrays,
   Schema,
   Struct,
+  TimeMicrosecond,
+  TimestampMicrosecond,
   Utf8,
   vectorFromArray,
 } from "@query-farm/apache-arrow";
 import { Protocol } from "../src/index.js";
-import { bool, bytes, float, float32, int, int32, str } from "../src/schema.js";
+import {
+  bool,
+  bytes,
+  float,
+  float32,
+  int,
+  int8,
+  int16,
+  int32,
+  str,
+  uint8,
+  uint16,
+  uint32,
+  uint64,
+} from "../src/schema.js";
 
 // ---------------------------------------------------------------------------
 // Error classes
@@ -278,6 +300,13 @@ protocol.unary("echo_string", {
   handler: (p) => ({ result: p.value }),
 });
 
+const largeStringType = new LargeUtf8();
+protocol.unary("echo_large_string", {
+  params: new Schema([new Field("value", largeStringType, false)]),
+  result: new Schema([new Field("result", largeStringType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
 protocol.unary("echo_bytes", {
   params: { data: bytes },
   result: { result: bytes },
@@ -437,6 +466,141 @@ protocol.unary("echo_float32", {
   handler: (p) => ({ result: p.value }),
 });
 
+// ===== Wide Integer Types (6) =====
+
+protocol.unary("echo_int8", {
+  params: { value: int8 },
+  result: { result: int8 },
+  handler: (p) => ({ result: p.value }),
+});
+
+protocol.unary("echo_int16", {
+  params: { value: int16 },
+  result: { result: int16 },
+  handler: (p) => ({ result: p.value }),
+});
+
+protocol.unary("echo_uint8", {
+  params: { value: uint8 },
+  result: { result: uint8 },
+  handler: (p) => ({ result: p.value }),
+});
+
+protocol.unary("echo_uint16", {
+  params: { value: uint16 },
+  result: { result: uint16 },
+  handler: (p) => ({ result: p.value }),
+});
+
+protocol.unary("echo_uint32", {
+  params: { value: uint32 },
+  result: { result: uint32 },
+  handler: (p) => ({ result: p.value }),
+});
+
+protocol.unary("echo_uint64", {
+  params: { value: uint64 },
+  result: { result: uint64 },
+  handler: (p) => ({ result: p.value }),
+});
+
+// ===== Wide Arrow Types (date/time/decimal/binary/dictionary) =====
+// These use opaque-Data passthrough — the framework round-trips the underlying
+// Arrow column without converting through JS values (avoids arrow-js conversion
+// quirks for Date/Timestamp/Decimal/etc).
+
+const dateType = new DateDay();
+protocol.unary("echo_date", {
+  params: new Schema([new Field("value", dateType, false)]),
+  result: new Schema([new Field("result", dateType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+const timestampType = new TimestampMicrosecond();
+protocol.unary("echo_timestamp", {
+  params: new Schema([new Field("value", timestampType, false)]),
+  result: new Schema([new Field("result", timestampType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+const timestampUtcType = new TimestampMicrosecond("UTC");
+protocol.unary("echo_timestamp_utc", {
+  params: new Schema([new Field("value", timestampUtcType, false)]),
+  result: new Schema([new Field("result", timestampUtcType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+const timeType = new TimeMicrosecond();
+protocol.unary("echo_time", {
+  params: new Schema([new Field("value", timeType, false)]),
+  result: new Schema([new Field("result", timeType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+const durationType = new DurationMicrosecond();
+protocol.unary("echo_duration", {
+  params: new Schema([new Field("value", durationType, false)]),
+  result: new Schema([new Field("result", durationType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+const decimalType = new Decimal(4, 20, 128);
+protocol.unary("echo_decimal", {
+  params: new Schema([new Field("value", decimalType, false)]),
+  result: new Schema([new Field("result", decimalType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+const largeBinaryType = new LargeBinary();
+protocol.unary("echo_large_binary", {
+  params: new Schema([new Field("value", largeBinaryType, false)]),
+  result: new Schema([new Field("result", largeBinaryType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+const fixedBinaryType = new FixedSizeBinary(8);
+protocol.unary("echo_fixed_binary", {
+  params: new Schema([new Field("value", fixedBinaryType, false)]),
+  result: new Schema([new Field("result", fixedBinaryType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+const dictStringType = new Dictionary(new Utf8(), new Int16());
+protocol.unary("echo_dict_encoded_string", {
+  params: new Schema([new Field("value", dictStringType, false)]),
+  result: new Schema([new Field("result", dictStringType, false)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+// Dataclass round-trips — opaque IPC blob (bytes)
+protocol.unary("echo_wide_types", {
+  params: { data: bytes },
+  result: { result: bytes },
+  handler: (p) => ({ result: p.data }),
+  paramTypes: { data: "WideTypes" },
+});
+
+protocol.unary("echo_container_wide_types", {
+  params: { data: bytes },
+  result: { result: bytes },
+  handler: (p) => ({ result: p.data }),
+  paramTypes: { data: "ContainerWideTypes" },
+});
+
+protocol.unary("echo_deep_nested", {
+  params: { data: bytes },
+  result: { result: bytes },
+  handler: (p) => ({ result: p.data }),
+  paramTypes: { data: "DeepNested" },
+});
+
+protocol.unary("echo_embedded_arrow", {
+  params: { data: bytes },
+  result: { result: bytes },
+  handler: (p) => ({ result: p.data }),
+  paramTypes: { data: "EmbeddedArrow" },
+});
+
 // ===== Multi-Param & Defaults (3) =====
 
 protocol.unary("add_floats", {
@@ -519,6 +683,19 @@ protocol.unary("echo_with_log_extras", {
       source: "conformance",
       detail: p.value,
     });
+    return { result: p.value };
+  },
+});
+
+protocol.unary("echo_with_all_log_levels", {
+  params: { value: str },
+  result: { result: str },
+  handler: (p, ctx) => {
+    ctx.clientLog("TRACE", `trace: ${p.value}`);
+    ctx.clientLog("DEBUG", `debug: ${p.value}`);
+    ctx.clientLog("INFO", `info: ${p.value}`);
+    ctx.clientLog("WARN", `warn: ${p.value}`);
+    ctx.clientLog("ERROR", `error: ${p.value}`);
     return { result: p.value };
   },
 });

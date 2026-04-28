@@ -12,6 +12,7 @@ import { protocol } from "./conformance-protocol.js";
 
 const handler = createHttpHandler(protocol, {
   serverId: "conformance-http-zstd",
+  protocolName: "ConformanceService",
   compressionLevel: 3,
   maxStreamResponseBytes: 1,
 });

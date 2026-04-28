@@ -6,6 +6,11 @@ import { LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
+import {
+  type HttpServerCapabilities,
+  isCapabilitySnapshotFresh,
+  parseCapabilitiesFromHeaders,
+} from "./capabilities.js";
 import { httpIntrospect, type MethodInfo, type ServiceDescription } from "./introspect.js";
 import {
   buildRequestIpc,
@@ -16,6 +21,7 @@ import {
 } from "./ipc.js";
 import { HttpStreamSession } from "./stream.js";
 import type { HttpConnectOptions, StreamSession } from "./types.js";
+import { externalizeRequestBody } from "./uploadUrl.js";
 
 type CompressFn = (data: Uint8Array, level: number) => Uint8Array;
 type DecompressFn = (data: Uint8Array) => Uint8Array;
@@ -38,10 +44,65 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
   let compressFn: CompressFn | undefined;
   let decompressFn: DecompressFn | undefined;
   let compressionLoaded = false;
+  let capabilities: HttpServerCapabilities | null = null;
+
+  function updateCapabilitiesFromResponse(resp: Response): void {
+    const next = parseCapabilitiesFromHeaders(resp.headers);
+    // Only treat the snapshot as authoritative when the server actually
+    // emitted capability hints. Otherwise leave any prior cache in place.
+    if (next.maxRequestBytes != null || next.uploadUrlSupport) {
+      capabilities = next;
+    }
+  }
+
+  async function maybeExternalize(body: Uint8Array): Promise<Uint8Array> {
+    const caps = isCapabilitySnapshotFresh(capabilities) ? capabilities : null;
+    if (!caps) return body;
+    if (!caps.uploadUrlSupport) return body;
+    if (caps.maxRequestBytes == null || body.byteLength <= caps.maxRequestBytes) return body;
+    return externalizeRequestBody(body, {
+      baseUrl,
+      prefix,
+      authorization,
+      urlValidator: externalConfig?.urlValidator ?? null,
+    });
+  }
+
+  /**
+   * Send a POST request, transparently retrying with externalization if
+   * the server returns 413 (Payload Too Large) and advertises upload-URL
+   * support. Mirrors Python's 413 fallback in `_HttpProxy._post_with_externalization`.
+   */
+  async function postWithExternalization(url: string, body: Uint8Array): Promise<Response> {
+    const sendBody = await maybeExternalize(body);
+    let resp = await fetch(url, {
+      method: "POST",
+      headers: buildHeaders(),
+      body: prepareBody(sendBody) as unknown as BodyInit,
+    });
+    updateCapabilitiesFromResponse(resp);
+
+    if (resp.status === 413 && capabilities?.uploadUrlSupport && body.byteLength > 0) {
+      // Refresh-and-retry: caps tell us we can externalize.
+      const externalized = await externalizeRequestBody(body, {
+        baseUrl,
+        prefix,
+        authorization,
+        urlValidator: externalConfig?.urlValidator ?? null,
+      });
+      resp = await fetch(url, {
+        method: "POST",
+        headers: buildHeaders(),
+        body: prepareBody(externalized) as unknown as BodyInit,
+      });
+      updateCapabilitiesFromResponse(resp);
+    }
+
+    return resp;
+  }
 
   async function ensureCompression(): Promise<void> {
     if (compressionLoaded || compressionLevel == null) return;
-    compressionLoaded = true;
     try {
       const mod = await import("../util/zstd.js");
       compressFn = mod.zstdCompress;
@@ -49,14 +110,17 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
     } catch {
       // zstd not available in this runtime
     }
+    compressionLoaded = true;
   }
 
   function buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       "Content-Type": ARROW_CONTENT_TYPE,
     };
-    if (compressionLevel != null) {
+    if (compressionLevel != null && compressFn) {
       headers["Content-Encoding"] = "zstd";
+    }
+    if (compressionLevel != null && decompressFn) {
       headers["Accept-Encoding"] = "zstd";
     }
     if (authorization) {
@@ -88,7 +152,14 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
 
   async function ensureMethodCache(): Promise<Map<string, MethodInfo>> {
     if (methodCache) return methodCache;
-    const desc = await httpIntrospect(baseUrl, { prefix, authorization });
+    await ensureCompression();
+    const desc = await httpIntrospect(baseUrl, {
+      prefix,
+      authorization,
+      compressionLevel,
+      compressFn,
+      decompressFn,
+    });
     methodCache = new Map(desc.methods.map((m) => [m.name, m]));
     return methodCache;
   }
@@ -106,11 +177,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
       const body = buildRequestIpc(info.paramsSchema, fullParams, method);
-      const resp = await fetch(`${baseUrl}${prefix}/${method}`, {
-        method: "POST",
-        headers: buildHeaders(),
-        body: prepareBody(body) as unknown as BodyInit,
-      });
+      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}`, body);
       checkAuth(resp);
 
       const responseBody = await readResponse(resp);
@@ -160,11 +227,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
       const body = buildRequestIpc(info.paramsSchema, fullParams, method);
-      const resp = await fetch(`${baseUrl}${prefix}/${method}/init`, {
-        method: "POST",
-        headers: buildHeaders(),
-        body: prepareBody(body) as unknown as BodyInit,
-      });
+      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}/init`, body);
       checkAuth(resp);
 
       const responseBody = await readResponse(resp);
@@ -310,11 +373,19 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
         decompressFn,
         authorization,
         externalConfig,
+        postFn: postWithExternalization,
       });
     },
 
     async describe(): Promise<ServiceDescription> {
-      return httpIntrospect(baseUrl, { prefix });
+      await ensureCompression();
+      return httpIntrospect(baseUrl, {
+        prefix,
+        authorization,
+        compressionLevel,
+        compressFn,
+        decompressFn,
+      });
     },
 
     close(): void {

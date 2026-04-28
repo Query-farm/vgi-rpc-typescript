@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ExternalLocationConfig } from "../external.js";
+import type { ExternalLocationConfig, UploadUrlProvider } from "../external.js";
 import type { DispatchHook } from "../types.js";
 import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 
@@ -40,12 +40,18 @@ export interface HttpHandlerOptions {
   enableDescribePage?: boolean;
   /** Enable HTML 404 page for unmatched GET routes. Default: true. */
   enableNotFoundPage?: boolean;
+  /** Enable JSON health endpoint at GET {prefix}/health. Default: true. */
+  enableHealthEndpoint?: boolean;
   /** Protocol name shown in HTML pages. Defaults to the Protocol's name. */
   protocolName?: string;
   /** URL to service's source repository, shown in landing/describe pages. */
   repositoryUrl?: string;
   /** External storage config for externalizing large response batches. */
   externalLocation?: ExternalLocationConfig;
+  /** Provider for vending pre-signed upload URLs to clients via {prefix}/__upload_url__/init. */
+  uploadUrlProvider?: UploadUrlProvider;
+  /** Optional advertised maximum upload size, surfaced via VGI-Max-Upload-Bytes. */
+  maxUploadBytes?: number;
   /** OAuth scope for PKCE authorization requests. Default: "openid email". */
   oauthPkceScope?: string;
   /** Allowed return-to origins for external frontend redirects. Default: Set(["https://cupola.query-farm.services"]). */

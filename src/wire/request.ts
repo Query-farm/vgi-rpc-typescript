@@ -4,6 +4,7 @@
 import { DataType, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
 import { REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError, VersionError } from "../errors.js";
+import { isOpaquePassthroughType } from "./opaque.js";
 
 export interface ParsedRequest {
   methodName: string;
@@ -62,7 +63,7 @@ export function parseRequest(schema: Schema, batch: RecordBatch): ParsedRequest 
   for (let i = 0; i < schema.fields.length; i++) {
     const field = schema.fields[i];
     // Map_ columns have a broken .get() in arrow-js — pass through raw Data
-    if (DataType.isMap(field.type)) {
+    if (DataType.isMap(field.type) || isOpaquePassthroughType(field.type)) {
       params[field.name] = batch.getChildAt(i)!.data[0];
       continue;
     }
@@ -84,4 +85,24 @@ export function parseRequest(schema: Schema, batch: RecordBatch): ParsedRequest 
     params,
     rawMetadata: metadata,
   };
+}
+
+/**
+ * Fill in `defaults` for any params that arrived as null/undefined.
+ * The slim DESCRIBE_VERSION 4 wire format no longer carries defaults to the
+ * client, so default substitution must happen server-side: the client sends
+ * a null in any column it didn't supply, and dispatch swaps in the registered
+ * default before invoking the handler.
+ */
+export function applyDefaults(
+  params: Record<string, any>,
+  defaults: Record<string, any> | undefined,
+): Record<string, any> {
+  if (!defaults) return params;
+  for (const key of Object.keys(defaults)) {
+    if (params[key] == null) {
+      params[key] = defaults[key];
+    }
+  }
+  return params;
 }

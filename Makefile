@@ -1,7 +1,10 @@
 .PHONY: all build build-types build-js test test-unit test-integration test-conformance test-smoke typecheck lint clean distclean docs docs-dev help
 
-# Python with vgi-rpc installed (override: make PYTHON=python3.13)
-PYTHON ?= python3
+# Python with vgi-rpc installed.  Defaults to the editable local install in
+# the sibling vgi-rpc checkout (which is the source of truth for the
+# conformance suite); override on the command line for a different env, e.g.
+# ``make PYTHON=python3.13 test-conformance``.
+PYTHON ?= /Users/rusty/Development/vgi-rpc/.venv/bin/python
 
 # Unit test files (no external dependencies)
 UNIT_TESTS := test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/token.test.ts test/auth.test.ts test/http-auth.test.ts test/bearer.test.ts

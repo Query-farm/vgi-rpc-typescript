@@ -59,44 +59,28 @@ export async function parseDescribeResponse(
   const meta = dataBatch.metadata;
   const protocolName = meta?.get(PROTOCOL_NAME_KEY) ?? "";
 
+  // Slim DESCRIBE_VERSION 4 wire format (see dispatch/describe.ts):
+  //   0:name 1:method_type 2:has_return 3:params_schema_ipc
+  //   4:result_schema_ipc 5:has_header 6:header_schema_ipc 7:is_exchange
   const methods: MethodInfo[] = [];
   for (let i = 0; i < dataBatch.numRows; i++) {
-    const name = dataBatch.getChildAt(0)!.get(i) as string; // name
-    const methodType = dataBatch.getChildAt(1)!.get(i) as string; // method_type
-    const doc = dataBatch.getChildAt(2)?.get(i) as string | null; // doc
-    const _hasReturn = dataBatch.getChildAt(3)!.get(i) as boolean; // has_return
-    const paramsIpc = dataBatch.getChildAt(4)!.get(i) as Uint8Array; // params_schema_ipc
-    const resultIpc = dataBatch.getChildAt(5)!.get(i) as Uint8Array; // result_schema_ipc
-    const paramTypesJson = dataBatch.getChildAt(6)?.get(i) as string | null; // param_types_json
-    const paramDefaultsJson = dataBatch.getChildAt(7)?.get(i) as string | null; // param_defaults_json
-    const hasHeader = dataBatch.getChildAt(8)!.get(i) as boolean; // has_header
-    const headerIpc = dataBatch.getChildAt(9)?.get(i) as Uint8Array | null; // header_schema_ipc
+    const name = dataBatch.getChildAt(0)!.get(i) as string;
+    const methodType = dataBatch.getChildAt(1)!.get(i) as string;
+    const _hasReturn = dataBatch.getChildAt(2)!.get(i) as boolean;
+    const paramsIpc = dataBatch.getChildAt(3)!.get(i) as Uint8Array;
+    const resultIpc = dataBatch.getChildAt(4)!.get(i) as Uint8Array;
+    const hasHeader = dataBatch.getChildAt(5)!.get(i) as boolean;
+    const headerIpc = dataBatch.getChildAt(6)?.get(i) as Uint8Array | null;
+    // is_exchange (index 7) currently unused on the client side.
 
     const paramsSchema = await deserializeSchema(paramsIpc);
     const resultSchema = await deserializeSchema(resultIpc);
-
-    let paramTypes: Record<string, string> | undefined;
-    if (paramTypesJson) {
-      try {
-        paramTypes = JSON.parse(paramTypesJson);
-      } catch {}
-    }
-
-    let defaults: Record<string, any> | undefined;
-    if (paramDefaultsJson) {
-      try {
-        defaults = JSON.parse(paramDefaultsJson);
-      } catch {}
-    }
 
     const info: MethodInfo = {
       name,
       type: methodType as "unary" | "stream",
       paramsSchema,
       resultSchema,
-      doc: doc ?? undefined,
-      paramTypes,
-      defaults,
     };
 
     // For stream methods, result_schema_ipc actually holds the output schema
@@ -119,7 +103,13 @@ export async function parseDescribeResponse(
  */
 export async function httpIntrospect(
   baseUrl: string,
-  options?: { prefix?: string; authorization?: string },
+  options?: {
+    prefix?: string;
+    authorization?: string;
+    compressionLevel?: number;
+    compressFn?: (data: Uint8Array, level: number) => Uint8Array;
+    decompressFn?: (data: Uint8Array) => Uint8Array;
+  },
 ): Promise<ServiceDescription> {
   const prefix = options?.prefix ?? "";
   const emptySchema = new ArrowSchema([]);
@@ -130,16 +120,31 @@ export async function httpIntrospect(
     headers.Authorization = options.authorization;
   }
 
+  const level = options?.compressionLevel;
+  const compressFn = options?.compressFn;
+  const decompressFn = options?.decompressFn;
+  let sendBody: Uint8Array = body;
+  if (level != null && compressFn) {
+    headers["Content-Encoding"] = "zstd";
+    sendBody = compressFn(body, level);
+  }
+  if (level != null && decompressFn) {
+    headers["Accept-Encoding"] = "zstd";
+  }
+
   const response = await fetch(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
     method: "POST",
     headers,
-    body: body as unknown as BodyInit,
+    body: sendBody as unknown as BodyInit,
   });
   if (response.status === 401) {
     throw new RpcError("AuthenticationError", "Authentication required", "");
   }
 
-  const responseBody = new Uint8Array(await response.arrayBuffer());
+  let responseBody = new Uint8Array(await response.arrayBuffer());
+  if (response.headers.get("Content-Encoding") === "zstd" && decompressFn) {
+    responseBody = new Uint8Array(decompressFn(responseBody));
+  }
   const { batches } = await readResponseBatches(responseBody);
 
   return parseDescribeResponse(batches);

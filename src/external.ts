@@ -25,6 +25,28 @@ export interface ExternalStorage {
   upload(data: Uint8Array, contentEncoding: string): Promise<string>;
 }
 
+/** A pre-signed PUT/GET URL pair for client-side data upload. */
+export interface UploadUrl {
+  /** Pre-signed PUT URL the client uploads to. */
+  uploadUrl: string;
+  /** Pre-signed GET URL the server fetches from. */
+  downloadUrl: string;
+  /** Expiration time (UTC) for the URL pair. */
+  expiresAt: Date;
+}
+
+/**
+ * Generates pre-signed upload URL pairs for client-vended externalization.
+ *
+ * Implementations must be safe to call from multiple concurrent requests.
+ * Object lifecycle is the operator's responsibility — uploaded objects are
+ * not automatically deleted by vgi-rpc.
+ */
+export interface UploadUrlProvider {
+  /** Allocate one upload/download URL pair. */
+  generateUploadUrl(): Promise<UploadUrl> | UploadUrl;
+}
+
 /** Configuration for external storage of large batches. */
 export interface ExternalLocationConfig {
   /** Storage backend for uploading. */

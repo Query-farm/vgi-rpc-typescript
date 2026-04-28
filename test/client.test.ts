@@ -1099,9 +1099,9 @@ function defineConformanceTests<TCtx>(
     // -----------------------------------------------------------------
 
     describe("TestDescribeConformance", () => {
-      it("verify 52 methods", async () => {
+      it("verify 73 methods", async () => {
         const desc = await describeFactory(ctx);
-        expect(desc.methods.length).toBe(52);
+        expect(desc.methods.length).toBe(73);
         expect(["Conformance", "ConformanceService"]).toContain(desc.protocolName);
       });
 

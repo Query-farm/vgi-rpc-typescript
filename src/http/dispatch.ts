@@ -5,12 +5,17 @@ import { RecordBatch, RecordBatchReader, Schema } from "@query-farm/apache-arrow
 import type { AuthContext } from "../auth.js";
 import { CANCEL_KEY, STATE_KEY } from "../constants.js";
 import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
-import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
+import {
+  type ExternalLocationConfig,
+  isExternalLocationBatch,
+  maybeExternalizeBatch,
+  resolveExternalLocation,
+} from "../external.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
 import { conformBatchToSchema } from "../util/conform.js";
 import { serializeSchema } from "../util/schema.js";
-import { parseRequest } from "../wire/request.js";
+import { applyDefaults, parseRequest } from "../wire/request.js";
 import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import { appendCookieHeaders, arrowResponse, HttpRpcError, readRequestFromBody, serializeIpcStream } from "./common.js";
 import { derivePrincipalKey, packStateToken, unpackStateToken } from "./token.js";
@@ -54,12 +59,33 @@ export async function httpDispatchUnary(
   ctx: DispatchContext,
 ): Promise<Response> {
   const schema = method.resultSchema;
-  const { schema: reqSchema, batch: reqBatch } = await readRequestFromBody(body);
-  const parsed = parseRequest(reqSchema, reqBatch);
+  const { schema: reqSchema, batch: reqBatchRaw } = await readRequestFromBody(body);
+
+  // If the client externalized the request payload, fetch the inner batch
+  // and re-attach the outer dispatch metadata (method, version, request id)
+  // before parsing parameters.  Mirrors the Python _read_request stage-1
+  // behaviour in vgi_rpc/rpc/_wire.py.
+  let reqBatch = reqBatchRaw;
+  let effectiveSchema = reqSchema;
+  if (ctx.externalLocation && isExternalLocationBatch(reqBatchRaw)) {
+    const resolved = await resolveExternalLocation(reqBatchRaw, ctx.externalLocation);
+    const mergedMeta = new Map<string, string>(resolved.metadata ?? []);
+    for (const [k, v] of reqBatchRaw.metadata ?? []) {
+      // Outer dispatch metadata wins for vgi_rpc.* keys (the inner batch
+      // shouldn't carry them but if it does, the outer is authoritative).
+      mergedMeta.set(k, v);
+    }
+    reqBatch = new RecordBatch(resolved.schema, resolved.data, mergedMeta);
+    effectiveSchema = resolved.schema;
+  }
+
+  const parsed = parseRequest(effectiveSchema, reqBatch);
 
   if (parsed.methodName !== method.name) {
     throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
   }
+
+  applyDefaults(parsed.params, method.defaults);
 
   const out = new OutputCollector(schema, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies);
   out.enableCookieSink();
@@ -102,6 +128,8 @@ export async function httpDispatchStreamInit(
   if (parsed.methodName !== method.name) {
     throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
   }
+
+  applyDefaults(parsed.params, method.defaults);
 
   // Init state
   let state: any;

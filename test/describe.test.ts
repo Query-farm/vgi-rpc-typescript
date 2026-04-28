@@ -56,29 +56,6 @@ describe("buildDescribeBatch", () => {
     expect(nameCol.get(1)).toBe("greet");
   });
 
-  it("includes doc and param types", () => {
-    const protocol = new Protocol("TestProtocol");
-    protocol.unary("multiply", {
-      params: new Schema([new Field("a", new Float64()), new Field("b", new Float64())]),
-      result: new Schema([new Field("result", new Float64())]),
-      handler: async ({ a, b }) => ({ result: a * b }),
-      doc: "Multiply two numbers.",
-      paramTypes: { a: "float", b: "float" },
-    });
-
-    const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
-
-    // doc column (index 2)
-    expect(batch.getChildAt(2)?.get(0)).toBe("Multiply two numbers.");
-
-    // param_types_json column (index 6)
-    const ptJson = batch.getChildAt(6)?.get(0);
-    expect(ptJson).toBeTruthy();
-    const pt = JSON.parse(ptJson);
-    expect(pt.a).toBe("float");
-    expect(pt.b).toBe("float");
-  });
-
   it("has_return is true for unary with result schema", () => {
     const protocol = new Protocol("TestProtocol");
     protocol.unary("compute", {
@@ -89,8 +66,8 @@ describe("buildDescribeBatch", () => {
 
     const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
-    // has_return column (index 3)
-    expect(batch.getChildAt(3)?.get(0)).toBe(true);
+    // has_return column (index 2 in slim DESCRIBE_VERSION 4 schema)
+    expect(batch.getChildAt(2)?.get(0)).toBe(true);
   });
 
   it("produces valid IPC schema bytes", () => {
@@ -103,8 +80,8 @@ describe("buildDescribeBatch", () => {
 
     const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
-    // params_schema_ipc column (index 4) should be a non-empty Uint8Array
-    const schemaBytes = batch.getChildAt(4)?.get(0);
+    // params_schema_ipc column (index 3 in slim DESCRIBE_VERSION 4 schema)
+    const schemaBytes = batch.getChildAt(3)?.get(0);
     expect(schemaBytes).toBeInstanceOf(Uint8Array);
     expect(schemaBytes.length).toBeGreaterThan(0);
   });

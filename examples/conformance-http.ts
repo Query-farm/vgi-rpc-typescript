@@ -9,11 +9,99 @@
  *
  * Run: bun run examples/conformance-http.ts
  */
+import type { ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider } from "../src/external.js";
 import { createHttpHandler } from "../src/http/index.js";
 import type { DispatchHook } from "../src/types.js";
 import { protocol } from "./conformance-protocol.js";
 
 const otelFile = process.env.VGI_OTEL_FILE;
+
+// ---------------------------------------------------------------------------
+// CLI args (positional, kept simple to match other-language workers)
+// ---------------------------------------------------------------------------
+
+const args = process.argv.slice(2);
+let fakeStorageUrl: string | undefined;
+let externalizeThreshold = 4096;
+let maxRequestBytesArg: number | undefined;
+let compression: ExternalLocationConfig["compression"] | undefined;
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === "--fake-storage" && i + 1 < args.length) {
+    fakeStorageUrl = args[++i];
+  } else if (a === "--externalize-threshold" && i + 1 < args.length) {
+    externalizeThreshold = Number.parseInt(args[++i], 10);
+  } else if (a === "--max-request-bytes" && i + 1 < args.length) {
+    maxRequestBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--compression" && i + 1 < args.length) {
+    const v = args[++i];
+    if (v === "zstd") compression = { algorithm: "zstd", level: 3 };
+  }
+}
+// Inline-request cap defaults to the externalize threshold for backward compat
+// with previous worker invocations. The ``externalize-always`` variant passes
+// both flags explicitly so server-side externalization fires on every batch
+// while clients can still send normal-sized inline requests.
+const maxRequestBytes = maxRequestBytesArg ?? externalizeThreshold;
+
+// ---------------------------------------------------------------------------
+// FakeStorage adapter — speaks the 4-endpoint contract documented in
+// vgi_rpc.conformance.fake_storage (POST /alloc, PUT /blob/{id}, ...).
+// ---------------------------------------------------------------------------
+
+class FakeStorage implements ExternalStorage, UploadUrlProvider {
+  constructor(private readonly baseUrl: string) {}
+
+  async upload(data: Uint8Array, contentEncoding: string): Promise<string> {
+    const allocResp = await fetch(`${this.baseUrl}/alloc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: contentEncoding ? JSON.stringify({ content_encoding: contentEncoding }) : "{}",
+    });
+    if (!allocResp.ok) {
+      throw new Error(`fake-storage /alloc failed: ${allocResp.status}`);
+    }
+    const { object_url: objectUrl } = (await allocResp.json()) as { object_url: string };
+
+    const putHeaders: Record<string, string> = { "Content-Type": "application/octet-stream" };
+    if (contentEncoding) putHeaders["Content-Encoding"] = contentEncoding;
+    const putResp = await fetch(objectUrl, { method: "PUT", headers: putHeaders, body: data });
+    if (!putResp.ok) {
+      throw new Error(`fake-storage PUT failed: ${putResp.status}`);
+    }
+    return objectUrl;
+  }
+
+  async generateUploadUrl(): Promise<UploadUrl> {
+    const allocResp = await fetch(`${this.baseUrl}/alloc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!allocResp.ok) {
+      throw new Error(`fake-storage /alloc failed: ${allocResp.status}`);
+    }
+    const { object_url: objectUrl } = (await allocResp.json()) as { object_url: string };
+    // The fake storage uses the same path for PUT and GET — disambiguates by HTTP method.
+    return {
+      uploadUrl: objectUrl,
+      downloadUrl: objectUrl,
+      expiresAt: new Date(Date.now() + 3600_000),
+    };
+  }
+}
+
+let externalLocation: ExternalLocationConfig | undefined;
+let fakeStorage: FakeStorage | undefined;
+if (fakeStorageUrl) {
+  fakeStorage = new FakeStorage(fakeStorageUrl);
+  externalLocation = {
+    storage: fakeStorage,
+    externalizeThresholdBytes: externalizeThreshold,
+    urlValidator: null, // fake storage runs on http://127.0.0.1
+    ...(compression ? { compression } : {}),
+  };
+}
 
 let dispatchHook: DispatchHook | undefined;
 let shutdownOtel: (() => Promise<void>) | undefined;
@@ -53,12 +141,21 @@ if (otelFile) {
 
 const handler = createHttpHandler(protocol, {
   serverId: "conformance-http",
+  protocolName: "ConformanceService",
   // Bound per-response size so infinite producers (e.g. ``cancellable_producer``)
   // return promptly and the client can follow continuation tokens or cancel
   // mid-stream. Any positive value works; 1 byte forces a continuation after
   // every produce cycle, matching the Python reference server's default.
   maxStreamResponseBytes: 1,
   ...(dispatchHook ? { dispatchHook } : {}),
+  ...(externalLocation ? { externalLocation } : {}),
+  ...(fakeStorage
+    ? {
+        uploadUrlProvider: fakeStorage,
+        maxRequestBytes,
+        maxUploadBytes: 64 * 1024 * 1024,
+      }
+    : {}),
 });
 
 const server = Bun.serve({ port: 0, fetch: handler });
