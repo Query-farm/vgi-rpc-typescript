@@ -25,6 +25,9 @@ let fakeStorageUrl: string | undefined;
 let externalizeThreshold = 4096;
 let maxRequestBytesArg: number | undefined;
 let compression: ExternalLocationConfig["compression"] | undefined;
+let strictMode = false;
+let maxResponseBytesArg: number | undefined;
+let maxExternalizedResponseBytesArg: number | undefined;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--fake-storage" && i + 1 < args.length) {
@@ -36,8 +39,20 @@ for (let i = 0; i < args.length; i++) {
   } else if (a === "--compression" && i + 1 < args.length) {
     const v = args[++i];
     if (v === "zstd") compression = { algorithm: "zstd", level: 3 };
+  } else if (a === "--strict") {
+    strictMode = true;
+  } else if (a === "--max-response-bytes" && i + 1 < args.length) {
+    maxResponseBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--max-externalized-response-bytes" && i + 1 < args.length) {
+    maxExternalizedResponseBytesArg = Number.parseInt(args[++i], 10);
   }
 }
+// Strict-cap mode: tight body + external caps so the http_response_cap.*
+// conformance tests can deliberately overshoot. Defaults to 1 MiB matching
+// Python's tests/serve_conformance_http_strict.py.
+const STRICT_DEFAULT = 1024 * 1024;
+const maxResponseBytes = maxResponseBytesArg ?? (strictMode ? STRICT_DEFAULT : undefined);
+const maxExternalizedResponseBytes = maxExternalizedResponseBytesArg ?? (strictMode ? STRICT_DEFAULT : undefined);
 // Inline-request cap defaults to the externalize threshold for backward compat
 // with previous worker invocations. The ``externalize-always`` variant passes
 // both flags explicitly so server-side externalization fires on every batch
@@ -146,7 +161,14 @@ const handler = createHttpHandler(protocol, {
   // return promptly and the client can follow continuation tokens or cancel
   // mid-stream. Any positive value works; 1 byte forces a continuation after
   // every produce cycle, matching the Python reference server's default.
-  maxStreamResponseBytes: 1,
+  // In strict-cap mode we use a real byte cap instead so the strict-fail
+  // tests can deliberately overshoot.
+  ...(strictMode
+    ? {
+        maxResponseBytes: maxResponseBytes!,
+        maxExternalizedResponseBytes: maxExternalizedResponseBytes!,
+      }
+    : { maxStreamResponseBytes: 1 }),
   ...(dispatchHook ? { dispatchHook } : {}),
   ...(externalLocation ? { externalLocation } : {}),
   ...(fakeStorage

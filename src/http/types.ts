@@ -19,8 +19,22 @@ export interface HttpHandlerOptions {
   corsMaxAge?: number | null;
   /** Maximum request body size in bytes. Advertised via VGI-Max-Request-Bytes header. */
   maxRequestBytes?: number;
-  /** Maximum bytes before a producer stream emits a continuation token. */
+  /** Maximum bytes before a producer stream emits a continuation token.
+   *
+   * @deprecated Use {@link maxResponseBytes} instead. The cap now governs all
+   *  HTTP method responses (unary, exchange, producer), not just producer streams.
+   */
   maxStreamResponseBytes?: number;
+  /** HTTP body cap. Hard for unary and stream-exchange (overshoot surfaces
+   *  as 200 + X-VGI-RPC-Error EXCEPTION batch). Soft for producer streams
+   *  (overshoot mints a continuation token). Externalised payloads do not
+   *  count toward this — they leave only tiny pointer batches on the wire.
+   *  Advertised via VGI-Max-Response-Bytes.  Undefined = unbounded. */
+  maxResponseBytes?: number;
+  /** Cap on bytes uploaded to external storage during one HTTP response.
+   *  Always hard — externalised uploads have no escape valve. Advertised via
+   *  VGI-Max-Externalized-Response-Bytes.  Undefined = unbounded. */
+  maxExternalizedResponseBytes?: number;
   /** Server ID included in response metadata. Random if omitted. */
   serverId?: string;
   /** Custom state serializer for stream state objects. Default: JSON with BigInt support. */

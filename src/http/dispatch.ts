@@ -33,12 +33,44 @@ export interface DispatchContext {
   signingKey: Uint8Array;
   tokenTtl: number;
   serverId: string;
+  /** Producer-only soft wire-cap (deprecated alias for the producer-loop
+   *  byte budget). Unary/exchange ignore this. */
   maxStreamResponseBytes?: number;
+  /** Soft wire-cap for producer streams; hard wire-cap for unary/exchange.
+   *  Externalised payloads do not count toward this. */
+  maxResponseBytes?: number;
+  /** Hard cap on bytes uploaded to external storage during one HTTP response. */
+  maxExternalizedResponseBytes?: number;
   stateSerializer: StateSerializer;
   authContext?: AuthContext;
   externalLocation?: ExternalLocationConfig;
   /** Incoming HTTP request cookies.  Empty/absent on non-HTTP paths. */
   cookies?: ReadonlyMap<string, string>;
+}
+
+/** Predict the external upload size if maybeExternalizeBatch ran on this batch
+ *  right now. Returns 0 when externalisation would not fire. Mirrors the
+ *  threshold logic so a pre-flight check matches the real upload size. */
+function predictExternalizeBytes(
+  batch: RecordBatch,
+  config: ExternalLocationConfig | undefined,
+): number {
+  if (!config?.storage) return 0;
+  if (batch.numRows === 0) return 0;
+  const size = batch.data.byteLength;
+  const threshold = config.externalizeThresholdBytes ?? 1_048_576;
+  if (size < threshold) return 0;
+  return size;
+}
+
+/** Build an Arrow IPC stream containing only an EXCEPTION batch, wrapped in a
+ *  500 response so common.ts/arrowResponse rewrites it to 200 + X-VGI-RPC-Error.
+ *  Used for cap-overshoot strict-fail. */
+function makeCapErrorResponse(schema: Schema, error: Error, ctx: DispatchContext): Response {
+  const errBatch = buildErrorBatch(schema, error, ctx.serverId, null);
+  const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
+  (response as any).__dispatchError = error;
+  return response;
 }
 
 /** Dispatch a __describe__ request. */
@@ -94,10 +126,38 @@ export async function httpDispatchUnary(
     const result = await method.handler!(parsed.params, out);
     let resultBatch = buildResultBatch(schema, result, ctx.serverId, parsed.requestId);
     if (ctx.externalLocation) {
+      // Pre-flight max_externalized_response_bytes BEFORE incurring the
+      // upload — operator's intent is "don't emit data beyond this per
+      // call," not "emit and then complain." Mirror the Python check.
+      const predicted = predictExternalizeBytes(resultBatch, ctx.externalLocation);
+      if (
+        ctx.maxExternalizedResponseBytes != null &&
+        predicted > ctx.maxExternalizedResponseBytes
+      ) {
+        const overshoot = new Error(
+          `Externalised payload exceeds max_externalized_response_bytes (${predicted} > ${ctx.maxExternalizedResponseBytes}) for method '${method.name}'`,
+        );
+        overshoot.name = "RuntimeError";
+        const response = makeCapErrorResponse(schema, overshoot, ctx);
+        appendCookieHeaders(response.headers, out.drainResponseCookies());
+        return response;
+      }
       resultBatch = await maybeExternalizeBatch(resultBatch, ctx.externalLocation);
     }
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
-    const response = arrowResponse(serializeIpcStream(schema, batches));
+    const body = serializeIpcStream(schema, batches);
+    // Hard wire-cap enforcement — overshoot replaces the response with a
+    // fresh EXCEPTION-only stream.
+    if (ctx.maxResponseBytes != null && body.byteLength > ctx.maxResponseBytes) {
+      const overshoot = new Error(
+        `HTTP body exceeds max_response_bytes (${body.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`,
+      );
+      overshoot.name = "RuntimeError";
+      const response = makeCapErrorResponse(schema, overshoot, ctx);
+      appendCookieHeaders(response.headers, out.drainResponseCookies());
+      return response;
+    }
+    const response = arrowResponse(body);
     appendCookieHeaders(response.headers, out.drainResponseCookies());
     return response;
   } catch (error: any) {
@@ -369,7 +429,17 @@ export async function httpDispatchStreamExchange(
       }
     }
 
-    return arrowResponse(serializeIpcStream(outputSchema, batches));
+    const body = serializeIpcStream(outputSchema, batches);
+    // Hard wire-cap enforcement for stream-exchange — overshoot replaces
+    // the response with an EXCEPTION-only stream so the client surfaces RpcError.
+    if (ctx.maxResponseBytes != null && body.byteLength > ctx.maxResponseBytes) {
+      const overshoot = new Error(
+        `HTTP body exceeds max_response_bytes (${body.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`,
+      );
+      overshoot.name = "RuntimeError";
+      return makeCapErrorResponse(outputSchema, overshoot, ctx);
+    }
+    return arrowResponse(body);
   }
 }
 
@@ -384,7 +454,11 @@ async function produceStreamResponse(
   headerBytes: Uint8Array | null,
 ): Promise<Response> {
   const allBatches: RecordBatch[] = [];
-  const maxBytes = ctx.maxStreamResponseBytes;
+  // Producer wire cap: prefer the legacy stream-only soft cap when set
+  // (lets old callers keep the "one batch per response" hack alive),
+  // else fall through to maxResponseBytes (which is hard for unary/
+  // exchange but soft for producer — continuation tokens cover overshoot).
+  const maxBytes = ctx.maxStreamResponseBytes ?? ctx.maxResponseBytes;
   let estimatedBytes = 0;
   let producerError: Error | undefined;
 

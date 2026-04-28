@@ -90,7 +90,13 @@ export function createHttpHandler(
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 7200 : options.corsMaxAge;
   const maxRequestBytes = options?.maxRequestBytes;
+  // ``maxStreamResponseBytes`` was the producer-only soft cap. Keep it
+  // distinct from ``maxResponseBytes`` (the new hard cap that also applies
+  // to unary/exchange) — falling one through to the other would turn the
+  // producer hack into an unintended hard cap on every response.
   const maxStreamResponseBytes = options?.maxStreamResponseBytes;
+  const maxResponseBytes = options?.maxResponseBytes;
+  const maxExternalizedResponseBytes = options?.maxExternalizedResponseBytes;
   const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
   let authenticate = options?.authenticate;
@@ -174,6 +180,15 @@ export function createHttpHandler(
     if (maxRequestBytes != null) {
       headers.set("VGI-Max-Request-Bytes", String(maxRequestBytes));
     }
+    if (maxResponseBytes != null) {
+      headers.set("VGI-Max-Response-Bytes", String(maxResponseBytes));
+    }
+    if (maxExternalizedResponseBytes != null) {
+      headers.set("VGI-Max-Externalized-Response-Bytes", String(maxExternalizedResponseBytes));
+    }
+    // Always present so capability-aware clients can decide whether to
+    // expect externalised payloads.
+    headers.set("VGI-Externalization-Enabled", externalLocation?.storage ? "true" : "false");
     if (uploadUrlProvider) {
       headers.set("VGI-Upload-URL-Support", "true");
       if (maxUploadBytes != null) {
@@ -194,6 +209,8 @@ export function createHttpHandler(
     tokenTtl,
     serverId,
     maxStreamResponseBytes,
+    maxResponseBytes,
+    maxExternalizedResponseBytes,
     stateSerializer,
     externalLocation,
   };
@@ -205,7 +222,7 @@ export function createHttpHandler(
       headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
       headers.set(
         "Access-Control-Expose-Headers",
-        `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}`,
+        `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}, VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled`,
       );
       if (isOptions && corsMaxAge != null) {
         headers.set("Access-Control-Max-Age", String(corsMaxAge));
@@ -290,7 +307,14 @@ export function createHttpHandler(
       // Always answer OPTIONS so capability discovery via OPTIONS /health (or
       // any other path) works even when CORS isn't enabled.  Falls back to
       // 405 only if no capability/CORS configuration exists.
-      if (corsOrigins || maxRequestBytes != null || uploadUrlProvider || path === `${prefix}/__capabilities__`) {
+      if (
+        corsOrigins ||
+        maxRequestBytes != null ||
+        maxResponseBytes != null ||
+        maxExternalizedResponseBytes != null ||
+        uploadUrlProvider ||
+        path === `${prefix}/__capabilities__`
+      ) {
         return new Response(null, { status: 204, headers });
       }
       return new Response(null, { status: 405 });

@@ -313,6 +313,17 @@ protocol.unary("echo_bytes", {
   handler: (p) => ({ result: p.data }),
 });
 
+protocol.unary("oversized_unary", {
+  params: { target_bytes: int },
+  result: { result: bytes },
+  handler: (p) => {
+    const n = typeof p.target_bytes === "bigint" ? Number(p.target_bytes) : Number(p.target_bytes);
+    if (n < 0) throw new ValueError("target_bytes must be non-negative");
+    return { result: new Uint8Array(n) };
+  },
+  paramTypes: { target_bytes: "int" },
+});
+
 protocol.unary("echo_int", {
   params: { value: int },
   result: { result: int },
@@ -794,6 +805,44 @@ protocol.producer<{ emitBeforeError: number; current: number }>("produce_error_m
     state.current++;
   },
   paramTypes: { emit_before_error: "int" },
+});
+
+protocol.producer<{ rowsPerBatch: number; emitted: boolean }>("produce_oversized_batch", {
+  params: { rows_per_batch: int },
+  outputSchema: COUNTER_SCHEMA,
+  init: ({ rows_per_batch }) => ({ rowsPerBatch: rows_per_batch, emitted: false }),
+  produce: (state, out) => {
+    if (state.emitted) {
+      out.finish();
+      return;
+    }
+    const indices: number[] = [];
+    const values: number[] = [];
+    for (let i = 0; i < state.rowsPerBatch; i++) {
+      indices.push(i);
+      values.push(i * 10);
+    }
+    out.emit({ index: indices, value: values });
+    state.emitted = true;
+  },
+  paramTypes: { rows_per_batch: "int" },
+});
+
+protocol.exchange<{ rowsPerBatch: number }>("exchange_oversized", {
+  params: { rows_per_batch: int },
+  inputSchema: SCALE_INPUT,
+  outputSchema: COUNTER_SCHEMA,
+  init: ({ rows_per_batch }) => ({ rowsPerBatch: rows_per_batch }),
+  exchange: (state, _input: RecordBatch, out) => {
+    const indices: number[] = [];
+    const values: number[] = [];
+    for (let i = 0; i < state.rowsPerBatch; i++) {
+      indices.push(i);
+      values.push(i * 10);
+    }
+    out.emit({ index: indices, value: values });
+  },
+  paramTypes: { rows_per_batch: "int" },
 });
 
 protocol.producer<never>("produce_error_on_init", {
