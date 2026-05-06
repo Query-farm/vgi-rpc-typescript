@@ -209,6 +209,12 @@ export async function httpDispatchStreamInit(
 
   // Support dynamic output schemas (same as pipe transport)
   const resolvedOutputSchema = state?.__outputSchema ?? outputSchema;
+  // Mirror the output-schema override for inputs: VGI's `init` registers
+  // exchange with a dummy `_tick` inputSchema and binds the real per-call
+  // input shape via state.__inputSchema. Without this, the dummy schema
+  // gets baked into the state token and conformBatchToSchema rejects the
+  // first real input batch on the next exchange round.
+  const resolvedInputSchema = state?.__inputSchema ?? inputSchema;
   const effectiveProducer = state?.__isProducer ?? isProducer;
 
   // Build header IPC stream if method has a header schema
@@ -239,12 +245,12 @@ export async function httpDispatchStreamInit(
     // Producer method — produce data inline in the init response.
     // For exchange-registered methods acting as producers (__isProducer),
     // produceStreamResponse falls back to exchangeFn with tick batches.
-    return produceStreamResponse(method, state, resolvedOutputSchema, inputSchema, ctx, parsed.requestId, headerBytes);
+    return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes);
   } else {
     // Exchange: serialize state into signed token, return zero-row batch with token
     const stateBytes = ctx.stateSerializer.serialize(state);
     const schemaBytes = serializeSchema(resolvedOutputSchema);
-    const inputSchemaBytes = serializeSchema(inputSchema);
+    const inputSchemaBytes = serializeSchema(resolvedInputSchema);
     const tokenKey = derivePrincipalKey(ctx.signingKey, ctx.authContext?.principal);
     const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey);
 
