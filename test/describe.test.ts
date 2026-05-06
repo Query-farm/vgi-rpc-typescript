@@ -15,7 +15,7 @@ import { buildDescribeBatch } from "../src/dispatch/describe.js";
 import { Protocol } from "../src/protocol.js";
 
 describe("buildDescribeBatch", () => {
-  it("builds a describe batch with correct metadata", () => {
+  it("builds a describe batch with correct metadata", async () => {
     const protocol = new Protocol("TestProtocol");
     protocol.unary("add", {
       params: new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]),
@@ -25,7 +25,7 @@ describe("buildDescribeBatch", () => {
       paramTypes: { a: "float", b: "float" },
     });
 
-    const { metadata } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "test-server-id");
+    const { metadata } = await buildDescribeBatch("TestProtocol", protocol.getMethods(), "test-server-id");
 
     expect(metadata.get(PROTOCOL_NAME_KEY)).toBe("TestProtocol");
     expect(metadata.get(DESCRIBE_VERSION_KEY)).toBe(DESCRIBE_VERSION);
@@ -33,7 +33,7 @@ describe("buildDescribeBatch", () => {
     expect(metadata.get(SERVER_ID_KEY)).toBe("test-server-id");
   });
 
-  it("has one row per method", () => {
+  it("has one row per method", async () => {
     const protocol = new Protocol("TestProtocol");
     protocol.unary("add", {
       params: new Schema([new Field("a", new Float64())]),
@@ -46,7 +46,7 @@ describe("buildDescribeBatch", () => {
       handler: async ({ name }) => ({ result: `Hello, ${name}!` }),
     });
 
-    const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
+    const { batch } = await buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
     expect(batch.numRows).toBe(2);
 
@@ -56,7 +56,7 @@ describe("buildDescribeBatch", () => {
     expect(nameCol.get(1)).toBe("greet");
   });
 
-  it("has_return is true for unary with result schema", () => {
+  it("has_return is true for unary with result schema", async () => {
     const protocol = new Protocol("TestProtocol");
     protocol.unary("compute", {
       params: new Schema([new Field("x", new Float64())]),
@@ -64,13 +64,13 @@ describe("buildDescribeBatch", () => {
       handler: async ({ x }) => ({ result: x }),
     });
 
-    const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
+    const { batch } = await buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
     // has_return column (index 2 in slim DESCRIBE_VERSION 4 schema)
     expect(batch.getChildAt(2)?.get(0)).toBe(true);
   });
 
-  it("produces valid IPC schema bytes", () => {
+  it("produces valid IPC schema bytes", async () => {
     const protocol = new Protocol("TestProtocol");
     protocol.unary("test", {
       params: new Schema([new Field("x", new Float64())]),
@@ -78,7 +78,7 @@ describe("buildDescribeBatch", () => {
       handler: async ({ x }) => ({ result: x }),
     });
 
-    const { batch } = buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
+    const { batch } = await buildDescribeBatch("TestProtocol", protocol.getMethods(), "srv1");
 
     // params_schema_ipc column (index 3 in slim DESCRIBE_VERSION 4 schema)
     const schemaBytes = batch.getChildAt(3)?.get(0);

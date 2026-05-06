@@ -9,8 +9,8 @@ import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
 import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
 import type { LogMessage, StreamSession } from "./types.js";
 
-type CompressFn = (data: Uint8Array, level: number) => Uint8Array;
-type DecompressFn = (data: Uint8Array) => Uint8Array;
+type CompressFn = (data: Uint8Array, level: number) => Promise<Uint8Array>;
+type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
 
 /**
  * Posts an Arrow IPC request body to *url*, transparently handling
@@ -78,7 +78,7 @@ export class HttpStreamSession implements StreamSession {
     return fetch(url, {
       method: "POST",
       headers: this._buildHeaders(),
-      body: this._prepareBody(body) as unknown as BodyInit,
+      body: (await this._prepareBody(body)) as unknown as BodyInit,
     });
   }
 
@@ -102,9 +102,9 @@ export class HttpStreamSession implements StreamSession {
     return headers;
   }
 
-  private _prepareBody(content: Uint8Array): Uint8Array {
+  private async _prepareBody(content: Uint8Array): Promise<Uint8Array> {
     if (this._compressionLevel != null && this._compressFn) {
-      return this._compressFn(content, this._compressionLevel);
+      return await this._compressFn(content, this._compressionLevel);
     }
     return content;
   }
@@ -112,7 +112,7 @@ export class HttpStreamSession implements StreamSession {
   private async _readResponse(resp: Response): Promise<Uint8Array<ArrayBuffer>> {
     let body = new Uint8Array(await resp.arrayBuffer());
     if (resp.headers.get("Content-Encoding") === "zstd" && this._decompressFn) {
-      body = new Uint8Array(this._decompressFn(body));
+      body = new Uint8Array(await this._decompressFn(body));
     }
     return body;
   }

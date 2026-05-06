@@ -15,10 +15,30 @@
  *    cookie, and redirects back to the original page.
  */
 
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AuthContext } from "../auth.js";
 import type { AuthenticateFn } from "./auth.js";
 import { ERROR_PAGE_STYLE, FONTS, LOGO_URL } from "./pages.js";
+
+// Indirect-string require keeps node:crypto out of the static bundle for
+// workerd. OAuth PKCE is opt-in (configureOAuthPkce); callers on workerd
+// should not enable it.
+const _NODE_CRYPTO_MOD = "node:crypto";
+function _crypto(): {
+  createHash: any;
+  createHmac: any;
+  randomBytes: (n: number) => any;
+  timingSafeEqual: (a: any, b: any) => boolean;
+} {
+  const req: any = (globalThis as any).require ?? null;
+  if (!req) {
+    throw new Error("OAuth PKCE requires Node.js or Bun (node:crypto).");
+  }
+  return req(_NODE_CRYPTO_MOD);
+}
+const createHash = (algo: string) => _crypto().createHash(algo);
+const createHmac = (algo: string, key: any) => _crypto().createHmac(algo, key);
+const randomBytes = (n: number) => _crypto().randomBytes(n);
+const timingSafeEqual = (a: any, b: any) => _crypto().timingSafeEqual(a, b);
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../util/web-crypto.js";
 import {
   Binary,
   Bool,
@@ -49,7 +49,7 @@ export const DESCRIBE_SCHEMA = new Schema([
  * implementations of the same Protocol that produce identical Arrow IPC
  * schema bytes for params/result/header will hash to the same value.
  */
-function computeProtocolHash(
+async function computeProtocolHash(
   protocolName: string,
   rows: ReadonlyArray<{
     name: string;
@@ -61,44 +61,61 @@ function computeProtocolHash(
     resultIpc: Uint8Array;
     headerIpc: Uint8Array | null;
   }>,
-): string {
-  const h = createHash("sha256");
-  h.update("vgi_rpc.describe.v");
-  h.update(DESCRIBE_VERSION);
-  h.update("|");
-  h.update(REQUEST_VERSION);
-  h.update("|");
-  h.update(protocolName);
-  h.update("|");
+): Promise<string> {
+  // Web Crypto's `subtle.digest` takes a single buffer, so we accumulate the
+  // canonical byte stream into a single Uint8Array and hash once. The byte
+  // sequence below must remain byte-for-byte identical to the Python
+  // implementation in vgi_rpc.introspect.compute_protocol_hash.
+  const enc = new TextEncoder();
+  const parts: Uint8Array[] = [];
+  const push = (v: string | Uint8Array) =>
+    parts.push(typeof v === "string" ? enc.encode(v) : v);
+
+  push("vgi_rpc.describe.v");
+  push(DESCRIBE_VERSION);
+  push("|");
+  push(REQUEST_VERSION);
+  push("|");
+  push(protocolName);
+  push("|");
   for (const r of rows) {
-    h.update(Uint8Array.of(0x1f));
-    h.update(r.name);
-    h.update(Uint8Array.of(0x1e));
-    h.update(r.methodType);
-    h.update(Uint8Array.of(0x1e));
-    h.update(r.hasReturn ? "1" : "0");
-    h.update(Uint8Array.of(0x1e));
-    h.update(r.hasHeader ? "1" : "0");
-    h.update(Uint8Array.of(0x1e));
-    h.update(r.isExchange === null ? "-" : r.isExchange ? "1" : "0");
-    h.update(Uint8Array.of(0x1e));
-    h.update(r.paramsIpc);
-    h.update(Uint8Array.of(0x1e));
-    h.update(r.resultIpc);
-    h.update(Uint8Array.of(0x1e));
-    if (r.headerIpc) h.update(r.headerIpc);
+    push(Uint8Array.of(0x1f));
+    push(r.name);
+    push(Uint8Array.of(0x1e));
+    push(r.methodType);
+    push(Uint8Array.of(0x1e));
+    push(r.hasReturn ? "1" : "0");
+    push(Uint8Array.of(0x1e));
+    push(r.hasHeader ? "1" : "0");
+    push(Uint8Array.of(0x1e));
+    push(r.isExchange === null ? "-" : r.isExchange ? "1" : "0");
+    push(Uint8Array.of(0x1e));
+    push(r.paramsIpc);
+    push(Uint8Array.of(0x1e));
+    push(r.resultIpc);
+    push(Uint8Array.of(0x1e));
+    if (r.headerIpc) push(r.headerIpc);
   }
-  return h.digest("hex");
+
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    buf.set(p, off);
+    off += p.length;
+  }
+  return sha256Hex(buf);
 }
 
 /**
  * Build the __describe__ response batch and metadata.
  */
-export function buildDescribeBatch(
+export async function buildDescribeBatch(
   protocolName: string,
   methods: Map<string, MethodDefinition>,
   serverId: string,
-): { batch: RecordBatch; metadata: Map<string, string> } {
+): Promise<{ batch: RecordBatch; metadata: Map<string, string> }> {
   // Sort methods by name for consistent ordering
   const sortedEntries = [...methods.entries()].sort(([a], [b]) => a.localeCompare(b));
 
@@ -185,7 +202,7 @@ export function buildDescribeBatch(
     nullCount: 0,
   });
 
-  const protocolHash = computeProtocolHash(protocolName, hashRows);
+  const protocolHash = await computeProtocolHash(protocolName, hashRows);
 
   const metadata = new Map<string, string>();
   metadata.set(PROTOCOL_NAME_KEY, protocolName);

@@ -1,7 +1,9 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { hmacSha256, hmacSha256Verify } from "../util/web-crypto.js";
+
+const _UTF8 = new TextEncoder();
 
 /**
  * Derive a per-principal signing key so that a state token issued to one
@@ -12,15 +14,68 @@ import { createHmac, timingSafeEqual } from "node:crypto";
  * The derivation domain-separator ("vgi_rpc.principal\0") prevents collision
  * with other key-derivation uses of the same base key (e.g. oauth-pkce).
  */
-export function derivePrincipalKey(signingKey: Uint8Array, principal: string | null | undefined): Uint8Array {
+export async function derivePrincipalKey(
+  signingKey: Uint8Array,
+  principal: string | null | undefined,
+): Promise<Uint8Array> {
   if (!principal) return signingKey;
-  return createHmac("sha256", signingKey).update(`vgi_rpc.principal\0${principal}`).digest();
+  return hmacSha256(signingKey, _UTF8.encode(`vgi_rpc.principal\0${principal}`));
 }
 
 const TOKEN_VERSION = 2;
 const HMAC_LEN = 32;
 // 1 (version) + 8 (created_at) + 4*3 (three length prefixes) + 32 (hmac)
 const MIN_TOKEN_LEN = 1 + 8 + 12 + HMAC_LEN;
+
+// Base64 helpers — `btoa`/`atob` exist on Node 16+, Bun, and workerd; we work
+// in chunks to stay below the per-call argument limit (Latin-1 only, so we
+// move byte-by-byte through `String.fromCharCode`).
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// Little-endian writers/readers — Buffer was the previous abstraction; we now
+// touch DataView for portability across Node, Bun, and workerd.
+
+function writeU32LE(view: DataView, offset: number, value: number): void {
+  view.setUint32(offset, value, /* littleEndian */ true);
+}
+
+function writeU64LE(view: DataView, offset: number, value: bigint): void {
+  view.setBigUint64(offset, value, /* littleEndian */ true);
+}
+
+function readU32LE(view: DataView, offset: number): number {
+  return view.getUint32(offset, /* littleEndian */ true);
+}
+
+function readU64LE(view: DataView, offset: number): bigint {
+  return view.getBigUint64(offset, /* littleEndian */ true);
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
 
 /**
  * Pack a state token matching the Python v2 wire format.
@@ -33,50 +88,49 @@ const MIN_TOKEN_LEN = 1 + 8 + 12 + HMAC_LEN;
  *   [4B input_schema_len uint32 LE] [input_schema_len bytes]
  *   [32B HMAC-SHA256(signing_key, all above bytes)]
  */
-export function packStateToken(
+export async function packStateToken(
   stateBytes: Uint8Array,
   schemaBytes: Uint8Array,
   inputSchemaBytes: Uint8Array,
   signingKey: Uint8Array,
   createdAt?: number,
-): string {
+): Promise<string> {
   const now = createdAt ?? Math.floor(Date.now() / 1000);
 
   const payloadLen = 1 + 8 + 4 + stateBytes.length + 4 + schemaBytes.length + 4 + inputSchemaBytes.length;
-  const buf = Buffer.alloc(payloadLen);
+  const payload = new Uint8Array(payloadLen);
+  const view = new DataView(payload.buffer);
   let offset = 0;
 
   // version
-  buf.writeUInt8(TOKEN_VERSION, offset);
+  payload[offset] = TOKEN_VERSION;
   offset += 1;
 
   // created_at as uint64 LE
-  buf.writeBigUInt64LE(BigInt(now), offset);
+  writeU64LE(view, offset, BigInt(now));
   offset += 8;
 
   // state
-  buf.writeUInt32LE(stateBytes.length, offset);
+  writeU32LE(view, offset, stateBytes.length);
   offset += 4;
-  buf.set(stateBytes, offset);
+  payload.set(stateBytes, offset);
   offset += stateBytes.length;
 
   // output schema
-  buf.writeUInt32LE(schemaBytes.length, offset);
+  writeU32LE(view, offset, schemaBytes.length);
   offset += 4;
-  buf.set(schemaBytes, offset);
+  payload.set(schemaBytes, offset);
   offset += schemaBytes.length;
 
   // input schema
-  buf.writeUInt32LE(inputSchemaBytes.length, offset);
+  writeU32LE(view, offset, inputSchemaBytes.length);
   offset += 4;
-  buf.set(inputSchemaBytes, offset);
+  payload.set(inputSchemaBytes, offset);
   offset += inputSchemaBytes.length;
 
   // HMAC
-  const mac = createHmac("sha256", signingKey).update(buf).digest();
-  const token = Buffer.concat([buf, mac]);
-
-  return token.toString("base64");
+  const mac = await hmacSha256(signingKey, payload);
+  return bytesToBase64(concatBytes(payload, mac));
 }
 
 export interface UnpackedToken {
@@ -90,8 +144,12 @@ export interface UnpackedToken {
  * Unpack and verify a state token.
  * Throws on tampered, expired, or malformed tokens.
  */
-export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, tokenTtl: number): UnpackedToken {
-  const token = Buffer.from(tokenBase64, "base64");
+export async function unpackStateToken(
+  tokenBase64: string,
+  signingKey: Uint8Array,
+  tokenTtl: number,
+): Promise<UnpackedToken> {
+  const token = base64ToBytes(tokenBase64);
 
   if (token.length < MIN_TOKEN_LEN) {
     throw new Error("State token too short");
@@ -101,23 +159,25 @@ export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, to
   const payload = token.subarray(0, token.length - HMAC_LEN);
   const receivedMac = token.subarray(token.length - HMAC_LEN);
 
-  // Verify HMAC first (before inspecting any fields)
-  const expectedMac = createHmac("sha256", signingKey).update(payload).digest();
-  if (!timingSafeEqual(receivedMac, expectedMac)) {
+  // Verify HMAC first (before inspecting any fields). `crypto.subtle.verify`
+  // is constant-time on conforming runtimes.
+  const ok = await hmacSha256Verify(signingKey, payload, receivedMac);
+  if (!ok) {
     throw new Error("State token HMAC verification failed");
   }
 
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   let offset = 0;
 
   // Version
-  const version = payload.readUInt8(offset);
+  const version = payload[offset];
   offset += 1;
   if (version !== TOKEN_VERSION) {
     throw new Error(`Unsupported state token version: ${version}`);
   }
 
   // created_at
-  const createdAt = Number(payload.readBigUInt64LE(offset));
+  const createdAt = Number(readU64LE(view, offset));
   offset += 8;
 
   // TTL check
@@ -128,14 +188,10 @@ export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, to
     }
   }
 
-  // Copy each bytes section out of the shared Buffer into a freshly-
-  // allocated Uint8Array with byteOffset=0. Buffer.slice returns a VIEW
-  // into the shared backing buffer at an arbitrary byte offset — when
-  // downstream code (arrow-js's schema deserializer) wraps the result
-  // as an Int32Array it throws 'RangeError: Byte offset is not aligned'
-  // if the slice happens to start at a non-4-aligned offset (e.g.
-  // because the union schema's length shifted the next field by 1-3
-  // bytes). Copying normalizes the alignment.
+  // Copy each bytes section into a freshly-allocated Uint8Array with
+  // byteOffset=0. arrow-js's schema deserializer wraps the result as Int32Array
+  // and throws 'RangeError: Byte offset is not aligned' if the slice happens
+  // to start at a non-4-aligned offset. Copying normalizes the alignment.
   const copyAligned = (start: number, len: number) => {
     const out = new Uint8Array(len);
     out.set(payload.subarray(start, start + len));
@@ -143,7 +199,7 @@ export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, to
   };
 
   // state bytes
-  const stateLen = payload.readUInt32LE(offset);
+  const stateLen = readU32LE(view, offset);
   offset += 4;
   if (offset + stateLen > payload.length) {
     throw new Error("State token truncated (state)");
@@ -152,7 +208,7 @@ export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, to
   offset += stateLen;
 
   // output schema bytes
-  const schemaLen = payload.readUInt32LE(offset);
+  const schemaLen = readU32LE(view, offset);
   offset += 4;
   if (offset + schemaLen > payload.length) {
     throw new Error("State token truncated (schema)");
@@ -161,7 +217,7 @@ export function unpackStateToken(tokenBase64: string, signingKey: Uint8Array, to
   offset += schemaLen;
 
   // input schema bytes
-  const inputSchemaLen = payload.readUInt32LE(offset);
+  const inputSchemaLen = readU32LE(view, offset);
   offset += 4;
   if (offset + inputSchemaLen > payload.length) {
     throw new Error("State token truncated (input schema)");

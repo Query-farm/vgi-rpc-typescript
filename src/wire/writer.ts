@@ -1,10 +1,28 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { writeSync } from "node:fs";
 import { type RecordBatch, RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
 
 const STDOUT_FD = 1;
+
+// Resolve node:fs via indirect-string require so esbuild/wrangler don't
+// statically pull node:fs into the bundle. Workers (Cloudflare workerd) never
+// instantiate IpcStreamWriter (no stdio transport on workers), so the
+// runtime-time `require("node:fs")` is unreachable in those builds.
+const _NODE_FS_MOD = "node:fs";
+let _writeSync: ((fd: number, data: Uint8Array, offset?: number, len?: number) => number) | null = null;
+function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?: number) => number {
+  if (_writeSync) return _writeSync;
+  const req: any = (globalThis as any).require ?? null;
+  if (!req) {
+    throw new Error(
+      "IpcStreamWriter requires Node.js or Bun (node:fs.writeSync). " +
+        "Subprocess transport is not available in this runtime.",
+    );
+  }
+  _writeSync = req(_NODE_FS_MOD).writeSync.bind(req(_NODE_FS_MOD));
+  return _writeSync!;
+}
 
 /**
  * Write all bytes to a file descriptor, looping on partial writes.
@@ -13,6 +31,7 @@ const STDOUT_FD = 1;
  * is full (e.g., 64KB limit), and throws EAGAIN on non-blocking fds.
  */
 function writeAll(fd: number, data: Uint8Array): void {
+  const writeSync = _loadWriteSync();
   let offset = 0;
   while (offset < data.length) {
     try {

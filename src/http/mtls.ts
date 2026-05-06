@@ -1,9 +1,22 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { createHash, X509Certificate } from "node:crypto";
 import { AuthContext } from "../auth.js";
 import type { AuthenticateFn } from "./auth.js";
+
+// Indirect-string require so esbuild doesn't pull node:crypto into the bundle.
+// X509Certificate and createHash are used only by the PEM-based mTLS factories;
+// callers on workerd should not configure mTLS.
+const _NODE_CRYPTO_MOD = "node:crypto";
+type X509Certificate = any;
+function _loadNodeCrypto(): { X509Certificate: any; createHash: any } {
+  const req: any = (globalThis as any).require ?? null;
+  if (!req) {
+    throw new Error("mTLS PEM-based authentication requires Node.js or Bun (node:crypto).");
+  }
+  const nc = req(_NODE_CRYPTO_MOD);
+  return { X509Certificate: nc.X509Certificate, createHash: nc.createHash };
+}
 
 // ---------------------------------------------------------------------------
 // XFCC types and parser (no crypto needed)
@@ -172,6 +185,7 @@ function parseCertFromHeader(request: Request, header: string): X509Certificate 
   if (!pemStr.startsWith("-----BEGIN CERTIFICATE-----")) {
     throw new Error("Header value is not a PEM certificate");
   }
+  const { X509Certificate } = _loadNodeCrypto();
   try {
     return new X509Certificate(pemStr);
   } catch (exc) {
@@ -239,6 +253,7 @@ export function mtlsAuthenticateFingerprint(options: {
     fingerprints instanceof Map ? fingerprints : new Map(Object.entries(fingerprints));
 
   function validate(cert: X509Certificate): AuthContext {
+    const { createHash } = _loadNodeCrypto();
     const fp = createHash(algorithm).update(cert.raw).digest("hex");
     const ctx = entries.get(fp);
     if (!ctx) {
@@ -266,9 +281,9 @@ export function mtlsAuthenticateSubject(options?: {
 
   function validate(cert: X509Certificate): AuthContext {
     // Node's cert.subject is \n-separated "KEY=value" lines
-    const subjectParts = cert.subject
+    const subjectParts: string[] = cert.subject
       .split("\n")
-      .map((s) => s.trim())
+      .map((s: string) => s.trim())
       .filter(Boolean);
     const subjectDn = subjectParts.join(", ");
 

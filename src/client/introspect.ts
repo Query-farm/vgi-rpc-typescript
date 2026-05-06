@@ -107,8 +107,8 @@ export async function httpIntrospect(
     prefix?: string;
     authorization?: string;
     compressionLevel?: number;
-    compressFn?: (data: Uint8Array, level: number) => Uint8Array;
-    decompressFn?: (data: Uint8Array) => Uint8Array;
+    compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;
+    decompressFn?: (data: Uint8Array) => Promise<Uint8Array>;
   },
 ): Promise<ServiceDescription> {
   const prefix = options?.prefix ?? "";
@@ -126,7 +126,7 @@ export async function httpIntrospect(
   let sendBody: Uint8Array = body;
   if (level != null && compressFn) {
     headers["Content-Encoding"] = "zstd";
-    sendBody = compressFn(body, level);
+    sendBody = await compressFn(body, level);
   }
   if (level != null && decompressFn) {
     headers["Accept-Encoding"] = "zstd";
@@ -143,7 +143,7 @@ export async function httpIntrospect(
 
   let responseBody = new Uint8Array(await response.arrayBuffer());
   if (response.headers.get("Content-Encoding") === "zstd" && decompressFn) {
-    responseBody = new Uint8Array(decompressFn(responseBody));
+    responseBody = new Uint8Array(await decompressFn(responseBody));
   }
   const { batches } = await readResponseBatches(responseBody);
 

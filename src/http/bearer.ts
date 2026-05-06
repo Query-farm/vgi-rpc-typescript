@@ -1,8 +1,8 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { timingSafeEqual } from "node:crypto";
 import type { AuthContext } from "../auth.js";
+import { constantTimeEqual } from "../util/web-crypto.js";
 import type { AuthenticateFn } from "./auth.js";
 
 /** Receives the raw bearer token string, returns an AuthContext on success. Must throw on failure. */
@@ -30,10 +30,7 @@ export function bearerAuthenticate(options: { validate: BearerValidateFn }): Aut
 /** Constant-time string comparison to prevent timing attacks on token lookup. */
 function safeEqual(a: string, b: string): boolean {
   const enc = new TextEncoder();
-  const bufA = enc.encode(a);
-  const bufB = enc.encode(b);
-  if (bufA.byteLength !== bufB.byteLength) return false;
-  return timingSafeEqual(bufA, bufB);
+  return constantTimeEqual(enc.encode(a), enc.encode(b));
 }
 
 /**

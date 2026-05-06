@@ -23,8 +23,8 @@ import { HttpStreamSession } from "./stream.js";
 import type { HttpConnectOptions, StreamSession } from "./types.js";
 import { externalizeRequestBody } from "./uploadUrl.js";
 
-type CompressFn = (data: Uint8Array, level: number) => Uint8Array;
-type DecompressFn = (data: Uint8Array) => Uint8Array;
+type CompressFn = (data: Uint8Array, level: number) => Promise<Uint8Array>;
+type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
 
 export interface RpcClient {
   call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null>;
@@ -78,7 +78,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
     let resp = await fetch(url, {
       method: "POST",
       headers: buildHeaders(),
-      body: prepareBody(sendBody) as unknown as BodyInit,
+      body: (await prepareBody(sendBody)) as unknown as BodyInit,
     });
     updateCapabilitiesFromResponse(resp);
 
@@ -93,7 +93,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       resp = await fetch(url, {
         method: "POST",
         headers: buildHeaders(),
-        body: prepareBody(externalized) as unknown as BodyInit,
+        body: (await prepareBody(externalized)) as unknown as BodyInit,
       });
       updateCapabilitiesFromResponse(resp);
     }
@@ -129,9 +129,9 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
     return headers;
   }
 
-  function prepareBody(content: Uint8Array): Uint8Array {
+  async function prepareBody(content: Uint8Array): Promise<Uint8Array> {
     if (compressionLevel != null && compressFn) {
-      return compressFn(content, compressionLevel);
+      return await compressFn(content, compressionLevel);
     }
     return content;
   }
@@ -145,7 +145,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
   async function readResponse(resp: Response): Promise<Uint8Array<ArrayBuffer>> {
     let body = new Uint8Array(await resp.arrayBuffer());
     if (resp.headers.get("Content-Encoding") === "zstd" && decompressFn) {
-      body = new Uint8Array(decompressFn(body));
+      body = new Uint8Array(await decompressFn(body));
     }
     return body;
   }

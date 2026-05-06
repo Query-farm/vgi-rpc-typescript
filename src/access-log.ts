@@ -14,7 +14,6 @@
  * same tool that gates the conformance suite.
  */
 
-import { writeSync } from "node:fs";
 import type { CallStatistics, DispatchHook, DispatchInfo, HookToken } from "./types.js";
 
 /** Where the hook writes formatted JSON lines. */
@@ -22,14 +21,29 @@ export interface AccessLogSink {
   write(line: string): void;
 }
 
+// Indirect-string require so esbuild can't pull node:fs into the bundle.
+// Workers should use a custom sink (e.g., one backed by `console.log`).
+const _NODE_FS_MOD = "node:fs";
+function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?: number) => number {
+  const req: any = (globalThis as any).require ?? null;
+  if (!req) {
+    throw new Error(
+      "FdSink requires Node.js or Bun (node:fs.writeSync). For other runtimes, " +
+        "supply a custom AccessLogSink that wraps console.log or your logger.",
+    );
+  }
+  return req(_NODE_FS_MOD).writeSync;
+}
+
 /** A sink backed by a file descriptor; uses synchronous writes for ordering. */
 export class FdSink implements AccessLogSink {
+  private readonly _writeSync = _loadWriteSync();
   constructor(private readonly fd: number) {}
   write(line: string): void {
-    const buf = Buffer.from(line, "utf-8");
+    const buf = new TextEncoder().encode(line);
     let offset = 0;
     while (offset < buf.length) {
-      const n = writeSync(this.fd, buf, offset, buf.length - offset);
+      const n = this._writeSync(this.fd, buf, offset, buf.length - offset);
       if (n <= 0) throw new Error(`access-log writeSync returned ${n}`);
       offset += n;
     }

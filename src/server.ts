@@ -35,8 +35,13 @@ export class VgiRpcServer {
   private protocol: Protocol;
   private enableDescribe: boolean;
   private serverId: string;
-  private describeBatch: import("@query-farm/apache-arrow").RecordBatch | null = null;
-  private protocolHash: string;
+  // Lazily initialized — `buildDescribeBatch` is async because the protocol
+  // hash is computed via `crypto.subtle.digest` (Web Crypto). The dispatch
+  // path awaits the cached promise on first use.
+  private _describePromise: Promise<{
+    batch: import("@query-farm/apache-arrow").RecordBatch;
+    protocolHash: string;
+  }> | null = null;
   private protocolVersion: string;
   private dispatchHook: DispatchHook | null = null;
   private externalConfig: ExternalLocationConfig | undefined;
@@ -57,14 +62,24 @@ export class VgiRpcServer {
     this.dispatchHook = options?.dispatchHook ?? null;
     this.externalConfig = options?.externalLocation;
     this.protocolVersion = options?.protocolVersion ?? "";
+  }
 
-    // Build the describe batch once, regardless of enableDescribe — its
-    // metadata carries the protocol_hash that every access-log record needs.
-    const { batch, metadata } = buildDescribeBatch(protocol.name, protocol.getMethods(), this.serverId);
-    this.protocolHash = metadata.get("vgi_rpc.protocol_hash") ?? "";
-    if (this.enableDescribe) {
-      this.describeBatch = batch;
+  /** Build (or retrieve cached) describe batch + protocol hash. */
+  private async describeInfo(): Promise<{
+    batch: import("@query-farm/apache-arrow").RecordBatch;
+    protocolHash: string;
+  }> {
+    if (!this._describePromise) {
+      this._describePromise = buildDescribeBatch(
+        this.protocol.name,
+        this.protocol.getMethods(),
+        this.serverId,
+      ).then(({ batch, metadata }) => ({
+        batch,
+        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? "",
+      }));
     }
+    return this._describePromise;
   }
 
   /** Start the server loop. Reads requests until stdin closes. */
@@ -142,9 +157,10 @@ export class VgiRpcServer {
       throw e;
     }
 
-    // Handle __describe__
-    if (methodName === DESCRIBE_METHOD_NAME && this.describeBatch) {
-      writer.writeStream(this.describeBatch.schema, [this.describeBatch]);
+    // Handle __describe__ — lazy-build on first request.
+    if (methodName === DESCRIBE_METHOD_NAME && this.enableDescribe) {
+      const { batch } = await this.describeInfo();
+      writer.writeStream(batch.schema, [batch]);
       return;
     }
 
@@ -180,13 +196,14 @@ export class VgiRpcServer {
       streamId = randomStreamId();
     }
 
+    const { protocolHash } = await this.describeInfo();
     const info: DispatchInfo = {
       method: methodName,
       methodType,
       serverId: this.serverId,
       requestId,
       protocol: this.protocol.name,
-      protocolHash: this.protocolHash,
+      protocolHash,
       protocolVersion: this.protocolVersion,
       principal: "",
       authDomain: "",

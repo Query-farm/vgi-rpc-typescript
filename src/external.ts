@@ -162,7 +162,7 @@ export async function maybeExternalizeBatch(
   // Optionally compress
   let contentEncoding = "";
   if (config.compression?.algorithm === "zstd") {
-    ipcData = zstdCompress(ipcData, config.compression.level ?? 3) as Uint8Array;
+    ipcData = (await zstdCompress(ipcData, config.compression.level ?? 3)) as Uint8Array;
     contentEncoding = "zstd";
   }
 
@@ -207,7 +207,7 @@ export async function resolveExternalLocation(
   // Decompress if needed
   const contentEncoding = response.headers.get("Content-Encoding");
   if (contentEncoding === "zstd") {
-    data = new Uint8Array(zstdDecompress(data));
+    data = new Uint8Array(await zstdDecompress(data));
   }
 
   // Verify SHA-256 if present

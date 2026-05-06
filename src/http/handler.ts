@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { randomBytes } from "node:crypto";
+import { randomBytes } from "../util/web-crypto.js";
 import {
   Field,
   Int64,
@@ -233,7 +233,7 @@ export function createHttpHandler(
   async function compressIfAccepted(response: Response, clientAcceptsZstd: boolean): Promise<Response> {
     if (compressionLevel == null || !clientAcceptsZstd) return response;
     const responseBody = new Uint8Array(await response.arrayBuffer());
-    const compressed = zstdCompress(responseBody, compressionLevel);
+    const compressed = await zstdCompress(responseBody, compressionLevel);
     const headers = new Headers(response.headers);
     headers.set("Content-Encoding", "zstd");
     return new Response(compressed as unknown as BodyInit, {
@@ -438,7 +438,7 @@ export function createHttpHandler(
     }
     const contentEncoding = request.headers.get("Content-Encoding");
     if (contentEncoding === "zstd") {
-      body = zstdDecompress(body);
+      body = await zstdDecompress(body);
     }
 
     // Route: {prefix}/__upload_url__/init — vend pre-signed upload URL pairs
@@ -511,7 +511,7 @@ export function createHttpHandler(
     // Route: {prefix}/__describe__
     if (path === `${prefix}/${DESCRIBE_METHOD_NAME}`) {
       try {
-        const response = httpDispatchDescribe(protocol.name, methods, serverId);
+        const response = await httpDispatchDescribe(protocol.name, methods, serverId);
         addCorsHeaders(response.headers);
         return compressIfAccepted(response, clientAcceptsZstd);
       } catch (error: any) {
