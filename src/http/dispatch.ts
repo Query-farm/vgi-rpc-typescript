@@ -128,6 +128,7 @@ export async function httpDispatchUnary(
 
   applyDefaults(parsed.params, method.defaults);
 
+  const externalizationEnabled = !!ctx.externalLocation?.storage;
   const out = new OutputCollector(
     schema,
     true,
@@ -136,6 +137,13 @@ export async function httpDispatchUnary(
     ctx.authContext,
     ctx.cookies,
     ctx.kind ?? TransportKind.HTTP,
+    {
+      // Unary is one-shot: the entire wire and external budgets are
+      // available for this single emit.
+      remainingResponseBytes: ctx.maxResponseBytes,
+      remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
+      externalizationEnabled,
+    },
   );
   out.enableCookieSink();
 
@@ -380,6 +388,7 @@ export async function httpDispatchStreamExchange(
     // Exchange path — also handles exchange-registered methods acting as
     // producers (__isProducer=true). Use producer mode on the OutputCollector
     // when effectiveProducer so finish() is allowed.
+    const externalizationEnabled = !!ctx.externalLocation?.storage;
     const out = new OutputCollector(
       outputSchema,
       effectiveProducer,
@@ -388,6 +397,13 @@ export async function httpDispatchStreamExchange(
       ctx.authContext,
       ctx.cookies,
       ctx.kind ?? TransportKind.HTTP,
+      {
+        // Exchange is lockstep: one process() call, one output batch,
+        // one HTTP response.  The whole budget belongs to this emit.
+        remainingResponseBytes: ctx.maxResponseBytes,
+        remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
+        externalizationEnabled,
+      },
     );
 
     // Cast compatible input types (e.g., decimal→double, int32→int64).
@@ -496,10 +512,25 @@ async function produceStreamResponse(
   // else fall through to maxResponseBytes (which is hard for unary/
   // exchange but soft for producer — continuation tokens cover overshoot).
   const maxBytes = ctx.maxStreamResponseBytes ?? ctx.maxResponseBytes;
+  const maxExternalBytes = ctx.maxExternalizedResponseBytes;
+  const externalizationEnabled = !!ctx.externalLocation?.storage;
   let estimatedBytes = 0;
+  /** Cumulative external-channel bytes across iterations.  External cap is
+   *  *hard* — externalised uploads have no continuation-token escape valve. */
+  let cumulativeExternalBytes = 0;
   let producerError: Error | undefined;
+  /** Set when the external cap is breached; the loop replaces the partial
+   *  stream with an EXCEPTION batch and breaks. */
+  let externalOvershoot: Error | undefined;
 
   while (true) {
+    // Snapshot per-iteration budgets so the worker can size its emit.
+    const remainingWire = maxBytes != null ? Math.max(0, maxBytes - estimatedBytes) : undefined;
+    const remainingExternal =
+      externalizationEnabled && maxExternalBytes != null
+        ? Math.max(0, maxExternalBytes - cumulativeExternalBytes)
+        : undefined;
+
     const out = new OutputCollector(
       outputSchema,
       true,
@@ -508,6 +539,11 @@ async function produceStreamResponse(
       ctx.authContext,
       ctx.cookies,
       ctx.kind ?? TransportKind.HTTP,
+      {
+        remainingResponseBytes: remainingWire,
+        remainingExternalizedResponseBytes: remainingExternal,
+        externalizationEnabled,
+      },
     );
 
     try {
@@ -530,15 +566,43 @@ async function produceStreamResponse(
     }
 
     for (const emitted of out.batches) {
-      allBatches.push(emitted.batch);
+      let batch = emitted.batch;
+      // Externalize before charging wire bytes — externalised payloads
+      // ride on the side channel and only the small pointer batch ends
+      // up on the wire.  Pre-flight check + cumulative accounting mirror
+      // Python's _run_http_producer_turn so a worker exfiltrating big
+      // batches via tiny pointer outputs still hits the external cap.
+      if (externalizationEnabled && ctx.externalLocation) {
+        const predicted = predictExternalizeBytes(batch, ctx.externalLocation);
+        if (predicted > 0 && maxExternalBytes != null && cumulativeExternalBytes + predicted > maxExternalBytes) {
+          externalOvershoot = new Error(
+            `Externalised payload exceeds max_externalized_response_bytes (${cumulativeExternalBytes + predicted} > ${maxExternalBytes}) for method '${method.name}'`,
+          );
+          externalOvershoot.name = "RuntimeError";
+          break;
+        }
+        if (predicted > 0) {
+          batch = await maybeExternalizeBatch(batch, ctx.externalLocation);
+          cumulativeExternalBytes += predicted;
+        }
+      }
+      allBatches.push(batch);
       if (maxBytes != null) {
         // arrow-js exposes O(1) byteLength via batch.data; flechette has no
         // equivalent. Best-effort estimate via serializeBatch in the latter.
-        const sz =
-          (emitted.batch as any).data?.byteLength ??
-          require("../arrow/index.js").serializeBatch(emitted.batch).byteLength;
+        const sz = (batch as any).data?.byteLength ?? require("../arrow/index.js").serializeBatch(batch).byteLength;
         estimatedBytes += sz;
       }
+    }
+
+    if (externalOvershoot) {
+      // Replace the partial stream with a fresh one carrying only the
+      // EXCEPTION batch — clients see RpcError before any data, matching
+      // the unary/exchange strict-fail contract.
+      allBatches.length = 0;
+      allBatches.push(buildErrorBatch(outputSchema, externalOvershoot, ctx.serverId, requestId));
+      producerError = externalOvershoot;
+      break;
     }
 
     if (out.finished) {
@@ -566,7 +630,13 @@ async function produceStreamResponse(
   } else {
     responseBody = dataBytes;
   }
-  const response = arrowResponse(responseBody);
+  // External-cap overshoot is a strict-fail: emit 500 so arrowResponse
+  // translates to 200 + X-VGI-RPC-Error.  In-handler producer errors
+  // stay 200-with-EXCEPTION-batch (the existing contract — clients see
+  // RpcError on body decode but proxies don't get the header signal).
+  // Mirrors c5c7091 for the cap-overshoot path only.
+  const status = externalOvershoot ? 500 : 200;
+  const response = arrowResponse(responseBody, status);
   if (producerError) {
     (response as any).__dispatchError = producerError;
   }

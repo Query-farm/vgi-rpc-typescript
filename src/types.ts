@@ -82,6 +82,23 @@ export interface CallContext extends LogContext {
    *  on the very first request). */
   readonly kind?: TransportKind;
   /**
+   * Wire body bytes the framework will accept this iteration before
+   * triggering a continuation token (producer streams) or strict-fail
+   * with an EXCEPTION batch (unary / stream-exchange).  Snapshot at
+   * collector construction; not live.  `undefined` when no cap is
+   * configured or the transport doesn't expose one (stdio).
+   */
+  readonly remainingResponseBytes?: number;
+  /**
+   * External-channel bytes left this iteration.  Always a hard cap —
+   * externalised uploads have no escape valve like producer
+   * continuation tokens.  Undefined when no cap is configured or
+   * externalisation is disabled.
+   */
+  readonly remainingExternalizedResponseBytes?: number;
+  /** True iff the server has an externalisation backend wired up. */
+  readonly externalizationEnabled?: boolean;
+  /**
    * Incoming request cookies.  Empty for non-HTTP transports.
    */
   readonly cookies: ReadonlyMap<string, string>;
@@ -229,6 +246,9 @@ export class OutputCollector implements CallContext {
   readonly auth: AuthContext;
   readonly cookies: ReadonlyMap<string, string>;
   readonly kind?: TransportKind;
+  readonly remainingResponseBytes?: number;
+  readonly remainingExternalizedResponseBytes?: number;
+  readonly externalizationEnabled?: boolean;
 
   constructor(
     outputSchema: VgiSchema,
@@ -238,6 +258,14 @@ export class OutputCollector implements CallContext {
     authContext?: AuthContext,
     cookies?: ReadonlyMap<string, string>,
     kind?: TransportKind,
+    /** Snapshot budget fields exposed to worker code via {@link CallContext}.
+     *  Optional — non-HTTP transports omit them and existing call sites
+     *  remain source-compatible. */
+    budgets?: {
+      remainingResponseBytes?: number;
+      remainingExternalizedResponseBytes?: number;
+      externalizationEnabled?: boolean;
+    },
   ) {
     this._outputSchema = outputSchema;
     this._producerMode = producerMode;
@@ -246,6 +274,9 @@ export class OutputCollector implements CallContext {
     this.auth = authContext ?? AuthContext.anonymous();
     this.cookies = cookies ?? EMPTY_COOKIES;
     this.kind = kind;
+    this.remainingResponseBytes = budgets?.remainingResponseBytes;
+    this.remainingExternalizedResponseBytes = budgets?.remainingExternalizedResponseBytes;
+    this.externalizationEnabled = budgets?.externalizationEnabled;
   }
 
   /**
