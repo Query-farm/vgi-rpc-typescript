@@ -25,7 +25,7 @@ export interface AccessLogSink {
 // Workers should use a custom sink (e.g., one backed by `console.log`).
 const _NODE_FS_MOD = "node:fs";
 function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?: number) => number {
-  const req: any = (globalThis as any).require ?? null;
+  const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
     throw new Error(
       "FdSink requires Node.js or Bun (node:fs.writeSync). For other runtimes, " +

@@ -39,7 +39,7 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function arrowTypeToString(type: import("@query-farm/apache-arrow").DataType): string {
+function arrowTypeToString(type: import("../arrow/index.js").VgiDataType): string {
   const id = type.typeId;
   // Match the human-friendly type names used by the Python reference implementation
   if (id === 5) return "str"; // Utf8

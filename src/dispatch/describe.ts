@@ -3,16 +3,15 @@
 
 import { sha256Hex } from "../util/web-crypto.js";
 import {
-  Binary,
-  Bool,
-  Field,
-  makeData,
-  RecordBatch,
-  Schema,
-  Struct,
-  Utf8,
-  vectorFromArray,
-} from "@query-farm/apache-arrow";
+  type VgiBatch,
+  schema as makeSchema,
+  field,
+  utf8,
+  bool,
+  binary,
+  batchFromColumns,
+  withBatchMetadata,
+} from "../arrow/index.js";
 import {
   DESCRIBE_VERSION,
   DESCRIBE_VERSION_KEY,
@@ -32,15 +31,15 @@ import { serializeSchema } from "../util/schema.js";
  * everything else is source-level metadata that callers should consult the
  * Protocol class for.
  */
-export const DESCRIBE_SCHEMA = new Schema([
-  new Field("name", new Utf8(), false),
-  new Field("method_type", new Utf8(), false),
-  new Field("has_return", new Bool(), false),
-  new Field("params_schema_ipc", new Binary(), false),
-  new Field("result_schema_ipc", new Binary(), false),
-  new Field("has_header", new Bool(), false),
-  new Field("header_schema_ipc", new Binary(), true),
-  new Field("is_exchange", new Bool(), true),
+export const DESCRIBE_SCHEMA = makeSchema([
+  field("name", utf8(), false),
+  field("method_type", utf8(), false),
+  field("has_return", bool(), false),
+  field("params_schema_ipc", binary(), false),
+  field("result_schema_ipc", binary(), false),
+  field("has_header", bool(), false),
+  field("header_schema_ipc", binary(), true),
+  field("is_exchange", bool(), true),
 ]);
 
 /**
@@ -115,7 +114,7 @@ export async function buildDescribeBatch(
   protocolName: string,
   methods: Map<string, MethodDefinition>,
   serverId: string,
-): Promise<{ batch: RecordBatch; metadata: Map<string, string> }> {
+): Promise<{ batch: VgiBatch; metadata: Map<string, string> }> {
   // Sort methods by name for consistent ordering
   const sortedEntries = [...methods.entries()].sort(([a], [b]) => a.localeCompare(b));
 
@@ -174,32 +173,15 @@ export async function buildDescribeBatch(
     });
   }
 
-  const nameArr = vectorFromArray(names, new Utf8());
-  const methodTypeArr = vectorFromArray(methodTypes, new Utf8());
-  const hasReturnArr = vectorFromArray(hasReturns, new Bool());
-  const paramsSchemaArr = vectorFromArray(paramsSchemas, new Binary());
-  const resultSchemaArr = vectorFromArray(resultSchemas, new Binary());
-  const hasHeaderArr = vectorFromArray(hasHeaders, new Bool());
-  const headerSchemaArr = vectorFromArray(headerSchemas, new Binary());
-  const isExchangeArr = vectorFromArray(isExchanges, new Bool());
-
-  const children = [
-    nameArr.data[0],
-    methodTypeArr.data[0],
-    hasReturnArr.data[0],
-    paramsSchemaArr.data[0],
-    resultSchemaArr.data[0],
-    hasHeaderArr.data[0],
-    headerSchemaArr.data[0],
-    isExchangeArr.data[0],
-  ];
-
-  const structType = new Struct(DESCRIBE_SCHEMA.fields);
-  const data = makeData({
-    type: structType,
-    length: sortedEntries.length,
-    children,
-    nullCount: 0,
+  const baseBatch = batchFromColumns(DESCRIBE_SCHEMA, {
+    name: names,
+    method_type: methodTypes,
+    has_return: hasReturns,
+    params_schema_ipc: paramsSchemas,
+    result_schema_ipc: resultSchemas,
+    has_header: hasHeaders,
+    header_schema_ipc: headerSchemas,
+    is_exchange: isExchanges,
   });
 
   const protocolHash = await computeProtocolHash(protocolName, hashRows);
@@ -211,7 +193,6 @@ export async function buildDescribeBatch(
   metadata.set(PROTOCOL_HASH_KEY, protocolHash);
   metadata.set(SERVER_ID_KEY, serverId);
 
-  const batch = new RecordBatch(DESCRIBE_SCHEMA, data, metadata);
-
+  const batch = withBatchMetadata(baseBatch, metadata);
   return { batch, metadata };
 }

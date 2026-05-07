@@ -1,7 +1,14 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatch, RecordBatchReader, Schema } from "@query-farm/apache-arrow";
+import {
+  type VgiSchema,
+  type VgiBatch,
+  schema as makeSchema,
+  deserializeSchema as facadeDeserializeSchema,
+  deserializeBatch,
+  withBatchMetadata,
+} from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
 import { CANCEL_KEY, STATE_KEY } from "../constants.js";
 import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
@@ -13,7 +20,7 @@ import {
 } from "../external.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
-import { conformBatchToSchema } from "../util/conform.js";
+import { conformBatchToSchema } from "../arrow/index.js";
 import { serializeSchema } from "../util/schema.js";
 import { applyDefaults, parseRequest } from "../wire/request.js";
 import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
@@ -21,13 +28,11 @@ import { appendCookieHeaders, arrowResponse, HttpRpcError, readRequestFromBody, 
 import { derivePrincipalKey, packStateToken, unpackStateToken } from "./token.js";
 import type { StateSerializer } from "./types.js";
 
-async function deserializeSchema(bytes: Uint8Array): Promise<Schema> {
-  const reader = await RecordBatchReader.from(bytes);
-  await reader.open();
-  return reader.schema!;
+async function deserializeSchema(bytes: Uint8Array): Promise<VgiSchema> {
+  return facadeDeserializeSchema(bytes);
 }
 
-const EMPTY_SCHEMA = new Schema([]);
+const EMPTY_SCHEMA = makeSchema([]);
 
 export interface DispatchContext {
   signingKey: Uint8Array;
@@ -52,12 +57,15 @@ export interface DispatchContext {
  *  right now. Returns 0 when externalisation would not fire. Mirrors the
  *  threshold logic so a pre-flight check matches the real upload size. */
 function predictExternalizeBytes(
-  batch: RecordBatch,
+  batch: VgiBatch,
   config: ExternalLocationConfig | undefined,
 ): number {
   if (!config?.storage) return 0;
   if (batch.numRows === 0) return 0;
-  const size = batch.data.byteLength;
+  // arrow-js exposes `.data.byteLength` for an O(1) batch-bytes estimate;
+  // flechette doesn't surface this, but maybeExternalizeBatch will measure
+  // exact size on the actual upload path. Best-effort prediction here.
+  const size = (batch as any).data?.byteLength ?? 0;
   const threshold = config.externalizeThresholdBytes ?? 1_048_576;
   if (size < threshold) return 0;
   return size;
@@ -66,7 +74,7 @@ function predictExternalizeBytes(
 /** Build an Arrow IPC stream containing only an EXCEPTION batch, wrapped in a
  *  500 response so common.ts/arrowResponse rewrites it to 200 + X-VGI-RPC-Error.
  *  Used for cap-overshoot strict-fail. */
-function makeCapErrorResponse(schema: Schema, error: Error, ctx: DispatchContext): Response {
+function makeCapErrorResponse(schema: VgiSchema, error: Error, ctx: DispatchContext): Response {
   const errBatch = buildErrorBatch(schema, error, ctx.serverId, null);
   const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
   (response as any).__dispatchError = error;
@@ -107,7 +115,7 @@ export async function httpDispatchUnary(
       // shouldn't carry them but if it does, the outer is authoritative).
       mergedMeta.set(k, v);
     }
-    reqBatch = new RecordBatch(resolved.schema, resolved.data, mergedMeta);
+    reqBatch = withBatchMetadata(resolved, mergedMeta);
     effectiveSchema = resolved.schema;
   }
 
@@ -313,13 +321,13 @@ export async function httpDispatchStreamExchange(
 
   // Recover schemas from the token (the state itself may not contain
   // Schema objects after JSON round-trip — always prefer the token).
-  let outputSchema: Schema;
+  let outputSchema: VgiSchema;
   if (unpacked.schemaBytes.length > 0) {
     outputSchema = await deserializeSchema(unpacked.schemaBytes);
   } else {
     outputSchema = state?.__outputSchema ?? method.outputSchema!;
   }
-  let inputSchema: Schema;
+  let inputSchema: VgiSchema;
   if (unpacked.inputSchemaBytes.length > 0) {
     inputSchema = await deserializeSchema(unpacked.inputSchemaBytes);
   } else {
@@ -399,7 +407,7 @@ export async function httpDispatchStreamExchange(
     }
 
     // Collect emitted batches
-    const batches: RecordBatch[] = [];
+    const batches: VgiBatch[] = [];
 
     if (out.finished) {
       // Stream is done — return data WITHOUT state token.
@@ -419,7 +427,7 @@ export async function httpDispatchStreamExchange(
         if (batch.numRows > 0) {
           const mergedMeta = new Map<string, string>(batch.metadata ?? []);
           mergedMeta.set(STATE_KEY, token);
-          batches.push(new RecordBatch(batch.schema, batch.data, mergedMeta));
+          batches.push(withBatchMetadata(batch, mergedMeta));
         } else {
           batches.push(batch);
         }
@@ -453,13 +461,13 @@ export async function httpDispatchStreamExchange(
 async function produceStreamResponse(
   method: MethodDefinition,
   state: any,
-  outputSchema: Schema,
-  inputSchema: Schema,
+  outputSchema: VgiSchema,
+  inputSchema: VgiSchema,
   ctx: DispatchContext,
   requestId: string | null,
   headerBytes: Uint8Array | null,
 ): Promise<Response> {
-  const allBatches: RecordBatch[] = [];
+  const allBatches: VgiBatch[] = [];
   // Producer wire cap: prefer the legacy stream-only soft cap when set
   // (lets old callers keep the "one batch per response" hack alive),
   // else fall through to maxResponseBytes (which is hard for unary/
@@ -493,7 +501,11 @@ async function produceStreamResponse(
     for (const emitted of out.batches) {
       allBatches.push(emitted.batch);
       if (maxBytes != null) {
-        estimatedBytes += emitted.batch.data.byteLength;
+        // arrow-js exposes O(1) byteLength via batch.data; flechette has no
+        // equivalent. Best-effort estimate via serializeBatch in the latter.
+        const sz = (emitted.batch as any).data?.byteLength
+          ?? require("../arrow/index.js").serializeBatch(emitted.batch).byteLength;
+        estimatedBytes += sz;
       }
     }
 

@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatch, recordBatchFromArrays, type Schema } from "@query-farm/apache-arrow";
+import { type VgiBatch, type VgiSchema, isBatch, batchFromColumns } from "./arrow/index.js";
 import { AuthContext } from "./auth.js";
 import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
@@ -79,7 +79,7 @@ export type ProducerFn<S = any> = (state: S, out: OutputCollector) => Promise<vo
 /** Initialization function for exchange streams. Returns the initial state object. */
 export type ExchangeInit<S = any> = (params: Record<string, any>) => Promise<S> | S;
 /** Called once per input batch. Must emit exactly one output batch per call. */
-export type ExchangeFn<S = any> = (state: S, input: RecordBatch, out: OutputCollector) => Promise<void> | void;
+export type ExchangeFn<S = any> = (state: S, input: VgiBatch, out: OutputCollector) => Promise<void> | void;
 
 /** Produces a header batch sent before the first output batch in a stream. */
 export type HeaderInit = (params: Record<string, any>, state: any, ctx: LogContext) => Record<string, any>;
@@ -95,16 +95,16 @@ export type OnCancelFn<S = any> = (state: S) => Promise<void> | void;
 export interface MethodDefinition {
   name: string;
   type: MethodType;
-  paramsSchema: Schema;
-  resultSchema: Schema;
-  outputSchema?: Schema;
-  inputSchema?: Schema;
+  paramsSchema: VgiSchema;
+  resultSchema: VgiSchema;
+  outputSchema?: VgiSchema;
+  inputSchema?: VgiSchema;
   handler?: UnaryHandler;
   producerInit?: ProducerInit;
   producerFn?: ProducerFn;
   exchangeInit?: ExchangeInit;
   exchangeFn?: ExchangeFn;
-  headerSchema?: Schema;
+  headerSchema?: VgiSchema;
   headerInit?: HeaderInit;
   onCancel?: OnCancelFn;
   doc?: string;
@@ -167,7 +167,7 @@ export interface DispatchHook {
 }
 
 export interface EmittedBatch {
-  batch: RecordBatch;
+  batch: VgiBatch;
   metadata?: Map<string, string>;
 }
 
@@ -180,7 +180,7 @@ export class OutputCollector implements CallContext {
   private _dataBatchIdx: number | null = null;
   private _finished = false;
   private _producerMode: boolean;
-  private _outputSchema: Schema;
+  private _outputSchema: VgiSchema;
   private _serverId: string;
   private _requestId: string | null;
   private _cookieSinkEnabled = false;
@@ -189,7 +189,7 @@ export class OutputCollector implements CallContext {
   readonly cookies: ReadonlyMap<string, string>;
 
   constructor(
-    outputSchema: Schema,
+    outputSchema: VgiSchema,
     producerMode = true,
     serverId = "",
     requestId: string | null = null,
@@ -245,7 +245,7 @@ export class OutputCollector implements CallContext {
     });
   }
 
-  get outputSchema(): Schema {
+  get outputSchema(): VgiSchema {
     return this._outputSchema;
   }
 
@@ -257,17 +257,23 @@ export class OutputCollector implements CallContext {
     return this._batches;
   }
 
-  /** Emit a pre-built RecordBatch as the data batch for this call. */
-  emit(batch: RecordBatch, metadata?: Map<string, string>): void;
+  /** Emit a pre-built batch as the data batch for this call. */
+  emit(batch: VgiBatch, metadata?: Map<string, string>): void;
   /** Emit a data batch from column arrays keyed by field name. Int64 Number values are coerced to BigInt. */
   emit(columns: Record<string, any[]>): void;
-  emit(batchOrColumns: RecordBatch | Record<string, any[]>, metadata?: Map<string, string>): void {
-    let batch: RecordBatch;
-    if (batchOrColumns instanceof RecordBatch) {
+  emit(batchOrColumns: VgiBatch | Record<string, any[]>, metadata?: Map<string, string>): void {
+    let batch: VgiBatch;
+    if (isBatch(batchOrColumns)) {
       batch = batchOrColumns;
     } else {
-      const coerced = coerceInt64(this._outputSchema, batchOrColumns);
-      batch = recordBatchFromArrays(coerced, this._outputSchema);
+      const coerced = coerceInt64(this._outputSchema, batchOrColumns as Record<string, any[]>);
+      // Build columns dict ensuring each field has an array (vectorFromArray-equivalent under the hood).
+      const cols: Record<string, any[]> = {};
+      for (const f of this._outputSchema.fields) {
+        const v = coerced[f.name];
+        cols[f.name] = Array.isArray(v) ? v : [v];
+      }
+      batch = batchFromColumns(this._outputSchema, cols);
     }
     if (this._dataBatchIdx !== null) {
       throw new Error("Only one data batch may be emitted per call");

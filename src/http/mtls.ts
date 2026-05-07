@@ -10,7 +10,7 @@ import type { AuthenticateFn } from "./auth.js";
 const _NODE_CRYPTO_MOD = "node:crypto";
 type X509Certificate = any;
 function _loadNodeCrypto(): { X509Certificate: any; createHash: any } {
-  const req: any = (globalThis as any).require ?? null;
+  const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
     throw new Error("mTLS PEM-based authentication requires Node.js or Bun (node:crypto).");
   }

@@ -1,26 +1,34 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { type RecordBatch, RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
+import { RecordBatchStreamWriter, type Schema as A_Schema, type RecordBatch as A_RecordBatch } from "@query-farm/apache-arrow";
+import type { VgiBatch, VgiSchema } from "../arrow/index.js";
 
 const STDOUT_FD = 1;
 
 // Resolve node:fs via indirect-string require so esbuild/wrangler don't
 // statically pull node:fs into the bundle. Workers (Cloudflare workerd) never
 // instantiate IpcStreamWriter (no stdio transport on workers), so the
-// runtime-time `require("node:fs")` is unreachable in those builds.
+// runtime-time require("node:fs") is unreachable in those builds.
+//
+// `globalThis.require` is undefined in both Bun ESM and Node ESM, so we try
+// `import.meta.require` (Bun) first, then fall back to globalThis.require
+// (Node CJS). Node ESM consumers must polyfill require if they need the
+// subprocess transport.
 const _NODE_FS_MOD = "node:fs";
 let _writeSync: ((fd: number, data: Uint8Array, offset?: number, len?: number) => number) | null = null;
 function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?: number) => number {
   if (_writeSync) return _writeSync;
-  const req: any = (globalThis as any).require ?? null;
+  const req: any =
+    (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
     throw new Error(
-      "IpcStreamWriter requires Node.js or Bun (node:fs.writeSync). " +
+      "IpcStreamWriter requires Bun or Node.js CJS for sync node:fs.writeSync. " +
         "Subprocess transport is not available in this runtime.",
     );
   }
-  _writeSync = req(_NODE_FS_MOD).writeSync.bind(req(_NODE_FS_MOD));
+  const fs = req(_NODE_FS_MOD);
+  _writeSync = fs.writeSync.bind(fs);
   return _writeSync!;
 }
 
@@ -67,12 +75,12 @@ export class IpcStreamWriter {
    * Write a complete IPC stream with the given schema and batches.
    * Creates schema message, writes all batches (with their metadata), writes EOS.
    */
-  writeStream(schema: Schema, batches: RecordBatch[]): void {
+  writeStream(schema: VgiSchema, batches: VgiBatch[]): void {
+    const a = schema as unknown as A_Schema;
     const writer = new RecordBatchStreamWriter();
-    writer.reset(undefined, schema);
+    writer.reset(undefined, a);
     for (const batch of batches) {
-      // Use _writeRecordBatch to bypass schema comparison (see IncrementalStream.write)
-      (writer as any)._writeRecordBatch(batch);
+      (writer as any)._writeRecordBatch(batch as unknown as A_RecordBatch);
     }
     writer.close();
     const bytes = writer.toUint8Array(true);
@@ -81,10 +89,8 @@ export class IpcStreamWriter {
 
   /**
    * Open an incremental IPC stream for writing batches one at a time.
-   * Used for streaming methods where output batches are produced incrementally.
-   * Bytes are written synchronously after each batch.
    */
-  openStream(schema: Schema): IncrementalStream {
+  openStream(schema: VgiSchema): IncrementalStream {
     return new IncrementalStream(this.fd, schema);
   }
 }
@@ -103,11 +109,11 @@ export class IncrementalStream {
   private readonly fd: number;
   private closed = false;
 
-  constructor(fd: number, schema: Schema) {
+  constructor(fd: number, schema: VgiSchema) {
     this.fd = fd;
     this.writer = new RecordBatchStreamWriter();
     // Buffer internally (no sink) — we drain manually via writeAll
-    this.writer.reset(undefined, schema);
+    this.writer.reset(undefined, schema as unknown as A_Schema);
     this.drain();
   }
 
@@ -121,9 +127,9 @@ export class IncrementalStream {
    * set at stream open time and all batches are structurally compatible,
    * we skip the comparison.
    */
-  write(batch: RecordBatch): void {
+  write(batch: VgiBatch): void {
     if (this.closed) throw new Error("Stream already closed");
-    (this.writer as any)._writeRecordBatch(batch);
+    (this.writer as any)._writeRecordBatch(batch as unknown as A_RecordBatch);
     this.drain();
   }
 

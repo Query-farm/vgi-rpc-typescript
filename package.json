@@ -8,36 +8,49 @@
     "url": "https://github.com/Query-farm/vgi-rpc-typescript"
   },
   "type": "module",
+  "sideEffects": false,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
+      "workerd": "./src/index.ts",
+      "worker": "./src/index.ts",
+      "browser": "./src/index.ts",
+      "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
-      "bun": "./src/index.ts"
+      "import": "./dist/index.js"
     },
     "./otel": {
-      "import": "./dist/otel.js",
+      "bun": "./src/otel.ts",
       "types": "./dist/otel.d.ts",
-      "bun": "./src/otel.ts"
+      "import": "./dist/otel.js"
     },
     "./s3": {
-      "import": "./dist/s3.js",
+      "bun": "./src/s3.ts",
       "types": "./dist/s3.d.ts",
-      "bun": "./src/s3.ts"
+      "import": "./dist/s3.js"
     },
     "./gcs": {
-      "import": "./dist/gcs.js",
+      "bun": "./src/gcs.ts",
       "types": "./dist/gcs.d.ts",
-      "bun": "./src/gcs.ts"
+      "import": "./dist/gcs.js"
     }
   },
   "files": [
     "dist",
     "src"
   ],
+  "imports": {
+    "#vgi-rpc-arrow": {
+      "workerd": "./src/arrow/impl-flechette/index.ts",
+      "worker": "./src/arrow/impl-flechette/index.ts",
+      "browser": "./src/arrow/impl-flechette/index.ts",
+      "default": "./src/arrow/impl-arrowjs/index.ts"
+    }
+  },
   "dependencies": {
     "@query-farm/apache-arrow": "*",
+    "@uwdata/flechette": "github:Query-farm/flechette#fix/timestamp-bigint-encode",
     "oauth4webapi": "^3.8.5"
   },
   "peerDependencies": {

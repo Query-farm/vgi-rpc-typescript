@@ -3,14 +3,13 @@
 
 import { randomBytes } from "../util/web-crypto.js";
 import {
-  Field,
-  Int64,
-  RecordBatch,
-  Schema,
-  TimestampMicrosecond,
-  Utf8,
-  vectorFromArray,
-} from "@query-farm/apache-arrow";
+  type VgiSchema,
+  batchFromColumns,
+  field,
+  schema as makeSchema,
+  timestampMicro,
+  utf8,
+} from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
 import { DESCRIBE_METHOD_NAME, RPC_ERROR_HEADER } from "../constants.js";
 import type { Protocol } from "../protocol.js";
@@ -46,7 +45,7 @@ import {
 import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
 import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
 
-const EMPTY_SCHEMA = new Schema([]);
+const EMPTY_SCHEMA: VgiSchema = makeSchema([]);
 
 const EMPTY_COOKIES: ReadonlyMap<string, string> = new Map();
 
@@ -165,12 +164,11 @@ export function createHttpHandler(
   const uploadUrlProvider = options?.uploadUrlProvider;
   const maxUploadBytes = options?.maxUploadBytes;
 
-  // Pre-built schemas for the synthetic __upload_url__ endpoint.
-  const UPLOAD_URL_REQUEST_SCHEMA = new Schema([new Field("count", new Int64(), false)]);
-  const UPLOAD_URL_RESPONSE_SCHEMA = new Schema([
-    new Field("upload_url", new Utf8(), false),
-    new Field("download_url", new Utf8(), false),
-    new Field("expires_at", new TimestampMicrosecond("UTC"), false),
+  // Pre-built response schema for the synthetic __upload_url__ endpoint.
+  const UPLOAD_URL_RESPONSE_SCHEMA = makeSchema([
+    field("upload_url", utf8(), false),
+    field("download_url", utf8(), false),
+    field("expires_at", timestampMicro("UTC"), false),
   ]);
   const UPLOAD_URL_METHOD = "__upload_url__";
   const MAX_UPLOAD_URL_COUNT = 100;
@@ -242,7 +240,7 @@ export function createHttpHandler(
     });
   }
 
-  function makeErrorResponse(error: Error, statusCode: number, schema: Schema = EMPTY_SCHEMA): Response {
+  function makeErrorResponse(error: Error, statusCode: number, schema: VgiSchema = EMPTY_SCHEMA): Response {
     const errBatch = buildErrorBatch(schema, error, serverId, null);
     const body = serializeIpcStream(schema, [errBatch]);
     const resp = arrowResponse(body, statusCode);
@@ -465,32 +463,15 @@ export function createHttpHandler(
           urls.push(await uploadUrlProvider.generateUploadUrl());
         }
 
-        const arrow = await import("@query-farm/apache-arrow");
-        const uploadUrlVec = vectorFromArray(
-          urls.map((u) => u.uploadUrl),
-          new Utf8(),
-        );
-        const downloadUrlVec = vectorFromArray(
-          urls.map((u) => u.downloadUrl),
-          new Utf8(),
-        );
-        // TimestampMicrosecond stores int64 microseconds since the epoch.
-        // Build the BigInt64 backing buffer directly — vectorFromArray for
-        // Timestamp types is finicky about input type coercion.
-        const tsType = new TimestampMicrosecond("UTC");
-        const tsValues = new BigInt64Array(urls.length);
-        for (let i = 0; i < urls.length; i++) {
-          tsValues[i] = BigInt(urls[i].expiresAt.getTime()) * 1000n;
-        }
-        const expiresData = arrow.makeData({ type: tsType, length: urls.length, data: tsValues, nullCount: 0 });
-
-        const data = arrow.makeData({
-          type: new arrow.Struct(UPLOAD_URL_RESPONSE_SCHEMA.fields),
-          length: urls.length,
-          children: [uploadUrlVec.data[0], downloadUrlVec.data[0], expiresData],
-          nullCount: 0,
+        // Timestamp(MICROSECOND) stores int64 microseconds since epoch.
+        // Both backends accept BigInt for int64-class types (the arrow-js
+        // facade auto-coerces; flechette requires it under useBigIntTimestamp).
+        const expiresAt = urls.map((u) => BigInt(u.expiresAt.getTime()) * 1000n);
+        const resultBatch = batchFromColumns(UPLOAD_URL_RESPONSE_SCHEMA, {
+          upload_url: urls.map((u) => u.uploadUrl),
+          download_url: urls.map((u) => u.downloadUrl),
+          expires_at: expiresAt,
         });
-        const resultBatch = new RecordBatch(UPLOAD_URL_RESPONSE_SCHEMA, data);
         const responseBody = serializeIpcStream(UPLOAD_URL_RESPONSE_SCHEMA, [resultBatch]);
         const response = arrowResponse(responseBody);
         addCorsHeaders(response.headers);

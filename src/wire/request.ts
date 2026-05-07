@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { DataType, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
+import { type VgiBatch, type VgiSchema, isMap } from "../arrow/index.js";
 import { REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError, VersionError } from "../errors.js";
 import { isOpaquePassthroughType } from "./opaque.js";
@@ -10,7 +10,7 @@ export interface ParsedRequest {
   methodName: string;
   requestVersion: string;
   requestId: string | null;
-  schema: Schema;
+  schema: VgiSchema;
   params: Record<string, any>;
   rawMetadata: Map<string, string>;
 }
@@ -19,7 +19,7 @@ export interface ParsedRequest {
  * Parse a request from a RecordBatch with metadata.
  * Extracts method name, version, and params from the batch.
  */
-export function parseRequest(schema: Schema, batch: RecordBatch): ParsedRequest {
+export function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest {
   const metadata: Map<string, string> = batch.metadata ?? new Map();
 
   const methodName = metadata.get(RPC_METHOD_KEY);
@@ -63,8 +63,11 @@ export function parseRequest(schema: Schema, batch: RecordBatch): ParsedRequest 
   for (let i = 0; i < schema.fields.length; i++) {
     const field = schema.fields[i];
     // Map_ columns have a broken .get() in arrow-js — pass through raw Data
-    if (DataType.isMap(field.type) || isOpaquePassthroughType(field.type)) {
-      params[field.name] = batch.getChildAt(i)!.data[0];
+    if (isMap(field.type) || isOpaquePassthroughType(field.type)) {
+      // arrow-js: pass through raw Data (column .data[0]); flechette
+      // exposes column directly via .at(0).
+      const col = batch.getChildAt(i)!;
+      params[field.name] = (col as any).data?.[0] ?? col.get(0);
       continue;
     }
     let value = batch.getChildAt(i)?.get(0);

@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema } from "@query-farm/apache-arrow";
+import { schema as makeSchema } from "./arrow/index.js";
 import { inferParamTypes, type SchemaLike, toSchema } from "./schema.js";
 import {
   type ExchangeFn,
@@ -15,7 +15,7 @@ import {
   type UnaryHandler,
 } from "./types.js";
 
-const EMPTY_SCHEMA = new Schema([]);
+const EMPTY_SCHEMA = makeSchema([]);
 
 /**
  * Fluent builder for defining RPC methods.

@@ -6,6 +6,7 @@
       "name": "@query-farm/vgi-rpc",
       "dependencies": {
         "@query-farm/apache-arrow": "*",
+        "@uwdata/flechette": "github:Query-farm/flechette#fix/timestamp-bigint-encode",
         "oauth4webapi": "^3.8.5",
       },
       "devDependencies": {
@@ -278,6 +279,8 @@
     "@types/request": ["@types/request@2.48.13", "", { "dependencies": { "@types/caseless": "*", "@types/node": "*", "@types/tough-cookie": "*", "form-data": "^2.5.5" } }, "sha512-FGJ6udDNUCjd19pp0Q3iTiDkwhYup7J8hpMW9c4k53NrccQFFWKRho6hvtPPEhnXWKvukfwAlB6DbDz4yhH5Gg=="],
 
     "@types/tough-cookie": ["@types/tough-cookie@4.0.5", "", {}, "sha512-/Ad8+nIOV7Rl++6f1BdKxFSMgmoqEoYbHRpPcx3JEfv8VRsQe9Z4mCXeJBzxs7mbHY/XOZZuXlRNfhpVPbs6ZA=="],
+
+    "@uwdata/flechette": ["@uwdata/flechette@github:Query-farm/flechette#a3ccb59", {}, "Query-farm-flechette-a3ccb59"],
 
     "abort-controller": ["abort-controller@3.0.0", "", { "dependencies": { "event-target-shim": "^5.0.0" } }, "sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg=="],
 

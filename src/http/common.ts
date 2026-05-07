@@ -1,10 +1,15 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
+import {
+  type VgiBatch,
+  type VgiSchema,
+  conformBatchToSchema,
+  deserializeBatch,
+  serializeBatches,
+} from "../arrow/index.js";
 import { RPC_ERROR_HEADER } from "../constants.js";
 import type { CookieSpec } from "../types.js";
-import { conformBatchToSchema } from "../util/conform.js";
 
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
 
@@ -45,15 +50,18 @@ export class HttpRpcError extends Error {
   }
 }
 
-/** Serialize a schema + batches into a complete IPC stream as Uint8Array. */
-export function serializeIpcStream(schema: Schema, batches: RecordBatch[]): Uint8Array {
-  const writer = new RecordBatchStreamWriter();
-  writer.reset(undefined, schema);
-  for (const batch of batches) {
-    writer.write(conformBatchToSchema(batch, schema));
-  }
-  writer.close();
-  return writer.toUint8Array(true);
+/**
+ * Serialize a schema + batches into a complete IPC stream as Uint8Array.
+ *
+ * A single IPC stream is `[schema_msg, batch_msg, batch_msg, ..., EOS]`.
+ * Each backend implements `serializeBatches` to write that atomically —
+ * arrow-js via `RecordBatchStreamWriter`, flechette via `tablesToIPC`
+ * (added in our flechette fork). Naive concatenation of per-batch streams
+ * produces multiple EOS markers and breaks readers.
+ */
+export function serializeIpcStream(schema: VgiSchema, batches: VgiBatch[]): Uint8Array {
+  const conformed = batches.map((b) => conformBatchToSchema(b, schema));
+  return serializeBatches(schema, conformed);
 }
 
 /**
@@ -74,17 +82,13 @@ export function arrowResponse(body: Uint8Array, status = 200, extraHeaders?: Hea
   return new Response(body as unknown as BodyInit, { status, headers });
 }
 
-/** Read schema + first batch from an IPC stream body. */
-export async function readRequestFromBody(body: Uint8Array): Promise<{ schema: Schema; batch: RecordBatch }> {
-  const reader = await RecordBatchReader.from(body);
-  await reader.open();
-  const schema = reader.schema;
-  if (!schema) {
+/** Read schema + first batch from an IPC stream body via the facade. */
+export async function readRequestFromBody(
+  body: Uint8Array,
+): Promise<{ schema: VgiSchema; batch: VgiBatch }> {
+  const batch = deserializeBatch(body);
+  if (batch.schema.fields.length === 0 && batch.numRows === 0) {
     throw new HttpRpcError("Empty IPC stream: no schema", 400);
   }
-  const batches = reader.readAll();
-  if (batches.length === 0) {
-    throw new HttpRpcError("IPC stream contains no batches", 400);
-  }
-  return { schema, batch: batches[0] };
+  return { schema: batch.schema, batch };
 }

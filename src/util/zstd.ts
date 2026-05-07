@@ -18,7 +18,7 @@
 const _NODE_ZLIB_MOD = "node:zlib";
 const isBun = typeof globalThis.Bun !== "undefined";
 function _loadZlib(): any {
-  const req: any = (globalThis as any).require ?? null;
+  const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
     throw new Error(
       "zstd is not available in this runtime. " +

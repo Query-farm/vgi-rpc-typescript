@@ -1,7 +1,18 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { DataType } from "@query-farm/apache-arrow";
+import {
+  type VgiDataType,
+  isDate,
+  isTime,
+  isTimestamp,
+  isDuration,
+  isDecimal,
+  isLargeUtf8,
+  isLargeBinary,
+  isFixedSizeBinary,
+  isDictionary,
+} from "../arrow/index.js";
 
 /**
  * Arrow types whose `.get(0)` / `vectorFromArray` round-trips are unreliable
@@ -11,16 +22,16 @@ import { DataType } from "@query-farm/apache-arrow";
  * Covers Date/Time/Timestamp/Duration/Decimal/LargeUtf8/LargeBinary/
  * FixedSizeBinary/Dictionary.
  */
-export function isOpaquePassthroughType(type: DataType): boolean {
+export function isOpaquePassthroughType(type: VgiDataType): boolean {
   return (
-    DataType.isDate(type) ||
-    DataType.isTime(type) ||
-    DataType.isTimestamp(type) ||
-    DataType.isDuration(type) ||
-    DataType.isDecimal(type) ||
-    DataType.isLargeUtf8(type) ||
-    DataType.isLargeBinary(type) ||
-    DataType.isFixedSizeBinary(type) ||
-    DataType.isDictionary(type)
+    isDate(type) ||
+    isTime(type) ||
+    isTimestamp(type) ||
+    isDuration(type) ||
+    isDecimal(type) ||
+    isLargeUtf8(type) ||
+    isLargeBinary(type) ||
+    isFixedSizeBinary(type) ||
+    isDictionary(type)
   );
 }

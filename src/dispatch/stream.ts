@@ -1,17 +1,17 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema } from "@query-farm/apache-arrow";
+import { schema as makeSchema } from "../arrow/index.js";
 import { CANCEL_KEY } from "../constants.js";
 import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
-import { conformBatchToSchema } from "../util/conform.js";
+import { conformBatchToSchema } from "../arrow/index.js";
 import type { IpcStreamReader } from "../wire/reader.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
 
-const EMPTY_SCHEMA = new Schema([]);
+const EMPTY_SCHEMA = makeSchema([]);
 
 /**
  * Dispatch a stream RPC call (producer or exchange).

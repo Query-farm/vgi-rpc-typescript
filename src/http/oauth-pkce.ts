@@ -29,7 +29,7 @@ function _crypto(): {
   randomBytes: (n: number) => any;
   timingSafeEqual: (a: any, b: any) => boolean;
 } {
-  const req: any = (globalThis as any).require ?? null;
+  const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
     throw new Error("OAuth PKCE requires Node.js or Bun (node:crypto).");
   }

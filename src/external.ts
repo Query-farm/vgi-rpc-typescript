@@ -10,7 +10,12 @@
  * download URL and SHA-256 checksum in metadata.
  */
 
-import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter, type Schema } from "@query-farm/apache-arrow";
+import {
+  type VgiBatch,
+  type VgiSchema,
+  serializeBatch,
+  deserializeBatch,
+} from "./arrow/index.js";
 import { LOCATION_KEY, LOCATION_SHA256_KEY, LOG_LEVEL_KEY } from "./constants.js";
 import { zstdCompress, zstdDecompress } from "./util/zstd.js";
 import { buildEmptyBatch } from "./wire/response.js";
@@ -92,7 +97,7 @@ async function sha256Hex(data: Uint8Array): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /** Returns true if the batch is a zero-row pointer to external data. */
-export function isExternalLocationBatch(batch: RecordBatch): boolean {
+export function isExternalLocationBatch(batch: VgiBatch): boolean {
   if (batch.numRows !== 0) return false;
   const meta = batch.metadata;
   if (!meta) return false;
@@ -104,7 +109,7 @@ export function isExternalLocationBatch(batch: RecordBatch): boolean {
 // ---------------------------------------------------------------------------
 
 /** Create a zero-row pointer batch with location URL and optional SHA-256. */
-export function makeExternalLocationBatch(schema: Schema, url: string, sha256?: string): RecordBatch {
+export function makeExternalLocationBatch(schema: VgiSchema, url: string, sha256?: string): VgiBatch {
   const metadata = new Map<string, string>();
   metadata.set(LOCATION_KEY, url);
   if (sha256) {
@@ -117,22 +122,13 @@ export function makeExternalLocationBatch(schema: Schema, url: string, sha256?: 
 // IPC serialization helpers
 // ---------------------------------------------------------------------------
 
-function serializeBatchToIpc(batch: RecordBatch): Uint8Array {
-  const writer = new RecordBatchStreamWriter();
-  writer.reset(undefined, batch.schema);
-  writer.write(batch);
-  writer.close();
-  return writer.toUint8Array(true);
+function serializeBatchToIpc(batch: VgiBatch): Uint8Array {
+  return serializeBatch(batch);
 }
 
-function batchByteSize(batch: RecordBatch): number {
-  // Arrow TS data.byteLength doesn't reflect actual data size.
+function batchByteSize(batch: VgiBatch): number {
   // Estimate from IPC serialization size for threshold check.
-  const writer = new RecordBatchStreamWriter();
-  writer.reset(undefined, batch.schema);
-  writer.write(batch);
-  writer.close();
-  return writer.toUint8Array(true).byteLength;
+  return serializeBatch(batch).byteLength;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,9 +140,9 @@ function batchByteSize(batch: RecordBatch): number {
  * Returns the original batch unchanged if below threshold or no config.
  */
 export async function maybeExternalizeBatch(
-  batch: RecordBatch,
+  batch: VgiBatch,
   config?: ExternalLocationConfig | null,
-): Promise<RecordBatch> {
+): Promise<VgiBatch> {
   if (!config?.storage) return batch;
   if (batch.numRows === 0) return batch;
 
@@ -182,9 +178,9 @@ export async function maybeExternalizeBatch(
  * Returns the original batch unchanged if not a pointer or no config.
  */
 export async function resolveExternalLocation(
-  batch: RecordBatch,
+  batch: VgiBatch,
   config?: ExternalLocationConfig | null,
-): Promise<RecordBatch> {
+): Promise<VgiBatch> {
   if (!config) return batch;
   if (!isExternalLocationBatch(batch)) return batch;
 
@@ -220,12 +216,9 @@ export async function resolveExternalLocation(
   }
 
   // Parse IPC stream
-  const reader = await RecordBatchReader.from(data);
-  await reader.open();
-  const resolved = reader.next();
-  if (!resolved || resolved.done || !resolved.value) {
+  const resolved = deserializeBatch(data);
+  if (resolved.numRows === 0 && resolved.schema.fields.length === 0) {
     throw new Error(`No data batch found in external IPC stream from ${url}`);
   }
-
-  return resolved.value;
+  return resolved;
 }

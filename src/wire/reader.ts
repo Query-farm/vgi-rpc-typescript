@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type RecordBatch, RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
+import type { VgiBatch, VgiSchema } from "../arrow/index.js";
 
 export interface StreamMessage {
-  schema: Schema;
-  batches: RecordBatch[];
+  schema: VgiSchema;
+  batches: VgiBatch[];
 }
 
 /**
@@ -68,7 +69,7 @@ export class IpcStreamReader {
    * Use readNextBatch() to read batches one at a time.
    * Returns null on EOF.
    */
-  async openNextStream(): Promise<Schema | null> {
+  async openNextStream(): Promise<VgiSchema | null> {
     if (this.initialized) {
       await this.reader.reset().open();
       if (this.reader.closed) {
@@ -88,7 +89,7 @@ export class IpcStreamReader {
    * reading from the underlying byte source. This prevents the Arrow-JS
    * reader from consuming bytes that belong to the next IPC stream.
    */
-  async readNextBatch(): Promise<RecordBatch | null> {
+  async readNextBatch(): Promise<VgiBatch | null> {
     if (this.streamEnded) return null;
     const result = await this.reader.next();
     if (result.done) {

@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatchStreamWriter, Schema } from "@query-farm/apache-arrow";
+import { schema as makeSchema, serializeBatch } from "./arrow/index.js";
 import { DESCRIBE_METHOD_NAME } from "./constants.js";
 import { buildDescribeBatch } from "./dispatch/describe.js";
 import { dispatchStream } from "./dispatch/stream.js";
@@ -15,7 +15,7 @@ import { applyDefaults, parseRequest } from "./wire/request.js";
 import { buildErrorBatch } from "./wire/response.js";
 import { IpcStreamWriter } from "./wire/writer.js";
 
-const EMPTY_SCHEMA = new Schema([]);
+const EMPTY_SCHEMA = makeSchema([]);
 
 function randomStreamId(): string {
   const bytes = new Uint8Array(16);
@@ -39,7 +39,7 @@ export class VgiRpcServer {
   // hash is computed via `crypto.subtle.digest` (Web Crypto). The dispatch
   // path awaits the cached promise on first use.
   private _describePromise: Promise<{
-    batch: import("@query-farm/apache-arrow").RecordBatch;
+    batch: import("./arrow/index.js").VgiBatch;
     protocolHash: string;
   }> | null = null;
   private protocolVersion: string;
@@ -66,7 +66,7 @@ export class VgiRpcServer {
 
   /** Build (or retrieve cached) describe batch + protocol hash. */
   private async describeInfo(): Promise<{
-    batch: import("@query-farm/apache-arrow").RecordBatch;
+    batch: import("./arrow/index.js").VgiBatch;
     protocolHash: string;
   }> {
     if (!this._describePromise) {
@@ -181,12 +181,7 @@ export class VgiRpcServer {
     // Capture self-contained IPC bytes of the request batch for the access log.
     let requestData: Uint8Array | undefined;
     try {
-      const w = new RecordBatchStreamWriter();
-      w.reset(undefined, batch.schema);
-      // biome-ignore lint/suspicious/noExplicitAny: bypass schema-cmp like elsewhere in this file
-      (w as any)._writeRecordBatch(batch);
-      w.close();
-      requestData = w.toUint8Array(true);
+      requestData = serializeBatch(batch as any);
     } catch {
       // best-effort; observability must not fail dispatch
     }
