@@ -78,11 +78,7 @@ export async function hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uin
  * `constantTimeEqual(await hmacSha256(key, data), tag)`, but routes through
  * `crypto.subtle.verify` which is also constant-time on conforming runtimes.
  */
-export async function hmacSha256Verify(
-  key: Uint8Array,
-  data: Uint8Array,
-  tag: Uint8Array,
-): Promise<boolean> {
+export async function hmacSha256Verify(key: Uint8Array, data: Uint8Array, tag: Uint8Array): Promise<boolean> {
   const cryptoKey = await _importHmacKey(key, "verify");
   return crypto.subtle.verify("HMAC", cryptoKey, tag as BufferSource, data as BufferSource);
 }

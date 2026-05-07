@@ -10,12 +10,7 @@
  * download URL and SHA-256 checksum in metadata.
  */
 
-import {
-  type VgiBatch,
-  type VgiSchema,
-  serializeBatch,
-  deserializeBatch,
-} from "./arrow/index.js";
+import { deserializeBatch, serializeBatch, type VgiBatch, type VgiSchema } from "./arrow/index.js";
 import { LOCATION_KEY, LOCATION_SHA256_KEY, LOG_LEVEL_KEY } from "./constants.js";
 import { zstdCompress, zstdDecompress } from "./util/zstd.js";
 import { buildEmptyBatch } from "./wire/response.js";
@@ -200,10 +195,14 @@ export async function resolveExternalLocation(
   }
   let data = new Uint8Array(await response.arrayBuffer());
 
-  // Decompress if needed
+  // Decompress if needed.  Cap the decompressed size at 16x the
+  // compressed body — generous for typical Arrow IPC zstd ratios but
+  // tight enough that a tiny response cannot inflate to multi-GB.
+  // Mirrors Python's external_fetch.fetch_url.
   const contentEncoding = response.headers.get("Content-Encoding");
   if (contentEncoding === "zstd") {
-    data = new Uint8Array(await zstdDecompress(data));
+    const cap = data.byteLength * 16;
+    data = new Uint8Array(await zstdDecompress(data, cap));
   }
 
   // Verify SHA-256 if present

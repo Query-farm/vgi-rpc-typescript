@@ -4,20 +4,34 @@
 import type { VgiDataType } from "./types.js";
 
 export const TypeId = {
-  Null: 1, Int: 2, Float: 3, Binary: 4, Utf8: 5, Bool: 6,
-  Decimal: 7, Date: 8, Time: 9, Timestamp: 10, Interval: 11,
-  List: 12, Struct: 13, Union: 14, FixedSizeBinary: 15,
-  FixedSizeList: 16, Map: 17, Duration: 18,
-  LargeBinary: 19, LargeUtf8: 20, Dictionary: -1,
+  Null: 1,
+  Int: 2,
+  Float: 3,
+  Binary: 4,
+  Utf8: 5,
+  Bool: 6,
+  Decimal: 7,
+  Date: 8,
+  Time: 9,
+  Timestamp: 10,
+  Interval: 11,
+  List: 12,
+  Struct: 13,
+  Union: 14,
+  FixedSizeBinary: 15,
+  FixedSizeList: 16,
+  Map: 17,
+  Duration: 18,
+  LargeBinary: 19,
+  LargeUtf8: 20,
+  Dictionary: -1,
 } as const;
 
 export const isNull = (t: VgiDataType): boolean => t.typeId === TypeId.Null;
 export const isInt = (t: VgiDataType): boolean => t.typeId === TypeId.Int;
 export const isFloat = (t: VgiDataType): boolean => t.typeId === TypeId.Float;
-export const isBinary = (t: VgiDataType): boolean =>
-  t.typeId === TypeId.Binary || t.typeId === TypeId.LargeBinary;
-export const isUtf8 = (t: VgiDataType): boolean =>
-  t.typeId === TypeId.Utf8 || t.typeId === TypeId.LargeUtf8;
+export const isBinary = (t: VgiDataType): boolean => t.typeId === TypeId.Binary || t.typeId === TypeId.LargeBinary;
+export const isUtf8 = (t: VgiDataType): boolean => t.typeId === TypeId.Utf8 || t.typeId === TypeId.LargeUtf8;
 export const isLargeUtf8 = (t: VgiDataType): boolean => t.typeId === TypeId.LargeUtf8;
 export const isLargeBinary = (t: VgiDataType): boolean => t.typeId === TypeId.LargeBinary;
 export const isBool = (t: VgiDataType): boolean => t.typeId === TypeId.Bool;

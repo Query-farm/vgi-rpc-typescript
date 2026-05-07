@@ -1,19 +1,13 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { randomBytes } from "../util/web-crypto.js";
-import {
-  type VgiSchema,
-  batchFromColumns,
-  field,
-  schema as makeSchema,
-  timestampMicro,
-  utf8,
-} from "../arrow/index.js";
+import { batchFromColumns, field, schema as makeSchema, timestampMicro, utf8, type VgiSchema } from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
-import { DESCRIBE_METHOD_NAME, RPC_ERROR_HEADER } from "../constants.js";
+import { DESCRIBE_METHOD_NAME, PROTOCOL_HASH_KEY, RPC_ERROR_HEADER } from "../constants.js";
+import { buildDescribeBatch } from "../dispatch/describe.js";
 import type { Protocol } from "../protocol.js";
-import { type CallStatistics, type DispatchInfo, MethodType } from "../types.js";
+import { type CallStatistics, type DispatchInfo, MethodType, type ServeStartHook, TransportKind } from "../types.js";
+import { randomBytes } from "../util/web-crypto.js";
 import { zstdCompress, zstdDecompress } from "../util/zstd.js";
 import { parseRequest } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
@@ -89,6 +83,15 @@ export function createHttpHandler(
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 7200 : options.corsMaxAge;
   const maxRequestBytes = options?.maxRequestBytes;
+  // Bomb-cap on `Content-Encoding: zstd` decompression. Default to
+  // 16x maxRequestBytes when the operator set one — generous for normal
+  // Arrow IPC zstd ratios on legitimate payloads, tight enough that a
+  // tiny compressed body cannot inflate to hundreds of MB.  When
+  // maxRequestBytes is unset the cap stays unbounded (operator-chosen,
+  // explicit).  Mirrors Python's make_wsgi_app default.
+  const maxDecompressedRequestBytes =
+    options?.maxDecompressedRequestBytes ??
+    (options?.maxRequestBytes != null ? options.maxRequestBytes * 16 : undefined);
   // ``maxStreamResponseBytes`` was the producer-only soft cap. Keep it
   // distinct from ``maxResponseBytes`` (the new hard cap that also applies
   // to unary/exchange) — falling one through to the other would turn the
@@ -131,9 +134,58 @@ export function createHttpHandler(
 
   const methods = protocol.getMethods();
 
+  // Lazily compute the protocol hash once; it's the SHA-256 over the
+  // canonical __describe__ payload and is derived from buildDescribeBatch's
+  // metadata.  Async because Web Crypto digests are async.  Used to stamp
+  // every dispatched access-log record with `protocol_hash`.
+  let protocolHashPromise: Promise<string> | null = null;
+  function getProtocolHash(): Promise<string> {
+    if (!protocolHashPromise) {
+      protocolHashPromise = buildDescribeBatch(protocol.name, methods, serverId).then(
+        ({ metadata }) => metadata.get(PROTOCOL_HASH_KEY) ?? "",
+      );
+    }
+    return protocolHashPromise;
+  }
+  const protocolVersion = options?.protocolVersion ?? "";
+
   const compressionLevel = options?.compressionLevel;
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
   const dispatchHook = options?.dispatchHook;
+
+  // Lazy on_serve_start firing — mirrors Python's middleware shape.
+  // The bind is committed only after the hook returns successfully so a
+  // transient failure on the first request leaves it un-fired and the
+  // next request retries (matches Python 7b3999c).  Multiple
+  // simultaneous first-callers serialize on the in-flight promise.
+  const onServeStart: ServeStartHook | null = options?.onServeStart ?? null;
+  let serveStartFired = false;
+  let serveStartInFlight: Promise<void> | null = null;
+  // The transport kind reported to access-log + dispatch hooks. Default
+  // to HTTP; the launcher path (createUnixHandler) overrides this in a
+  // future commit.
+  const transportKind: TransportKind =
+    (options as { _transportKind?: TransportKind })?._transportKind ?? TransportKind.HTTP;
+  async function notifyTransport(kind: TransportKind): Promise<void> {
+    if (serveStartFired) return;
+    if (serveStartInFlight) {
+      await serveStartInFlight;
+      return;
+    }
+    if (!onServeStart) {
+      serveStartFired = true;
+      return;
+    }
+    serveStartInFlight = (async () => {
+      try {
+        await onServeStart(kind);
+        serveStartFired = true;
+      } finally {
+        serveStartInFlight = null;
+      }
+    })();
+    await serveStartInFlight;
+  }
 
   // HTML page configuration
   const enableLandingPage = options?.enableLandingPage ?? true;
@@ -211,6 +263,7 @@ export function createHttpHandler(
     maxExternalizedResponseBytes,
     stateSerializer,
     externalLocation,
+    kind: transportKind,
   };
 
   function addCorsHeaders(headers: Headers, isOptions = false): void {
@@ -261,8 +314,11 @@ export function createHttpHandler(
     // OAuth token-exchange proxy — exempt from auth (it's the mechanism by
     // which a client *gets* an auth token). Handled before the global OPTIONS
     // catch-all so the proxy can apply its own Origin-allowlist CORS.
-    if (pkceConfig && path === `${prefix}/_oauth/token` &&
-        (request.method === "POST" || request.method === "OPTIONS")) {
+    if (
+      pkceConfig &&
+      path === `${prefix}/_oauth/token` &&
+      (request.method === "POST" || request.method === "OPTIONS")
+    ) {
       return handleOAuthTokenProxy(request, pkceConfig);
     }
 
@@ -436,7 +492,19 @@ export function createHttpHandler(
     }
     const contentEncoding = request.headers.get("Content-Encoding");
     if (contentEncoding === "zstd") {
-      body = await zstdDecompress(body);
+      try {
+        body = await zstdDecompress(body, maxDecompressedRequestBytes);
+      } catch (error: any) {
+        // Decompression-bomb refusal surfaces as 413 (the wire-cap
+        // sibling of maxRequestBytes); other zstd errors are 400 (bad
+        // request).
+        const message = error?.message ?? "zstd decompression failed";
+        const status = message.includes("exceed cap") ? 413 : 400;
+        const headers = new Headers({ "Content-Type": "text/plain" });
+        addCorsHeaders(headers);
+        addCapabilityHeaders(headers);
+        return new Response(message, { status, headers });
+      }
     }
 
     // Route: {prefix}/__upload_url__/init — vend pre-signed upload URL pairs
@@ -528,8 +596,31 @@ export function createHttpHandler(
       return compressIfAccepted(makeErrorResponse(err, 404), clientAcceptsZstd);
     }
 
+    // Fire on_serve_start lazily (idempotent on success). A failure here
+    // propagates as a 500 to the client, leaves the bind un-fired, and
+    // the next request retries.
+    await notifyTransport(transportKind);
+
     const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
-    const info: DispatchInfo = { method: methodName, methodType, serverId, requestId: null };
+    const protocolHash = await getProtocolHash();
+    const auth = ctx.authContext;
+    const info: DispatchInfo = {
+      method: methodName,
+      methodType,
+      serverId,
+      requestId: null,
+      protocol: protocol.name,
+      protocolHash,
+      protocolVersion,
+      kind: transportKind,
+      principal: auth?.principal ?? "",
+      authDomain: auth?.domain ?? "",
+      authenticated: auth?.authenticated ?? false,
+      // Self-contained Arrow IPC stream of the request batch — the body
+      // we already buffered.  Best-effort: the access-log can still emit
+      // even if we couldn't capture it.
+      requestData: action === "call" ? body : undefined,
+    };
     const stats: CallStatistics = {
       inputBatches: 0,
       outputBatches: 0,

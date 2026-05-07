@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  type VgiBatch,
-  type VgiSchema,
   conformBatchToSchema,
   deserializeBatch,
   serializeBatches,
+  type VgiBatch,
+  type VgiSchema,
 } from "../arrow/index.js";
 import { RPC_ERROR_HEADER } from "../constants.js";
 import type { CookieSpec } from "../types.js";
@@ -83,11 +83,13 @@ export function arrowResponse(body: Uint8Array, status = 200, extraHeaders?: Hea
 }
 
 /** Read schema + first batch from an IPC stream body via the facade. */
-export async function readRequestFromBody(
-  body: Uint8Array,
-): Promise<{ schema: VgiSchema; batch: VgiBatch }> {
+export async function readRequestFromBody(body: Uint8Array): Promise<{ schema: VgiSchema; batch: VgiBatch }> {
   const batch = deserializeBatch(body);
-  if (batch.schema.fields.length === 0 && batch.numRows === 0) {
+  // Reject only truly empty bodies. A zero-field, zero-row batch with batch
+  // metadata is a legal exchange/cancel/continuation signal — the state
+  // token rides on `batch.metadata` and downstream code (cancel detection,
+  // schema conformance gating) is built to handle it.
+  if (batch.schema.fields.length === 0 && batch.numRows === 0 && (batch.metadata?.size ?? 0) === 0) {
     throw new HttpRpcError("Empty IPC stream: no schema", 400);
   }
   return { schema: batch.schema, batch };

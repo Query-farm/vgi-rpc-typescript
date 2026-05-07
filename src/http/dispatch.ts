@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  type VgiSchema,
-  type VgiBatch,
-  schema as makeSchema,
-  deserializeSchema as facadeDeserializeSchema,
+  conformBatchToSchema,
   deserializeBatch,
+  deserializeSchema as facadeDeserializeSchema,
+  schema as makeSchema,
+  type VgiBatch,
+  type VgiSchema,
   withBatchMetadata,
 } from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
@@ -19,8 +20,7 @@ import {
   resolveExternalLocation,
 } from "../external.js";
 import type { MethodDefinition } from "../types.js";
-import { OutputCollector } from "../types.js";
-import { conformBatchToSchema } from "../arrow/index.js";
+import { OutputCollector, TransportKind } from "../types.js";
 import { serializeSchema } from "../util/schema.js";
 import { applyDefaults, parseRequest } from "../wire/request.js";
 import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
@@ -51,15 +51,16 @@ export interface DispatchContext {
   externalLocation?: ExternalLocationConfig;
   /** Incoming HTTP request cookies.  Empty/absent on non-HTTP paths. */
   cookies?: ReadonlyMap<string, string>;
+  /** Transport identifier surfaced to handlers via CallContext.kind.
+   *  Defaults to HTTP when unset (the only caller that overrides it is
+   *  the AF_UNIX launcher path). */
+  kind?: TransportKind;
 }
 
 /** Predict the external upload size if maybeExternalizeBatch ran on this batch
  *  right now. Returns 0 when externalisation would not fire. Mirrors the
  *  threshold logic so a pre-flight check matches the real upload size. */
-function predictExternalizeBytes(
-  batch: VgiBatch,
-  config: ExternalLocationConfig | undefined,
-): number {
+function predictExternalizeBytes(batch: VgiBatch, config: ExternalLocationConfig | undefined): number {
   if (!config?.storage) return 0;
   if (batch.numRows === 0) return 0;
   // arrow-js exposes `.data.byteLength` for an O(1) batch-bytes estimate;
@@ -127,7 +128,15 @@ export async function httpDispatchUnary(
 
   applyDefaults(parsed.params, method.defaults);
 
-  const out = new OutputCollector(schema, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies);
+  const out = new OutputCollector(
+    schema,
+    true,
+    ctx.serverId,
+    parsed.requestId,
+    ctx.authContext,
+    ctx.cookies,
+    ctx.kind ?? TransportKind.HTTP,
+  );
   out.enableCookieSink();
 
   try {
@@ -138,10 +147,7 @@ export async function httpDispatchUnary(
       // upload — operator's intent is "don't emit data beyond this per
       // call," not "emit and then complain." Mirror the Python check.
       const predicted = predictExternalizeBytes(resultBatch, ctx.externalLocation);
-      if (
-        ctx.maxExternalizedResponseBytes != null &&
-        predicted > ctx.maxExternalizedResponseBytes
-      ) {
+      if (ctx.maxExternalizedResponseBytes != null && predicted > ctx.maxExternalizedResponseBytes) {
         const overshoot = new Error(
           `Externalised payload exceeds max_externalized_response_bytes (${predicted} > ${ctx.maxExternalizedResponseBytes}) for method '${method.name}'`,
         );
@@ -236,6 +242,7 @@ export async function httpDispatchStreamInit(
         parsed.requestId,
         ctx.authContext,
         ctx.cookies,
+        ctx.kind ?? TransportKind.HTTP,
       );
       const headerValues = method.headerInit(parsed.params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, ctx.serverId, parsed.requestId);
@@ -253,7 +260,15 @@ export async function httpDispatchStreamInit(
     // Producer method — produce data inline in the init response.
     // For exchange-registered methods acting as producers (__isProducer),
     // produceStreamResponse falls back to exchangeFn with tick batches.
-    return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes);
+    return produceStreamResponse(
+      method,
+      state,
+      resolvedOutputSchema,
+      resolvedInputSchema,
+      ctx,
+      parsed.requestId,
+      headerBytes,
+    );
   } else {
     // Exchange: serialize state into signed token, return zero-row batch with token
     const stateBytes = ctx.stateSerializer.serialize(state);
@@ -365,7 +380,15 @@ export async function httpDispatchStreamExchange(
     // Exchange path — also handles exchange-registered methods acting as
     // producers (__isProducer=true). Use producer mode on the OutputCollector
     // when effectiveProducer so finish() is allowed.
-    const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext, ctx.cookies);
+    const out = new OutputCollector(
+      outputSchema,
+      effectiveProducer,
+      ctx.serverId,
+      null,
+      ctx.authContext,
+      ctx.cookies,
+      ctx.kind ?? TransportKind.HTTP,
+    );
 
     // Cast compatible input types (e.g., decimal→double, int32→int64).
     // Gated on effectiveProducer (not isProducer) so methods that flip to
@@ -477,7 +500,15 @@ async function produceStreamResponse(
   let producerError: Error | undefined;
 
   while (true) {
-    const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId, ctx.authContext, ctx.cookies);
+    const out = new OutputCollector(
+      outputSchema,
+      true,
+      ctx.serverId,
+      requestId,
+      ctx.authContext,
+      ctx.cookies,
+      ctx.kind ?? TransportKind.HTTP,
+    );
 
     try {
       if (method.producerFn) {
@@ -503,8 +534,9 @@ async function produceStreamResponse(
       if (maxBytes != null) {
         // arrow-js exposes O(1) byteLength via batch.data; flechette has no
         // equivalent. Best-effort estimate via serializeBatch in the latter.
-        const sz = (emitted.batch as any).data?.byteLength
-          ?? require("../arrow/index.js").serializeBatch(emitted.batch).byteLength;
+        const sz =
+          (emitted.batch as any).data?.byteLength ??
+          require("../arrow/index.js").serializeBatch(emitted.batch).byteLength;
         estimatedBytes += sz;
       }
     }

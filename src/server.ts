@@ -9,7 +9,14 @@ import { dispatchUnary } from "./dispatch/unary.js";
 import { RpcError, VersionError } from "./errors.js";
 import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
-import { type CallStatistics, type DispatchHook, type DispatchInfo, MethodType } from "./types.js";
+import {
+  type CallStatistics,
+  type DispatchHook,
+  type DispatchInfo,
+  MethodType,
+  type ServeStartHook,
+  TransportKind,
+} from "./types.js";
 import { IpcStreamReader } from "./wire/reader.js";
 import { applyDefaults, parseRequest } from "./wire/request.js";
 import { buildErrorBatch } from "./wire/response.js";
@@ -45,6 +52,12 @@ export class VgiRpcServer {
   private protocolVersion: string;
   private dispatchHook: DispatchHook | null = null;
   private externalConfig: ExternalLocationConfig | undefined;
+  private onServeStart: ServeStartHook | null = null;
+  /** True once the on_serve_start hook has fired successfully. The bind
+   *  state is committed only after the hook returns, so a transient
+   *  failure on first request leaves it `false` and the next request
+   *  re-fires rather than silently skipping. Mirrors Python 7b3999c. */
+  private serveStartFired = false;
 
   constructor(
     protocol: Protocol,
@@ -54,6 +67,8 @@ export class VgiRpcServer {
       dispatchHook?: DispatchHook;
       externalLocation?: ExternalLocationConfig;
       protocolVersion?: string;
+      /** Lifecycle hook fired once before the first dispatched request. */
+      onServeStart?: ServeStartHook;
     },
   ) {
     this.protocol = protocol;
@@ -62,6 +77,17 @@ export class VgiRpcServer {
     this.dispatchHook = options?.dispatchHook ?? null;
     this.externalConfig = options?.externalLocation;
     this.protocolVersion = options?.protocolVersion ?? "";
+    this.onServeStart = options?.onServeStart ?? null;
+  }
+
+  /** Fire the on_serve_start hook once for this transport. Idempotent
+   *  on success — re-throws on failure without committing the bind. */
+  private async notifyTransport(kind: TransportKind): Promise<void> {
+    if (this.serveStartFired) return;
+    if (this.onServeStart) {
+      await this.onServeStart(kind);
+    }
+    this.serveStartFired = true;
   }
 
   /** Build (or retrieve cached) describe batch + protocol hash. */
@@ -70,14 +96,12 @@ export class VgiRpcServer {
     protocolHash: string;
   }> {
     if (!this._describePromise) {
-      this._describePromise = buildDescribeBatch(
-        this.protocol.name,
-        this.protocol.getMethods(),
-        this.serverId,
-      ).then(({ batch, metadata }) => ({
-        batch,
-        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? "",
-      }));
+      this._describePromise = buildDescribeBatch(this.protocol.name, this.protocol.getMethods(), this.serverId).then(
+        ({ batch, metadata }) => ({
+          batch,
+          protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? "",
+        }),
+      );
     }
     return this._describePromise;
   }
@@ -101,6 +125,11 @@ export class VgiRpcServer {
 
     try {
       while (true) {
+        // Fire on_serve_start lazily so the hook can do work that
+        // depends on the transport binding (matches Python which fires
+        // it inside serve()). Inside the loop so a failure on the very
+        // first request can be retried.
+        await this.notifyTransport(TransportKind.PIPE);
         await this.serveOne(reader, writer);
       }
     } catch (e: any) {
@@ -200,6 +229,7 @@ export class VgiRpcServer {
       protocol: this.protocol.name,
       protocolHash,
       protocolVersion: this.protocolVersion,
+      kind: TransportKind.PIPE,
       principal: "",
       authDomain: "",
       authenticated: false,
@@ -223,9 +253,18 @@ export class VgiRpcServer {
 
     try {
       if (method.type === MethodType.UNARY) {
-        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig);
+        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig, TransportKind.PIPE);
       } else {
-        await dispatchStream(method, params, writer, reader, this.serverId, requestId, this.externalConfig);
+        await dispatchStream(
+          method,
+          params,
+          writer,
+          reader,
+          this.serverId,
+          requestId,
+          this.externalConfig,
+          TransportKind.PIPE,
+        );
       }
     } catch (e) {
       dispatchError = e instanceof Error ? e : new Error(String(e));

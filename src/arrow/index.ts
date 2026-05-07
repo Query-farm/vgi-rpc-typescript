@@ -3,47 +3,74 @@
 // in package.json's `imports` field (workerd/worker/browser → impl-flechette,
 // default → impl-arrowjs).
 
+export {
+  backend,
+  batchFromColumnData,
+  batchFromColumns,
+  binary,
+  bool,
+  // Construction
+  columnFromArray,
+  conformBatchToSchema,
+  deserializeBatch,
+  deserializeSchema,
+  emptyBatchWithMetadata,
+  emptyColumnData,
+  field,
+  float32,
+  float64,
+  int8,
+  int16,
+  int32,
+  int64,
+  isOpaqueData,
+  // Type factories
+  nullType,
+  schema,
+  serializeBatch,
+  serializeBatches,
+  // IPC
+  serializeSchema,
+  singleRowBatch,
+  singleRowBatchWithMetadata,
+  timestampMicro,
+  uint8,
+  uint16,
+  uint32,
+  uint64,
+  utf8,
+  withBatchMetadata,
+} from "#vgi-rpc-arrow";
+
+export {
+  isBatch,
+  isBinary,
+  isBool,
+  isDate,
+  isDecimal,
+  isDictionary,
+  isDuration,
+  isFixedSizeBinary,
+  isFloat,
+  isInt,
+  isLargeBinary,
+  isLargeUtf8,
+  isList,
+  isMap,
+  isNull,
+  isStruct,
+  isTime,
+  isTimestamp,
+  isUtf8,
+  TypeId,
+} from "./predicates.js";
 export type {
-  VgiTypeId,
+  VgiBackendInfo,
+  VgiBatch,
+  VgiColumn,
+  VgiColumnData,
   VgiDataType,
   VgiField,
   VgiSchema,
-  VgiColumn,
-  VgiColumnData,
-  VgiBatch,
-  VgiBackendInfo,
+  VgiTypeId,
 } from "./types.js";
-
-export {
-  TypeId,
-  isNull, isInt, isFloat, isBinary, isUtf8, isLargeUtf8, isLargeBinary,
-  isBool, isDecimal, isDate, isTime, isTimestamp, isDuration, isList,
-  isStruct, isMap, isFixedSizeBinary, isDictionary, isBatch,
-} from "./predicates.js";
-
-export {
-  backend,
-  // Type factories
-  nullType, bool,
-  int8, int16, int32, int64,
-  uint8, uint16, uint32, uint64,
-  float32, float64,
-  utf8, binary,
-  timestampMicro,
-  field, schema,
-  // IPC
-  serializeSchema, deserializeSchema,
-  serializeBatch, deserializeBatch,
-  // Construction
-  columnFromArray,
-  singleRowBatch,
-  batchFromColumns,
-  batchFromColumnData,
-  emptyColumnData,
-  emptyBatchWithMetadata,
-  singleRowBatchWithMetadata,
-  isOpaqueData,
-  withBatchMetadata,
-  serializeBatches,
-  conformBatchToSchema,
-} from "#vgi-rpc-arrow";

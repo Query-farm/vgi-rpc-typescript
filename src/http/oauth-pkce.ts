@@ -700,8 +700,7 @@ export async function handleOAuthTokenProxy(request: Request, config: OAuthPkceC
 
   const ctype = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
   if (ctype !== "application/x-www-form-urlencoded") {
-    return jsonErrorResponse(headers, 415, "invalid_request",
-      "Content-Type must be application/x-www-form-urlencoded");
+    return jsonErrorResponse(headers, 415, "invalid_request", "Content-Type must be application/x-www-form-urlencoded");
   }
 
   let raw: string;
@@ -720,14 +719,17 @@ export async function handleOAuthTokenProxy(request: Request, config: OAuthPkceC
 
   const grantType = form.get("grant_type") ?? "";
   if (!ALLOWED_TOKEN_GRANT_TYPES.has(grantType)) {
-    return jsonErrorResponse(headers, 400, "unsupported_grant_type",
-      "grant_type must be authorization_code or refresh_token");
+    return jsonErrorResponse(
+      headers,
+      400,
+      "unsupported_grant_type",
+      "grant_type must be authorization_code or refresh_token",
+    );
   }
 
   const submittedClientId = form.get("client_id");
   if (submittedClientId && submittedClientId !== config.clientId) {
-    return jsonErrorResponse(headers, 400, "invalid_client",
-      "client_id does not match the configured client");
+    return jsonErrorResponse(headers, 400, "invalid_client", "client_id does not match the configured client");
   }
 
   const endpoints = await config.oidcDiscovery();
@@ -757,8 +759,7 @@ export async function handleOAuthTokenProxy(request: Request, config: OAuthPkceC
       signal: AbortSignal.timeout(15000),
     });
   } catch (err: any) {
-    return jsonErrorResponse(headers, 502, "server_error",
-      `Upstream token endpoint failed: ${err?.message ?? err}`);
+    return jsonErrorResponse(headers, 502, "server_error", `Upstream token endpoint failed: ${err?.message ?? err}`);
   }
 
   const body = new Uint8Array(await upstreamResp.arrayBuffer());

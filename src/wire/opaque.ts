@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  type VgiDataType,
   isDate,
+  isDecimal,
+  isDictionary,
+  isDuration,
+  isFixedSizeBinary,
+  isLargeBinary,
+  isLargeUtf8,
   isTime,
   isTimestamp,
-  isDuration,
-  isDecimal,
-  isLargeUtf8,
-  isLargeBinary,
-  isFixedSizeBinary,
-  isDictionary,
+  type VgiDataType,
 } from "../arrow/index.js";
 
 /**

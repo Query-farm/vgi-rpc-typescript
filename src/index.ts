@@ -91,5 +91,7 @@ export {
   OutputCollector,
   type ProducerFn,
   type ProducerInit,
+  type ServeStartHook,
+  TransportKind,
   type UnaryHandler,
 } from "./types.js";

@@ -1,15 +1,14 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { sha256Hex } from "../util/web-crypto.js";
 import {
-  type VgiBatch,
-  schema as makeSchema,
-  field,
-  utf8,
-  bool,
-  binary,
   batchFromColumns,
+  binary,
+  bool,
+  field,
+  schema as makeSchema,
+  utf8,
+  type VgiBatch,
   withBatchMetadata,
 } from "../arrow/index.js";
 import {
@@ -23,6 +22,7 @@ import {
 } from "../constants.js";
 import type { MethodDefinition } from "../types.js";
 import { serializeSchema } from "../util/schema.js";
+import { sha256Hex } from "../util/web-crypto.js";
 
 /**
  * Slim DESCRIBE_VERSION 4 schema. Python-flavoured fields (doc,
@@ -67,8 +67,7 @@ async function computeProtocolHash(
   // implementation in vgi_rpc.introspect.compute_protocol_hash.
   const enc = new TextEncoder();
   const parts: Uint8Array[] = [];
-  const push = (v: string | Uint8Array) =>
-    parts.push(typeof v === "string" ? enc.encode(v) : v);
+  const push = (v: string | Uint8Array) => parts.push(typeof v === "string" ? enc.encode(v) : v);
 
   push("vgi_rpc.describe.v");
   push(DESCRIBE_VERSION);

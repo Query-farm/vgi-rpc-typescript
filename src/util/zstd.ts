@@ -20,10 +20,7 @@ const isBun = typeof globalThis.Bun !== "undefined";
 function _loadZlib(): any {
   const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
-    throw new Error(
-      "zstd is not available in this runtime. " +
-        "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.",
-    );
+    throw new Error("zstd is not available in this runtime. " + "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.");
   }
   return req(_NODE_ZLIB_MOD);
 }
@@ -47,15 +44,85 @@ export async function zstdCompress(data: Uint8Array, level: number): Promise<Uin
   );
 }
 
-/** Decompress zstd-compressed data. */
-export async function zstdDecompress(data: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
+/**
+ * Decompress zstd-compressed data, optionally bounding the output size.
+ *
+ * Zstd frames carry the decompressed size in the header and decompressors
+ * trust it eagerly: a ~3 KB compressed body claiming 100 MB output would
+ * allocate 100 MB. When `maxOutputSize` is supplied, this helper:
+ *
+ * 1. Reads `Frame_Content_Size` from the frame header. If declared and
+ *    above the cap, refuses *before* allocation with a clear error.
+ * 2. Decompresses, then asserts the actual output size is also under the
+ *    cap (covers frames whose size is not in the header — a streaming
+ *    cap would be tighter, but neither Bun.zstdDecompressSync nor
+ *    node:zlib's sync API exposes one, so we use the post-check).
+ *
+ * Mirrors the Python server-side fix in `_decompress_body` and the
+ * client-side fix in `external_fetch.fetch_url`.
+ */
+export async function zstdDecompress(data: Uint8Array, maxOutputSize?: number): Promise<Uint8Array<ArrayBuffer>> {
+  if (maxOutputSize != null) {
+    const declared = readZstdFrameContentSize(data);
+    if (declared !== null && declared > maxOutputSize) {
+      throw new Error(`zstd decompressed size (${declared}) would exceed cap (${maxOutputSize})`);
+    }
+  }
+
+  let out: Uint8Array<ArrayBuffer>;
   if (isBun) {
-    return new Uint8Array(Bun.zstdDecompressSync(data));
+    out = new Uint8Array(Bun.zstdDecompressSync(data));
+  } else {
+    const zlib = _loadZlib();
+    const fn = zlib.zstdDecompressSync;
+    if (typeof fn !== "function") {
+      throw new Error("zstd is not available in this runtime. " + "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.");
+    }
+    out = new Uint8Array(fn(data));
   }
-  const zlib = _loadZlib();
-  const fn = zlib.zstdDecompressSync;
-  if (typeof fn !== "function") {
-    throw new Error("zstd is not available in this runtime. " + "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.");
+
+  if (maxOutputSize != null && out.byteLength > maxOutputSize) {
+    throw new Error(`zstd decompressed size (${out.byteLength}) exceeds cap (${maxOutputSize})`);
   }
-  return new Uint8Array(fn(data));
+  return out;
+}
+
+/**
+ * Parse `Frame_Content_Size` from a zstd frame header.
+ *
+ * Returns the declared decompressed size, or `null` if the frame header
+ * does not include it (frames may omit it for streaming compression) or
+ * the input is too short / not a valid zstd frame magic.
+ *
+ * Frame format (RFC 8478): magic(4) | FHD(1) | window_desc(0|1) |
+ * dict_id(0|1|2|4) | frame_content_size(0|1|2|4|8). FCS_size depends on
+ * FCS_field_size (FHD bits 6-7) and Single_Segment_flag (FHD bit 5).
+ */
+function readZstdFrameContentSize(data: Uint8Array): number | null {
+  if (data.length < 6) return null;
+  // Magic: 0xFD2FB528 little-endian.
+  if (data[0] !== 0x28 || data[1] !== 0xb5 || data[2] !== 0x2f || data[3] !== 0xfd) {
+    return null;
+  }
+  const fhd = data[4];
+  const fcsFieldSize = (fhd >> 6) & 0x3;
+  const singleSegment = ((fhd >> 5) & 0x1) === 1;
+  const dictIdFlag = fhd & 0x3;
+  // Per spec: FCS_size = 0 → 0 unless Single_Segment_flag is set, then 1.
+  const fcsSize = fcsFieldSize === 0 ? (singleSegment ? 1 : 0) : fcsFieldSize === 1 ? 2 : fcsFieldSize === 2 ? 4 : 8;
+  if (fcsSize === 0) return null;
+
+  const windowDescSize = singleSegment ? 0 : 1;
+  const dictIdSize = dictIdFlag === 0 ? 0 : dictIdFlag === 1 ? 1 : dictIdFlag === 2 ? 2 : 4;
+  const fcsOffset = 5 + windowDescSize + dictIdSize;
+  if (data.length < fcsOffset + fcsSize) return null;
+
+  let fcs = 0n;
+  for (let i = 0; i < fcsSize; i++) {
+    fcs |= BigInt(data[fcsOffset + i]) << BigInt(i * 8);
+  }
+  // FCS_field_size == 1 (size 2) carries an offset of 256.
+  if (fcsSize === 2) fcs += 256n;
+  if (fcs > BigInt(Number.MAX_SAFE_INTEGER)) return Number.MAX_SAFE_INTEGER;
+  return Number(fcs);
 }

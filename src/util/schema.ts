@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { type VgiSchema, serializeSchema as facadeSerializeSchema } from "../arrow/index.js";
+import { serializeSchema as facadeSerializeSchema, type VgiSchema } from "../arrow/index.js";
 
 /**
  * Serialize a Schema to the Arrow IPC Schema message format.

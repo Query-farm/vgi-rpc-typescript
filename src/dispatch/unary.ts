@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
-import type { MethodDefinition } from "../types.js";
+import type { MethodDefinition, TransportKind } from "../types.js";
 import { OutputCollector } from "../types.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
@@ -19,9 +19,10 @@ export async function dispatchUnary(
   serverId: string,
   requestId: string | null,
   externalConfig?: ExternalLocationConfig,
+  kind?: TransportKind,
 ): Promise<void> {
   const schema = method.resultSchema;
-  const out = new OutputCollector(schema, true, serverId, requestId);
+  const out = new OutputCollector(schema, true, serverId, requestId, undefined, undefined, kind);
 
   try {
     const result = await method.handler!(params, out);

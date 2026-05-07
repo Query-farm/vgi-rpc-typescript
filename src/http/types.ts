@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ExternalLocationConfig, UploadUrlProvider } from "../external.js";
-import type { DispatchHook } from "../types.js";
+import type { DispatchHook, ServeStartHook } from "../types.js";
 import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 
 /** Configuration options for createHttpHandler(). */
@@ -19,6 +19,13 @@ export interface HttpHandlerOptions {
   corsMaxAge?: number | null;
   /** Maximum request body size in bytes. Advertised via VGI-Max-Request-Bytes header. */
   maxRequestBytes?: number;
+  /** Cap on the post-decompression size of a `Content-Encoding: zstd`
+   *  request body, in bytes.  Defends against zstd decompression bombs:
+   *  a tiny compressed frame can declare a huge decompressed size and
+   *  blow up the server before {@link maxRequestBytes} ever sees the
+   *  payload.  When omitted, defaults to `maxRequestBytes * 16` if that
+   *  is set, otherwise unbounded. */
+  maxDecompressedRequestBytes?: number;
   /** Maximum bytes before a producer stream emits a continuation token.
    *
    * @deprecated Use {@link maxResponseBytes} instead. The cap now governs all
@@ -48,6 +55,10 @@ export interface HttpHandlerOptions {
   oauthResourceMetadata?: OAuthResourceMetadata;
   /** Optional dispatch hook for observability (tracing, metrics). */
   dispatchHook?: DispatchHook;
+  /** Optional lifecycle hook fired once on the first dispatched request.
+   *  Mirrors Python's on_serve_start; lazy-firing keeps it fork-safe for
+   *  pre-fork servers. */
+  onServeStart?: ServeStartHook;
   /** Enable HTML landing page at GET {prefix}/. Default: true. */
   enableLandingPage?: boolean;
   /** Enable HTML describe/API reference page at GET {prefix}/describe. Default: true. */
@@ -58,6 +69,11 @@ export interface HttpHandlerOptions {
   enableHealthEndpoint?: boolean;
   /** Protocol name shown in HTML pages. Defaults to the Protocol's name. */
   protocolName?: string;
+  /** Operator-supplied protocol-contract version label, surfaced on every
+   *  access-log record so dashboards and alerts can key off contract
+   *  changes.  Mirrors the Python `RpcServer(..., protocol_version=...)`
+   *  argument. */
+  protocolVersion?: string;
   /** URL to service's source repository, shown in landing/describe pages. */
   repositoryUrl?: string;
   /** External storage config for externalizing large response batches. */

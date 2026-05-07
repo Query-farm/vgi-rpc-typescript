@@ -75,11 +75,42 @@ function roundTo2(f: number): number {
   return Math.round(f * 100) / 100;
 }
 
+/**
+ * Options for {@link AccessLogHook}.
+ *
+ * `level` matches Python's logger-level gating in `_emit_access_log`:
+ * at "INFO" the heavy `request_data` field (a base64 of the full
+ * request batch — typically 8+ KiB per init RPC) is replaced with a
+ * `truncated: true` marker plus `original_request_bytes`, so the
+ * access-log schema's "unary requires request_data unless truncated"
+ * invariant still holds. Bump to "DEBUG" to capture full payloads for
+ * replay/audit.
+ */
+export interface AccessLogOptions {
+  /** Server version string (optional). */
+  serverVersion?: string;
+  /** Verbosity for heavy fields. Default: "INFO". */
+  level?: "INFO" | "DEBUG";
+}
+
 export class AccessLogHook implements DispatchHook {
+  private readonly serverVersion: string;
+  private readonly level: "INFO" | "DEBUG";
+
   constructor(
     private readonly sink: AccessLogSink,
-    private readonly serverVersion = "",
-  ) {}
+    options: AccessLogOptions | string = {},
+  ) {
+    // Backward compatibility: the original signature accepted a bare
+    // serverVersion string as the second arg.
+    if (typeof options === "string") {
+      this.serverVersion = options;
+      this.level = "INFO";
+    } else {
+      this.serverVersion = options.serverVersion ?? "";
+      this.level = options.level ?? "INFO";
+    }
+  }
 
   onDispatchStart(_info: DispatchInfo): HookToken {
     const token: StartToken = { startNs: process.hrtime.bigint() };
@@ -88,12 +119,10 @@ export class AccessLogHook implements DispatchHook {
 
   onDispatchEnd(token: HookToken, info: DispatchInfo, stats: CallStatistics, error?: Error): void {
     const t = token as StartToken | undefined;
-    const durationMs = t
-      ? roundTo2(Number(process.hrtime.bigint() - t.startNs) / 1_000_000)
-      : 0;
+    const durationMs = t ? roundTo2(Number(process.hrtime.bigint() - t.startNs) / 1_000_000) : 0;
 
     const status = error ? "error" : "ok";
-    const errType = error ? (error as Error & { type?: string }).type ?? error.constructor.name : "";
+    const errType = error ? ((error as Error & { type?: string }).type ?? error.constructor.name) : "";
     const errMsg = error?.message ?? "";
 
     const protocol = info.protocol ?? "";
@@ -121,7 +150,19 @@ export class AccessLogHook implements DispatchHook {
     if (info.protocolVersion) rec.protocol_version = info.protocolVersion;
     if (info.requestId) rec.request_id = info.requestId;
     if (info.requestData && info.requestData.length > 0) {
-      rec.request_data = base64(info.requestData);
+      // At INFO, the per-request base64 payload dominates record size
+      // (an init RPC commonly logs 8+ KiB of base64 per call) and audit
+      // consumers rarely need the bytes — they care about who/what/when.
+      // Replace with a `truncated: true` marker so the access-log schema's
+      // "unary requires request_data unless truncated" invariant holds.
+      // Bump level to DEBUG to re-enable the full payload.
+      const encoded = base64(info.requestData);
+      if (this.level === "DEBUG") {
+        rec.request_data = encoded;
+      } else {
+        rec.original_request_bytes = encoded.length;
+        rec.truncated = true;
+      }
     }
     if (info.methodType === "stream") {
       rec.stream_id = info.streamId ?? "00000000000000000000000000000000";

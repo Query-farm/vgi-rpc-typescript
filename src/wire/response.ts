@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  emptyBatchWithMetadata,
+  isInt,
+  singleRowBatchWithMetadata,
   type VgiBatch,
   type VgiSchema,
-  isInt,
-  emptyBatchWithMetadata,
-  singleRowBatchWithMetadata,
 } from "../arrow/index.js";
 import { LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY, REQUEST_ID_KEY, SERVER_ID_KEY } from "../constants.js";
 
@@ -65,12 +65,7 @@ export function buildResultBatch(
 /**
  * Build a 0-row error batch with EXCEPTION metadata matching Python's Message.from_exception().
  */
-export function buildErrorBatch(
-  schema: VgiSchema,
-  error: Error,
-  serverId: string,
-  requestId: string | null,
-): VgiBatch {
+export function buildErrorBatch(schema: VgiSchema, error: Error, serverId: string, requestId: string | null): VgiBatch {
   const metadata = new Map<string, string>();
   metadata.set(LOG_LEVEL_KEY, "EXCEPTION");
   metadata.set(LOG_MESSAGE_KEY, `${error.constructor.name}: ${error.message}`);

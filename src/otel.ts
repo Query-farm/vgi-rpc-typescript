@@ -119,42 +119,48 @@ export function createOtelHook(config?: OtelConfig): DispatchHook {
       const durationS = (performance.now() - t.startTime) / 1000;
       const status = error ? "error" : "ok";
 
-      // Finalize span
-      if (t.span) {
-        if (stats) {
-          t.span.setAttributes({
-            "rpc.vgi_rpc.input_batches": stats.inputBatches,
-            "rpc.vgi_rpc.output_batches": stats.outputBatches,
-            "rpc.vgi_rpc.input_rows": stats.inputRows,
-            "rpc.vgi_rpc.output_rows": stats.outputRows,
-            "rpc.vgi_rpc.input_bytes": stats.inputBytes,
-            "rpc.vgi_rpc.output_bytes": stats.outputBytes,
-          });
-        }
-
-        if (error) {
-          t.span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-          t.span.setAttribute("rpc.vgi_rpc.error_type", error.constructor.name);
-          if (recordExceptions) {
-            t.span.recordException(error);
+      // Finalize span — wrap in try/finally so metric recording still
+      // runs if an exporter inside span.end() raises. Mirrors the Python
+      // fix that detaches the otel context unconditionally; TS doesn't
+      // attach context, but the same shape protects metric counters from
+      // a single misbehaving exporter taking out request observability.
+      try {
+        if (t.span) {
+          if (stats) {
+            t.span.setAttributes({
+              "rpc.vgi_rpc.input_batches": stats.inputBatches,
+              "rpc.vgi_rpc.output_batches": stats.outputBatches,
+              "rpc.vgi_rpc.input_rows": stats.inputRows,
+              "rpc.vgi_rpc.output_rows": stats.outputRows,
+              "rpc.vgi_rpc.input_bytes": stats.inputBytes,
+              "rpc.vgi_rpc.output_bytes": stats.outputBytes,
+            });
           }
-        } else {
-          t.span.setStatus({ code: SpanStatusCode.OK });
-        }
-        t.span.end();
-      }
 
-      // Record metrics
-      if (enableMetrics) {
-        const metricAttrs: Attributes = {
-          "rpc.system": "vgi_rpc",
-          "rpc.service": serviceName,
-          "rpc.method": info.method,
-          "rpc.vgi_rpc.method_type": info.methodType,
-          status,
-        };
-        requestCounter?.add(1, metricAttrs);
-        durationHistogram?.record(durationS, metricAttrs);
+          if (error) {
+            t.span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+            t.span.setAttribute("rpc.vgi_rpc.error_type", error.constructor.name);
+            if (recordExceptions) {
+              t.span.recordException(error);
+            }
+          } else {
+            t.span.setStatus({ code: SpanStatusCode.OK });
+          }
+          t.span.end();
+        }
+      } finally {
+        // Record metrics — runs even if span finalisation above raises.
+        if (enableMetrics) {
+          const metricAttrs: Attributes = {
+            "rpc.system": "vgi_rpc",
+            "rpc.service": serviceName,
+            "rpc.method": info.method,
+            "rpc.vgi_rpc.method_type": info.methodType,
+            status,
+          };
+          requestCounter?.add(1, metricAttrs);
+          durationHistogram?.record(durationS, metricAttrs);
+        }
       }
     },
   };

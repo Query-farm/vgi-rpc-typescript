@@ -1,7 +1,11 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { RecordBatchStreamWriter, type Schema as A_Schema, type RecordBatch as A_RecordBatch } from "@query-farm/apache-arrow";
+import {
+  type RecordBatch as A_RecordBatch,
+  type Schema as A_Schema,
+  RecordBatchStreamWriter,
+} from "@query-farm/apache-arrow";
 import type { VgiBatch, VgiSchema } from "../arrow/index.js";
 
 const STDOUT_FD = 1;
@@ -19,8 +23,7 @@ const _NODE_FS_MOD = "node:fs";
 let _writeSync: ((fd: number, data: Uint8Array, offset?: number, len?: number) => number) | null = null;
 function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?: number) => number {
   if (_writeSync) return _writeSync;
-  const req: any =
-    (import.meta as any).require ?? (globalThis as any).require ?? null;
+  const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
     throw new Error(
       "IpcStreamWriter requires Bun or Node.js CJS for sync node:fs.writeSync. " +

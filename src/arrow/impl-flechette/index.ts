@@ -1,39 +1,32 @@
 // flechette backend for vgi-rpc-typescript's Arrow facade.
 
 import {
-  field as f_field,
-  nullType as f_nullType,
+  type Column,
+  TimeUnit as F_TimeUnit,
+  binary as f_binary,
   bool as f_bool,
+  columnFromArray as f_columnFromArray,
+  field as f_field,
+  float32 as f_float32,
+  float64 as f_float64,
   int8 as f_int8,
   int16 as f_int16,
   int32 as f_int32,
   int64 as f_int64,
+  nullType as f_nullType,
+  timestamp as f_timestamp,
   uint8 as f_uint8,
   uint16 as f_uint16,
   uint32 as f_uint32,
   uint64 as f_uint64,
-  float32 as f_float32,
-  float64 as f_float64,
   utf8 as f_utf8,
-  binary as f_binary,
-  timestamp as f_timestamp,
-  TimeUnit as F_TimeUnit,
-  tableFromIPC,
-  tableToIPC,
-  tablesToIPC,
   tableFromColumns,
-  columnFromArray as f_columnFromArray,
-  type Column,
+  tableFromIPC,
+  tablesToIPC,
+  tableToIPC,
 } from "@uwdata/flechette";
 
-import type {
-  VgiBackendInfo,
-  VgiSchema,
-  VgiBatch,
-  VgiField,
-  VgiDataType,
-  VgiColumnData,
-} from "../types.js";
+import type { VgiBackendInfo, VgiBatch, VgiColumnData, VgiDataType, VgiField, VgiSchema } from "../types.js";
 
 export const backend: VgiBackendInfo = { name: "flechette" };
 
@@ -65,19 +58,11 @@ export const binary = (): VgiDataType => f_binary() as unknown as VgiDataType;
 export const timestampMicro = (timezone: string | null = null): VgiDataType =>
   f_timestamp(F_TimeUnit.MICROSECOND, timezone) as unknown as VgiDataType;
 
-export function field(
-  name: string,
-  type: VgiDataType,
-  nullable = true,
-  metadata?: Map<string, string>,
-): VgiField {
+export function field(name: string, type: VgiDataType, nullable = true, metadata?: Map<string, string>): VgiField {
   return f_field(name, type as any, nullable, metadata ?? new Map()) as unknown as VgiField;
 }
 
-export function schema(
-  fields: readonly VgiField[],
-  metadata?: Map<string, string>,
-): VgiSchema {
+export function schema(fields: readonly VgiField[], metadata?: Map<string, string>): VgiSchema {
   return {
     fields,
     metadata: metadata ?? new Map(),
@@ -130,13 +115,8 @@ export function singleRowBatch(s: VgiSchema, values: Record<string, any>): VgiBa
   return tableFromColumns(cols) as unknown as VgiBatch;
 }
 
-export function batchFromColumns(
-  s: VgiSchema,
-  columns: Record<string, any[]>,
-): VgiBatch {
-  const numRows = s.fields.length > 0
-    ? columns[s.fields[0].name]?.length ?? 0
-    : 0;
+export function batchFromColumns(s: VgiSchema, columns: Record<string, any[]>): VgiBatch {
+  const numRows = s.fields.length > 0 ? (columns[s.fields[0].name]?.length ?? 0) : 0;
   const cols: Record<string, Column<any>> = {};
   for (const f of s.fields) {
     const vals = columns[f.name] ?? new Array(numRows).fill(null);
@@ -169,10 +149,7 @@ export function emptyColumnData(type: VgiDataType): VgiColumnData {
  * doesn't accept metadata directly — we construct via batchFromColumns, then
  * patch the schema.metadata onto the returned table.
  */
-export function emptyBatchWithMetadata(
-  s: VgiSchema,
-  metadata?: Map<string, string>,
-): VgiBatch {
+export function emptyBatchWithMetadata(s: VgiSchema, metadata?: Map<string, string>): VgiBatch {
   const cols: Record<string, Column<any>> = {};
   for (const f of s.fields) {
     cols[f.name] = f_columnFromArray([], f.type as any, EXTRACT_OPTS);

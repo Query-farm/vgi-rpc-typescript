@@ -1,45 +1,38 @@
 // arrow-js backend for vgi-rpc-typescript's Arrow facade.
 
 import {
-  Schema as A_Schema,
-  Field as A_Field,
-  RecordBatch as A_RecordBatch,
-  RecordBatchStreamWriter,
-  RecordBatchReader,
-  Struct as A_Struct,
-  makeData as a_makeData,
-  vectorFromArray as a_vectorFromArray,
-  Null as A_Null,
-  Bool as A_Bool,
-  Utf8 as A_Utf8,
   Binary as A_Binary,
+  Bool as A_Bool,
+  type DataType as A_DataType,
+  Field as A_Field,
+  Float32 as A_Float32,
+  Float64 as A_Float64,
   Int8 as A_Int8,
   Int16 as A_Int16,
   Int32 as A_Int32,
   Int64 as A_Int64,
+  Null as A_Null,
+  RecordBatch as A_RecordBatch,
+  Schema as A_Schema,
+  Struct as A_Struct,
+  Timestamp as A_Timestamp,
+  TimeUnit as A_TimeUnit,
+  Type as A_Type,
   Uint8 as A_Uint8,
   Uint16 as A_Uint16,
   Uint32 as A_Uint32,
   Uint64 as A_Uint64,
-  Float32 as A_Float32,
-  Float64 as A_Float64,
-  Type as A_Type,
-  Timestamp as A_Timestamp,
-  TimeUnit as A_TimeUnit,
-  type DataType as A_DataType,
+  Utf8 as A_Utf8,
+  makeData as a_makeData,
+  vectorFromArray as a_vectorFromArray,
+  RecordBatchReader,
+  RecordBatchStreamWriter,
 } from "@query-farm/apache-arrow";
 
 // Local type-only helpers used by conformBatchToSchema.
 type _NeedsCast = (src: A_DataType, dst: A_DataType) => boolean;
 
-import type {
-  VgiBackendInfo,
-  VgiSchema,
-  VgiBatch,
-  VgiField,
-  VgiDataType,
-  VgiColumnData,
-} from "../types.js";
+import type { VgiBackendInfo, VgiBatch, VgiColumnData, VgiDataType, VgiField, VgiSchema } from "../types.js";
 
 export const backend: VgiBackendInfo = { name: "arrow-js" };
 
@@ -64,19 +57,11 @@ export const binary = (): VgiDataType => new A_Binary() as unknown as VgiDataTyp
 export const timestampMicro = (timezone: string | null = null): VgiDataType =>
   new A_Timestamp(A_TimeUnit.MICROSECOND, timezone) as unknown as VgiDataType;
 
-export function field(
-  name: string,
-  type: VgiDataType,
-  nullable = true,
-  metadata?: Map<string, string>,
-): VgiField {
+export function field(name: string, type: VgiDataType, nullable = true, metadata?: Map<string, string>): VgiField {
   return new A_Field(name, type as A_DataType, nullable, metadata ?? new Map()) as unknown as VgiField;
 }
 
-export function schema(
-  fields: readonly VgiField[],
-  metadata?: Map<string, string>,
-): VgiSchema {
+export function schema(fields: readonly VgiField[], metadata?: Map<string, string>): VgiSchema {
   return new A_Schema(fields as A_Field[], metadata ?? new Map()) as unknown as VgiSchema;
 }
 
@@ -142,14 +127,9 @@ export function singleRowBatch(s: VgiSchema, values: Record<string, any>): VgiBa
 }
 
 /** Build an N-row batch from columnar arrays. */
-export function batchFromColumns(
-  s: VgiSchema,
-  columns: Record<string, any[]>,
-): VgiBatch {
+export function batchFromColumns(s: VgiSchema, columns: Record<string, any[]>): VgiBatch {
   const a = s as unknown as A_Schema;
-  const numRows = a.fields.length > 0
-    ? columns[a.fields[0].name]?.length ?? 0
-    : 0;
+  const numRows = a.fields.length > 0 ? (columns[a.fields[0].name]?.length ?? 0) : 0;
   const children = a.fields.map((f) => {
     const vals = columns[f.name];
     if (!vals) return a_makeData({ type: f.type, length: numRows, nullCount: numRows });
@@ -177,9 +157,7 @@ export function batchFromColumnData(
   });
   // arrow-js Schema doesn't carry batch-level metadata; attach it when present
   // by cloning with a fresh metadata map.
-  const finalSchema = metadata && metadata.size > 0
-    ? new A_Schema(a.fields, metadata)
-    : a;
+  const finalSchema = metadata && metadata.size > 0 ? new A_Schema(a.fields, metadata) : a;
   return new A_RecordBatch(finalSchema, data) as unknown as VgiBatch;
 }
 
@@ -227,12 +205,20 @@ function makeEmptyDataRecursive(type: A_DataType): any {
     const children = (type as any).children.map((f: any) => makeEmptyDataRecursive(f.type));
     if (M.DataType.isDenseUnion(type)) {
       return a_makeData({
-        type, length: 0, typeIds: new Int8Array(0),
-        valueOffsets: new Int32Array(0), children, nullCount: 0,
+        type,
+        length: 0,
+        typeIds: new Int8Array(0),
+        valueOffsets: new Int32Array(0),
+        children,
+        nullCount: 0,
       } as any);
     }
     return a_makeData({
-      type, length: 0, typeIds: new Int8Array(0), children, nullCount: 0,
+      type,
+      length: 0,
+      typeIds: new Int8Array(0),
+      children,
+      nullCount: 0,
     } as any);
   }
   return a_makeData({ type, length: 0, nullCount: 0 });
@@ -302,8 +288,7 @@ const _needsValueCast: _NeedsCast = (src, dst) => {
   return true;
 };
 
-const _isNumeric = (t: A_DataType): boolean =>
-  t.typeId === A_Type.Int || t.typeId === A_Type.Float;
+const _isNumeric = (t: A_DataType): boolean => t.typeId === A_Type.Int || t.typeId === A_Type.Float;
 
 export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBatch {
   const a = batch as unknown as A_RecordBatch;
@@ -311,9 +296,7 @@ export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBat
   const s = schema as unknown as A_Schema;
 
   if (a.schema.fields.length !== s.fields.length) {
-    throw new TypeError(
-      `Field count mismatch: expected ${s.fields.length}, got ${a.schema.fields.length}`,
-    );
+    throw new TypeError(`Field count mismatch: expected ${s.fields.length}, got ${a.schema.fields.length}`);
   }
   for (let i = 0; i < s.fields.length; i++) {
     if (a.schema.fields[i].name !== s.fields[i].name) {

@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { type VgiBatch, type VgiSchema, isMap } from "../arrow/index.js";
+import { isMap, type VgiBatch, type VgiSchema } from "../arrow/index.js";
 import { REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError, VersionError } from "../errors.js";
 import { isOpaquePassthroughType } from "./opaque.js";

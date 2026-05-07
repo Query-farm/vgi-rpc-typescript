@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { type VgiBatch, type VgiSchema, isBatch, batchFromColumns } from "./arrow/index.js";
+import { batchFromColumns, isBatch, type VgiBatch, type VgiSchema } from "./arrow/index.js";
 import { AuthContext } from "./auth.js";
 import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
@@ -9,6 +9,40 @@ export enum MethodType {
   UNARY = "unary",
   STREAM = "stream",
 }
+
+/**
+ * Coarse identifier of the transport binding a {@link VgiRpcServer} or
+ * HTTP handler.  Workers (RPC implementations) read this via
+ * {@link CallContext.kind} or the {@link ServeStartHook} lifecycle hook
+ * to tailor startup behaviour (skip HTTP-only caching, enable
+ * transport-specific metrics, etc.).
+ *
+ * Values are wire/log-friendly strings to match Python's `TransportKind`
+ * StrEnum byte-for-byte across language boundaries.
+ *
+ * - `PIPE` — Stdio worker (the standalone {@link VgiRpcServer} loop).
+ * - `HTTP` — Fetch-style HTTP handler (`createHttpHandler`).
+ * - `UNIX` — AF_UNIX socket handler (the launcher path).
+ */
+export enum TransportKind {
+  PIPE = "pipe",
+  HTTP = "http",
+  UNIX = "unix",
+}
+
+/**
+ * Optional lifecycle hook fired once per process before the first
+ * dispatched request.
+ *
+ * For the stdio server, fires inside `VgiRpcServer.run()` before the
+ * first read.  For HTTP, fires lazily on the first request handled
+ * (fork-safe for pre-fork servers).
+ *
+ * If the hook raises, the server logs the exception and propagates it,
+ * leaving the bind state unset so the next attempt re-fires the hook
+ * rather than silently skipping it.
+ */
+export type ServeStartHook = (kind: TransportKind) => void | Promise<void>;
 
 /** Logging interface available to handlers. */
 export interface LogContext {
@@ -43,6 +77,10 @@ export interface CookieSpec extends CookieAttrs {
 /** Extended context with authentication info, available to handlers. */
 export interface CallContext extends LogContext {
   readonly auth: AuthContext;
+  /** Coarse identifier of the bound transport, or `undefined` until the
+   *  server begins serving (the value is committed by the lifecycle hook
+   *  on the very first request). */
+  readonly kind?: TransportKind;
   /**
    * Incoming request cookies.  Empty for non-HTTP transports.
    */
@@ -122,6 +160,9 @@ export interface DispatchInfo {
   serverId: string;
   /** Client-supplied request identifier, or null. */
   requestId: string | null;
+  /** Coarse transport identifier — `pipe` for stdio, `http` for fetch
+   *  handlers, `unix` for AF_UNIX. */
+  kind?: TransportKind;
   /** Logical service / protocol name. */
   protocol?: string;
   /** SHA-256 hex of the canonical __describe__ payload (always required in access log). */
@@ -187,6 +228,7 @@ export class OutputCollector implements CallContext {
   private _responseCookies: CookieSpec[] = [];
   readonly auth: AuthContext;
   readonly cookies: ReadonlyMap<string, string>;
+  readonly kind?: TransportKind;
 
   constructor(
     outputSchema: VgiSchema,
@@ -195,6 +237,7 @@ export class OutputCollector implements CallContext {
     requestId: string | null = null,
     authContext?: AuthContext,
     cookies?: ReadonlyMap<string, string>,
+    kind?: TransportKind,
   ) {
     this._outputSchema = outputSchema;
     this._producerMode = producerMode;
@@ -202,6 +245,7 @@ export class OutputCollector implements CallContext {
     this._requestId = requestId;
     this.auth = authContext ?? AuthContext.anonymous();
     this.cookies = cookies ?? EMPTY_COOKIES;
+    this.kind = kind;
   }
 
   /**

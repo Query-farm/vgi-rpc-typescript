@@ -1,12 +1,11 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { schema as makeSchema } from "../arrow/index.js";
+import { conformBatchToSchema, schema as makeSchema } from "../arrow/index.js";
 import { CANCEL_KEY } from "../constants.js";
 import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
-import type { MethodDefinition } from "../types.js";
+import type { MethodDefinition, TransportKind } from "../types.js";
 import { OutputCollector } from "../types.js";
-import { conformBatchToSchema } from "../arrow/index.js";
 import type { IpcStreamReader } from "../wire/reader.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
@@ -36,6 +35,7 @@ export async function dispatchStream(
   serverId: string,
   requestId: string | null,
   externalConfig?: ExternalLocationConfig,
+  kind?: TransportKind,
 ): Promise<void> {
   const isProducer = !!method.producerFn;
 
@@ -72,7 +72,7 @@ export async function dispatchStream(
   // Write header IPC stream if method has a header schema
   if (method.headerSchema && method.headerInit) {
     try {
-      const headerOut = new OutputCollector(method.headerSchema, true, serverId, requestId);
+      const headerOut = new OutputCollector(method.headerSchema, true, serverId, requestId, undefined, undefined, kind);
       const headerValues = method.headerInit(params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, serverId, requestId);
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
@@ -149,7 +149,7 @@ export async function dispatchStream(
         }
       }
 
-      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId);
+      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId, undefined, undefined, kind);
 
       if (isProducer) {
         await method.producerFn!(state, out);
