@@ -51,6 +51,7 @@
   "dependencies": {
     "@query-farm/apache-arrow": "*",
     "@uwdata/flechette": "github:Query-farm/flechette#fix/timestamp-bigint-encode",
+    "fzstd": "^0.1.1",
     "oauth4webapi": "^3.8.5"
   },
   "peerDependencies": {

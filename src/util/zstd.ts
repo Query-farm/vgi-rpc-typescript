@@ -4,25 +4,29 @@
 /**
  * Cross-runtime zstd compression/decompression.
  *
- * Uses Bun.zstd* when running on Bun, otherwise falls back to node:zlib
- * (available on Node.js 22.15+ and Deno 2.6.9+). On Cloudflare workerd
- * `nodejs_compat_v2` polyfills node:zlib's gzip/deflate APIs but **not**
- * zstd; the functions below throw on workerd. zstd is opt-in (only enabled
- * when `compressionLevel` is configured), so the bundle stays valid even
- * when zstd is unreachable.
+ * Decompression order of preference: Bun.zstd → node:zlib zstd (Node 22.15+,
+ * Deno 2.6.9+) → fzstd pure-JS fallback. The fzstd fallback exists so
+ * Cloudflare workerd — which has no native zstd — can still decode
+ * `Content-Encoding: zstd` request bodies (the DuckDB VGI extension always
+ * sends them). fzstd is decompression-only, so compression on workerd still
+ * throws.
  */
 
+import { decompress as fzstdDecompress } from "fzstd";
+
 // Resolve node:zlib via indirect-string require so esbuild/wrangler can't
-// trace it statically. workerd has neither bun:zstd nor node:zlib zstd APIs;
-// throwing at call time keeps the bundle valid.
+// trace it statically. On workerd we want the fzstd path, not a node:zlib
+// import that wouldn't have zstd anyway.
 const _NODE_ZLIB_MOD = "node:zlib";
 const isBun = typeof globalThis.Bun !== "undefined";
-function _loadZlib(): any {
+function _loadZlibOrNull(): any | null {
   const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
-  if (!req) {
-    throw new Error("zstd is not available in this runtime. " + "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.");
+  if (!req) return null;
+  try {
+    return req(_NODE_ZLIB_MOD);
+  } catch {
+    return null;
   }
-  return req(_NODE_ZLIB_MOD);
 }
 
 /** Compress data with zstd at the given level (1-22). */
@@ -30,10 +34,14 @@ export async function zstdCompress(data: Uint8Array, level: number): Promise<Uin
   if (isBun) {
     return new Uint8Array(Bun.zstdCompressSync(data, { level }));
   }
-  const zlib = _loadZlib();
-  const fn = zlib.zstdCompressSync;
+  const zlib = _loadZlibOrNull();
+  const fn = zlib?.zstdCompressSync;
   if (typeof fn !== "function") {
-    throw new Error("zstd is not available in this runtime. " + "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.");
+    throw new Error(
+      "zstd compression is not available in this runtime. " +
+        "Requires Bun or Node.js >= 22.15 / Deno >= 2.6.9. " +
+        "(workerd has no native zstd encoder; fzstd is decompress-only.)",
+    );
   }
   return new Uint8Array(
     fn(data, {
@@ -73,12 +81,26 @@ export async function zstdDecompress(data: Uint8Array, maxOutputSize?: number): 
   if (isBun) {
     out = new Uint8Array(Bun.zstdDecompressSync(data));
   } else {
-    const zlib = _loadZlib();
-    const fn = zlib.zstdDecompressSync;
-    if (typeof fn !== "function") {
-      throw new Error("zstd is not available in this runtime. " + "Requires Bun, Node.js >= 22.15, or Deno >= 2.6.9.");
+    const zlib = _loadZlibOrNull();
+    const fn = zlib?.zstdDecompressSync;
+    if (typeof fn === "function") {
+      out = new Uint8Array(fn(data));
+    } else {
+      // workerd path: no native zstd, fall back to the pure-JS decoder.
+      // fzstd is decompress-only and synchronous; cap-checking already ran
+      // above against the frame header, but pure-JS decode of large inputs
+      // is slow — keep the upstream maxOutputSize tight.
+      //
+      // CRITICAL: copy into a freshly-allocated ArrayBuffer so byteOffset is
+      // 0. fzstd internally returns subarray views with arbitrary byteOffset
+      // (often not 8-aligned), and downstream Arrow IPC readers create
+      // BigInt64Array views relative to the buffer's byteOffset — those
+      // throw `start offset of BigInt64Array should be a multiple of 8` if
+      // the underlying offset isn't 8-aligned.
+      const decoded = fzstdDecompress(data);
+      out = new Uint8Array(decoded.byteLength);
+      out.set(decoded);
     }
-    out = new Uint8Array(fn(data));
   }
 
   if (maxOutputSize != null && out.byteLength > maxOutputSize) {

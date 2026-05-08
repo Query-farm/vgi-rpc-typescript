@@ -24,9 +24,11 @@ import {
   tableFromIPC,
   tablesToIPC,
   tableToIPC,
+  Table,
 } from "@uwdata/flechette";
 
 import type { VgiBackendInfo, VgiBatch, VgiColumnData, VgiDataType, VgiField, VgiSchema } from "../types.js";
+import { readFirstRecordBatchMeta } from "./message-meta.js";
 
 export const backend: VgiBackendInfo = { name: "flechette" };
 
@@ -72,17 +74,14 @@ export function schema(fields: readonly VgiField[], metadata?: Map<string, strin
 // ----- IPC -----------------------------------------------------------------
 
 export function serializeSchema(s: VgiSchema): Uint8Array {
-  // Empty 0-row table carries the schema. Need at least one column for
-  // flechette to encode; fall back to a placeholder when fields=[].
   if (s.fields.length === 0) {
     const t = tableFromColumns({ __placeholder: f_columnFromArray([], f_utf8()) });
     return tableToIPC(t, { format: "stream" }) as Uint8Array;
   }
-  const cols: Record<string, Column<any>> = {};
-  for (const f of s.fields) {
-    cols[f.name] = f_columnFromArray([], f.type as any);
-  }
-  return tableToIPC(tableFromColumns(cols), { format: "stream" }) as Uint8Array;
+  // Build directly so per-field nullable/metadata round-trip — same reason
+  // batchFromColumns goes through buildTablePreservingNullable below.
+  const cols = s.fields.map((f) => f_columnFromArray([], f.type as any));
+  return tableToIPC(buildTablePreservingNullable(s, cols) as any, { format: "stream" }) as Uint8Array;
 }
 
 export function deserializeSchema(bytes: Uint8Array): VgiSchema {
@@ -94,7 +93,23 @@ export function serializeBatch(batch: VgiBatch): Uint8Array {
 }
 
 export function deserializeBatch(bytes: Uint8Array): VgiBatch {
-  return tableFromIPC(bytes, EXTRACT_OPTS) as unknown as VgiBatch;
+  const table: any = tableFromIPC(bytes, EXTRACT_OPTS);
+  // flechette doesn't surface Message-level custom_metadata or RecordBatch
+  // length when the schema has zero columns. The vgi-rpc wire protocol uses
+  // exactly that shape (1-row, 0-field, metadata-bearing batches) for state
+  // tokens / cancellations, so backfill both here. See message-meta.ts.
+  const meta = readFirstRecordBatchMeta(bytes);
+  if (meta === null) return table as VgiBatch;
+  const wantRows = table.numRows === 0 && meta.numRows > 0;
+  const wantMeta = !table.metadata && meta.metadata.size > 0;
+  if (!wantRows && !wantMeta) return table as VgiBatch;
+  return new Proxy(table, {
+    get(target, prop, receiver) {
+      if (wantRows && prop === "numRows") return meta.numRows;
+      if (wantMeta && prop === "metadata") return meta.metadata;
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as unknown as VgiBatch;
 }
 
 // ----- Construction --------------------------------------------------------
@@ -103,26 +118,58 @@ export function columnFromArray(values: any[], type: VgiDataType): VgiColumnData
   return f_columnFromArray(values, type as any, EXTRACT_OPTS) as VgiColumnData;
 }
 
+// flechette's `tableFromColumns` discards per-field `nullable`/`metadata` —
+// it always builds nullable=true fields. The vgi-rpc wire protocol cares:
+// the C++ extension validates response schemas exactly, and a `nullable`
+// mismatch on a `not null` field rejects the whole batch. Build the Table
+// directly with a schema that preserves the source VgiSchema's flags.
+function buildTablePreservingNullable(s: VgiSchema, cols: Column<any>[]): VgiBatch {
+  const fields = s.fields.map((f, i) =>
+    f_field(f.name, cols[i].type as any, (f as any).nullable ?? true, (f as any).metadata ?? null),
+  );
+  const flechSchema = {
+    version: 5,
+    endianness: 0,
+    fields,
+    metadata: (s as any).metadata ?? null,
+  };
+  return new Table(flechSchema as any, cols) as unknown as VgiBatch;
+}
+
+// flechette's Map builder iterates values via for-of and rejects plain
+// objects (`{}`) with "value is not iterable". Coerce Map-typed inputs so
+// producer code passing `{}` (legal under arrow-js) keeps working.
+function isMapType(t: VgiDataType): boolean { return (t as any)?.typeId === 17; }
+function coerceForMap(v: any): any {
+  if (v == null || v instanceof Map) return v;
+  if (Array.isArray(v)) return new Map(v);
+  if (typeof v === "object") return new Map(Object.entries(v));
+  return v;
+}
+function coerceValuesForType(values: any[], type: VgiDataType): any[] {
+  return isMapType(type) ? values.map(coerceForMap) : values;
+}
+
 export function singleRowBatch(s: VgiSchema, values: Record<string, any>): VgiBatch {
-  const cols: Record<string, Column<any>> = {};
+  const cols: Column<any>[] = [];
   for (const f of s.fields) {
     let val = values[f.name];
     if (f.type.typeId === 2 /* Int */ && (f.type as any).bitWidth === 64 && typeof val === "number") {
       val = BigInt(val);
     }
-    cols[f.name] = f_columnFromArray([val], f.type as any, EXTRACT_OPTS);
+    cols.push(f_columnFromArray(coerceValuesForType([val], f.type), f.type as any, EXTRACT_OPTS));
   }
-  return tableFromColumns(cols) as unknown as VgiBatch;
+  return buildTablePreservingNullable(s, cols);
 }
 
 export function batchFromColumns(s: VgiSchema, columns: Record<string, any[]>): VgiBatch {
   const numRows = s.fields.length > 0 ? (columns[s.fields[0].name]?.length ?? 0) : 0;
-  const cols: Record<string, Column<any>> = {};
+  const cols: Column<any>[] = [];
   for (const f of s.fields) {
     const vals = columns[f.name] ?? new Array(numRows).fill(null);
-    cols[f.name] = f_columnFromArray(vals, f.type as any, EXTRACT_OPTS);
+    cols.push(f_columnFromArray(coerceValuesForType(vals, f.type), f.type as any, EXTRACT_OPTS));
   }
-  return tableFromColumns(cols) as unknown as VgiBatch;
+  return buildTablePreservingNullable(s, cols);
 }
 
 export function batchFromColumnData(
@@ -131,13 +178,9 @@ export function batchFromColumnData(
   columnData: VgiColumnData[],
   _metadata?: Map<string, string>,
 ): VgiBatch {
-  // flechette's Column objects ARE the column-data handles; assemble via
-  // tableFromColumns keyed by schema field names.
-  const cols: Record<string, any> = {};
-  for (let i = 0; i < s.fields.length; i++) {
-    cols[s.fields[i].name] = columnData[i];
-  }
-  return tableFromColumns(cols) as unknown as VgiBatch;
+  // flechette's Column objects ARE the column-data handles; build directly so
+  // we preserve the schema's per-field nullable/metadata flags.
+  return buildTablePreservingNullable(s, columnData as any);
 }
 
 export function emptyColumnData(type: VgiDataType): VgiColumnData {
