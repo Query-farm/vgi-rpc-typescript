@@ -39,29 +39,30 @@ interface FetchCapture {
   body?: string;
 }
 
-function installFetchMock(opts: {
-  capture?: FetchCapture;
-  upstreamStatus?: number;
-  upstreamBody?: string;
-}) {
+function installFetchMock(opts: { capture?: FetchCapture; upstreamStatus?: number; upstreamBody?: string }) {
   const originalFetch = globalThis.fetch;
   const captured = opts.capture;
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = typeof input === "string" ? input : input.url;
     if (url.endsWith("/.well-known/openid-configuration")) {
-      return new Response(JSON.stringify({
-        issuer: "https://auth.example.com",
-        authorization_endpoint: "https://auth.example.com/authorize",
-        token_endpoint: TOKEN_ENDPOINT_REAL,
-      }), { headers: { "Content-Type": "application/json" } });
+      return new Response(
+        JSON.stringify({
+          issuer: "https://auth.example.com",
+          authorization_endpoint: "https://auth.example.com/authorize",
+          token_endpoint: TOKEN_ENDPOINT_REAL,
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
     }
     if (url === TOKEN_ENDPOINT_REAL) {
       if (captured) {
         captured.url = url;
         captured.body = String(init?.body ?? "");
       }
-      return new Response(opts.upstreamBody ?? '{"access_token":"new","token_type":"Bearer","expires_in":3600}',
-        { status: opts.upstreamStatus ?? 200, headers: { "Content-Type": "application/json" } });
+      return new Response(opts.upstreamBody ?? '{"access_token":"new","token_type":"Bearer","expires_in":3600}', {
+        status: opts.upstreamStatus ?? 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
     return originalFetch(input, init);
   }) as typeof fetch;
@@ -77,7 +78,9 @@ describe("OAuth token proxy", () => {
   test("well-known advertises token_endpoint pointing at the proxy", async () => {
     restoreFetch = installFetchMock({});
     const handler = makePkceHandler();
-    const resp = await handler(new Request(`http://localhost${PREFIX === "" ? "" : "/.well-known/oauth-protected-resource" + PREFIX}`));
+    const resp = await handler(
+      new Request(`http://localhost${PREFIX === "" ? "" : "/.well-known/oauth-protected-resource" + PREFIX}`),
+    );
     expect(resp.status).toBe(200);
     const json: any = await resp.json();
     expect(json.token_endpoint).toBe(`http://localhost:8000${PREFIX}/_oauth/token`);
@@ -86,10 +89,12 @@ describe("OAuth token proxy", () => {
   test("OPTIONS returns 204 with CORS headers when Origin is allowed", async () => {
     restoreFetch = installFetchMock({});
     const handler = makePkceHandler();
-    const resp = await handler(new Request(`http://localhost${PREFIX}/_oauth/token`, {
-      method: "OPTIONS",
-      headers: { Origin: "https://cupola.query-farm.services" },
-    }));
+    const resp = await handler(
+      new Request(`http://localhost${PREFIX}/_oauth/token`, {
+        method: "OPTIONS",
+        headers: { Origin: "https://cupola.query-farm.services" },
+      }),
+    );
     expect(resp.status).toBe(204);
     expect(resp.headers.get("access-control-allow-origin")).toBe("https://cupola.query-farm.services");
     expect(resp.headers.get("access-control-allow-methods")).toContain("POST");
@@ -106,11 +111,13 @@ describe("OAuth token proxy", () => {
       redirect_uri: "https://x/cb",
       client_id: "my-client-id",
     }).toString();
-    const resp = await handler(new Request(`http://localhost${PREFIX}/_oauth/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    }));
+    const resp = await handler(
+      new Request(`http://localhost${PREFIX}/_oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+    );
     expect(resp.status).toBe(200);
     const upstream = new URLSearchParams(captured.body!);
     expect(upstream.get("client_secret")).toBe("my-client-secret");
@@ -130,11 +137,13 @@ describe("OAuth token proxy", () => {
       client_id: "my-client-id",
       scope: "openid",
     }).toString();
-    const resp = await handler(new Request(`http://localhost${PREFIX}/_oauth/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    }));
+    const resp = await handler(
+      new Request(`http://localhost${PREFIX}/_oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+    );
     expect(resp.status).toBe(200);
     const upstream = new URLSearchParams(captured.body!);
     expect(upstream.get("grant_type")).toBe("refresh_token");
@@ -153,11 +162,13 @@ describe("OAuth token proxy", () => {
       redirect_uri: "https://x/cb",
       client_id: "evil",
     }).toString();
-    const resp = await handler(new Request(`http://localhost${PREFIX}/_oauth/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    }));
+    const resp = await handler(
+      new Request(`http://localhost${PREFIX}/_oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+    );
     expect(resp.status).toBe(400);
     const json: any = await resp.json();
     expect(json.error).toBe("invalid_client");
@@ -167,11 +178,13 @@ describe("OAuth token proxy", () => {
     restoreFetch = installFetchMock({});
     const handler = makePkceHandler();
     const body = "grant_type=client_credentials";
-    const resp = await handler(new Request(`http://localhost${PREFIX}/_oauth/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    }));
+    const resp = await handler(
+      new Request(`http://localhost${PREFIX}/_oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+    );
     expect(resp.status).toBe(400);
     const json: any = await resp.json();
     expect(json.error).toBe("unsupported_grant_type");
@@ -189,11 +202,13 @@ describe("OAuth token proxy", () => {
       code_verifier: "v",
       redirect_uri: "https://x/cb",
     }).toString();
-    const resp = await handler(new Request(`http://localhost${PREFIX}/_oauth/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    }));
+    const resp = await handler(
+      new Request(`http://localhost${PREFIX}/_oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+    );
     expect(resp.status).toBe(400);
     const json: any = await resp.json();
     expect(json.error).toBe("invalid_grant");
@@ -203,11 +218,13 @@ describe("OAuth token proxy", () => {
   test("non-form Content-Type is rejected with 415", async () => {
     restoreFetch = installFetchMock({});
     const handler = makePkceHandler();
-    const resp = await handler(new Request(`http://localhost${PREFIX}/_oauth/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: '{"grant_type":"authorization_code"}',
-    }));
+    const resp = await handler(
+      new Request(`http://localhost${PREFIX}/_oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: '{"grant_type":"authorization_code"}',
+      }),
+    );
     expect(resp.status).toBe(415);
   });
 });

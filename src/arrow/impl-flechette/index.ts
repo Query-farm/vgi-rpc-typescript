@@ -20,11 +20,11 @@ import {
   uint32 as f_uint32,
   uint64 as f_uint64,
   utf8 as f_utf8,
+  Table,
   tableFromColumns,
   tableFromIPC,
   tablesToIPC,
   tableToIPC,
-  Table,
 } from "@uwdata/flechette";
 
 import type { VgiBackendInfo, VgiBatch, VgiColumnData, VgiDataType, VgiField, VgiSchema } from "../types.js";
@@ -139,7 +139,9 @@ function buildTablePreservingNullable(s: VgiSchema, cols: Column<any>[]): VgiBat
 // flechette's Map builder iterates values via for-of and rejects plain
 // objects (`{}`) with "value is not iterable". Coerce Map-typed inputs so
 // producer code passing `{}` (legal under arrow-js) keeps working.
-function isMapType(t: VgiDataType): boolean { return (t as any)?.typeId === 17; }
+function isMapType(t: VgiDataType): boolean {
+  return (t as any)?.typeId === 17;
+}
 function coerceForMap(v: any): any {
   if (v == null || v instanceof Map) return v;
   if (Array.isArray(v)) return new Map(v);

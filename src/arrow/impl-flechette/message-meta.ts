@@ -19,7 +19,7 @@ const TYPE_SCHEMA = 1;
 const TYPE_RECORD_BATCH = 3;
 
 function readU32LE(b: Uint8Array, p: number): number {
-  return ((b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0);
+  return (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 }
 function readI32LE(b: Uint8Array, p: number): number {
   return readU32LE(b, p) | 0;
