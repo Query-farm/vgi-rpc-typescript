@@ -78,7 +78,7 @@ export function createHttpHandler(
   options?: HttpHandlerOptions,
 ): (request: Request) => Response | Promise<Response> {
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
-  const signingKey = options?.signingKey ?? randomBytes(32);
+  const tokenKey = options?.tokenKey ?? randomBytes(32);
   const tokenTtl = options?.tokenTtl ?? 3600;
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 7200 : options.corsMaxAge;
@@ -115,7 +115,7 @@ export function createHttpHandler(
       const originalAuth = authenticate;
       pkceConfig = configureOAuthPkce(
         {
-          signingKey,
+          signingKey: tokenKey,
           issuer,
           clientId: oauthMetadata.clientId,
           clientSecret: oauthMetadata.clientSecret,
@@ -255,7 +255,7 @@ export function createHttpHandler(
 
   // ctx is built per-request to include authContext; base fields set here
   const baseCtx = {
-    signingKey,
+    tokenKey,
     tokenTtl,
     serverId,
     maxStreamResponseBytes,

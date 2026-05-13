@@ -1,31 +1,36 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { hmacSha256, hmacSha256Verify } from "../util/web-crypto.js";
+import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
+import { randomBytes } from "../util/web-crypto.js";
 
 const _UTF8 = new TextEncoder();
 
-/**
- * Derive a per-principal signing key so that a state token issued to one
- * authenticated identity cannot be replayed by another. When `principal` is
- * null or empty (anonymous request), the base key is returned unchanged so
- * that wire-compatible behavior with non-authenticated peers is preserved.
- *
- * The derivation domain-separator ("vgi_rpc.principal\0") prevents collision
- * with other key-derivation uses of the same base key (e.g. oauth-pkce).
- */
-export async function derivePrincipalKey(
-  signingKey: Uint8Array,
-  principal: string | null | undefined,
-): Promise<Uint8Array> {
-  if (!principal) return signingKey;
-  return hmacSha256(signingKey, _UTF8.encode(`vgi_rpc.principal\0${principal}`));
-}
+const TOKEN_VERSION = 4;
+const VERSION_LEN = 1;
+const NONCE_LEN = 24; // XChaCha20-Poly1305 nonce (192 bits — random-safe at any volume).
+const TAG_LEN = 16; // Poly1305 authentication tag length.
+const MIN_TOKEN_LEN = VERSION_LEN + NONCE_LEN + TAG_LEN;
 
-const TOKEN_VERSION = 2;
-const HMAC_LEN = 32;
-// 1 (version) + 8 (created_at) + 4*3 (three length prefixes) + 32 (hmac)
-const MIN_TOKEN_LEN = 1 + 8 + 12 + HMAC_LEN;
+const AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\0");
+
+/**
+ * Build the AEAD associated data that binds a state token to its issuing
+ * principal. Anonymous and authenticated tokens produce distinct AAD
+ * strings, so an anonymous token cannot be opened by a named identity
+ * (and vice versa).
+ */
+function computeAad(principal: string | null | undefined): Uint8Array {
+  if (!principal) {
+    const tail = _UTF8.encode("\0anonymous");
+    return concatBytes(AAD_PREFIX, tail);
+  }
+  const pBytes = _UTF8.encode(principal);
+  const tail = new Uint8Array(1 + pBytes.length);
+  tail[0] = 0x01;
+  tail.set(pBytes, 1);
+  return concatBytes(AAD_PREFIX, tail);
+}
 
 // Base64 helpers — `btoa`/`atob` exist on Node 16+, Bun, and workerd; we work
 // in chunks to stay below the per-call argument limit (Latin-1 only, so we
@@ -78,59 +83,72 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
 }
 
 /**
- * Pack a state token matching the Python v2 wire format.
+ * Seal a state token with XChaCha20-Poly1305 AEAD (v4 wire format).
  *
- * Layout:
- *   [1B version=2]
- *   [8B created_at uint64 LE (seconds since epoch)]
- *   [4B state_len uint32 LE] [state_len bytes]
- *   [4B schema_len uint32 LE] [schema_len bytes]
- *   [4B input_schema_len uint32 LE] [input_schema_len bytes]
- *   [32B HMAC-SHA256(signing_key, all above bytes)]
+ * Layout (base64-encoded):
+ *
+ * ```
+ *   [1B  version=4]
+ *   [24B XChaCha20-Poly1305 nonce (random)]
+ *   [..  ciphertext + 16B Poly1305 tag]
+ *        plaintext:
+ *          [8B  created_at uint64 LE]
+ *          [4B  state_len uint32 LE]   [state_len bytes]
+ *          [4B  schema_len uint32 LE]  [schema_len bytes]
+ *          [4B  input_schema_len LE]   [input_schema_len bytes]
+ * ```
+ *
+ * `created_at` lives inside the ciphertext so TTL enforcement runs after
+ * authenticity. The version byte is informational (a self-describing
+ * format marker); a tampered version byte still fails decryption because
+ * we use the matching algorithm for that version. `principal` is bound
+ * via AEAD associated data so a token minted for one identity fails
+ * decryption when presented by another.
  */
-export async function packStateToken(
+export function packStateToken(
   stateBytes: Uint8Array,
   schemaBytes: Uint8Array,
   inputSchemaBytes: Uint8Array,
-  signingKey: Uint8Array,
+  tokenKey: Uint8Array,
+  principal: string | null | undefined,
   createdAt?: number,
-): Promise<string> {
+): string {
+  if (tokenKey.length !== 32) {
+    throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
+  }
   const now = createdAt ?? Math.floor(Date.now() / 1000);
 
-  const payloadLen = 1 + 8 + 4 + stateBytes.length + 4 + schemaBytes.length + 4 + inputSchemaBytes.length;
-  const payload = new Uint8Array(payloadLen);
-  const view = new DataView(payload.buffer);
+  const plaintextLen = 8 + 4 + stateBytes.length + 4 + schemaBytes.length + 4 + inputSchemaBytes.length;
+  const plaintext = new Uint8Array(plaintextLen);
+  const view = new DataView(plaintext.buffer);
   let offset = 0;
 
-  // version
-  payload[offset] = TOKEN_VERSION;
-  offset += 1;
-
-  // created_at as uint64 LE
   writeU64LE(view, offset, BigInt(now));
   offset += 8;
 
-  // state
   writeU32LE(view, offset, stateBytes.length);
   offset += 4;
-  payload.set(stateBytes, offset);
+  plaintext.set(stateBytes, offset);
   offset += stateBytes.length;
 
-  // output schema
   writeU32LE(view, offset, schemaBytes.length);
   offset += 4;
-  payload.set(schemaBytes, offset);
+  plaintext.set(schemaBytes, offset);
   offset += schemaBytes.length;
 
-  // input schema
   writeU32LE(view, offset, inputSchemaBytes.length);
   offset += 4;
-  payload.set(inputSchemaBytes, offset);
-  offset += inputSchemaBytes.length;
+  plaintext.set(inputSchemaBytes, offset);
 
-  // HMAC
-  const mac = await hmacSha256(signingKey, payload);
-  return bytesToBase64(concatBytes(payload, mac));
+  const nonce = randomBytes(NONCE_LEN);
+  const aad = computeAad(principal);
+  const ciphertext = xchacha20poly1305(tokenKey, nonce, aad).encrypt(plaintext);
+
+  const wire = new Uint8Array(VERSION_LEN + NONCE_LEN + ciphertext.length);
+  wire[0] = TOKEN_VERSION;
+  wire.set(nonce, VERSION_LEN);
+  wire.set(ciphertext, VERSION_LEN + NONCE_LEN);
+  return bytesToBase64(wire);
 }
 
 export interface UnpackedToken {
@@ -141,46 +159,64 @@ export interface UnpackedToken {
 }
 
 /**
- * Unpack and verify a state token.
- * Throws on tampered, expired, or malformed tokens.
+ * Open and verify a state token. Decryption (which checks the Poly1305
+ * tag) authenticates the payload; any tampering, wrong key, or AAD
+ * mismatch (e.g. cross-principal replay) surfaces as a uniform
+ * "signature verification failed" error so callers cannot distinguish
+ * failure modes via timing or message content.
+ *
+ * Throws on tampered, expired, malformed, or unknown-version tokens.
  */
-export async function unpackStateToken(
+export function unpackStateToken(
   tokenBase64: string,
-  signingKey: Uint8Array,
+  tokenKey: Uint8Array,
   tokenTtl: number,
-): Promise<UnpackedToken> {
-  const token = base64ToBytes(tokenBase64);
-
-  if (token.length < MIN_TOKEN_LEN) {
+  principal: string | null | undefined,
+): UnpackedToken {
+  if (tokenKey.length !== 32) {
+    throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
+  }
+  let raw: Uint8Array;
+  try {
+    raw = base64ToBytes(tokenBase64);
+  } catch {
+    throw new Error("Malformed state token");
+  }
+  if (raw.length < MIN_TOKEN_LEN) {
     throw new Error("State token too short");
   }
-
-  // Split payload and mac
-  const payload = token.subarray(0, token.length - HMAC_LEN);
-  const receivedMac = token.subarray(token.length - HMAC_LEN);
-
-  // Verify HMAC first (before inspecting any fields). `crypto.subtle.verify`
-  // is constant-time on conforming runtimes.
-  const ok = await hmacSha256Verify(signingKey, payload, receivedMac);
-  if (!ok) {
-    throw new Error("State token HMAC verification failed");
-  }
-
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  let offset = 0;
-
-  // Version
-  const version = payload[offset];
-  offset += 1;
+  const version = raw[0];
   if (version !== TOKEN_VERSION) {
     throw new Error(`Unsupported state token version: ${version}`);
   }
+  const nonce = raw.subarray(VERSION_LEN, VERSION_LEN + NONCE_LEN);
+  const ciphertext = raw.subarray(VERSION_LEN + NONCE_LEN);
 
-  // created_at
+  let plaintext: Uint8Array;
+  try {
+    plaintext = xchacha20poly1305(tokenKey, nonce, computeAad(principal)).decrypt(ciphertext);
+  } catch {
+    throw new Error("State token signature verification failed");
+  }
+  if (plaintext.length < 8) {
+    throw new Error("State token truncated");
+  }
+
+  // Copy each bytes section into a freshly-allocated Uint8Array with
+  // byteOffset=0. arrow-js's schema deserializer wraps the result as Int32Array
+  // and throws 'RangeError: Byte offset is not aligned' if the slice happens
+  // to start at a non-4-aligned offset. Copying normalizes the alignment.
+  const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
+  let offset = 0;
+  const copyAligned = (start: number, len: number) => {
+    const out = new Uint8Array(len);
+    out.set(plaintext.subarray(start, start + len));
+    return out;
+  };
+
   const createdAt = Number(readU64LE(view, offset));
   offset += 8;
 
-  // TTL check
   if (tokenTtl > 0) {
     const now = Math.floor(Date.now() / 1000);
     if (now - createdAt > tokenTtl) {
@@ -188,38 +224,25 @@ export async function unpackStateToken(
     }
   }
 
-  // Copy each bytes section into a freshly-allocated Uint8Array with
-  // byteOffset=0. arrow-js's schema deserializer wraps the result as Int32Array
-  // and throws 'RangeError: Byte offset is not aligned' if the slice happens
-  // to start at a non-4-aligned offset. Copying normalizes the alignment.
-  const copyAligned = (start: number, len: number) => {
-    const out = new Uint8Array(len);
-    out.set(payload.subarray(start, start + len));
-    return out;
-  };
-
-  // state bytes
   const stateLen = readU32LE(view, offset);
   offset += 4;
-  if (offset + stateLen > payload.length) {
+  if (offset + stateLen > plaintext.length) {
     throw new Error("State token truncated (state)");
   }
   const stateBytes = copyAligned(offset, stateLen);
   offset += stateLen;
 
-  // output schema bytes
   const schemaLen = readU32LE(view, offset);
   offset += 4;
-  if (offset + schemaLen > payload.length) {
+  if (offset + schemaLen > plaintext.length) {
     throw new Error("State token truncated (schema)");
   }
   const schemaBytes = copyAligned(offset, schemaLen);
   offset += schemaLen;
 
-  // input schema bytes
   const inputSchemaLen = readU32LE(view, offset);
   offset += 4;
-  if (offset + inputSchemaLen > payload.length) {
+  if (offset + inputSchemaLen > plaintext.length) {
     throw new Error("State token truncated (input schema)");
   }
   const inputSchemaBytes = copyAligned(offset, inputSchemaLen);

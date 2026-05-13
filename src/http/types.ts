@@ -9,8 +9,10 @@ import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 export interface HttpHandlerOptions {
   /** URL path prefix for all endpoints. Default: "" (root). */
   prefix?: string;
-  /** HMAC-SHA256 signing key for state tokens. Random 32 bytes if omitted. */
-  signingKey?: Uint8Array;
+  /** XChaCha20-Poly1305 master key (32 bytes) used to seal stream state
+   *  tokens.  A random 32-byte key is generated if omitted (tokens won't
+   *  survive a restart or load-balance across workers). */
+  tokenKey?: Uint8Array;
   /** State token time-to-live in seconds. Default: 3600 (1 hour). 0 disables TTL checks. */
   tokenTtl?: number;
   /** CORS allowed origins. If set, CORS headers are added to all responses. */

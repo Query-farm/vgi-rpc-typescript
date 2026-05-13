@@ -25,7 +25,7 @@ import { serializeSchema } from "../util/schema.js";
 import { applyDefaults, parseRequest } from "../wire/request.js";
 import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import { appendCookieHeaders, arrowResponse, HttpRpcError, readRequestFromBody, serializeIpcStream } from "./common.js";
-import { derivePrincipalKey, packStateToken, unpackStateToken } from "./token.js";
+import { packStateToken, unpackStateToken } from "./token.js";
 import type { StateSerializer } from "./types.js";
 
 async function deserializeSchema(bytes: Uint8Array): Promise<VgiSchema> {
@@ -35,7 +35,7 @@ async function deserializeSchema(bytes: Uint8Array): Promise<VgiSchema> {
 const EMPTY_SCHEMA = makeSchema([]);
 
 export interface DispatchContext {
-  signingKey: Uint8Array;
+  tokenKey: Uint8Array;
   tokenTtl: number;
   serverId: string;
   /** Producer-only soft wire-cap (deprecated alias for the producer-loop
@@ -282,8 +282,7 @@ export async function httpDispatchStreamInit(
     const stateBytes = ctx.stateSerializer.serialize(state);
     const schemaBytes = serializeSchema(resolvedOutputSchema);
     const inputSchemaBytes = serializeSchema(resolvedInputSchema);
-    const tokenKey = await derivePrincipalKey(ctx.signingKey, ctx.authContext?.principal);
-    const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey);
+    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.tokenKey, ctx.authContext?.principal);
 
     const tokenMeta = new Map<string, string>();
     tokenMeta.set(STATE_KEY, token);
@@ -322,14 +321,12 @@ export async function httpDispatchStreamExchange(
   // don't fail the cast.
   const cancelled = reqBatch.metadata?.get(CANCEL_KEY) != null;
 
-  // Bind verification to the caller's identity — a token signed for principal
-  // A will fail HMAC verification when replayed by principal B (or by an
-  // anonymous caller, and vice versa).
-  const tokenKey = await derivePrincipalKey(ctx.signingKey, ctx.authContext?.principal);
-
+  // Bind verification to the caller's identity — a token sealed for
+  // principal A will fail AEAD decryption when replayed by principal B
+  // (or by an anonymous caller, and vice versa).
   let unpacked: import("./token.js").UnpackedToken;
   try {
-    unpacked = await unpackStateToken(tokenBase64, tokenKey, ctx.tokenTtl);
+    unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, ctx.authContext?.principal);
   } catch (error: any) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
@@ -459,7 +456,7 @@ export async function httpDispatchStreamExchange(
       const stateBytes = ctx.stateSerializer.serialize(state);
       const schemaBytes = serializeSchema(outputSchema);
       const inputSchemaBytes = serializeSchema(inputSchema);
-      const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey);
+      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.tokenKey, ctx.authContext?.principal);
 
       for (const emitted of out.batches) {
         const batch = emitted.batch;
@@ -614,8 +611,7 @@ async function produceStreamResponse(
       const stateBytes = ctx.stateSerializer.serialize(state);
       const schemaBytes = serializeSchema(outputSchema);
       const inputSchemaBytes = serializeSchema(inputSchema);
-      const tokenKey = await derivePrincipalKey(ctx.signingKey, ctx.authContext?.principal);
-      const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey);
+      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.tokenKey, ctx.authContext?.principal);
       const tokenMeta = new Map<string, string>();
       tokenMeta.set(STATE_KEY, token);
       allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));

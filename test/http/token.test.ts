@@ -2,94 +2,116 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, test } from "bun:test";
-import { derivePrincipalKey, packStateToken, unpackStateToken } from "../../src/http/token.js";
+import { packStateToken, unpackStateToken } from "../../src/http/token.js";
 import { jsonStateSerializer } from "../../src/http/types.js";
 import { randomBytes } from "../../src/util/web-crypto.js";
 
 describe("State Token", () => {
-  const signingKey = randomBytes(32);
+  const tokenKey = randomBytes(32);
+  const ANON = "";
 
-  test("pack and unpack round-trips correctly", async () => {
+  test("pack and unpack round-trips correctly", () => {
     const stateBytes = new TextEncoder().encode('{"count":5}');
     const schemaBytes = new Uint8Array([1, 2, 3, 4]);
     const inputSchemaBytes = new Uint8Array([5, 6, 7]);
 
-    const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey);
-
+    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, ANON);
     expect(typeof token).toBe("string");
 
-    const unpacked = await unpackStateToken(token, signingKey, 3600);
+    const unpacked = unpackStateToken(token, tokenKey, 3600, ANON);
     expect(new TextDecoder().decode(unpacked.stateBytes)).toBe('{"count":5}');
     expect(Array.from(unpacked.schemaBytes)).toEqual([1, 2, 3, 4]);
     expect(Array.from(unpacked.inputSchemaBytes)).toEqual([5, 6, 7]);
     expect(unpacked.createdAt).toBeGreaterThan(0);
   });
 
-  test("HMAC verification fails with wrong key", async () => {
-    const stateBytes = new TextEncoder().encode("{}");
-    const schemaBytes = new Uint8Array([1]);
-    const inputSchemaBytes = new Uint8Array([2]);
-
-    const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey);
+  test("decryption fails with wrong key", () => {
+    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
     const wrongKey = randomBytes(32);
-
-    await expect(unpackStateToken(token, wrongKey, 3600)).rejects.toThrow("HMAC verification failed");
+    expect(() => unpackStateToken(token, wrongKey, 3600, ANON)).toThrow("signature verification failed");
   });
 
-  test("detects tampered token", async () => {
-    const stateBytes = new TextEncoder().encode("{}");
-    const schemaBytes = new Uint8Array([1]);
-    const inputSchemaBytes = new Uint8Array([2]);
+  test("detects tampered ciphertext", () => {
+    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
 
-    const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey);
-
-    // Decode, tamper, re-encode (use base64 helpers — Buffer is Node-only).
     const bin = atob(token);
     const buf = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-    buf[10] ^= 0xff; // flip a byte in the state section
-    let tampered = "";
+    // Flip a byte inside the ciphertext (skip version=1 + nonce=24 = 25-byte header).
+    buf[26] ^= 0xff;
+    let s = "";
     for (let i = 0; i < buf.length; i += 0x8000) {
-      tampered += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+      s += String.fromCharCode(...buf.subarray(i, i + 0x8000));
     }
-    const tamperedToken = btoa(tampered);
+    const tamperedToken = btoa(s);
 
-    await expect(unpackStateToken(tamperedToken, signingKey, 3600)).rejects.toThrow(
-      "HMAC verification failed",
-    );
+    expect(() => unpackStateToken(tamperedToken, tokenKey, 3600, ANON)).toThrow("signature verification failed");
   });
 
-  test("TTL expiration", async () => {
-    const stateBytes = new TextEncoder().encode("{}");
-    const schemaBytes = new Uint8Array([1]);
-    const inputSchemaBytes = new Uint8Array([2]);
+  test("detects tampered nonce", () => {
+    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    const bin = atob(token);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    buf[1] ^= 0x01; // first nonce byte
+    let s = "";
+    for (let i = 0; i < buf.length; i += 0x8000) {
+      s += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    }
+    const tamperedToken = btoa(s);
+    expect(() => unpackStateToken(tamperedToken, tokenKey, 3600, ANON)).toThrow("signature verification failed");
+  });
 
+  test("rejects unknown token version", () => {
+    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    const bin = atob(token);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    buf[0] = 0x99;
+    let s = "";
+    for (let i = 0; i < buf.length; i += 0x8000) {
+      s += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    }
+    const tamperedToken = btoa(s);
+    expect(() => unpackStateToken(tamperedToken, tokenKey, 3600, ANON)).toThrow("Unsupported state token version");
+  });
+
+  test("rejects malformed base64", () => {
+    expect(() => unpackStateToken("not!base64!", tokenKey, 3600, ANON)).toThrow();
+  });
+
+  test("TTL expiration", () => {
     // Created 2 hours ago
     const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
-    const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey, twoHoursAgo);
+    const token = packStateToken(
+      new Uint8Array([1]),
+      new Uint8Array([2]),
+      new Uint8Array([3]),
+      tokenKey,
+      ANON,
+      twoHoursAgo,
+    );
 
     // 1-hour TTL should reject it
-    await expect(unpackStateToken(token, signingKey, 3600)).rejects.toThrow("State token expired");
+    expect(() => unpackStateToken(token, tokenKey, 3600, ANON)).toThrow("State token expired");
 
     // 0 TTL (disabled) should accept it
-    const unpacked = await unpackStateToken(token, signingKey, 0);
+    const unpacked = unpackStateToken(token, tokenKey, 0, ANON);
     expect(unpacked.createdAt).toBe(twoHoursAgo);
   });
 
-  test("rejects too-short token", async () => {
+  test("rejects too-short token", () => {
     const shortToken = btoa("too short");
-    await expect(unpackStateToken(shortToken, signingKey, 3600)).rejects.toThrow(
-      "State token too short",
-    );
+    expect(() => unpackStateToken(shortToken, tokenKey, 3600, ANON)).toThrow();
   });
 
-  test("handles empty state", async () => {
+  test("handles empty state", () => {
     const stateBytes = new Uint8Array(0);
     const schemaBytes = new Uint8Array([1, 2]);
     const inputSchemaBytes = new Uint8Array([3, 4]);
 
-    const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey);
-    const unpacked = await unpackStateToken(token, signingKey, 3600);
+    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, ANON);
+    const unpacked = unpackStateToken(token, tokenKey, 3600, ANON);
     expect(unpacked.stateBytes.length).toBe(0);
   });
 
@@ -102,54 +124,34 @@ describe("State Token", () => {
     expect(restored.nested.x).toBe(BigInt(-42));
   });
 
-  test("derivePrincipalKey returns base key when principal is empty", async () => {
-    expect(await derivePrincipalKey(signingKey, null)).toBe(signingKey);
-    expect(await derivePrincipalKey(signingKey, undefined)).toBe(signingKey);
-    expect(await derivePrincipalKey(signingKey, "")).toBe(signingKey);
-  });
-
-  test("derivePrincipalKey produces distinct keys per principal", async () => {
-    const a = await derivePrincipalKey(signingKey, "alice");
-    const b = await derivePrincipalKey(signingKey, "bob");
-    const a2 = await derivePrincipalKey(signingKey, "alice");
-    const equal = (x: Uint8Array, y: Uint8Array) =>
-      x.length === y.length && x.every((v, i) => v === y[i]);
-    expect(equal(a, a2)).toBe(true);
-    expect(equal(a, b)).toBe(false);
-    expect(equal(a, signingKey)).toBe(false);
-  });
-
-  test("token signed for one principal cannot be verified by another", async () => {
+  test("token sealed for one principal cannot be opened by another", () => {
     const stateBytes = new TextEncoder().encode("{}");
     const schemaBytes = new Uint8Array([1]);
     const inputSchemaBytes = new Uint8Array([2]);
 
-    const aliceKey = await derivePrincipalKey(signingKey, "alice");
-    const bobKey = await derivePrincipalKey(signingKey, "bob");
+    const aliceToken = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, "alice");
 
-    const aliceToken = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, aliceKey);
-
-    // Alice can verify her own token.
-    await expect(unpackStateToken(aliceToken, aliceKey, 3600)).resolves.toBeDefined();
+    // Alice can open her own token.
+    expect(() => unpackStateToken(aliceToken, tokenKey, 3600, "alice")).not.toThrow();
     // Bob cannot replay Alice's token.
-    await expect(unpackStateToken(aliceToken, bobKey, 3600)).rejects.toThrow(
-      "HMAC verification failed",
-    );
-    // Anonymous (base key) cannot replay it either.
-    await expect(unpackStateToken(aliceToken, signingKey, 3600)).rejects.toThrow(
-      "HMAC verification failed",
-    );
+    expect(() => unpackStateToken(aliceToken, tokenKey, 3600, "bob")).toThrow("signature verification failed");
+    // Anonymous cannot replay it either.
+    expect(() => unpackStateToken(aliceToken, tokenKey, 3600, ANON)).toThrow("signature verification failed");
   });
 
-  test("handles large state", async () => {
+  test("anonymous token cannot be opened by a named principal", () => {
+    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    expect(() => unpackStateToken(token, tokenKey, 3600, "alice")).toThrow("signature verification failed");
+  });
+
+  test("handles large state", () => {
     const stateBytes = randomBytes(10000);
     const schemaBytes = randomBytes(500);
     const inputSchemaBytes = randomBytes(500);
 
-    const token = await packStateToken(stateBytes, schemaBytes, inputSchemaBytes, signingKey);
-    const unpacked = await unpackStateToken(token, signingKey, 3600);
-    const equal = (x: Uint8Array, y: Uint8Array) =>
-      x.length === y.length && x.every((v, i) => v === y[i]);
+    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, ANON);
+    const unpacked = unpackStateToken(token, tokenKey, 3600, ANON);
+    const equal = (x: Uint8Array, y: Uint8Array) => x.length === y.length && x.every((v, i) => v === y[i]);
     expect(equal(unpacked.stateBytes, stateBytes)).toBe(true);
     expect(equal(unpacked.schemaBytes, schemaBytes)).toBe(true);
     expect(equal(unpacked.inputSchemaBytes, inputSchemaBytes)).toBe(true);

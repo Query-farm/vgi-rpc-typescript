@@ -49,6 +49,7 @@
     }
   },
   "dependencies": {
+    "@noble/ciphers": "^2.2.0",
     "@query-farm/apache-arrow": "*",
     "@uwdata/flechette": "github:Query-farm/flechette#fix/timestamp-bigint-encode",
     "fzstd": "^0.1.1",
