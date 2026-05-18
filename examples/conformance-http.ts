@@ -154,9 +154,23 @@ if (otelFile) {
   };
 }
 
+// Sticky-session fixture wiring — TestSticky in vgi_rpc.conformance is
+// capability-gated on `VGI-Sticky-Enabled: true`, so the conformance
+// worker enables sticky by default with a fixed marker echo header. A
+// `/__test_drain__` admin endpoint (POST / DELETE) toggles the drain
+// flag so `TestSticky::test_drain_rejects_new_opens` can exercise it
+// without sending SIGTERM mid-fixture.
+let stickyDrainHandle: import("../src/http/sticky.js").DrainHandle | null = null;
+
 const handler = createHttpHandler(protocol, {
   serverId: "conformance-http",
   protocolName: "ConformanceService",
+  enableSticky: true,
+  stickyDefaultTtl: 300,
+  stickyEchoHeaders: { "x-vgi-conformance-echo": "conformance-fixed-marker" },
+  _onStickyHandle: (h) => {
+    stickyDrainHandle = h;
+  },
   // Bound per-response size so infinite producers (e.g. ``cancellable_producer``)
   // return promptly and the client can follow continuation tokens or cancel
   // mid-stream. Any positive value works; 1 byte forces a continuation after
@@ -180,7 +194,27 @@ const handler = createHttpHandler(protocol, {
     : {}),
 });
 
-const server = Bun.serve({ port: 0, fetch: handler });
+// Wrap the handler with the test-only `/__test_drain__` admin endpoint so
+// canonical conformance tests can drive the registry's drain flag over
+// the wire without sending SIGTERM (which would kill the fixture).
+const wrappedHandler = async (req: Request): Promise<Response> => {
+  const url = new URL(req.url);
+  if (url.pathname === "/__test_drain__") {
+    if (!stickyDrainHandle) return new Response(null, { status: 404 });
+    if (req.method === "POST") {
+      stickyDrainHandle.drain();
+      return new Response(null, { status: 204 });
+    }
+    if (req.method === "DELETE") {
+      stickyDrainHandle.setDraining(false);
+      return new Response(null, { status: 204 });
+    }
+    return new Response(null, { status: 405 });
+  }
+  return handler(req);
+};
+
+const server = Bun.serve({ port: 0, fetch: wrappedHandler });
 console.log(`PORT:${server.port}`);
 
 if (shutdownOtel) {

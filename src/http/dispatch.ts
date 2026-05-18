@@ -6,6 +6,7 @@ import {
   deserializeBatch,
   deserializeSchema as facadeDeserializeSchema,
   schema as makeSchema,
+  serializeBatch,
   type VgiBatch,
   type VgiSchema,
   withBatchMetadata,
@@ -55,6 +56,10 @@ export interface DispatchContext {
    *  Defaults to HTTP when unset (the only caller that overrides it is
    *  the AF_UNIX launcher path). */
   kind?: TransportKind;
+  /** Per-request sticky-session sink. Installed by the handler when sticky
+   *  is enabled and the dispatcher attaches it to the OutputCollector so
+   *  `ctx.session` / `ctx.openSession` / `ctx.closeSession` work. */
+  stickyContext?: import("../types.js").StickyContext;
 }
 
 /** Predict the external upload size if maybeExternalizeBatch ran on this batch
@@ -146,6 +151,7 @@ export async function httpDispatchUnary(
     },
   );
   out.enableCookieSink();
+  if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
 
   try {
     const result = await method.handler!(parsed.params, out);
@@ -402,6 +408,7 @@ export async function httpDispatchStreamExchange(
         externalizationEnabled,
       },
     );
+    if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
 
     // Cast compatible input types (e.g., decimal→double, int32→int64).
     // Gated on effectiveProducer (not isProducer) so methods that flip to
@@ -542,6 +549,7 @@ async function produceStreamResponse(
         externalizationEnabled,
       },
     );
+    if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
 
     try {
       if (method.producerFn) {
@@ -587,7 +595,28 @@ async function produceStreamResponse(
       if (maxBytes != null) {
         // arrow-js exposes O(1) byteLength via batch.data; flechette has no
         // equivalent. Best-effort estimate via serializeBatch in the latter.
-        const sz = (batch as any).data?.byteLength ?? require("../arrow/index.js").serializeBatch(batch).byteLength;
+        let sz = (batch as any).data?.byteLength ?? 0;
+        if (sz === 0) {
+          // Either a zero-row externalisation pointer batch or a flechette
+          // batch that doesn't expose `data.byteLength`. The pointer case
+          // is real "work done" — the worker's emit became an upload, and
+          // we still need to advance the wire-cap loop so it eventually
+          // breaks. Use a serialized-size estimate; for pointer batches
+          // this captures the metadata-bearing zero-row body, for plain
+          // batches it's the actual wire size.
+          try {
+            sz = serializeBatch(batch).byteLength;
+          } catch {
+            sz = 0;
+          }
+          // Producer cancellation contract: the loop MUST make progress
+          // every iteration so an externalized infinite producer (e.g.,
+          // `cancellable_producer` with externalize-threshold=1) eventually
+          // mints a continuation token and lets the client cancel. Charge
+          // at least 1 byte when neither byteLength nor serialization
+          // gives us a real measurement.
+          if (sz === 0) sz = 1;
+        }
         estimatedBytes += sz;
       }
     }

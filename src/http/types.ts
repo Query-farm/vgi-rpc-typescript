@@ -88,6 +88,26 @@ export interface HttpHandlerOptions {
   oauthPkceScope?: string;
   /** Allowed return-to origins for external frontend redirects. Default: Set(["https://cupola.query-farm.services"]). */
   allowedReturnOrigins?: ReadonlySet<string>;
+
+  /** Enable opt-in sticky sessions on this HTTP handler. When enabled the
+   *  server advertises `VGI-Sticky-Enabled: true` (capability discovery),
+   *  honours `VGI-Session` / `VGI-Session-Accept` headers, and exposes a
+   *  `DELETE {prefix}/__session__` teardown endpoint. Default: false. */
+  enableSticky?: boolean;
+  /** Default session TTL in seconds when `ctx.openSession` is called without
+   *  an explicit `ttl` override. Default: 300. */
+  stickyDefaultTtl?: number;
+  /** Headers the server emits as `VGI-Echo-<name>: <value>` on the
+   *  session-opening response. A conformant client captures them and replays
+   *  them on every subsequent request in the session — used for
+   *  client-driven routing (e.g. `fly-force-instance-id` on Fly.io). */
+  stickyEchoHeaders?: Record<string, string>;
+  /** Internal — invoked once at handler creation with a {@link DrainHandle}
+   *  when sticky is enabled. Conformance fixtures use this to wire up the
+   *  test-only `/__test_drain__` admin endpoint without the library
+   *  exposing the registry directly. Production code should hold the
+   *  handle returned by a future `createHttpHandlerWithDrainHandle` helper. */
+  _onStickyHandle?: (handle: import("./sticky.js").DrainHandle) => void;
 }
 
 /** Serializer for stream state objects stored in state tokens. */

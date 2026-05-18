@@ -6,7 +6,7 @@ import {
   type Schema as A_Schema,
   RecordBatchStreamWriter,
 } from "@query-farm/apache-arrow";
-import type { VgiBatch, VgiSchema } from "../arrow/index.js";
+import { serializeBatches, type VgiBatch, type VgiSchema } from "../arrow/index.js";
 
 const STDOUT_FD = 1;
 
@@ -79,15 +79,13 @@ export class IpcStreamWriter {
    * Creates schema message, writes all batches (with their metadata), writes EOS.
    */
   writeStream(schema: VgiSchema, batches: VgiBatch[]): void {
-    const a = schema as unknown as A_Schema;
-    const writer = new RecordBatchStreamWriter();
-    writer.reset(undefined, a);
-    for (const batch of batches) {
-      (writer as any)._writeRecordBatch(batch as unknown as A_RecordBatch);
-    }
-    writer.close();
-    const bytes = writer.toUint8Array(true);
-    writeAll(this.fd, bytes);
+    // Delegate to the Arrow facade so the bytes-on-the-wire match the
+    // active backend (arrow-js by default, flechette under the `workerd`/
+    // `worker`/`browser` package.json conditions). The incremental stream
+    // below still uses arrow-js directly — flechette has no equivalent
+    // streaming-writer surface and only the stdio server uses the
+    // incremental path.
+    writeAll(this.fd, serializeBatches(schema, batches));
   }
 
   /**

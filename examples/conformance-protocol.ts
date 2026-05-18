@@ -1134,3 +1134,113 @@ protocol.unary("reset_cancel_probe", {
     return {};
   },
 });
+
+// ===== Sticky Sessions (3) =====
+//
+// `open_counter` / `increment_counter` / `close_counter` exercise the
+// runtime API `ctx.openSession` / `ctx.session` / `ctx.closeSession`.
+// Tests live in `vgi_rpc.conformance._pytest_suite::TestSticky` and run
+// only against HTTP servers that advertise `VGI-Sticky-Enabled: true`.
+class StickyCounter {
+  value: number;
+  closed = false;
+  constructor(initial: number) {
+    this.value = initial;
+  }
+  close(): void {
+    this.closed = true;
+  }
+}
+
+protocol.unary("open_counter", {
+  params: { initial: int },
+  result: { result: int },
+  handler: (p, ctx) => {
+    const cc = ctx as unknown as import("../src/types.js").CallContext;
+    cc.openSession(new StickyCounter(Number(p.initial)));
+    return { result: p.initial };
+  },
+});
+
+protocol.unary("increment_counter", {
+  params: { by: int },
+  result: { result: int },
+  handler: (p, ctx) => {
+    const cc = ctx as unknown as import("../src/types.js").CallContext;
+    const counter = cc.session;
+    if (!(counter instanceof StickyCounter)) {
+      throw new RuntimeError("no sticky counter bound to this request");
+    }
+    counter.value += Number(p.by);
+    return { result: BigInt(counter.value) };
+  },
+});
+
+protocol.unary("close_counter", {
+  params: {},
+  result: { result: int },
+  handler: (_p, ctx) => {
+    const cc = ctx as unknown as import("../src/types.js").CallContext;
+    const counter = cc.session;
+    if (!(counter instanceof StickyCounter)) {
+      throw new RuntimeError("no sticky counter bound to this request");
+    }
+    const final = counter.value;
+    cc.closeSession();
+    return { result: BigInt(final) };
+  },
+});
+
+// Streaming sticky-session methods — share the same `StickyCounter` bound
+// by `open_counter`. The producer increments and emits; the exchange adds
+// the input column sum and emits. Both use `ctx.session` per turn so the
+// session must be re-resolved by the sticky middleware on every HTTP
+// request. Mirrors `SessionCounterProducerState`/`SessionCounterExchangeState`
+// in vgi_rpc.conformance.
+const _SESSION_COUNTER_OUTPUT = new Schema([new Field("value", new Int64(), false)]);
+const _SESSION_COUNTER_EXCHANGE_INPUT = new Schema([new Field("by", new Int64(), false)]);
+
+protocol.producer<{ count: number; current: number }>("stream_session_counter", {
+  params: { count: int },
+  outputSchema: _SESSION_COUNTER_OUTPUT,
+  init: (p) => ({ count: Number(p.count), current: 0 }),
+  produce: (state, out) => {
+    if (state.current >= state.count) {
+      out.finish();
+      return;
+    }
+    const cc = out as unknown as import("../src/types.js").CallContext;
+    const counter = cc.session;
+    if (!(counter instanceof StickyCounter)) {
+      throw new RuntimeError("no sticky counter bound to this request");
+    }
+    counter.value += 1;
+    out.emitRow({ value: BigInt(counter.value) });
+    state.current += 1;
+  },
+});
+
+protocol.exchange<Record<string, never>>("exchange_session_counter", {
+  params: {},
+  inputSchema: _SESSION_COUNTER_EXCHANGE_INPUT,
+  outputSchema: _SESSION_COUNTER_OUTPUT,
+  init: () => ({}),
+  exchange: (_state, input: RecordBatch, out) => {
+    const cc = out as unknown as import("../src/types.js").CallContext;
+    const counter = cc.session;
+    if (!(counter instanceof StickyCounter)) {
+      throw new RuntimeError("no sticky counter bound to this request");
+    }
+    // Sum the "by" column across the input batch.
+    const col = input.getChild("by");
+    let total = 0n;
+    if (col) {
+      for (let i = 0; i < col.length; i++) {
+        const v = col.get(i);
+        total += typeof v === "bigint" ? v : BigInt(v ?? 0);
+      }
+    }
+    counter.value += Number(total);
+    out.emitRow({ value: BigInt(counter.value) });
+  },
+});

@@ -8,7 +8,14 @@ import {
   type VgiBatch,
   type VgiSchema,
 } from "../arrow/index.js";
-import { LOG_EXTRA_KEY, LOG_LEVEL_KEY, LOG_MESSAGE_KEY, REQUEST_ID_KEY, SERVER_ID_KEY } from "../constants.js";
+import {
+  ERROR_KIND_KEY,
+  LOG_EXTRA_KEY,
+  LOG_LEVEL_KEY,
+  LOG_MESSAGE_KEY,
+  REQUEST_ID_KEY,
+  SERVER_ID_KEY,
+} from "../constants.js";
 
 /**
  * Coerce values for Int64 schema fields from Number to BigInt.
@@ -68,13 +75,31 @@ export function buildResultBatch(
 export function buildErrorBatch(schema: VgiSchema, error: Error, serverId: string, requestId: string | null): VgiBatch {
   const metadata = new Map<string, string>();
   metadata.set(LOG_LEVEL_KEY, "EXCEPTION");
-  metadata.set(LOG_MESSAGE_KEY, `${error.constructor.name}: ${error.message}`);
+  // Prefer the standard `error.name` property (which user classes can set
+  // via `this.name = "Foo"` even after a bundler renames the class) over
+  // `constructor.name`, which is fragile under minification.
+  const exceptionType = typeof error.name === "string" && error.name !== "Error" ? error.name : error.constructor.name;
+  metadata.set(LOG_MESSAGE_KEY, `${exceptionType}: ${error.message}`);
+
+  // Hoist `errorKind` (typed-exception marker) into the EXCEPTION batch
+  // metadata as a top-level `vgi_rpc.error_kind` field so clients can
+  // branch on the kind without parsing the log_extra JSON blob. Mirrors
+  // Python's `Message.from_exception()` + `add_to_metadata()` hoisting.
+  const errorKind =
+    (error as { errorKind?: unknown }).errorKind ??
+    ((error.constructor as { errorKind?: unknown }).errorKind as unknown);
+  if (typeof errorKind === "string" && errorKind.length > 0) {
+    metadata.set(ERROR_KIND_KEY, errorKind);
+  }
 
   const extra: Record<string, any> = {
-    exception_type: error.constructor.name,
+    exception_type: exceptionType,
     exception_message: error.message,
     traceback: error.stack ?? "",
   };
+  if (typeof errorKind === "string" && errorKind.length > 0) {
+    extra.error_kind = errorKind;
+  }
   metadata.set(LOG_EXTRA_KEY, JSON.stringify(extra));
   metadata.set(SERVER_ID_KEY, serverId);
   if (requestId !== null) {

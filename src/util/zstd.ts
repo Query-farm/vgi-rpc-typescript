@@ -29,6 +29,18 @@ function _loadZlibOrNull(): any | null {
   }
 }
 
+/** Return true when the current runtime can produce zstd-compressed output.
+ *
+ *  Bun has `Bun.zstdCompressSync`; Node ≥22.15 / Deno ≥2.6.9 expose it via
+ *  `node:zlib`. Other runtimes (workerd, older Node) have no encoder. The
+ *  fzstd fallback is decompress-only so it doesn't count.
+ */
+export function isZstdCompressAvailable(): boolean {
+  if (isBun) return true;
+  const zlib = _loadZlibOrNull();
+  return typeof zlib?.zstdCompressSync === "function";
+}
+
 /** Compress data with zstd at the given level (1-22). */
 export async function zstdCompress(data: Uint8Array, level: number): Promise<Uint8Array<ArrayBuffer>> {
   if (isBun) {

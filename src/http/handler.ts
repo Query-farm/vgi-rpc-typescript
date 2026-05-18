@@ -5,10 +5,12 @@ import { batchFromColumns, field, schema as makeSchema, timestampMicro, utf8, ty
 import type { AuthContext } from "../auth.js";
 import { DESCRIBE_METHOD_NAME, PROTOCOL_HASH_KEY, RPC_ERROR_HEADER } from "../constants.js";
 import { buildDescribeBatch } from "../dispatch/describe.js";
+import { MethodNotImplementedError, SessionLostError } from "../errors.js";
 import type { Protocol } from "../protocol.js";
 import { type CallStatistics, type DispatchInfo, MethodType, type ServeStartHook, TransportKind } from "../types.js";
+import { gzipCompress, gzipDecompress } from "../util/gzip.js";
 import { randomBytes } from "../util/web-crypto.js";
-import { zstdCompress, zstdDecompress } from "../util/zstd.js";
+import { isZstdCompressAvailable, zstdCompress, zstdDecompress } from "../util/zstd.js";
 import { parseRequest } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
@@ -16,8 +18,16 @@ import { chainAuthenticate } from "./bearer.js";
 import {
   ARROW_CONTENT_TYPE,
   arrowResponse,
+  ECHO_HEADER_PREFIX,
   HttpRpcError,
   readRequestFromBody as readRequestFromBodyImported,
+  SESSION_ACCEPT_HEADER,
+  SESSION_CLOSE_HEADER,
+  SESSION_ENDPOINT,
+  SESSION_HEADER,
+  STICKY_DEFAULT_TTL_HEADER,
+  STICKY_ECHO_HEADERS_HEADER,
+  STICKY_ENABLED_HEADER,
   serializeIpcStream,
 } from "./common.js";
 import {
@@ -37,6 +47,17 @@ import {
   resolvePkceScope,
 } from "./oauth-pkce.js";
 import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
+import {
+  type DrainHandle,
+  makeDrainHandle,
+  openSessionToken,
+  SessionRegistry,
+  type StickySink,
+  sealSessionToken,
+  sessionIdHex,
+  startSessionReaper,
+} from "./sticky.js";
+import { computeAad } from "./token.js";
 import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
 
 const EMPTY_SCHEMA: VgiSchema = makeSchema([]);
@@ -225,8 +246,43 @@ export function createHttpHandler(
   const UPLOAD_URL_METHOD = "__upload_url__";
   const MAX_UPLOAD_URL_COUNT = 100;
 
+  // -------- Sticky session machinery --------
+  const stickyEnabled = options?.enableSticky === true;
+  const stickyDefaultTtl = options?.stickyDefaultTtl ?? 300;
+  // Frozen snapshot so per-response emission doesn't re-read a mutable
+  // operator dict mid-request.
+  const stickyEchoHeadersArr: Array<[string, string]> = stickyEnabled
+    ? Object.entries(options?.stickyEchoHeaders ?? {})
+    : [];
+  const sessionRegistry = stickyEnabled ? new SessionRegistry(stickyDefaultTtl) : null;
+  if (sessionRegistry) {
+    // Start the reaper lazily (it'll unref so it doesn't block exit).
+    startSessionReaper(sessionRegistry);
+  }
+  if (options?._onStickyHandle && sessionRegistry) {
+    options._onStickyHandle(makeDrainHandle(sessionRegistry));
+  }
+
+  // Encodings the server can produce on the response side. Mirrors
+  // Python's `VGI-Supported-Encodings` header from `_codec.py`.
+  // `compressionLevel` gates response compression overall; zstd is only
+  // advertised when the runtime can actually encode it (Bun, Node ≥22.15,
+  // Deno ≥2.6.9 — workerd lacks an encoder). gzip is always available via
+  // Web `CompressionStream`.
+  const supportedResponseEncodings: string[] = [];
+  const zstdResponseAvailable = compressionLevel != null && isZstdCompressAvailable();
+  if (zstdResponseAvailable) {
+    supportedResponseEncodings.push("zstd");
+  }
+  if (compressionLevel != null) {
+    supportedResponseEncodings.push("gzip");
+  }
+
   /** Append capability headers (advertised on every response when configured). */
   function addCapabilityHeaders(headers: Headers, isOptions = false): void {
+    if (supportedResponseEncodings.length) {
+      headers.set("VGI-Supported-Encodings", supportedResponseEncodings.join(", "));
+    }
     if (maxRequestBytes != null) {
       headers.set("VGI-Max-Request-Bytes", String(maxRequestBytes));
     }
@@ -245,7 +301,14 @@ export function createHttpHandler(
         headers.set("VGI-Max-Upload-Bytes", String(maxUploadBytes));
       }
     }
-    if (isOptions && (maxRequestBytes != null || uploadUrlProvider)) {
+    if (stickyEnabled) {
+      headers.set(STICKY_ENABLED_HEADER, "true");
+      headers.set(STICKY_DEFAULT_TTL_HEADER, String(Math.floor(stickyDefaultTtl)));
+      if (stickyEchoHeadersArr.length > 0) {
+        headers.set(STICKY_ECHO_HEADERS_HEADER, stickyEchoHeadersArr.map(([k]) => k).join(", "));
+      }
+    }
+    if (isOptions && (maxRequestBytes != null || uploadUrlProvider || stickyEnabled)) {
       // Match Python: cache discovery results for 5 minutes.
       if (!headers.has("Cache-Control")) {
         headers.set("Cache-Control", "public, max-age=300");
@@ -281,12 +344,21 @@ export function createHttpHandler(
     }
   }
 
-  async function compressIfAccepted(response: Response, clientAcceptsZstd: boolean): Promise<Response> {
-    if (compressionLevel == null || !clientAcceptsZstd) return response;
+  async function compressIfAccepted(
+    response: Response,
+    clientAcceptsZstd: boolean,
+    clientAcceptsGzip: boolean,
+  ): Promise<Response> {
+    if (compressionLevel == null) return response;
+    // Honour client preference: zstd preferred over gzip when the runtime
+    // can actually produce zstd. Fall through to gzip otherwise.
+    const codec = clientAcceptsZstd && zstdResponseAvailable ? "zstd" : clientAcceptsGzip ? "gzip" : null;
+    if (!codec) return response;
     const responseBody = new Uint8Array(await response.arrayBuffer());
-    const compressed = await zstdCompress(responseBody, compressionLevel);
+    const compressed =
+      codec === "zstd" ? await zstdCompress(responseBody, compressionLevel) : await gzipCompress(responseBody);
     const headers = new Headers(response.headers);
-    headers.set("Content-Encoding", "zstd");
+    headers.set("Content-Encoding", codec);
     return new Response(compressed as unknown as BodyInit, {
       status: response.status,
       headers,
@@ -367,6 +439,7 @@ export function createHttpHandler(
         maxResponseBytes != null ||
         maxExternalizedResponseBytes != null ||
         uploadUrlProvider ||
+        stickyEnabled ||
         path === `${prefix}/__capabilities__`
       ) {
         return new Response(null, { status: 204, headers });
@@ -427,6 +500,64 @@ export function createHttpHandler(
       return new Response("Not Found", { status: 404 });
     }
 
+    // DELETE {prefix}/__session__ — idempotent sticky-session teardown.
+    // Mirrors Python's `_SessionResource.on_delete`: missing token /
+    // malformed / wrong server_id / wrong principal / registry miss all
+    // return 200 (so the endpoint cannot be used to probe for live
+    // sessions); a successful close returns 204 + VGI-Session-Close: true.
+    if (request.method === "DELETE" && stickyEnabled && sessionRegistry && path === `${prefix}/${SESSION_ENDPOINT}`) {
+      const headers = new Headers();
+      addCorsHeaders(headers);
+      addCapabilityHeaders(headers);
+      const tokenHeader = (request.headers.get(SESSION_HEADER) ?? "").trim();
+      if (!tokenHeader) {
+        return new Response(null, { status: 200, headers });
+      }
+      // Optional auth — re-uses the same authenticate path so principal
+      // binding is consistent with the dispatch flow. AAD uses only the
+      // authenticated principal (matching `computeAad` in `token.ts`);
+      // the registry's principalKey compounds domain+principal as
+      // defense-in-depth.
+      let principalKey = "\u0000anonymous";
+      let aadPrincipal: string | null = null;
+      if (authenticate) {
+        try {
+          const auth = await authenticate(request);
+          if (auth?.authenticated) {
+            aadPrincipal = auth.principal ?? "";
+            principalKey = `${auth.domain ?? ""}\u0000${auth.principal ?? ""}`;
+          }
+        } catch {
+          // Anonymous principal — stale / forged tokens already won't
+          // decrypt under a real principal's AAD, so the auth failure
+          // here is harmless; treat as anonymous and let the next steps
+          // 200 out idempotently.
+        }
+      }
+      const aad = computeAad(aadPrincipal);
+      let opened: { serverId: string; sessionId: Uint8Array };
+      try {
+        opened = openSessionToken(tokenHeader, tokenKey, aad);
+      } catch {
+        return new Response(null, { status: 200, headers });
+      }
+      if (opened.serverId !== serverId) {
+        return new Response(null, { status: 200, headers });
+      }
+      const entry = sessionRegistry.get(opened.sessionId, principalKey);
+      if (!entry) {
+        return new Response(null, { status: 200, headers });
+      }
+      const release = await entry.lock.acquire();
+      try {
+        sessionRegistry.close(opened.sessionId);
+      } finally {
+        release();
+      }
+      headers.set(SESSION_CLOSE_HEADER, "true");
+      return new Response(null, { status: 204, headers });
+    }
+
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
@@ -435,6 +566,7 @@ export function createHttpHandler(
     const ctx = { ...baseCtx, cookies: parseRequestCookies(request) } as typeof baseCtx & {
       authContext?: AuthContext;
       cookies: ReadonlyMap<string, string>;
+      stickyContext?: StickySink;
     };
 
     // Authentication — run before content-type validation so unauthenticated
@@ -465,9 +597,100 @@ export function createHttpHandler(
       }
     }
 
+    // Hoisted ahead of sticky resolution so the SessionLost path's
+    // `compressIfAccepted` call can see them.
+    const acceptEncodingEarly = (request.headers.get("Accept-Encoding") ?? "").toLowerCase();
+    const clientAcceptsZstdEarly = acceptEncodingEarly.includes("zstd");
+    const clientAcceptsGzipEarly = acceptEncodingEarly.includes("gzip");
+
+    // -------- Sticky session resolution --------
+    // Mirrors `_StickyMiddleware.process_request` in Python: read
+    // VGI-Session-Accept + VGI-Session, decrypt the token (AAD-bound to
+    // the request's principal), look up the registry entry, and acquire
+    // the per-session lock so concurrent calls on the same session
+    // serialize. On any failure we surface a typed SessionLostError as
+    // a 500 + EXCEPTION-batch response (the same wire shape a
+    // dispatch-time throw would produce).
+    let stickyLockRelease: (() => void) | null = null;
+    let stickySink: StickySink | null = null;
+    if (stickyEnabled && sessionRegistry) {
+      const auth = ctx.authContext;
+      const aadPrincipal = auth?.authenticated ? (auth.principal ?? "") : null;
+      const principalKey = auth?.authenticated ? `${auth.domain ?? ""} ${auth.principal ?? ""}` : " anonymous";
+      const aad = computeAad(aadPrincipal);
+      const acceptOpens = (request.headers.get(SESSION_ACCEPT_HEADER) ?? "").trim().toLowerCase() === "true";
+      const sessionHeader = (request.headers.get(SESSION_HEADER) ?? "").trim();
+
+      let resumeState: unknown | null = null;
+      let resumeSessionId: string | null = null;
+
+      if (sessionHeader) {
+        let opened: { serverId: string; sessionId: Uint8Array };
+        try {
+          opened = openSessionToken(sessionHeader, tokenKey, aad);
+          if (opened.serverId !== serverId) {
+            throw new SessionLostError("session token was issued by a different worker (server_id mismatch)");
+          }
+        } catch (err) {
+          // Wrong-AAD / wrong-key / malformed → SessionLostError.
+          const e = err instanceof Error ? err : new Error(String(err));
+          const r = makeErrorResponse(e, 500);
+          addCapabilityHeaders(r.headers);
+          return compressIfAccepted(r, clientAcceptsZstdEarly, clientAcceptsGzipEarly);
+        }
+        const entry = sessionRegistry.get(opened.sessionId, principalKey);
+        if (!entry) {
+          const r = makeErrorResponse(new SessionLostError("session not found, expired, or principal mismatch"), 500);
+          addCapabilityHeaders(r.headers);
+          return compressIfAccepted(r, clientAcceptsZstdEarly, clientAcceptsGzipEarly);
+        }
+        stickyLockRelease = await entry.lock.acquire();
+        resumeState = entry.state;
+        resumeSessionId = sessionIdHex(opened.sessionId);
+      }
+
+      // Build the sink. Captures `principalKey` and `aad` so `_open`
+      // can register a new entry and mint a token bound to the same
+      // principal as the request.
+      const sink: StickySink = {
+        acceptOpens,
+        state: resumeState,
+        sessionId: resumeSessionId,
+        mintToken: null,
+        closed: false,
+        action: sessionHeader ? "resume" : "none",
+        _open(state: unknown, ttl?: number) {
+          const { sessionId, expiresAt } = sessionRegistry!.open(state, ttl, principalKey);
+          sink.sessionId = sessionIdHex(sessionId);
+          sink.state = state;
+          sink.mintToken = sealSessionToken(serverId, sessionId, expiresAt, tokenKey, aad);
+        },
+        _close() {
+          if (sink.closed) return;
+          const sid = sink.sessionId;
+          if (!sid) return;
+          // Decode hex back to bytes for registry lookup.
+          const bytes = new Uint8Array(sid.length / 2);
+          for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(sid.slice(i * 2, i * 2 + 2), 16);
+          // Release the lock before close so the resource isn't held
+          // while close() runs.
+          if (stickyLockRelease) {
+            stickyLockRelease();
+            stickyLockRelease = null;
+          }
+          sessionRegistry!.close(bytes);
+          sink.state = null;
+          sink.closed = true;
+        },
+      };
+      stickySink = sink;
+      ctx.stickyContext = sink;
+    }
+
     // Validate Content-Type
     const contentType = request.headers.get("Content-Type");
     if (!contentType || !contentType.includes(ARROW_CONTENT_TYPE)) {
+      if (stickyLockRelease) stickyLockRelease();
       return new Response(`Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`, { status: 415 });
     }
 
@@ -483,28 +706,36 @@ export function createHttpHandler(
       }
     }
 
-    const clientAcceptsZstd = (request.headers.get("Accept-Encoding") ?? "").includes("zstd");
+    const clientAcceptsZstd = clientAcceptsZstdEarly;
+    const clientAcceptsGzip = clientAcceptsGzipEarly;
 
     // Read body, decompressing if needed
     let body = new Uint8Array(await request.arrayBuffer());
     if (maxRequestBytes != null && !exemptFromMaxBytes && body.byteLength > maxRequestBytes) {
       return new Response("Request body too large", { status: 413 });
     }
-    const contentEncoding = request.headers.get("Content-Encoding");
-    if (contentEncoding === "zstd") {
+    const contentEncoding = (request.headers.get("Content-Encoding") ?? "").trim().toLowerCase();
+    if (contentEncoding === "zstd" || contentEncoding === "gzip") {
       try {
-        body = await zstdDecompress(body, maxDecompressedRequestBytes);
+        body =
+          contentEncoding === "zstd"
+            ? await zstdDecompress(body, maxDecompressedRequestBytes)
+            : await gzipDecompress(body, maxDecompressedRequestBytes);
       } catch (error: any) {
         // Decompression-bomb refusal surfaces as 413 (the wire-cap
-        // sibling of maxRequestBytes); other zstd errors are 400 (bad
-        // request).
-        const message = error?.message ?? "zstd decompression failed";
-        const status = message.includes("exceed cap") ? 413 : 400;
+        // sibling of maxRequestBytes); other decode errors are 400.
+        const message = error?.message ?? `${contentEncoding} decompression failed`;
+        const status = message.includes("exceed") || message.includes("cap") ? 413 : 400;
         const headers = new Headers({ "Content-Type": "text/plain" });
         addCorsHeaders(headers);
         addCapabilityHeaders(headers);
         return new Response(message, { status, headers });
       }
+    } else if (contentEncoding) {
+      const headers = new Headers({ "Content-Type": "text/plain" });
+      addCorsHeaders(headers);
+      addCapabilityHeaders(headers);
+      return new Response(`Unsupported Content-Encoding: ${contentEncoding}`, { status: 415, headers });
     }
 
     // Route: {prefix}/__upload_url__/init — vend pre-signed upload URL pairs
@@ -531,10 +762,13 @@ export function createHttpHandler(
           urls.push(await uploadUrlProvider.generateUploadUrl());
         }
 
-        // Timestamp(MICROSECOND) stores int64 microseconds since epoch.
-        // Both backends accept BigInt for int64-class types (the arrow-js
-        // facade auto-coerces; flechette requires it under useBigIntTimestamp).
-        const expiresAt = urls.map((u) => BigInt(u.expiresAt.getTime()) * 1000n);
+        // Timestamp(MICROSECOND) — arrow-js's `setTimestampMicrosecond`
+        // visitor internally does `BigInt(value * 1000)`, so we have to
+        // pass a Number of milliseconds. Passing a BigInt of microseconds
+        // would trip "Invalid mix of BigInt and other type in
+        // multiplication". The Date.getTime() ms value fits in Number
+        // safely for the next ~285k years.
+        const expiresAt = urls.map((u) => u.expiresAt.getTime());
         const resultBatch = batchFromColumns(UPLOAD_URL_RESPONSE_SCHEMA, {
           upload_url: urls.map((u) => u.uploadUrl),
           download_url: urls.map((u) => u.downloadUrl),
@@ -544,16 +778,16 @@ export function createHttpHandler(
         const response = arrowResponse(responseBody);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, clientAcceptsZstd);
+        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
       } catch (error: any) {
         if (error instanceof HttpRpcError) {
           const r = makeErrorResponse(error, error.statusCode, UPLOAD_URL_RESPONSE_SCHEMA);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, clientAcceptsZstd);
+          return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
         }
         const r = makeErrorResponse(error, 500, UPLOAD_URL_RESPONSE_SCHEMA);
         addCapabilityHeaders(r.headers);
-        return compressIfAccepted(r, clientAcceptsZstd);
+        return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
       }
     }
 
@@ -562,9 +796,9 @@ export function createHttpHandler(
       try {
         const response = await httpDispatchDescribe(protocol.name, methods, serverId);
         addCorsHeaders(response.headers);
-        return compressIfAccepted(response, clientAcceptsZstd);
+        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
       } catch (error: any) {
-        return compressIfAccepted(makeErrorResponse(error, 500), clientAcceptsZstd);
+        return compressIfAccepted(makeErrorResponse(error, 500), clientAcceptsZstd, clientAcceptsGzip);
       }
     }
 
@@ -592,8 +826,10 @@ export function createHttpHandler(
     const method = methods.get(methodName);
     if (!method) {
       const available = [...methods.keys()].sort();
-      const err = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
-      return compressIfAccepted(makeErrorResponse(err, 404), clientAcceptsZstd);
+      const err = new MethodNotImplementedError(
+        `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
+      );
+      return compressIfAccepted(makeErrorResponse(err, 404), clientAcceptsZstd, clientAcceptsGzip);
     }
 
     // Fire on_serve_start lazily (idempotent on success). A failure here
@@ -666,19 +902,54 @@ export function createHttpHandler(
       }
       addCorsHeaders(response.headers);
       addCapabilityHeaders(response.headers);
-      return compressIfAccepted(response, clientAcceptsZstd);
+      applyStickyResponseHeaders(response.headers, stickySink);
+      return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
     } catch (error: any) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
       if (error instanceof HttpRpcError) {
         const r = makeErrorResponse(error, error.statusCode);
         addCapabilityHeaders(r.headers);
-        return compressIfAccepted(r, clientAcceptsZstd);
+        applyStickyResponseHeaders(r.headers, stickySink);
+        return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
       }
       const r = makeErrorResponse(error, 500);
       addCapabilityHeaders(r.headers);
-      return compressIfAccepted(r, clientAcceptsZstd);
+      applyStickyResponseHeaders(r.headers, stickySink);
+      return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
     } finally {
+      // Surface sticky lifecycle on the access log.
+      if (stickySink) {
+        if (stickySink.sessionId) info.sessionId = stickySink.sessionId;
+        info.sessionAction = stickySink.action;
+      }
       dispatchHook?.onDispatchEnd(hookToken, info, stats, dispatchError);
+      // Release the per-session lock if dispatch held it and the handler
+      // didn't already release it via close_session.
+      if (stickyLockRelease) {
+        try {
+          stickyLockRelease();
+        } catch {
+          // ignore — mutex release is best-effort
+        }
+        stickyLockRelease = null;
+      }
     }
   };
+
+  /** Emit sticky-session response headers based on the sink's per-request state. */
+  function applyStickyResponseHeaders(headers: Headers, sink: StickySink | null): void {
+    if (!sink) return;
+    if (sink.mintToken !== null) {
+      headers.set(SESSION_HEADER, sink.mintToken);
+      // Echo headers — emitted only on the session-opening response. The
+      // client captures `VGI-Echo-<name>` and replays `<name>` for the
+      // remainder of the session view.
+      for (const [name, value] of stickyEchoHeadersArr) {
+        headers.set(`${ECHO_HEADER_PREFIX}${name}`, value);
+      }
+    }
+    if (sink.closed) {
+      headers.set(SESSION_CLOSE_HEADER, "true");
+    }
+  }
 }

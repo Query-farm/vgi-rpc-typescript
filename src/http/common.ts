@@ -13,6 +13,27 @@ import type { CookieSpec } from "../types.js";
 
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
 
+// Sticky session header conventions (HTTP-only). Mirrors Python's
+// `vgi_rpc.http._common`. Headers — not cookies — so multiple concurrent
+// sessions to one host from a single client multiplex correctly.
+export const SESSION_HEADER = "VGI-Session";
+export const SESSION_ACCEPT_HEADER = "VGI-Session-Accept";
+export const SESSION_CLOSE_HEADER = "VGI-Session-Close";
+export const STICKY_ENABLED_HEADER = "VGI-Sticky-Enabled";
+export const STICKY_DEFAULT_TTL_HEADER = "VGI-Sticky-Default-TTL";
+export const STICKY_ECHO_HEADERS_HEADER = "VGI-Sticky-Echo-Headers";
+
+/** Prefix the server uses to tell the client "echo this header on subsequent
+ *  requests in this session". Clients capture and replay
+ *  `VGI-Echo-<name>: <value>` as plain `<name>: <value>` for the session
+ *  lifetime — used for client-driven routing (e.g. `fly-force-instance-id`). */
+export const ECHO_HEADER_PREFIX = "VGI-Echo-";
+
+/** Framework-managed sticky session teardown endpoint path component.
+ *  `DELETE {prefix}/__session__` idempotently closes the session referenced
+ *  by the request's `VGI-Session` header. */
+export const SESSION_ENDPOINT = "__session__";
+
 /** Serialize a CookieSpec into a Set-Cookie header value. */
 export function formatSetCookieHeader(c: CookieSpec): string {
   const parts: string[] = [];

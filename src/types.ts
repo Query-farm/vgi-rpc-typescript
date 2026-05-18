@@ -74,6 +74,20 @@ export interface CookieSpec extends CookieAttrs {
   delete: boolean;
 }
 
+/** Per-request sticky-session sink. Internal — populated by the HTTP handler
+ *  when sticky sessions are enabled, read/mutated by {@link CallContext}'s
+ *  `openSession` / `closeSession` / `session` getters. */
+export interface StickyContext {
+  readonly acceptOpens: boolean;
+  state: unknown | null;
+  sessionId: string | null;
+  mintToken: string | null;
+  closed: boolean;
+  action: "none" | "resume" | "open" | "close";
+  _open(state: unknown, ttl: number | undefined): void;
+  _close(): void;
+}
+
 /** Extended context with authentication info, available to handlers. */
 export interface CallContext extends LogContext {
   readonly auth: AuthContext;
@@ -112,12 +126,51 @@ export interface CallContext extends LogContext {
    * inside a unary RPC method served over HTTP; throws otherwise.
    */
   deleteCookie(name: string, opts?: { path?: string; domain?: string }): void;
+
+  /**
+   * Live sticky-session state object, or `null` when no session is bound to
+   * this request. HTTP-only — other transports always return `null`.
+   */
+  readonly session: unknown | null;
+
+  /**
+   * Opaque 24-char-hex session ID, or `null` when no session is bound.
+   * Survives {@link closeSession} so post-close access-log records still
+   * carry the id.
+   */
+  readonly sessionId: string | null;
+
+  /**
+   * Register a sticky session holding *state* for subsequent requests on
+   * this transport. HTTP-only — throws on other transports, on calls
+   * without the `VGI-Session-Accept: true` opt-in header, or when a
+   * session is already bound to this request.
+   */
+  openSession(state: unknown, ttl?: number): void;
+
+  /** Invalidate the sticky session bound to this request. Idempotent. */
+  closeSession(): void;
 }
 
 const EMPTY_COOKIES: ReadonlyMap<string, string> = new Map();
 
 function cookieNotUnaryHttpError(): Error {
   return new Error("setCookie/deleteCookie is only supported inside unary RPC methods served over HTTP");
+}
+
+/** Surface as `exception_type: "RuntimeError"` on the EXCEPTION batch — the
+ *  wire serializer reads `error.constructor.name`, so we need a real subclass
+ *  rather than just `err.name = "RuntimeError"`. Matches Python's pattern of
+ *  raising `RuntimeError` from the runtime API methods. */
+class RuntimeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeError";
+  }
+}
+
+function runtimeError(message: string): Error {
+  return new RuntimeError(message);
 }
 
 /** Handler for unary (request-response) RPC methods. */
@@ -200,6 +253,13 @@ export interface DispatchInfo {
   streamId?: string;
   /** True when a stream was cancelled by the client. */
   cancelled?: boolean;
+  /** Sticky session ID (24-char hex). Present only when the request was bound
+   *  to a sticky session or the method opened/closed one. */
+  sessionId?: string;
+  /** Sticky-session lifecycle action observed during dispatch — one of
+   *  `"none"` / `"resume"` / `"open"` / `"close"`. Omitted when sticky is
+   *  disabled or the request never touched the sticky middleware. */
+  sessionAction?: "none" | "resume" | "open" | "close";
 }
 
 /** Per-call I/O counters, matching Python's CallStatistics. */
@@ -243,6 +303,7 @@ export class OutputCollector implements CallContext {
   private _requestId: string | null;
   private _cookieSinkEnabled = false;
   private _responseCookies: CookieSpec[] = [];
+  private _stickyContext: StickyContext | null = null;
   readonly auth: AuthContext;
   readonly cookies: ReadonlyMap<string, string>;
   readonly kind?: TransportKind;
@@ -318,6 +379,48 @@ export class OutputCollector implements CallContext {
       path: opts?.path,
       domain: opts?.domain,
     });
+  }
+
+  /** Attach the sticky-session sink the HTTP handler built for this request.
+   *  @internal */
+  attachStickyContext(ctx: StickyContext): void {
+    this._stickyContext = ctx;
+  }
+
+  get session(): unknown | null {
+    return this._stickyContext?.state ?? null;
+  }
+
+  get sessionId(): string | null {
+    return this._stickyContext?.sessionId ?? null;
+  }
+
+  openSession(state: unknown, ttl?: number): void {
+    const sink = this._stickyContext;
+    if (!sink) {
+      throw runtimeError("sticky sessions not available on this transport");
+    }
+    if (!sink.acceptOpens) {
+      throw runtimeError(
+        "client did not opt in to sticky sessions " +
+          "(missing VGI-Session-Accept: true header — open the call inside " +
+          "an HttpConnection.with_session_token() block)",
+      );
+    }
+    if (sink.state !== null) {
+      throw runtimeError("a sticky session is already active for this request");
+    }
+    sink._open(state, ttl);
+    sink.action = "open";
+  }
+
+  closeSession(): void {
+    const sink = this._stickyContext;
+    if (!sink) {
+      throw runtimeError("sticky sessions not available on this transport");
+    }
+    sink._close();
+    sink.action = "close";
   }
 
   get outputSchema(): VgiSchema {

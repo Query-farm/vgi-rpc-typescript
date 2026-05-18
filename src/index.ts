@@ -8,6 +8,7 @@ export {
   DESCRIBE_METHOD_NAME,
   DESCRIBE_VERSION,
   DESCRIBE_VERSION_KEY,
+  ERROR_KIND_KEY,
   LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
@@ -20,7 +21,16 @@ export {
   SERVER_ID_KEY,
   STATE_KEY,
 } from "./constants.js";
-export { RpcError, VersionError } from "./errors.js";
+export {
+  ERROR_KIND_METHOD_NOT_IMPLEMENTED,
+  ERROR_KIND_SERVER_DRAINING,
+  ERROR_KIND_SESSION_LOST,
+  MethodNotImplementedError,
+  RpcError,
+  ServerDrainingError,
+  SessionLostError,
+  VersionError,
+} from "./errors.js";
 export {
   type ExternalLocationConfig,
   type ExternalStorage,

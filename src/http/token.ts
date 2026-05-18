@@ -1,16 +1,11 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
-import { randomBytes } from "../util/web-crypto.js";
+import { openBytes, SealError, sealBytes } from "../crypto.js";
 
 const _UTF8 = new TextEncoder();
 
 const TOKEN_VERSION = 4;
-const VERSION_LEN = 1;
-const NONCE_LEN = 24; // XChaCha20-Poly1305 nonce (192 bits — random-safe at any volume).
-const TAG_LEN = 16; // Poly1305 authentication tag length.
-const MIN_TOKEN_LEN = VERSION_LEN + NONCE_LEN + TAG_LEN;
 
 const AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\0");
 
@@ -20,7 +15,7 @@ const AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\0");
  * strings, so an anonymous token cannot be opened by a named identity
  * (and vice versa).
  */
-function computeAad(principal: string | null | undefined): Uint8Array {
+export function computeAad(principal: string | null | undefined): Uint8Array {
   if (!principal) {
     const tail = _UTF8.encode("\0anonymous");
     return concatBytes(AAD_PREFIX, tail);
@@ -36,7 +31,7 @@ function computeAad(principal: string | null | undefined): Uint8Array {
 // in chunks to stay below the per-call argument limit (Latin-1 only, so we
 // move byte-by-byte through `String.fromCharCode`).
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   let s = "";
   for (let i = 0; i < bytes.length; i += 0x8000) {
     s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
@@ -44,7 +39,7 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
-function base64ToBytes(b64: string): Uint8Array {
+export function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -140,14 +135,7 @@ export function packStateToken(
   offset += 4;
   plaintext.set(inputSchemaBytes, offset);
 
-  const nonce = randomBytes(NONCE_LEN);
-  const aad = computeAad(principal);
-  const ciphertext = xchacha20poly1305(tokenKey, nonce, aad).encrypt(plaintext);
-
-  const wire = new Uint8Array(VERSION_LEN + NONCE_LEN + ciphertext.length);
-  wire[0] = TOKEN_VERSION;
-  wire.set(nonce, VERSION_LEN);
-  wire.set(ciphertext, VERSION_LEN + NONCE_LEN);
+  const wire = sealBytes(plaintext, tokenKey, { aad: computeAad(principal), version: TOKEN_VERSION });
   return bytesToBase64(wire);
 }
 
@@ -173,30 +161,25 @@ export function unpackStateToken(
   tokenTtl: number,
   principal: string | null | undefined,
 ): UnpackedToken {
-  if (tokenKey.length !== 32) {
-    throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
-  }
   let raw: Uint8Array;
   try {
     raw = base64ToBytes(tokenBase64);
   } catch {
     throw new Error("Malformed state token");
   }
-  if (raw.length < MIN_TOKEN_LEN) {
-    throw new Error("State token too short");
+  // Pre-check the envelope version separately so callers can distinguish
+  // "wrong format" from "tampered". Mirrors the pre-refactor error shape.
+  if (raw.length >= 1 && raw[0] !== TOKEN_VERSION) {
+    throw new Error(`Unsupported state token version: ${raw[0]}`);
   }
-  const version = raw[0];
-  if (version !== TOKEN_VERSION) {
-    throw new Error(`Unsupported state token version: ${version}`);
-  }
-  const nonce = raw.subarray(VERSION_LEN, VERSION_LEN + NONCE_LEN);
-  const ciphertext = raw.subarray(VERSION_LEN + NONCE_LEN);
-
   let plaintext: Uint8Array;
   try {
-    plaintext = xchacha20poly1305(tokenKey, nonce, computeAad(principal)).decrypt(ciphertext);
-  } catch {
-    throw new Error("State token signature verification failed");
+    plaintext = openBytes(raw, tokenKey, { aad: computeAad(principal), version: TOKEN_VERSION });
+  } catch (err) {
+    if (err instanceof SealError) {
+      throw new Error("State token signature verification failed");
+    }
+    throw err;
   }
   if (plaintext.length < 8) {
     throw new Error("State token truncated");

@@ -27,3 +27,8 @@ export const LOCATION_KEY = "vgi_rpc.location";
 export const LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
 
 export const RPC_ERROR_HEADER = "X-VGI-RPC-Error";
+
+/** Top-level metadata key on an EXCEPTION batch identifying the error category.
+ *  Hoisted by `buildErrorBatch` when the thrown error has a static or instance
+ *  `errorKind` property. Mirrors Python's `vgi_rpc.metadata.ERROR_KIND_KEY`. */
+export const ERROR_KIND_KEY = "vgi_rpc.error_kind";

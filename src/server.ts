@@ -6,7 +6,7 @@ import { DESCRIBE_METHOD_NAME } from "./constants.js";
 import { buildDescribeBatch } from "./dispatch/describe.js";
 import { dispatchStream } from "./dispatch/stream.js";
 import { dispatchUnary } from "./dispatch/unary.js";
-import { RpcError, VersionError } from "./errors.js";
+import { MethodNotImplementedError, RpcError, VersionError } from "./errors.js";
 import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
 import {
@@ -198,7 +198,9 @@ export class VgiRpcServer {
     const method = methods.get(methodName);
     if (!method) {
       const available = [...methods.keys()].sort();
-      const err = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
+      const err = new MethodNotImplementedError(
+        `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
+      );
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, this.serverId, requestId);
       writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
