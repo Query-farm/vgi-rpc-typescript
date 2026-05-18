@@ -94,19 +94,23 @@ export function serializeBatch(batch: VgiBatch): Uint8Array {
 
 export function deserializeBatch(bytes: Uint8Array): VgiBatch {
   const table: any = tableFromIPC(bytes, EXTRACT_OPTS);
-  // flechette doesn't surface Message-level custom_metadata or RecordBatch
-  // length when the schema has zero columns. The vgi-rpc wire protocol uses
-  // exactly that shape (1-row, 0-field, metadata-bearing batches) for state
-  // tokens / cancellations, so backfill both here. See message-meta.ts.
-  const meta = readFirstRecordBatchMeta(bytes);
-  if (meta === null) return table as VgiBatch;
-  const wantRows = table.numRows === 0 && meta.numRows > 0;
-  const wantMeta = !table.metadata && meta.metadata.size > 0;
+  // The patched flechette decoder surfaces per-record-batch custom_metadata
+  // on `_vgiRecordMetadata`. flechette still doesn't carry RecordBatch
+  // length when the schema has zero columns (it derives numRows from the
+  // first column's batch length, which doesn't exist), so we still
+  // re-parse the FlatBuffer to recover the row count for that one
+  // shape. See message-meta.ts.
+  const recordMd: Map<string, string> | undefined = table._vgiRecordMetadata;
+  const wantMeta = !!recordMd && recordMd.size > 0;
+  // numRows fallback is only needed for zero-column batches.
+  const needRowsFallback = table.numRows === 0 && table.schema.fields.length === 0;
+  const meta = needRowsFallback ? readFirstRecordBatchMeta(bytes) : null;
+  const wantRows = meta !== null && meta.numRows > 0;
   if (!wantRows && !wantMeta) return table as VgiBatch;
   return new Proxy(table, {
     get(target, prop, receiver) {
-      if (wantRows && prop === "numRows") return meta.numRows;
-      if (wantMeta && prop === "metadata") return meta.metadata;
+      if (wantRows && prop === "numRows") return meta!.numRows;
+      if (wantMeta && prop === "metadata") return recordMd;
       return Reflect.get(target, prop, receiver);
     },
   }) as unknown as VgiBatch;
@@ -190,9 +194,13 @@ export function emptyColumnData(type: VgiDataType): VgiColumnData {
 }
 
 /**
- * 0-row batch carrying schema-level metadata. flechette's tableFromColumns
- * doesn't accept metadata directly — we construct via batchFromColumns, then
- * patch the schema.metadata onto the returned table.
+ * 0-row batch carrying per-record-batch (NOT schema) custom metadata.
+ *
+ * The vgi-rpc wire protocol puts per-call metadata (`vgi_rpc.log_level`,
+ * `vgi_rpc.server_id`, `vgi_rpc.request_id`, etc.) on the RecordBatch
+ * message — not on the Schema message. We stash it on the Table via
+ * `_vgiRecordMetadata`; our patched `tablesToIPC` picks it up and emits
+ * it as the Message FlatBuffer's `custom_metadata` field.
  */
 export function emptyBatchWithMetadata(s: VgiSchema, metadata?: Map<string, string>): VgiBatch {
   const cols: Record<string, Column<any>> = {};
@@ -200,14 +208,11 @@ export function emptyBatchWithMetadata(s: VgiSchema, metadata?: Map<string, stri
     cols[f.name] = f_columnFromArray([], f.type as any, EXTRACT_OPTS);
   }
   const t = tableFromColumns(cols) as any;
-  if (metadata && metadata.size > 0) {
-    // flechette Schema.metadata is mutable.
-    t.schema.metadata = metadata;
-  }
+  attachBatchMetadata(t, metadata);
   return t as unknown as VgiBatch;
 }
 
-/** 1-row result batch with optional metadata. */
+/** 1-row result batch with optional per-record-batch metadata. */
 export function singleRowBatchWithMetadata(
   s: VgiSchema,
   values: Record<string, any>,
@@ -222,10 +227,22 @@ export function singleRowBatchWithMetadata(
     cols[f.name] = f_columnFromArray([val], f.type as any, EXTRACT_OPTS);
   }
   const t = tableFromColumns(cols) as any;
-  if (metadata && metadata.size > 0) {
-    t.schema.metadata = metadata;
-  }
+  attachBatchMetadata(t, metadata);
   return t as unknown as VgiBatch;
+}
+
+/** Pin per-record-batch metadata so that:
+ *  - `batch.metadata` surfaces it to consumer code (matching arrow-js's
+ *    RecordBatch.metadata getter behavior).
+ *  - The patched flechette encoder picks it up via `_vgiRecordMetadata`
+ *    and emits it as the IPC Message's `custom_metadata` field. */
+function attachBatchMetadata(t: any, metadata?: Map<string, string>): void {
+  if (!metadata || metadata.size === 0) return;
+  t._vgiRecordMetadata = metadata;
+  // Surface as `batch.metadata` so wire/dispatch code (which expects the
+  // arrow-js shape) works uniformly. flechette's Table class has no
+  // top-level `metadata` property, so this assignment is non-shadowing.
+  t.metadata = metadata;
 }
 
 /** flechette has no Data passthrough concept (no opaque-type quirk). */
@@ -233,14 +250,14 @@ export function isOpaqueData(_val: unknown): boolean {
   return false;
 }
 
-/** Re-emit a batch with a different metadata map (same schema + data).
- *  flechette stores metadata on Schema; we patch a shallow copy so the
- *  caller's reference isn't mutated. */
+/** Re-emit a batch with a different per-record-batch metadata map (same
+ *  schema + data). Shallow-clones the Table so the caller's reference is
+ *  not mutated. */
 export function withBatchMetadata(batch: VgiBatch, metadata: Map<string, string>): VgiBatch {
   const t = batch as any;
-  // Clone the schema with new metadata; reuse the underlying batches.
-  const newSchema = { ...t.schema, metadata };
-  return { ...t, schema: newSchema } as unknown as VgiBatch;
+  const clone = Object.assign(Object.create(Object.getPrototypeOf(t)), t);
+  attachBatchMetadata(clone, metadata);
+  return clone as unknown as VgiBatch;
 }
 
 /**
