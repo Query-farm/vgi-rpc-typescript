@@ -21,6 +21,16 @@ BUN_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance.ts")]
 BUN_HTTP_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http.ts")]
 BUN_HTTP_ZSTD_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-zstd.ts")]
 BUN_HTTP_AUTH_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-auth.ts")]
+# Flechette variants — same source, different Arrow backend via Node's
+# conditional resolution (workerd → impl-flechette, default → impl-arrowjs).
+# Bun resolves the `imports` map in package.json by `--conditions`.
+BUN_FLECHETTE_WORKER = ["bun", "--conditions=workerd", "run", os.path.join(_TS_DIR, "examples", "conformance.ts")]
+BUN_FLECHETTE_HTTP_WORKER = [
+    "bun",
+    "--conditions=workerd",
+    "run",
+    os.path.join(_TS_DIR, "examples", "conformance-http.ts"),
+]
 
 
 def _start_http_server(
@@ -67,9 +77,26 @@ def ts_transport() -> Iterator[SubprocessTransport]:
 
 
 @pytest.fixture(scope="session")
+def ts_flechette_transport() -> Iterator[SubprocessTransport]:
+    """Stdio worker pinned to the flechette Arrow backend via --conditions=workerd."""
+    transport = SubprocessTransport(BUN_FLECHETTE_WORKER)
+    yield transport
+    transport.close()
+
+
+@pytest.fixture(scope="session")
 def ts_http_port() -> Iterator[int]:
     """Start Bun conformance HTTP server."""
     proc, port = _start_http_server(BUN_HTTP_WORKER)
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def ts_flechette_http_port() -> Iterator[int]:
+    """Start Bun conformance HTTP server pinned to the flechette Arrow backend."""
+    proc, port = _start_http_server(BUN_FLECHETTE_HTTP_WORKER)
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -159,6 +186,20 @@ def ts_http_zstd_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_strict_cap_port() -> Iterator[int]:
+    """Bun conformance HTTP server with tight body + external caps for strict-fail tests.
+
+    Mirrors Python's `tests/serve_conformance_http_strict.py`: 1 MiB cap on
+    both inline and externalized responses so producer/unary/exchange tests
+    that emit oversized payloads provably trip the strict-fail path.
+    """
+    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--strict"])
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def ts_node_http_port() -> Iterator[int]:
     """Start Node.js conformance HTTP server."""
     if not shutil.which("node"):
@@ -219,13 +260,25 @@ def ts_deno_http_zstd_port() -> Iterator[int]:
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 
 
-@pytest.fixture(params=[
+_DEFAULT_TRANSPORTS = [
     "pipe", "subprocess",
     "http", "http-zstd",
     "http_externalize_always",
     "node-http", "node-http-zstd",
     "deno-http", "deno-http-zstd",
-])
+]
+
+# Flechette Arrow backend — same TS source, different `imports` condition.
+# Opt-in via VGI_TEST_FLECHETTE=1 because the flechette backend currently
+# has known wire-encoding gaps (list buffer layout, batch metadata
+# attachment on zero-row batches, several wide-type serialization issues).
+# Tracking issue: see TODO at top of src/arrow/impl-flechette/index.ts.
+_TRANSPORTS = _DEFAULT_TRANSPORTS + (
+    ["flechette-pipe", "flechette-http"] if os.environ.get("VGI_TEST_FLECHETTE") == "1" else []
+)
+
+
+@pytest.fixture(params=_TRANSPORTS)
 def conformance_conn(
     request: pytest.FixtureRequest,
     ts_transport: SubprocessTransport,
@@ -300,6 +353,24 @@ def conformance_conn(
                 f"http://127.0.0.1:{port}",
                 on_log=on_log,
                 compression_level=3,
+            )
+        elif request.param == "flechette-pipe":
+
+            @contextlib.contextmanager
+            def _flechette_pipe_conn() -> Iterator[_RpcProxy]:
+                transport = SubprocessTransport(BUN_FLECHETTE_WORKER)
+                try:
+                    yield _RpcProxy(ConformanceService, transport, on_log)
+                finally:
+                    transport.close()
+
+            return _flechette_pipe_conn()
+        elif request.param == "flechette-http":
+            port = request.getfixturevalue("ts_flechette_http_port")
+            return http_connect(
+                ConformanceService,
+                f"http://127.0.0.1:{port}",
+                on_log=on_log,
             )
         else:
             # "subprocess" — shared transport
