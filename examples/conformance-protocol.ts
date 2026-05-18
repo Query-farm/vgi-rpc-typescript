@@ -227,6 +227,11 @@ function buildMapDataFromEntries(keyField: Field, valueField: Field, keys: any[]
 
 function buildRichHeader(seed: number): Record<string, any> {
   const s = BigInt(seed);
+  // Backend-agnostic header values: plain JS Maps, objects, and arrays
+  // rather than arrow-js `Data` blobs from `makeData` / `vectorFromArray`.
+  // Both arrow-js and flechette column builders accept the JS-native
+  // shapes — Map → Map column, plain object → Struct column,
+  // Array<object> → List<Struct> column.
   return {
     str_field: `seed-${seed}`,
     bytes_field: new Uint8Array([seed % 256, (seed + 1) % 256, (seed + 2) % 256]),
@@ -235,27 +240,20 @@ function buildRichHeader(seed: number): Record<string, any> {
     bool_field: seed % 2 === 0,
     list_of_int: [s, s + 1n, s + 2n],
     list_of_str: [`item-${seed}`, `item-${seed + 1}`],
-    dict_field: buildMapDataFromEntries(
-      field("key", utf8(), false),
-      field("value", int64(), false),
-      ["a", "b"],
-      [s, s + 1n],
-    ),
+    dict_field: new Map<string, bigint>([
+      ["a", s],
+      ["b", s + 1n],
+    ]),
     enum_field: STATUS_CYCLE[seed % 3],
-    nested_point: buildStructPointData(seed, seed * 2),
+    nested_point: { x: seed, y: seed * 2 },
     optional_str: seed % 2 === 0 ? `opt-${seed}` : null,
     optional_int: seed % 2 === 1 ? seed * 3 : null,
-    optional_nested: seed % 3 === 0 ? buildStructPointData(seed, 0) : buildNullStructPointData(),
-    list_of_nested: buildListOfPointsData([{ x: seed, y: seed + 1 }]),
+    optional_nested: seed % 3 === 0 ? { x: seed, y: 0 } : null,
+    list_of_nested: [{ x: seed, y: seed + 1 }],
     nested_list: [[s, s + 1n], [s + 2n]],
     annotated_int32: seed % 1000,
     annotated_float32: seed / 3.0,
-    dict_str_str: buildMapDataFromEntries(
-      field("key", utf8(), false),
-      field("value", utf8(), false),
-      ["key"],
-      [`val-${seed}`],
-    ),
+    dict_str_str: new Map<string, string>([["key", `val-${seed}`]]),
   };
 }
 
@@ -403,15 +401,14 @@ protocol.unary("echo_nested_list", {
   params: schema([field("matrix", nestedList, false)]),
   result: schema([field("result", nestedList, false)]),
   handler: (p) => {
-    // Nested list: outer Vector of inner Vectors → JS array of arrays
-    const outer = p.matrix;
-    const rows: bigint[][] = [];
-    for (let i = 0; i < outer.length; i++) {
-      const inner = outer.get(i);
-      const row: bigint[] = [];
-      for (let j = 0; j < inner.length; j++) row.push(inner.get(j));
-      rows.push(row);
-    }
+    // Backend-agnostic extraction: arrow-js returns nested Vectors with
+    // `.get(i)`, flechette returns nested plain JS arrays. Materialise
+    // either shape into Array<Array<bigint>>.
+    const toArray = (v: any): any[] =>
+      v && typeof v.get === "function" && typeof v.length === "number"
+        ? Array.from({ length: v.length }, (_, k) => v.get(k))
+        : Array.from(v ?? []);
+    const rows: bigint[][] = toArray(p.matrix).map((inner: any) => toArray(inner));
     return { result: rows };
   },
 });
@@ -975,7 +972,11 @@ protocol.exchange<{ callCount: number }>("exchange_zero_columns", {
   init: () => ({ callCount: 0 }),
   exchange: (state, _input: RecordBatch, out) => {
     state.callCount++;
-    out.emit(recordBatchFromArrays({}, EMPTY_EXCHANGE_SCHEMA));
+    // Build a zero-column batch via the facade so the same code works
+    // on arrow-js and flechette. The OutputCollector validates that
+    // exactly one data batch is emitted per call — emit({}) is the
+    // zero-column equivalent.
+    out.emit({});
   },
 });
 
@@ -985,9 +986,17 @@ protocol.exchange<{ factor: number }>("exchange_cast_compatible", {
   outputSchema: SCALE_OUTPUT,
   init: () => ({ factor: 1.0 }),
   exchange: (state, input: RecordBatch, out) => {
+    // Cast-compatible exchange: the client may send int64 to a float64
+    // input. arrow-js's conformBatchToSchema casts in-place; flechette's
+    // facade leaves the batch untouched. Coerce BigInt → Number here
+    // so the multiplication doesn't mix types.
     const col = input.getChildAt(0)!;
     const values: number[] = [];
-    for (let i = 0; i < input.numRows; i++) values.push(col.get(i) * state.factor);
+    for (let i = 0; i < input.numRows; i++) {
+      const raw = col.get(i);
+      const num = typeof raw === "bigint" ? Number(raw) : Number(raw);
+      values.push(num * state.factor);
+    }
     out.emit({ value: values });
   },
 });

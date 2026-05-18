@@ -228,7 +228,7 @@ function assembleContext(codec) {
  *  The assembled dictionary batches and a map from dictionary column
  *  instances to dictionary ids.
  */
-function assembleDictionaryBatches(columns, codec) {
+export function assembleDictionaryBatches(columns, codec) {
   const dictionaries = [];
   const dictMap = new Map;
   const idMap = new Map;
@@ -283,7 +283,7 @@ function visitDictionaries(batch, visitor) {
  *  dictionary ids. If there are no dictionaries, the input schema is
  *  returned unchanged.
  */
-function assembleSchema(schema, idMap) {
+export function assembleSchema(schema, idMap) {
   // early exit if no dictionaries
   if (!idMap.size) return schema;
 

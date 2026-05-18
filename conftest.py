@@ -31,6 +31,9 @@ _FLECHETTE_PIPE_STREAM_XFAIL_CLASSES = frozenset(
         "TestDynamicRichHeader",
         "TestDynamicSchemaProducer",
         "TestRichHeaderExchange",
+        # TestLargeData exercises producer + exchange streams (200k+
+        # row batches) — same IncrementalStream/arrow-js coupling.
+        "TestLargeData",
     }
 )
 

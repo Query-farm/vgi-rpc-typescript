@@ -75,8 +75,37 @@ export function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest 
       continue;
     }
     let value = batch.getChildAt(i)?.get(0);
-    // Convert BigInt to Number when safe
-    if (typeof value === "bigint") {
+    // Normalize arrow-js BigNum wrappers (DecimalBigNum / IntBigNum) to
+    // primitive BigInt. The stdio reader is arrow-js-coupled (the
+    // facade has no streaming reader surface), so on the flechette
+    // facade we still receive arrow-js batches whose Decimal/Int64
+    // columns return BigNum objects. Downstream construction goes
+    // through the flechette facade and expects a primitive — without
+    // this normalization the encoder treats the BigNum as a Number
+    // and the value loses precision.
+    if (
+      value &&
+      typeof value === "object" &&
+      (value as any)?.constructor?.name?.includes("BigNum") &&
+      isOpaquePassthroughType(field.type)
+    ) {
+      // BigInt(decimalBigNum) triggers arrow-js's
+      // Symbol.toPrimitive('number') path which throws for values
+      // outside the safe-integer range. Go through `.toString()`
+      // instead — bigNumToString handles arbitrary precision.
+      try {
+        value = BigInt((value as { toString(): string }).toString());
+      } catch {
+        // leave as-is on unexpected shape
+      }
+    }
+    // Convert BigInt to Number when safe — but NOT for types whose
+    // BigInt-encoded value is type-scaled (Decimal: unscaled integer;
+    // Date32: ms-since-epoch; Timestamp/Time/Duration: native-unit
+    // ticks). Re-encoding a Number where a BigInt is expected would
+    // make the builder apply a `*scale` multiplication (Decimal) or
+    // `* 10^unit` (Time/Timestamp), corrupting the value.
+    if (typeof value === "bigint" && !isOpaquePassthroughType(field.type)) {
       if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
         value = Number(value);
       }

@@ -114,14 +114,16 @@ export function schema(fields: readonly VgiField[], metadata?: Map<string, strin
 // ----- IPC -----------------------------------------------------------------
 
 export function serializeSchema(s: VgiSchema): Uint8Array {
-  if (s.fields.length === 0) {
-    const t = tableFromColumns({ __placeholder: f_columnFromArray([], f_utf8()) });
-    return tableToIPC(t, { format: "stream" }) as Uint8Array;
-  }
-  // Build directly so per-field nullable/metadata round-trip — same reason
-  // batchFromColumns goes through buildTablePreservingNullable below.
+  // Build directly so per-field nullable/metadata round-trip (same
+  // reason `batchFromColumns` goes through `buildTablePreservingNullable`
+  // below) AND so empty schemas stay empty on the wire — the previous
+  // version of this function injected a `__placeholder` column for
+  // empty schemas, which then leaked into state-token-embedded schema
+  // bytes and made `exchange_zero_columns` etc. see a 1-column schema
+  // on the next round-trip.
   const cols = s.fields.map((f) => f_columnFromArray([], f.type as any));
-  return tableToIPC(buildTablePreservingNullable(s, cols) as any, { format: "stream" }) as Uint8Array;
+  const table = buildTablePreservingNullable(s, cols) as any;
+  return tableToIPC(table, { format: "stream" }) as Uint8Array;
 }
 
 export function deserializeSchema(bytes: Uint8Array): VgiSchema {
@@ -317,12 +319,27 @@ export function serializeBatches(_schema: VgiSchema, batches: VgiBatch[]): Uint8
 }
 
 /**
- * No-op under flechette: the IPC reader already produces specific types
- * (no Int_/Float_ generic-type quirk that arrow-js exhibits). Field-name
- * validation is still useful but is delegated to downstream consumers
- * since flechette doesn't expose `batch.data.children` for column-by-column
- * type rewriting anyway.
+ * Mostly no-op under flechette: the IPC reader already produces specific
+ * types (no Int_/Float_ generic-type quirk that arrow-js exhibits), and
+ * flechette doesn't expose `batch.data.children` for column-by-column type
+ * rewriting. We still surface field-name / field-count mismatches as
+ * TypeErrors so the dispatch layer can convert them to RpcError — matches
+ * the arrow-js path's contract.
  */
-export function conformBatchToSchema(batch: VgiBatch, _schema: VgiSchema): VgiBatch {
+export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBatch {
+  const batchSchema = (batch as any)?.schema;
+  if (!batchSchema || !schema) return batch;
+  const batchFields = batchSchema.fields ?? [];
+  const expectedFields = schema.fields ?? [];
+  if (batchFields.length !== expectedFields.length) {
+    throw new TypeError(`Batch has ${batchFields.length} fields, expected ${expectedFields.length}.`);
+  }
+  for (let i = 0; i < expectedFields.length; i++) {
+    const got = batchFields[i]?.name;
+    const want = expectedFields[i]?.name;
+    if (got !== want) {
+      throw new TypeError(`Batch field[${i}] is '${got}', expected '${want}'.`);
+    }
+  }
   return batch;
 }

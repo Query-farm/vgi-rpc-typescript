@@ -8,7 +8,7 @@ import { compressBuffer, getCompressionCodec, missingCodec } from '../compressio
 import { Column } from '../column.js';
 import { Table as Table_ } from '../table.js';
 import { encodeIPC } from './encode-ipc.js';
-import { tableToIPC } from './table-to-ipc.js';
+import { assembleDictionaryBatches, assembleSchema, tableToIPC } from './table-to-ipc.js';
 
 /**
  * Encode multiple Arrow tables into a single Arrow IPC stream.
@@ -46,13 +46,30 @@ export function tablesToIPC(tables, options) {
       : options;
     return tableToIPC(tables[0], opts);
   }
-  // Multi-table path: assemble per-table records and metadata yourself,
-  // preserving correct positional ordering across mixed empty +
-  // populated tables. The naive `concatTables → tableToIPC` flow drops
-  // empty-data tables (their Columns contribute zero batches), so when
-  // a vgi-rpc log batch (empty data + metadata) precedes a result batch
-  // (non-empty data + metadata), batch positions and metadata indices
-  // get scrambled. Walk tables explicitly instead.
+  // Multi-table path: when every input table contributes ≥1 actual
+  // record batch, the standard `concatTables → tableToIPC` flow handles
+  // dictionaries / batch ordering / metadata correctly (per-table
+  // `_vgiRecordMetadata` is honored by `tableToIPC`'s positional
+  // batchMetadata option). When at least one input is metadata-only
+  // (vgi-rpc log/EXCEPTION shape with zero column data), concat would
+  // drop it and scramble positions — fall back to the manual
+  // assembly path that synthesises empties at the right positions.
+  const hasEmptyWithMd = tables.some(
+    (t) => (t?.children?.[0]?.data?.length ?? 0) === 0 && t?._vgiRecordMetadata,
+  );
+  if (!hasEmptyWithMd) {
+    // Build positional batchMetadata from per-table _vgiRecordMetadata.
+    const md = [];
+    for (const t of tables) {
+      const tm = t?._vgiRecordMetadata;
+      const n = t?.children?.[0]?.data?.length ?? 0;
+      for (let i = 0; i < n; i++) md.push(i === 0 ? tm : undefined);
+    }
+    const opts = md.some((m) => m && m.size > 0)
+      ? { ...(options ?? {}), batchMetadata: md }
+      : options;
+    return tableToIPC(concatTables(tables), opts);
+  }
   return multiTableToIPC(tables, options);
 }
 
@@ -106,11 +123,24 @@ function multiTableToIPC(tables, options) {
     if (md && md.size > 0) records[i].metadata = md;
   }
 
-  const data = {
-    schema: tables[0].schema,
-    dictionaries: [],
-    records,
-  };
+  // Assemble dictionary batches + resolved schema. We use the columns
+  // of the first table that contributes actual data — its Dictionary
+  // columns hold the canonical dictionaries that the encoder needs to
+  // emit BEFORE any record batch that references them. Without this,
+  // a schema like `(int64, dictionary<int16, utf8>)` encodes the
+  // RecordBatch fine but pyarrow rejects the stream with "Dictionary
+  // field not found".
+  const dataTable = tables.find((t) => (t?.children?.[0]?.data?.length ?? 0) > 0);
+  let dictionaries = [];
+  let idMap = new Map();
+  if (dataTable) {
+    const r = assembleDictionaryBatches(dataTable.children, codec);
+    dictionaries = r.dictionaries;
+    idMap = r.idMap;
+  }
+  const schema = assembleSchema(tables[0].schema, idMap);
+
+  const data = { schema, dictionaries, records };
   return encodeIPC(data, { ...options, codec: id }).finish();
 }
 
