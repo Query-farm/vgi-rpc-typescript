@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { isMap, type VgiBatch, type VgiSchema } from "../arrow/index.js";
+import { backend, isMap, type VgiBatch, type VgiSchema } from "../arrow/index.js";
 import { REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError, VersionError } from "../errors.js";
 import { isOpaquePassthroughType } from "./opaque.js";
@@ -60,12 +60,16 @@ export function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest 
     );
   }
 
+  // Map_ + Date/Time/Timestamp/Duration/Decimal/LargeUtf8/LargeBinary/
+  // FixedSizeBinary/Dictionary all need passthrough on arrow-js because
+  // its `.get(0)` round-trip is unreliable for those types. On flechette
+  // those same types extract cleanly via `col.get(0)`, and `col.data[0]`
+  // is a Batch (not a Data) so the arrow-js passthrough trick doesn't
+  // apply. Gate on backend.
+  const useOpaquePassthrough = backend.name === "arrow-js";
   for (let i = 0; i < schema.fields.length; i++) {
     const field = schema.fields[i];
-    // Map_ columns have a broken .get() in arrow-js — pass through raw Data
-    if (isMap(field.type) || isOpaquePassthroughType(field.type)) {
-      // arrow-js: pass through raw Data (column .data[0]); flechette
-      // exposes column directly via .at(0).
+    if (useOpaquePassthrough && (isMap(field.type) || isOpaquePassthroughType(field.type))) {
       const col = batch.getChildAt(i)!;
       params[field.name] = (col as any).data?.[0] ?? col.get(0);
       continue;

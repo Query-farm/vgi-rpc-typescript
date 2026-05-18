@@ -413,3 +413,29 @@ class TestExchangeStream(TestExchangeStream):  # type: ignore[no-redef]  # noqa:
                 session = proxy.exchange_error_on_init()
                 # HTTP raises during init; pipe/subprocess raises on first exchange.
                 session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
+
+
+# The stdio worker's `IncrementalStream` (src/wire/writer.ts) uses arrow-js's
+# `RecordBatchStreamWriter` directly because the exchange protocol is lockstep
+# — the client reads each batch before sending the next input, so we can't
+# buffer-then-emit. flechette has no equivalent streaming surface, so the
+# stdio worker effectively requires the arrow-js backend. workerd/browser
+# deployments use HTTP (no stdio), so this is fine in practice; mark the
+# stdio-flechette stream tests xfail rather than re-implementing incremental
+# encoding atop flechette.
+_FLECHETTE_PIPE_STREAM_XFAIL_CLASSES = {
+    "TestProducerStream",
+    "TestProducerStreamWithHeader",
+    "TestExchangeStream",
+    "TestExchangeStreamWithHeader",
+    "TestCancel",
+    "TestExchangeCastCompatible",
+    "TestErrorRecovery",
+    "TestDynamicRichHeader",
+    "TestDynamicSchemaProducer",
+    "TestRichHeaderExchange",
+}
+
+
+# Hook lives in conftest.py (next to this file) — pytest does not pick up
+# `pytest_collection_modifyitems` defined inside a test module.

@@ -6,14 +6,25 @@ import {
   binary as f_binary,
   bool as f_bool,
   columnFromArray as f_columnFromArray,
+  dateDay as f_dateDay,
+  decimal as f_decimal,
+  dictionary as f_dictionary,
+  duration as f_duration,
   field as f_field,
+  fixedSizeBinary as f_fixedSizeBinary,
   float32 as f_float32,
   float64 as f_float64,
   int8 as f_int8,
   int16 as f_int16,
   int32 as f_int32,
   int64 as f_int64,
+  largeBinary as f_largeBinary,
+  largeUtf8 as f_largeUtf8,
+  list as f_list,
+  map as f_map,
   nullType as f_nullType,
+  struct as f_struct,
+  timeMicrosecond as f_timeMicrosecond,
   timestamp as f_timestamp,
   uint8 as f_uint8,
   uint16 as f_uint16,
@@ -59,6 +70,35 @@ export const binary = (): VgiDataType => f_binary() as unknown as VgiDataType;
 /** Microsecond Timestamp with optional timezone. */
 export const timestampMicro = (timezone: string | null = null): VgiDataType =>
   f_timestamp(F_TimeUnit.MICROSECOND, timezone) as unknown as VgiDataType;
+
+/** Date32 with day resolution. */
+export const dateDay = (): VgiDataType => f_dateDay() as unknown as VgiDataType;
+/** Time64 with microsecond resolution. */
+export const timeMicro = (): VgiDataType => f_timeMicrosecond() as unknown as VgiDataType;
+/** Duration with microsecond resolution. */
+export const durationMicro = (): VgiDataType => f_duration(F_TimeUnit.MICROSECOND) as unknown as VgiDataType;
+/** Decimal128 by default; pass bitWidth=256 for Decimal256. */
+export const decimal = (precision: number, scale: number, bitWidth: 128 | 256 = 128): VgiDataType =>
+  f_decimal(precision, scale, bitWidth) as unknown as VgiDataType;
+/** FixedSizeBinary with the given byte width. */
+export const fixedSizeBinary = (byteWidth: number): VgiDataType =>
+  f_fixedSizeBinary(byteWidth) as unknown as VgiDataType;
+/** LargeUtf8 — 64-bit-offset UTF-8 string. */
+export const largeUtf8 = (): VgiDataType => f_largeUtf8() as unknown as VgiDataType;
+/** LargeBinary — 64-bit-offset binary blob. */
+export const largeBinary = (): VgiDataType => f_largeBinary() as unknown as VgiDataType;
+/** List of `child` items. */
+export const list = (child: VgiField): VgiDataType => f_list(child as any) as unknown as VgiDataType;
+/** Struct of `fields`. */
+export const struct = (fields: readonly VgiField[]): VgiDataType => f_struct(fields as any) as unknown as VgiDataType;
+/** Map (key → value). flechette's `map(keyField, valueField, keysSorted)`
+ *  builds the entries Struct internally — same shape as arrow-js's Map_
+ *  but a less verbose API. */
+export const map = (keyField: VgiField, valueField: VgiField, keysSorted = false): VgiDataType =>
+  f_map(keyField as any, valueField as any, keysSorted) as unknown as VgiDataType;
+/** Dictionary-encoded type. `indices` must be an integer type. */
+export const dictionary = (indices: VgiDataType, values: VgiDataType, id = -1, ordered = false): VgiDataType =>
+  f_dictionary(values as any, indices as any, ordered, id) as unknown as VgiDataType;
 
 export function field(name: string, type: VgiDataType, nullable = true, metadata?: Map<string, string>): VgiField {
   return f_field(name, type as any, nullable, metadata ?? new Map()) as unknown as VgiField;

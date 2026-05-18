@@ -4,17 +4,27 @@ import {
   Binary as A_Binary,
   Bool as A_Bool,
   type DataType as A_DataType,
+  DateDay as A_DateDay,
+  Decimal as A_Decimal,
+  Dictionary as A_Dictionary,
+  DurationMicrosecond as A_DurationMicrosecond,
   Field as A_Field,
+  FixedSizeBinary as A_FixedSizeBinary,
   Float32 as A_Float32,
   Float64 as A_Float64,
   Int8 as A_Int8,
   Int16 as A_Int16,
   Int32 as A_Int32,
   Int64 as A_Int64,
+  LargeBinary as A_LargeBinary,
+  LargeUtf8 as A_LargeUtf8,
+  List as A_List,
+  Map_ as A_Map,
   Null as A_Null,
   RecordBatch as A_RecordBatch,
   Schema as A_Schema,
   Struct as A_Struct,
+  TimeMicrosecond as A_TimeMicrosecond,
   Timestamp as A_Timestamp,
   TimeUnit as A_TimeUnit,
   Type as A_Type,
@@ -56,6 +66,44 @@ export const binary = (): VgiDataType => new A_Binary() as unknown as VgiDataTyp
 /** Microsecond Timestamp with optional timezone. */
 export const timestampMicro = (timezone: string | null = null): VgiDataType =>
   new A_Timestamp(A_TimeUnit.MICROSECOND, timezone) as unknown as VgiDataType;
+
+/** Date32 with day resolution. */
+export const dateDay = (): VgiDataType => new A_DateDay() as unknown as VgiDataType;
+/** Time64 with microsecond resolution. */
+export const timeMicro = (): VgiDataType => new A_TimeMicrosecond() as unknown as VgiDataType;
+/** Duration with microsecond resolution. */
+export const durationMicro = (): VgiDataType => new A_DurationMicrosecond() as unknown as VgiDataType;
+/** Decimal128 by default; pass bitWidth=256 for Decimal256. */
+export const decimal = (precision: number, scale: number, bitWidth: 128 | 256 = 128): VgiDataType =>
+  new A_Decimal(scale, precision, bitWidth) as unknown as VgiDataType;
+/** FixedSizeBinary with the given byte width. */
+export const fixedSizeBinary = (byteWidth: number): VgiDataType =>
+  new A_FixedSizeBinary(byteWidth) as unknown as VgiDataType;
+/** LargeUtf8 — 64-bit-offset UTF-8 string. */
+export const largeUtf8 = (): VgiDataType => new A_LargeUtf8() as unknown as VgiDataType;
+/** LargeBinary — 64-bit-offset binary blob. */
+export const largeBinary = (): VgiDataType => new A_LargeBinary() as unknown as VgiDataType;
+/** List of `child` items. The child field carries name + nullability + type. */
+export const list = (child: VgiField): VgiDataType => new A_List(child as unknown as A_Field) as unknown as VgiDataType;
+/** Struct of `fields`. */
+export const struct = (fields: readonly VgiField[]): VgiDataType =>
+  new A_Struct(fields as unknown as A_Field[]) as unknown as VgiDataType;
+/** Map (key → value) carried as a List<Struct<key,value>>. arrow-js's Map_
+ *  constructor takes a child Field whose type is a Struct of [key, value]. */
+export const map = (keyField: VgiField, valueField: VgiField, keysSorted = false): VgiDataType => {
+  const k = keyField as unknown as A_Field;
+  const v = valueField as unknown as A_Field;
+  const entriesField = new A_Field("entries", new A_Struct([k, v]), /* nullable */ false);
+  return new A_Map(entriesField, keysSorted) as unknown as VgiDataType;
+};
+/** Dictionary-encoded type. `indices` must be an integer type.
+ *
+ *  `id` is left undefined by default so arrow-js's internal `getId()`
+ *  counter assigns a fresh unique id per Dictionary instance. Passing
+ *  `-1` (or any concrete number) here would short-circuit that counter
+ *  and produce id collisions when multiple Dictionary types are used. */
+export const dictionary = (indices: VgiDataType, values: VgiDataType, id?: number, ordered = false): VgiDataType =>
+  new A_Dictionary(values as A_DataType, indices as any, id, ordered) as unknown as VgiDataType;
 
 export function field(name: string, type: VgiDataType, nullable = true, metadata?: Map<string, string>): VgiField {
   return new A_Field(name, type as A_DataType, nullable, metadata ?? new Map()) as unknown as VgiField;

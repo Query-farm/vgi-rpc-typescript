@@ -8,37 +8,56 @@
  * This module exports the Protocol instance so it can be reused by both the
  * stdio server (conformance.ts) and the HTTP conformance tests.
  */
+// arrow-js helpers still used inside the rich-header data builders and the
+// embedded-arrow / IPC-roundtrip handlers. Type *classes* used to live
+// here too; the conformance protocol now constructs schemas/types via the
+// vgi-rpc Arrow facade (imports below) so it can run on either backend.
 import {
-  Binary,
-  Bool,
+  Field as A_Field,
+  Float64 as A_Float64,
+  Int16 as A_Int16,
+  Int32 as A_Int32,
+  Int64 as A_Int64,
+  List as A_List,
+  Struct as A_Struct,
+  Utf8 as A_Utf8,
   type Data,
-  DateDay,
-  Decimal,
-  Dictionary,
-  DurationMicrosecond,
-  Field,
-  FixedSizeBinary,
-  Float32,
-  Float64,
-  Int16,
-  Int32,
-  Int64,
-  LargeBinary,
-  LargeUtf8,
-  List,
   Map_,
   makeData,
   type RecordBatch,
   RecordBatchReader,
   RecordBatchStreamWriter,
   recordBatchFromArrays,
-  Schema,
-  Struct,
-  TimeMicrosecond,
-  TimestampMicrosecond,
-  Utf8,
   vectorFromArray,
 } from "@query-farm/apache-arrow";
+import {
+  binary,
+  bool as boolType,
+  dateDay,
+  decimal,
+  dictionary,
+  durationMicro,
+  field,
+  fixedSizeBinary,
+  float32 as float32Type,
+  float64,
+  int8 as int8Type,
+  int16 as int16Type,
+  int32 as int32Type,
+  int64,
+  largeBinary,
+  largeUtf8,
+  list,
+  map as mapType,
+  schema,
+  struct,
+  timeMicro,
+  timestampMicro,
+  utf8,
+  type VgiBatch,
+  type VgiField,
+  type VgiSchema,
+} from "../src/arrow/index.js";
 import { Protocol } from "../src/index.js";
 import {
   bool,
@@ -74,71 +93,56 @@ class RuntimeError extends Error {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Map_ fix: arrow-js Map_ constructor creates broken children structure.
-// We need to patch it to produce IPC-compatible schemas for PyArrow.
-// ---------------------------------------------------------------------------
-
-function makeMapType(keyField: Field, valueField: Field): Map_ {
-  const m = new Map_(keyField, valueField);
-  const entriesStruct = new Struct([keyField, valueField]);
-  const entriesField = new Field("entries", entriesStruct, false);
-  (m as any).children = [entriesField];
-  return m;
-}
+// Map types are constructed via the Arrow facade's `mapType(keyField,
+// valueField)` (imported above). Both backends build the entries
+// Struct child correctly — no per-backend patching needed.
 
 // ---------------------------------------------------------------------------
 // Shared schemas
 // ---------------------------------------------------------------------------
 
-const COUNTER_SCHEMA = new Schema([new Field("index", new Int64(), false), new Field("value", new Int64(), false)]);
+const COUNTER_SCHEMA = schema([field("index", int64(), false), field("value", int64(), false)]);
 
-const HEADER_SCHEMA = new Schema([
-  new Field("total_expected", new Int64(), false),
-  new Field("description", new Utf8(), false),
-]);
+const HEADER_SCHEMA = schema([field("total_expected", int64(), false), field("description", utf8(), false)]);
 
-const SCALE_INPUT = new Schema([new Field("value", new Float64(), false)]);
-const SCALE_OUTPUT = new Schema([new Field("value", new Float64(), false)]);
+const SCALE_INPUT = schema([field("value", float64(), false)]);
+const SCALE_OUTPUT = schema([field("value", float64(), false)]);
 
-const ACCUM_INPUT = new Schema([new Field("value", new Float64(), false)]);
-const ACCUM_OUTPUT = new Schema([
-  new Field("running_sum", new Float64(), false),
-  new Field("exchange_count", new Int64(), false),
-]);
+const ACCUM_INPUT = schema([field("value", float64(), false)]);
+const ACCUM_OUTPUT = schema([field("running_sum", float64(), false), field("exchange_count", int64(), false)]);
 
 // ---------------------------------------------------------------------------
 // RichHeader schema — 18 fields matching Python's RichHeader dataclass
 // ---------------------------------------------------------------------------
 
-const POINT_FIELDS = [new Field("x", new Float64(), false), new Field("y", new Float64(), false)];
-const POINT_STRUCT = new Struct(POINT_FIELDS);
+const POINT_FIELDS = [field("x", float64(), false), field("y", float64(), false)];
+const POINT_STRUCT = struct(POINT_FIELDS);
 
 const STATUS_CYCLE = ["PENDING", "ACTIVE", "CLOSED"];
 
-const richMapStrInt = makeMapType(new Field("key", new Utf8(), false), new Field("value", new Int64(), false));
+const richMapStrInt = mapType(field("key", utf8(), false), field("value", int64(), false));
 
-const richMapStrStr = makeMapType(new Field("key", new Utf8(), false), new Field("value", new Utf8(), false));
+const richMapStrStr = mapType(field("key", utf8(), false), field("value", utf8(), false));
 
-const RICH_HEADER_SCHEMA = new Schema([
-  new Field("str_field", new Utf8(), false),
-  new Field("bytes_field", new Binary(), false),
-  new Field("int_field", new Int64(), false),
-  new Field("float_field", new Float64(), false),
-  new Field("bool_field", new Bool(), false),
-  new Field("list_of_int", new List(new Field("item", new Int64(), false)), false),
-  new Field("list_of_str", new List(new Field("item", new Utf8(), false)), false),
-  new Field("dict_field", richMapStrInt, false),
-  new Field("enum_field", new Dictionary(new Utf8(), new Int16()), false),
-  new Field("nested_point", POINT_STRUCT, false),
-  new Field("optional_str", new Utf8(), true),
-  new Field("optional_int", new Int64(), true),
-  new Field("optional_nested", POINT_STRUCT, true),
-  new Field("list_of_nested", new List(new Field("item", POINT_STRUCT, false)), false),
-  new Field("nested_list", new List(new Field("item", new List(new Field("item", new Int64(), false)), false)), false),
-  new Field("annotated_int32", new Int32(), false),
-  new Field("annotated_float32", new Float32(), false),
-  new Field("dict_str_str", richMapStrStr, false),
+const RICH_HEADER_SCHEMA = schema([
+  field("str_field", utf8(), false),
+  field("bytes_field", binary(), false),
+  field("int_field", int64(), false),
+  field("float_field", float64(), false),
+  field("bool_field", boolType(), false),
+  field("list_of_int", list(field("item", int64(), false)), false),
+  field("list_of_str", list(field("item", utf8(), false)), false),
+  field("dict_field", richMapStrInt, false),
+  field("enum_field", dictionary(int16Type(), utf8()), false),
+  field("nested_point", POINT_STRUCT, false),
+  field("optional_str", utf8(), true),
+  field("optional_int", int64(), true),
+  field("optional_nested", POINT_STRUCT, true),
+  field("list_of_nested", list(field("item", POINT_STRUCT, false)), false),
+  field("nested_list", list(field("item", list(field("item", int64(), false)), false)), false),
+  field("annotated_int32", int32Type(), false),
+  field("annotated_float32", float32Type(), false),
+  field("dict_str_str", richMapStrStr, false),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -146,8 +150,8 @@ const RICH_HEADER_SCHEMA = new Schema([
 // ---------------------------------------------------------------------------
 
 function buildStructPointData(x: number, y: number): Data {
-  const xData = vectorFromArray([x], new Float64()).data[0];
-  const yData = vectorFromArray([y], new Float64()).data[0];
+  const xData = vectorFromArray([x], float64()).data[0];
+  const yData = vectorFromArray([y], float64()).data[0];
   return makeData({
     type: POINT_STRUCT,
     length: 1,
@@ -159,8 +163,8 @@ function buildStructPointData(x: number, y: number): Data {
 function buildNullStructPointData(): Data {
   // PyArrow requires valid-sized child buffers even for null struct entries.
   // Use vectorFromArray to build proper Float64 children with valid buffers.
-  const xData = vectorFromArray([0], new Float64()).data[0];
-  const yData = vectorFromArray([0], new Float64()).data[0];
+  const xData = vectorFromArray([0], float64()).data[0];
+  const yData = vectorFromArray([0], float64()).data[0];
   return makeData({
     type: POINT_STRUCT,
     length: 1,
@@ -174,11 +178,11 @@ function buildListOfPointsData(points: { x: number; y: number }[]): Data {
   const offsets = new Int32Array([0, points.length]);
   const xData = vectorFromArray(
     points.map((p) => p.x),
-    new Float64(),
+    float64(),
   ).data[0];
   const yData = vectorFromArray(
     points.map((p) => p.y),
-    new Float64(),
+    float64(),
   ).data[0];
   const structData = makeData({
     type: POINT_STRUCT,
@@ -186,7 +190,7 @@ function buildListOfPointsData(points: { x: number; y: number }[]): Data {
     children: [xData, yData],
     nullCount: 0,
   });
-  const listType = new List(new Field("item", POINT_STRUCT, false));
+  const listType = list(field("item", POINT_STRUCT, false));
   return makeData({
     type: listType,
     length: 1,
@@ -200,16 +204,16 @@ function buildMapDataFromEntries(keyField: Field, valueField: Field, keys: any[]
   const offsets = new Int32Array([0, keys.length]);
   const keyData = vectorFromArray(keys, keyField.type).data[0];
   const valData = vectorFromArray(values, valueField.type).data[0];
-  const entriesStruct = new Struct([keyField, valueField]);
+  const entriesStruct = struct([keyField, valueField]);
   const entriesData = makeData({
     type: entriesStruct,
     length: keys.length,
     children: [keyData, valData],
     nullCount: 0,
   });
-  const mapType = makeMapType(keyField, valueField);
+  const mapT = mapType(keyField, valueField);
   return makeData({
-    type: mapType,
+    type: mapT,
     length: 1,
     valueOffsets: offsets,
     child: entriesData,
@@ -232,8 +236,8 @@ function buildRichHeader(seed: number): Record<string, any> {
     list_of_int: [s, s + 1n, s + 2n],
     list_of_str: [`item-${seed}`, `item-${seed + 1}`],
     dict_field: buildMapDataFromEntries(
-      new Field("key", new Utf8(), false),
-      new Field("value", new Int64(), false),
+      field("key", utf8(), false),
+      field("value", int64(), false),
       ["a", "b"],
       [s, s + 1n],
     ),
@@ -247,8 +251,8 @@ function buildRichHeader(seed: number): Record<string, any> {
     annotated_int32: seed % 1000,
     annotated_float32: seed / 3.0,
     dict_str_str: buildMapDataFromEntries(
-      new Field("key", new Utf8(), false),
-      new Field("value", new Utf8(), false),
+      field("key", utf8(), false),
+      field("value", utf8(), false),
       ["key"],
       [`val-${seed}`],
     ),
@@ -261,10 +265,10 @@ function buildRichHeader(seed: number): Record<string, any> {
 
 function buildDynamicSchema(includeStrings: boolean, includeFloats: boolean): Schema {
   // Python pa.field() defaults to nullable=True, so we match that here.
-  const fields: Field[] = [new Field("index", new Int64(), true)];
-  if (includeStrings) fields.push(new Field("label", new Utf8(), true));
-  if (includeFloats) fields.push(new Field("score", new Float64(), true));
-  return new Schema(fields);
+  const fields: Field[] = [field("index", int64(), true)];
+  if (includeStrings) fields.push(field("label", utf8(), true));
+  if (includeFloats) fields.push(field("score", float64(), true));
+  return schema(fields);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,10 +304,10 @@ protocol.unary("echo_string", {
   handler: (p) => ({ result: p.value }),
 });
 
-const largeStringType = new LargeUtf8();
+const largeStringType = largeUtf8();
 protocol.unary("echo_large_string", {
-  params: new Schema([new Field("value", largeStringType, false)]),
-  result: new Schema([new Field("result", largeStringType, false)]),
+  params: schema([field("value", largeStringType, false)]),
+  result: schema([field("result", largeStringType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
@@ -358,42 +362,46 @@ protocol.unary("void_with_param", {
 
 // ===== Complex Type Echo (4) =====
 
-const dictType = new Dictionary(new Utf8(), new Int16());
+const dictType = dictionary(int16Type(), utf8());
 
 protocol.unary("echo_enum", {
-  params: new Schema([new Field("status", dictType, false)]),
-  result: new Schema([new Field("result", dictType, false)]),
+  params: schema([field("status", dictType, false)]),
+  result: schema([field("result", dictType, false)]),
   handler: (p) => ({ result: p.status }),
 });
 
-const listUtf8 = new List(new Field("item", new Utf8(), false));
+const listUtf8 = list(field("item", utf8(), false));
 
 protocol.unary("echo_list", {
-  params: new Schema([new Field("values", listUtf8, false)]),
-  result: new Schema([new Field("result", listUtf8, false)]),
+  params: schema([field("values", listUtf8, false)]),
+  result: schema([field("result", listUtf8, false)]),
   handler: (p) => {
-    // List.get() returns a Vector — convert to JS array for vectorFromArray
+    // Backend-agnostic extraction: arrow-js returns a Vector with .get(i);
+    // flechette returns a plain JS array. Both are iterable.
     const vec = p.values;
-    const arr: string[] = [];
-    for (let i = 0; i < vec.length; i++) arr.push(vec.get(i));
+    const arr: string[] = Array.from(vec, (v: any) => (v?.get ? v : v));
+    if (vec && typeof vec.get === "function" && typeof vec.length === "number") {
+      arr.length = 0;
+      for (let i = 0; i < vec.length; i++) arr.push(vec.get(i));
+    }
     return { result: arr };
   },
 });
 
-const mapStrInt = makeMapType(new Field("key", new Utf8(), false), new Field("value", new Int64(), false));
+const mapStrInt = mapType(field("key", utf8(), false), field("value", int64(), false));
 
 protocol.unary("echo_dict", {
-  params: new Schema([new Field("mapping", mapStrInt, false)]),
-  result: new Schema([new Field("result", mapStrInt, false)]),
+  params: schema([field("mapping", mapStrInt, false)]),
+  result: schema([field("result", mapStrInt, false)]),
   // Map_ values are raw Data objects (passthrough) due to arrow-js bug
   handler: (p) => ({ result: p.mapping }),
 });
 
-const nestedList = new List(new Field("item", new List(new Field("item", new Int64(), false)), false));
+const nestedList = list(field("item", list(field("item", int64(), false)), false));
 
 protocol.unary("echo_nested_list", {
-  params: new Schema([new Field("matrix", nestedList, false)]),
-  result: new Schema([new Field("result", nestedList, false)]),
+  params: schema([field("matrix", nestedList, false)]),
+  result: schema([field("result", nestedList, false)]),
   handler: (p) => {
     // Nested list: outer Vector of inner Vectors → JS array of arrays
     const outer = p.matrix;
@@ -411,14 +419,14 @@ protocol.unary("echo_nested_list", {
 // ===== Optional/Nullable (2) =====
 
 protocol.unary("echo_optional_string", {
-  params: new Schema([new Field("value", new Utf8(), true)]),
-  result: new Schema([new Field("result", new Utf8(), true)]),
+  params: schema([field("value", utf8(), true)]),
+  result: schema([field("result", utf8(), true)]),
   handler: (p) => ({ result: p.value }),
 });
 
 protocol.unary("echo_optional_int", {
-  params: new Schema([new Field("value", new Int64(), true)]),
-  result: new Schema([new Field("result", new Int64(), true)]),
+  params: schema([field("value", int64(), true)]),
+  result: schema([field("result", int64(), true)]),
   handler: (p) => ({ result: p.value }),
 });
 
@@ -520,66 +528,66 @@ protocol.unary("echo_uint64", {
 // Arrow column without converting through JS values (avoids arrow-js conversion
 // quirks for Date/Timestamp/Decimal/etc).
 
-const dateType = new DateDay();
+const dateType = dateDay();
 protocol.unary("echo_date", {
-  params: new Schema([new Field("value", dateType, false)]),
-  result: new Schema([new Field("result", dateType, false)]),
+  params: schema([field("value", dateType, false)]),
+  result: schema([field("result", dateType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
-const timestampType = new TimestampMicrosecond();
+const timestampType = timestampMicro();
 protocol.unary("echo_timestamp", {
-  params: new Schema([new Field("value", timestampType, false)]),
-  result: new Schema([new Field("result", timestampType, false)]),
+  params: schema([field("value", timestampType, false)]),
+  result: schema([field("result", timestampType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
-const timestampUtcType = new TimestampMicrosecond("UTC");
+const timestampUtcType = timestampMicro("UTC");
 protocol.unary("echo_timestamp_utc", {
-  params: new Schema([new Field("value", timestampUtcType, false)]),
-  result: new Schema([new Field("result", timestampUtcType, false)]),
+  params: schema([field("value", timestampUtcType, false)]),
+  result: schema([field("result", timestampUtcType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
-const timeType = new TimeMicrosecond();
+const timeType = timeMicro();
 protocol.unary("echo_time", {
-  params: new Schema([new Field("value", timeType, false)]),
-  result: new Schema([new Field("result", timeType, false)]),
+  params: schema([field("value", timeType, false)]),
+  result: schema([field("result", timeType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
-const durationType = new DurationMicrosecond();
+const durationType = durationMicro();
 protocol.unary("echo_duration", {
-  params: new Schema([new Field("value", durationType, false)]),
-  result: new Schema([new Field("result", durationType, false)]),
+  params: schema([field("value", durationType, false)]),
+  result: schema([field("result", durationType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
-const decimalType = new Decimal(4, 20, 128);
+const decimalType = decimal(20, 4, 128);
 protocol.unary("echo_decimal", {
-  params: new Schema([new Field("value", decimalType, false)]),
-  result: new Schema([new Field("result", decimalType, false)]),
+  params: schema([field("value", decimalType, false)]),
+  result: schema([field("result", decimalType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
-const largeBinaryType = new LargeBinary();
+const largeBinaryType = largeBinary();
 protocol.unary("echo_large_binary", {
-  params: new Schema([new Field("value", largeBinaryType, false)]),
-  result: new Schema([new Field("result", largeBinaryType, false)]),
+  params: schema([field("value", largeBinaryType, false)]),
+  result: schema([field("result", largeBinaryType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
-const fixedBinaryType = new FixedSizeBinary(8);
+const fixedBinaryType = fixedSizeBinary(8);
 protocol.unary("echo_fixed_binary", {
-  params: new Schema([new Field("value", fixedBinaryType, false)]),
-  result: new Schema([new Field("result", fixedBinaryType, false)]),
+  params: schema([field("value", fixedBinaryType, false)]),
+  result: schema([field("result", fixedBinaryType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
-const dictStringType = new Dictionary(new Utf8(), new Int16());
+const dictStringType = dictionary(int16Type(), utf8());
 protocol.unary("echo_dict_encoded_string", {
-  params: new Schema([new Field("value", dictStringType, false)]),
-  result: new Schema([new Field("result", dictStringType, false)]),
+  params: schema([field("value", dictStringType, false)]),
+  result: schema([field("result", dictStringType, false)]),
   handler: (p) => ({ result: p.value }),
 });
 
@@ -958,7 +966,7 @@ protocol.exchange<{ failOn: number; exchangeCount: number }>("exchange_error_on_
   paramTypes: { fail_on: "int" },
 });
 
-const EMPTY_EXCHANGE_SCHEMA = new Schema([]);
+const EMPTY_EXCHANGE_SCHEMA = schema([]);
 
 protocol.exchange<{ callCount: number }>("exchange_zero_columns", {
   params: {},
@@ -1118,7 +1126,7 @@ protocol.exchange<Record<string, never>>("cancellable_exchange", {
 
 protocol.unary("cancel_probe_counters", {
   params: {},
-  result: new Schema([new Field("result", new List(new Field("item", new Int64(), false)), false)]),
+  result: schema([field("result", list(field("item", int64(), false)), false)]),
   handler: () => ({
     result: [BigInt(cancelProbe.produceCalls), BigInt(cancelProbe.exchangeCalls), BigInt(cancelProbe.onCancelCalls)],
   }),
@@ -1197,8 +1205,8 @@ protocol.unary("close_counter", {
 // session must be re-resolved by the sticky middleware on every HTTP
 // request. Mirrors `SessionCounterProducerState`/`SessionCounterExchangeState`
 // in vgi_rpc.conformance.
-const _SESSION_COUNTER_OUTPUT = new Schema([new Field("value", new Int64(), false)]);
-const _SESSION_COUNTER_EXCHANGE_INPUT = new Schema([new Field("by", new Int64(), false)]);
+const _SESSION_COUNTER_OUTPUT = schema([field("value", int64(), false)]);
+const _SESSION_COUNTER_EXCHANGE_INPUT = schema([field("by", int64(), false)]);
 
 protocol.producer<{ count: number; current: number }>("stream_session_counter", {
   params: { count: int },

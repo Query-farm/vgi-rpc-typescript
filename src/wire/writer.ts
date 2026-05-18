@@ -6,7 +6,8 @@ import {
   type Schema as A_Schema,
   RecordBatchStreamWriter,
 } from "@query-farm/apache-arrow";
-import { serializeBatches, type VgiBatch, type VgiSchema } from "../arrow/index.js";
+import type { VgiBatch, VgiSchema } from "../arrow/index.js";
+import { serializeBatches } from "../arrow/index.js";
 
 const STDOUT_FD = 1;
 
@@ -104,6 +105,15 @@ export class IpcStreamWriter {
  * and writes bytes synchronously via writeAll(). This avoids deadlocks
  * caused by Node.js async stream piping when stdin reads block before
  * stdout writes flush through the event loop.
+ *
+ * **Arrow-js only:** the stdio exchange protocol is lockstep — the client
+ * reads each response batch before sending the next input. Buffering
+ * via `serializeBatches`-at-close would deadlock the protocol. The
+ * incremental writer that satisfies both constraints is arrow-js's
+ * `RecordBatchStreamWriter`. flechette has no equivalent surface, so
+ * the stdio worker effectively requires the arrow-js backend. workerd /
+ * browser deployments use HTTP (no stdio), so this is fine in practice;
+ * conformance under `flechette-pipe` is marked xfail for stream tests.
  */
 export class IncrementalStream {
   private writer: RecordBatchStreamWriter;
