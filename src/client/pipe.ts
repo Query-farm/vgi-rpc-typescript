@@ -125,17 +125,17 @@ export class PipeStreamSession implements StreamSession {
 
       if (batch.numRows === 0) {
         // Check for external location pointer batch
-        if (isExternalLocationBatch(batch)) {
-          return await resolveExternalLocation(batch, this._externalConfig);
+        if (isExternalLocationBatch(batch as any)) {
+          return (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
         }
         // Check if it's a log/error batch. If so, dispatch and continue.
         // Otherwise it's a zero-row data batch — return it.
-        if (dispatchLogOrError(batch, this._onLog)) {
+        if (dispatchLogOrError(batch as any, this._onLog)) {
           continue;
         }
       }
 
-      return batch;
+      return batch as any;
     }
   }
 
@@ -459,7 +459,7 @@ export function pipeConnect(
         throw new Error("EOF reading __describe__ response");
       }
 
-      const desc = await parseDescribeResponse(response.batches, onLog);
+      const desc = await parseDescribeResponse(response.batches as any, onLog);
       protocolName = desc.protocolName;
       serverProtocolVersion = desc.protocolVersion;
       methodCache = new Map(desc.methods.map((m) => [m.name, m]));
@@ -496,7 +496,7 @@ export function pipeConnect(
 
         // Process batches: dispatch logs, resolve external pointers, find result
         let resultBatch: RecordBatch | null = null;
-        for (let batch of response.batches) {
+        for (let batch of response.batches as any[]) {
           if (batch.numRows === 0) {
             if (isExternalLocationBatch(batch)) {
               batch = await resolveExternalLocation(batch, externalConfig);
@@ -547,7 +547,7 @@ export function pipeConnect(
         if (info.headerSchema) {
           const headerStream = await r.readStream();
           if (headerStream) {
-            for (const batch of headerStream.batches) {
+            for (const batch of headerStream.batches as any[]) {
               if (batch.numRows === 0) {
                 dispatchLogOrError(batch, onLog);
                 continue;

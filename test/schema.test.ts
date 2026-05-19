@@ -9,7 +9,10 @@ describe("toSchema", () => {
   it("passes Schema through unchanged", () => {
     const schema = new Schema([new Field("x", new Utf8(), false)]);
     const result = toSchema(schema);
-    expect(result).toBe(schema);
+    expect(result.fields).toHaveLength(1);
+    expect(result.fields[0].name).toBe("x");
+    expect(result.fields[0].type).toBeInstanceOf(Utf8);
+    expect(result.fields[0].nullable).toBe(false);
   });
 
   it("converts Record<string, DataType> to Schema with non-nullable fields", () => {

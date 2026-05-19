@@ -130,7 +130,7 @@ async function buildPointerRequestBody(originalBody: Uint8Array, downloadUrl: st
 
   // Re-emit the pointer batch with merged metadata.
   const { RecordBatch } = await import("@query-farm/apache-arrow");
-  const pointerWithMeta = new RecordBatch(schema, pointer.data, merged);
+  const pointerWithMeta = new RecordBatch(schema as any, (pointer as any).data, merged);
   return serializeIpcStream(schema, [pointerWithMeta]);
 }
 

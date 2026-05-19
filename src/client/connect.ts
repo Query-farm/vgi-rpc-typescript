@@ -194,8 +194,8 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       for (let batch of batches) {
         if (batch.numRows === 0) {
           // Check for external location pointer batch
-          if (isExternalLocationBatch(batch)) {
-            batch = await resolveExternalLocation(batch, externalConfig);
+          if (isExternalLocationBatch(batch as any)) {
+            batch = (await resolveExternalLocation(batch as any, externalConfig)) as any;
           } else {
             dispatchLogOrError(batch, onLog);
             continue;
@@ -254,7 +254,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
         // First stream: header
         const headerStream = await reader.readStream();
         if (headerStream) {
-          for (const batch of headerStream.batches) {
+          for (const batch of headerStream.batches as any[]) {
             if (batch.numRows === 0) {
               dispatchLogOrError(batch, onLog);
               continue;
@@ -269,11 +269,11 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
         // Second stream: data/state
         const dataStream = await reader.readStream();
         if (dataStream) {
-          streamSchema = dataStream.schema;
+          streamSchema = dataStream.schema as any;
         }
         const headerErrorBatches: RecordBatch[] = [];
         if (dataStream) {
-          for (const batch of dataStream.batches) {
+          for (const batch of dataStream.batches as any[]) {
             if (batch.numRows === 0) {
               // Check for state token
               const token = batch.metadata?.get(STATE_KEY);

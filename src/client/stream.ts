@@ -235,7 +235,7 @@ export class HttpStreamSession implements StreamSession {
     for (let batch of this._pendingBatches) {
       if (batch.numRows === 0) {
         if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
+          batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
         } else {
           dispatchLogOrError(batch, this._onLog);
           continue;
@@ -265,7 +265,7 @@ export class HttpStreamSession implements StreamSession {
           }
           // Check for external location pointer
           if (isExternalLocationBatch(batch)) {
-            batch = await resolveExternalLocation(batch, this._externalConfig);
+            batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
           } else {
             // Log/error batch
             dispatchLogOrError(batch, this._onLog);

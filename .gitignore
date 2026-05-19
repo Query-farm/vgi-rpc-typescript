@@ -3,3 +3,4 @@ dist/
 .astro/
 .conformance-bundles/
 .smoke-bundle/
+__pycache__/

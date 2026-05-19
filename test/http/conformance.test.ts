@@ -46,13 +46,25 @@ afterEach(() => {
 });
 
 beforeAll(async () => {
-  // Write a minimal server script that imports the shared protocol
+  // Write a minimal server script that imports the shared protocol.
+  // Rebuild the Protocol without `protocolVersion` so the generic
+  // `vgi-rpc` CLI — which doesn't bind to ConformanceService and
+  // therefore can't emit `vgi_rpc.protocol_version` — isn't rejected
+  // at the dispatch boundary. The Python conformance suite drives
+  // the versioned `examples/conformance-http.ts` server through the
+  // typed proxy; that path keeps the version gate live.
   const scriptPath = `${TS_DIR}/test/http/_conformance_server.ts`;
   await Bun.write(
     scriptPath,
     `
-import { protocol } from "../../examples/conformance-protocol.js";
+import { protocol as versionedProtocol } from "../../examples/conformance-protocol.js";
 import { createHttpHandler } from "../../src/http/index.js";
+import { Protocol } from "../../src/protocol.js";
+
+const protocol = new Protocol("Conformance");
+for (const [name, def] of versionedProtocol.getMethods()) {
+  (protocol as any)._methods.set(name, def);
+}
 
 const httpHandler = createHttpHandler(protocol, {
   serverId: "conformance-http",
@@ -155,12 +167,12 @@ async function writeExchangeInput(values: number[]): Promise<string> {
 // ==========================================================================
 
 describe("HTTP conformance: describe", () => {
-  it("lists all 53 methods via HTTP", async () => {
+  it("lists all 81 methods via HTTP", async () => {
     const { stdout, exitCode, stderr } = await run(cliHttp("describe"));
     if (exitCode !== 0) throw new Error(`exit ${exitCode}: ${stdout}\n${stderr}`);
     const data = JSON.parse(stdout);
     expect(data.protocol_name).toBe("Conformance");
-    expect(Object.keys(data.methods).length).toBe(53);
+    expect(Object.keys(data.methods).length).toBe(81);
   });
 });
 
