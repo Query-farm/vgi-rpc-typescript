@@ -92,8 +92,9 @@ export async function httpDispatchDescribe(
   protocolName: string,
   methods: Map<string, MethodDefinition>,
   serverId: string,
+  protocolVersion?: string,
 ): Promise<Response> {
-  const { batch } = await buildDescribeBatch(protocolName, methods, serverId);
+  const { batch } = await buildDescribeBatch(protocolName, methods, serverId, protocolVersion);
   const body = serializeIpcStream(DESCRIBE_SCHEMA, [batch]);
   return arrowResponse(body);
 }

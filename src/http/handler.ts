@@ -850,7 +850,12 @@ export function createHttpHandler(
     // Route: {prefix}/__describe__
     if (path === `${prefix}/${DESCRIBE_METHOD_NAME}`) {
       try {
-        const response = await httpDispatchDescribe(protocol.name, methods, serverId);
+        const response = await httpDispatchDescribe(
+          protocol.name,
+          methods,
+          serverId,
+          protocol.protocolVersion || undefined,
+        );
         addCorsHeaders(response.headers);
         return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
       } catch (error: any) {
