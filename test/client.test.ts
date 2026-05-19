@@ -89,7 +89,11 @@ async function startServer(proc: Subprocess): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /** HTTP transport: spawns server, reads PORT, creates httpConnect clients. */
-function defineHttpConformanceTests(label: string, spawnFn: () => Subprocess) {
+function defineHttpConformanceTests(
+  label: string,
+  spawnFn: () => Subprocess,
+  extraOpts?: { supportsServerSideDefaults?: boolean },
+) {
   defineConformanceTests(
     label,
     // setup: spawn server, return baseUrl
@@ -106,6 +110,7 @@ function defineHttpConformanceTests(label: string, spawnFn: () => Subprocess) {
     (ctx, opts) => httpConnect(ctx.baseUrl, opts),
     // describeFactory
     (ctx) => httpIntrospect(ctx.baseUrl),
+    extraOpts,
   );
 }
 
@@ -114,7 +119,7 @@ function definePipeConformanceTests(
   label: string,
   cmd: string[],
   cmdOpts?: { cwd?: string },
-  extraOpts?: { supportsZeroRowExchange?: boolean },
+  extraOpts?: { supportsZeroRowExchange?: boolean; supportsServerSideDefaults?: boolean },
 ) {
   defineConformanceTests(
     label,
@@ -143,10 +148,19 @@ function defineConformanceTests<TCtx>(
   teardown: (ctx: TCtx) => void,
   clientFactory: (ctx: TCtx, opts?: { onLog?: (msg: LogMessage) => void }) => RpcClient,
   describeFactory: (ctx: TCtx) => Promise<any>,
-  opts?: { supportsInitErrors?: boolean; supportsZeroRowExchange?: boolean },
+  opts?: {
+    supportsInitErrors?: boolean;
+    supportsZeroRowExchange?: boolean;
+    /** True when the server fills in optional-parameter defaults on its own
+     *  (TS server does; Python server requires the client to merge defaults
+     *  before send, which the TS client can't do because DESCRIBE_VERSION 4
+     *  dropped ``param_defaults`` from the wire). */
+    supportsServerSideDefaults?: boolean;
+  },
 ) {
   const supportsInitErrors = opts?.supportsInitErrors ?? true;
   const supportsZeroRowExchange = opts?.supportsZeroRowExchange ?? true;
+  const supportsServerSideDefaults = opts?.supportsServerSideDefaults ?? true;
   describe(`Client conformance [${label}]`, () => {
     let ctx: TCtx;
 
@@ -432,7 +446,7 @@ function defineConformanceTests<TCtx>(
         client.close();
       });
 
-      it("concatenate with default", async () => {
+      it.skipIf(!supportsServerSideDefaults)("concatenate with default", async () => {
         const client = clientFactory(ctx);
         const result = await client.call("concatenate", { prefix: "hello", suffix: "world" });
         expect(result!.result).toBe("hello-world");
@@ -446,7 +460,7 @@ function defineConformanceTests<TCtx>(
         client.close();
       });
 
-      it("with_defaults all default", async () => {
+      it.skipIf(!supportsServerSideDefaults)("with_defaults all default", async () => {
         const client = clientFactory(ctx);
         const result = await client.call("with_defaults", { required: 1 });
         expect(result!.result).toBe("required=1, optional_str=default, optional_int=42");
@@ -1312,11 +1326,18 @@ const PYTHON_PIPE_SERVER = [
 ];
 
 if (hasPython) {
-  defineHttpConformanceTests("python-http", () =>
-    Bun.spawn(PYTHON_HTTP_SERVER, {
-      stdout: "pipe",
-      stderr: "pipe",
-    }),
+  defineHttpConformanceTests(
+    "python-http",
+    () =>
+      Bun.spawn(PYTHON_HTTP_SERVER, {
+        stdout: "pipe",
+        stderr: "pipe",
+      }),
+    // Python's RpcServer doesn't fill in optional-parameter defaults
+    // server-side — its own client merges from ``info.param_defaults``
+    // before sending. DESCRIBE_VERSION 4 dropped ``param_defaults`` from
+    // the wire, so a cross-language TS client can't know about them.
+    { supportsServerSideDefaults: false },
   );
 }
 
@@ -1330,6 +1351,7 @@ if (hasPython) {
     // Python server strictly validates input schema. The pipe transport can't
     // know the correct schema for zero-row exchange since the describe response
     // doesn't include stream IO schemas (HTTP gets it from the init response).
-    { supportsZeroRowExchange: false },
+    // Same defaults limitation applies — see ``python-http``.
+    { supportsZeroRowExchange: false, supportsServerSideDefaults: false },
   );
 }
