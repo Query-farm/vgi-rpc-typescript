@@ -1,11 +1,19 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { batchFromColumns, field, schema as makeSchema, timestampMicro, utf8, type VgiSchema } from "../arrow/index.js";
+import {
+  batchFromColumns,
+  deserializeBatch,
+  field,
+  schema as makeSchema,
+  timestampMicro,
+  utf8,
+  type VgiSchema,
+} from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
-import { DESCRIBE_METHOD_NAME, PROTOCOL_HASH_KEY, RPC_ERROR_HEADER } from "../constants.js";
+import { DESCRIBE_METHOD_NAME, PROTOCOL_HASH_KEY, PROTOCOL_VERSION_KEY, RPC_ERROR_HEADER } from "../constants.js";
 import { buildDescribeBatch } from "../dispatch/describe.js";
-import { MethodNotImplementedError, SessionLostError } from "../errors.js";
+import { MethodNotImplementedError, ProtocolVersionError, parseProtocolVersion, SessionLostError } from "../errors.js";
 import type { Protocol } from "../protocol.js";
 import { type CallStatistics, type DispatchInfo, MethodType, type ServeStartHook, TransportKind } from "../types.js";
 import { gzipCompress, gzipDecompress } from "../util/gzip.js";
@@ -162,13 +170,61 @@ export function createHttpHandler(
   let protocolHashPromise: Promise<string> | null = null;
   function getProtocolHash(): Promise<string> {
     if (!protocolHashPromise) {
-      protocolHashPromise = buildDescribeBatch(protocol.name, methods, serverId).then(
-        ({ metadata }) => metadata.get(PROTOCOL_HASH_KEY) ?? "",
-      );
+      protocolHashPromise = buildDescribeBatch(
+        protocol.name,
+        methods,
+        serverId,
+        protocol.protocolVersion || undefined,
+      ).then(({ metadata }) => metadata.get(PROTOCOL_HASH_KEY) ?? "");
     }
     return protocolHashPromise;
   }
-  const protocolVersion = options?.protocolVersion ?? "";
+  const protocolVersion = protocol.protocolVersion || options?.protocolVersion || "";
+
+  // Dispatch-boundary protocol_version check, fires only when the Protocol
+  // declares a `protocolVersion`. Mirrors Python's HTTP _app_unary /
+  // _app_stream gate added after the dispatch-loop bypass was caught in
+  // review. Throws ProtocolVersionError so the existing catch turns it into
+  // a buffered error stream rather than a raw HTTP 500.
+  function enforceProtocolVersion(reqBatchMeta: ReadonlyMap<string, string> | undefined): void {
+    const parts = protocol.protocolVersionParts;
+    if (parts === null) return;
+    const serverVersion = protocol.protocolVersion;
+    const clientVersion = reqBatchMeta?.get(PROTOCOL_VERSION_KEY);
+    if (clientVersion === undefined) {
+      throw new ProtocolVersionError(
+        "VGI client/worker protocol_version mismatch.\n" +
+          "  Client: <not declared>\n" +
+          `  Server: ${serverVersion}\n` +
+          "  Direction: the client did not send a vgi_rpc.protocol_version " +
+          "metadata key. This is either a vgi-rpc framework bug or a " +
+          "non-VGI client connecting to a VGI worker.",
+      );
+    }
+    let clientParts: readonly [number, number, number];
+    try {
+      clientParts = parseProtocolVersion(clientVersion);
+    } catch {
+      throw new ProtocolVersionError(
+        "VGI client/worker protocol_version mismatch.\n" +
+          `  Client: ${clientVersion}\n` +
+          `  Server: ${serverVersion}\n` +
+          "  Direction: client sent a malformed protocol_version. " +
+          "Expected canonical semver MAJOR.MINOR.PATCH.",
+      );
+    }
+    if (clientParts[0] === parts[0] && clientParts[1] === parts[1]) return;
+    const clientOlder = clientParts[0] < parts[0] || (clientParts[0] === parts[0] && clientParts[1] < parts[1]);
+    const direction = clientOlder
+      ? `client is too old; upgrade the VGI extension/client to a version supporting protocol_version ${serverVersion}.`
+      : `server is too old; upgrade the VGI worker to a version supporting protocol_version ${clientVersion}.`;
+    throw new ProtocolVersionError(
+      "VGI client/worker protocol_version mismatch.\n" +
+        `  Client: ${clientVersion}\n` +
+        `  Server: ${serverVersion}\n` +
+        `  Direction: ${direction}`,
+    );
+  }
 
   const compressionLevel = options?.compressionLevel;
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
@@ -830,6 +886,39 @@ export function createHttpHandler(
         `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
       );
       return compressIfAccepted(makeErrorResponse(err, 404), clientAcceptsZstd, clientAcceptsGzip);
+    }
+
+    // Application-protocol-version gate (HTTP dispatch path). Fires only
+    // when the Protocol declared a `protocolVersion`, on unary calls and
+    // stream init. `/exchange` continuations skip the gate — the Python
+    // client (and parity TS client) only emits `vgi_rpc.protocol_version`
+    // on the dispatch-entry request, not on follow-up exchange batches.
+    // `__describe__` is exempt — diagnostic path for mismatched clients to
+    // discover the server's version. Mirrors Python's _app_unary /
+    // _app_stream gate.
+    if (protocol.protocolVersionParts !== null && methodName !== DESCRIBE_METHOD_NAME && action !== "exchange") {
+      try {
+        // Peek at request batch metadata without consuming the body — the
+        // dispatch helpers re-deserialize. Cost is one extra deserialize
+        // per protocol-versioned dispatch; acceptable for a typed gate.
+        let reqMeta: ReadonlyMap<string, string> | undefined;
+        try {
+          const peeked = deserializeBatch(body);
+          reqMeta = peeked.metadata ?? undefined;
+        } catch {
+          // Malformed body — fall through to the dispatch helper, which
+          // will surface the parse error properly.
+        }
+        enforceProtocolVersion(reqMeta);
+      } catch (exc) {
+        const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
+        const errBatch = buildErrorBatch(errSchema, exc as Error, serverId, null);
+        const errBody = serializeIpcStream(errSchema, [errBatch]);
+        const response = arrowResponse(errBody, 400);
+        addCorsHeaders(response.headers);
+        addCapabilityHeaders(response.headers);
+        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+      }
     }
 
     // Fire on_serve_start lazily (idempotent on success). A failure here

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { schema as makeSchema } from "./arrow/index.js";
+import { parseProtocolVersion } from "./errors.js";
 import { inferParamTypes, type SchemaLike, toSchema } from "./schema.js";
 import {
   type ExchangeFn,
@@ -23,10 +24,28 @@ const EMPTY_SCHEMA = makeSchema([]);
  */
 export class Protocol {
   readonly name: string;
+  /**
+   * Application protocol surface version. When non-empty, the server enforces
+   * exact major+minor match (patch ignored) against every request's
+   * `vgi_rpc.protocol_version` metadata; clients bound to this Protocol emit
+   * the value on every request. Format: canonical semver MAJOR.MINOR.PATCH.
+   * Mirrors Python's `Protocol.protocol_version` ClassVar.
+   */
+  readonly protocolVersion: string;
+  /** Parsed semver tuple; null when `protocolVersion` is unset. */
+  readonly protocolVersionParts: readonly [number, number, number] | null;
   private _methods: Map<string, MethodDefinition> = new Map();
 
-  constructor(name: string) {
+  constructor(name: string, options?: { protocolVersion?: string }) {
     this.name = name;
+    const raw = options?.protocolVersion;
+    if (raw === undefined || raw === "") {
+      this.protocolVersion = "";
+      this.protocolVersionParts = null;
+    } else {
+      this.protocolVersion = raw;
+      this.protocolVersionParts = parseProtocolVersion(raw);
+    }
   }
 
   /**

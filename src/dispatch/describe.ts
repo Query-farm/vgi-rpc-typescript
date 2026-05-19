@@ -16,6 +16,7 @@ import {
   DESCRIBE_VERSION_KEY,
   PROTOCOL_HASH_KEY,
   PROTOCOL_NAME_KEY,
+  PROTOCOL_VERSION_KEY,
   REQUEST_VERSION,
   REQUEST_VERSION_KEY,
   SERVER_ID_KEY,
@@ -113,6 +114,7 @@ export async function buildDescribeBatch(
   protocolName: string,
   methods: Map<string, MethodDefinition>,
   serverId: string,
+  protocolVersion?: string,
 ): Promise<{ batch: VgiBatch; metadata: Map<string, string> }> {
   // Sort methods by name for consistent ordering
   const sortedEntries = [...methods.entries()].sort(([a], [b]) => a.localeCompare(b));
@@ -191,6 +193,9 @@ export async function buildDescribeBatch(
   metadata.set(DESCRIBE_VERSION_KEY, DESCRIBE_VERSION);
   metadata.set(PROTOCOL_HASH_KEY, protocolHash);
   metadata.set(SERVER_ID_KEY, serverId);
+  if (protocolVersion) {
+    metadata.set(PROTOCOL_VERSION_KEY, protocolVersion);
+  }
 
   const batch = withBatchMetadata(baseBatch, metadata);
   return { batch, metadata };

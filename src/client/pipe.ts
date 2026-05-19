@@ -389,6 +389,7 @@ export function pipeConnect(
   let readerPromise: Promise<IpcStreamReader> | null = null;
   let methodCache: Map<string, MethodInfo> | null = null;
   let protocolName = "";
+  let serverProtocolVersion = "";
   let _busy = false;
   let _drainPromise: Promise<void> | null = null;
   let closed = false;
@@ -460,6 +461,7 @@ export function pipeConnect(
 
       const desc = await parseDescribeResponse(response.batches, onLog);
       protocolName = desc.protocolName;
+      serverProtocolVersion = desc.protocolVersion;
       methodCache = new Map(desc.methods.map((m) => [m.name, m]));
       return methodCache;
     } finally {
@@ -483,7 +485,7 @@ export function pipeConnect(
         const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
         // Send request
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method);
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
         writeFn(body);
 
         // Read response
@@ -537,7 +539,7 @@ export function pipeConnect(
         const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
         // Send init request (params as a complete IPC stream)
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method);
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
         writeFn(body);
 
         // Read header if method has headerSchema
@@ -597,6 +599,7 @@ export function pipeConnect(
       const methods = await ensureMethodCache();
       return {
         protocolName,
+        protocolVersion: serverProtocolVersion,
         methods: [...methods.values()],
       };
     },

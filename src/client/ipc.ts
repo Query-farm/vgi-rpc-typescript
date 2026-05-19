@@ -19,6 +19,7 @@ import {
   LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
+  PROTOCOL_VERSION_KEY,
   REQUEST_VERSION,
   REQUEST_VERSION_KEY,
   RPC_METHOD_KEY,
@@ -79,11 +80,23 @@ function coerceForArrow(type: DataType, value: any): any {
 
 /**
  * Build a 1-row Arrow IPC request batch with method metadata.
+ *
+ * When `options.protocolVersion` is non-empty, the value is emitted as
+ * `vgi_rpc.protocol_version` so servers that declare a Protocol-level
+ * version validate the request at the dispatch boundary.
  */
-export function buildRequestIpc(schema: Schema, params: Record<string, any>, method: string): Uint8Array {
+export function buildRequestIpc(
+  schema: Schema,
+  params: Record<string, any>,
+  method: string,
+  options?: { protocolVersion?: string },
+): Uint8Array {
   const metadata = new Map<string, string>();
   metadata.set(RPC_METHOD_KEY, method);
   metadata.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
+  if (options?.protocolVersion) {
+    metadata.set(PROTOCOL_VERSION_KEY, options.protocolVersion);
+  }
 
   if (schema.fields.length === 0) {
     const structType = new Struct(schema.fields);

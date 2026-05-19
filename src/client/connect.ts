@@ -41,6 +41,11 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
   const externalConfig = options?.externalLocation;
 
   let methodCache: Map<string, MethodInfo> | null = null;
+  /** Application protocol surface version discovered via __describe__. When
+   *  non-empty, the client emits it on every request as
+   *  `vgi_rpc.protocol_version` so a versioned server can validate at the
+   *  dispatch boundary. */
+  let serverProtocolVersion = "";
   let compressFn: CompressFn | undefined;
   let decompressFn: DecompressFn | undefined;
   let compressionLoaded = false;
@@ -161,6 +166,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       decompressFn,
     });
     methodCache = new Map(desc.methods.map((m) => [m.name, m]));
+    serverProtocolVersion = desc.protocolVersion;
     return methodCache;
   }
 
@@ -176,7 +182,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       // Apply defaults
       const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method);
+      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
       const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}`, body);
       checkAuth(resp);
 
@@ -226,7 +232,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
       // Apply defaults
       const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method);
+      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
       const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}/init`, body);
       checkAuth(resp);
 

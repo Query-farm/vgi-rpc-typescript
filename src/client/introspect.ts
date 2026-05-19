@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Schema as ArrowSchema, type RecordBatch, RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
-import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY } from "../constants.js";
+import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY, PROTOCOL_VERSION_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import { buildRequestIpc, dispatchLogOrError, readResponseBatches } from "./ipc.js";
@@ -23,6 +23,10 @@ export interface MethodInfo {
 
 export interface ServiceDescription {
   protocolName: string;
+  /** Application protocol surface version surfaced by the server's
+   *  __describe__ response. Empty string when the server did not declare
+   *  a `protocolVersion`. */
+  protocolVersion: string;
   methods: MethodInfo[];
 }
 
@@ -58,6 +62,7 @@ export async function parseDescribeResponse(
   // Extract metadata from batch
   const meta = dataBatch.metadata;
   const protocolName = meta?.get(PROTOCOL_NAME_KEY) ?? "";
+  const protocolVersion = meta?.get(PROTOCOL_VERSION_KEY) ?? "";
 
   // Slim DESCRIBE_VERSION 4 wire format (see dispatch/describe.ts):
   //   0:name 1:method_type 2:has_return 3:params_schema_ipc
@@ -95,7 +100,7 @@ export async function parseDescribeResponse(
     methods.push(info);
   }
 
-  return { protocolName, methods };
+  return { protocolName, protocolVersion, methods };
 }
 
 /**

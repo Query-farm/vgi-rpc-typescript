@@ -2,11 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { schema as makeSchema, serializeBatch } from "./arrow/index.js";
-import { DESCRIBE_METHOD_NAME } from "./constants.js";
+import { DESCRIBE_METHOD_NAME, PROTOCOL_VERSION_KEY } from "./constants.js";
 import { buildDescribeBatch } from "./dispatch/describe.js";
 import { dispatchStream } from "./dispatch/stream.js";
 import { dispatchUnary } from "./dispatch/unary.js";
-import { MethodNotImplementedError, RpcError, VersionError } from "./errors.js";
+import {
+  MethodNotImplementedError,
+  ProtocolVersionError,
+  parseProtocolVersion,
+  RpcError,
+  VersionError,
+} from "./errors.js";
 import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
 import {
@@ -96,14 +102,63 @@ export class VgiRpcServer {
     protocolHash: string;
   }> {
     if (!this._describePromise) {
-      this._describePromise = buildDescribeBatch(this.protocol.name, this.protocol.getMethods(), this.serverId).then(
-        ({ batch, metadata }) => ({
-          batch,
-          protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? "",
-        }),
-      );
+      this._describePromise = buildDescribeBatch(
+        this.protocol.name,
+        this.protocol.getMethods(),
+        this.serverId,
+        this.protocol.protocolVersion || undefined,
+      ).then(({ batch, metadata }) => ({
+        batch,
+        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? "",
+      }));
     }
     return this._describePromise;
+  }
+
+  /** Validate a client's declared protocol_version against the Protocol's
+   *  declared version. Caller invokes only when
+   *  `protocol.protocolVersionParts` is non-null. Mirrors Python's
+   *  `RpcServer._check_protocol_version`: exact major+minor match, patch
+   *  ignored; directional error message names which side is older. */
+  private checkProtocolVersion(clientVersion: string | undefined): void {
+    const serverParts = this.protocol.protocolVersionParts!;
+    const serverVersion = this.protocol.protocolVersion;
+    if (clientVersion === undefined) {
+      throw new ProtocolVersionError(
+        "VGI client/worker protocol_version mismatch.\n" +
+          "  Client: <not declared>\n" +
+          `  Server: ${serverVersion}\n` +
+          "  Direction: the client did not send a vgi_rpc.protocol_version " +
+          "metadata key. This is either a vgi-rpc framework bug or a " +
+          "non-VGI client connecting to a VGI worker.",
+      );
+    }
+    let clientParts: readonly [number, number, number];
+    try {
+      clientParts = parseProtocolVersion(clientVersion);
+    } catch {
+      throw new ProtocolVersionError(
+        "VGI client/worker protocol_version mismatch.\n" +
+          `  Client: ${clientVersion}\n` +
+          `  Server: ${serverVersion}\n` +
+          "  Direction: client sent a malformed protocol_version. " +
+          "Expected canonical semver MAJOR.MINOR.PATCH.",
+      );
+    }
+    if (clientParts[0] === serverParts[0] && clientParts[1] === serverParts[1]) {
+      return;
+    }
+    const clientOlder =
+      clientParts[0] < serverParts[0] || (clientParts[0] === serverParts[0] && clientParts[1] < serverParts[1]);
+    const direction = clientOlder
+      ? `client is too old; upgrade the VGI extension/client to a version supporting protocol_version ${serverVersion}.`
+      : `server is too old; upgrade the VGI worker to a version supporting protocol_version ${clientVersion}.`;
+    throw new ProtocolVersionError(
+      "VGI client/worker protocol_version mismatch.\n" +
+        `  Client: ${clientVersion}\n` +
+        `  Server: ${serverVersion}\n` +
+        `  Direction: ${direction}`,
+    );
   }
 
   /** Start the server loop. Reads requests until stdin closes. */
@@ -204,6 +259,22 @@ export class VgiRpcServer {
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, this.serverId, requestId);
       writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
+    }
+
+    // Application-protocol-version gate. Fires only when the Protocol
+    // declared a `protocolVersion`. `__describe__` is exempt — it is the
+    // diagnostic path a mismatched client uses to introspect the server's
+    // version. Mirrors Python's serve_one dispatch-boundary check.
+    if (this.protocol.protocolVersionParts !== null) {
+      try {
+        const md = batch.metadata;
+        this.checkProtocolVersion(md?.get(PROTOCOL_VERSION_KEY));
+      } catch (exc) {
+        const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
+        const errBatch = buildErrorBatch(errSchema, exc as Error, this.serverId, requestId);
+        writer.writeStream(errSchema, [errBatch]);
+        return;
+      }
     }
 
     // Dispatch based on method type, with optional hook

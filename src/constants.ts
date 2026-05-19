@@ -18,6 +18,14 @@ export const DESCRIBE_VERSION_KEY = "vgi_rpc.describe_version";
 export const PROTOCOL_HASH_KEY = "vgi_rpc.protocol_hash";
 export const DESCRIBE_VERSION = "4";
 
+/** Application protocol surface version. Carried on every request batch from
+ *  a client bound to a Protocol that declares `protocolVersion`; also emitted
+ *  in the __describe__ response metadata. Format: canonical semver
+ *  MAJOR.MINOR.PATCH. Enforced at the dispatch boundary on the server: exact
+ *  major+minor match required, patch ignored. Distinct from `REQUEST_VERSION`
+ *  (wire framing). Mirrors Python's `PROTOCOL_VERSION_KEY`. */
+export const PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
+
 export const DESCRIBE_METHOD_NAME = "__describe__";
 
 export const STATE_KEY = "vgi_rpc.stream_state#b64";
