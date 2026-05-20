@@ -24,7 +24,7 @@ import {
   SERVER_ID_KEY,
 } from "../src/constants.js";
 import { RpcError, VersionError } from "../src/errors.js";
-import { parseRequest } from "../src/wire/request.js";
+import { applyDefaults, parseRequest } from "../src/wire/request.js";
 import { buildErrorBatch, buildResultBatch } from "../src/wire/response.js";
 import { IpcStreamWriter } from "../src/wire/writer.js";
 
@@ -182,5 +182,30 @@ describe("IpcStreamWriter", () => {
     expect(bytes.length).toBeGreaterThan(0);
 
     unlinkSync(tmpPath);
+  });
+});
+
+describe("applyDefaults", () => {
+  it("substitutes defaults only for null/undefined params", () => {
+    const params = { a: 1, b: null, c: undefined as unknown, d: 0 };
+    const out = applyDefaults(params, { a: 99, b: 2, c: 3, d: 99, e: 5 });
+    expect(out.a).toBe(1); // supplied value kept
+    expect(out.b).toBe(2); // null replaced
+    expect(out.c).toBe(3); // undefined replaced
+    expect(out.d).toBe(0); // falsy-but-present value kept (not treated as missing)
+    expect(out.e).toBe(5); // absent key filled from default
+  });
+
+  it("preserves BigInt defaults without coercing to Number", () => {
+    // int64 defaults arrive as BigInt; the builder relies on the type being
+    // preserved so it doesn't re-scale. applyDefaults must pass it through.
+    const out = applyDefaults({ n: null }, { n: 9007199254740993n });
+    expect(out.n).toBe(9007199254740993n);
+    expect(typeof out.n).toBe("bigint");
+  });
+
+  it("is a no-op when defaults is undefined", () => {
+    const params = { a: 1 };
+    expect(applyDefaults(params, undefined)).toBe(params);
   });
 });

@@ -56,7 +56,6 @@ import {
 } from "./oauth-pkce.js";
 import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
 import {
-  type DrainHandle,
   makeDrainHandle,
   openSessionToken,
   SessionRegistry,
@@ -312,12 +311,12 @@ export function createHttpHandler(
     ? Object.entries(options?.stickyEchoHeaders ?? {})
     : [];
   const sessionRegistry = stickyEnabled ? new SessionRegistry(stickyDefaultTtl) : null;
-  if (sessionRegistry) {
-    // Start the reaper lazily (it'll unref so it doesn't block exit).
-    startSessionReaper(sessionRegistry);
-  }
+  // Reaper interval is unref'd (won't block process exit) but is still a live
+  // resource — `DrainHandle.shutdown()` clears it via this stop fn so callers
+  // that drain explicitly (tests, worker-exit hooks) don't leak the interval.
+  const stopReaper = sessionRegistry ? startSessionReaper(sessionRegistry) : null;
   if (options?._onStickyHandle && sessionRegistry) {
-    options._onStickyHandle(makeDrainHandle(sessionRegistry));
+    options._onStickyHandle(makeDrainHandle(sessionRegistry, stopReaper ?? undefined));
   }
 
   // Encodings the server can produce on the response side. Mirrors

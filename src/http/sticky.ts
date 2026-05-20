@@ -408,11 +408,16 @@ export interface DrainHandle {
   setDraining(value: boolean): void;
 }
 
-/** Build a {@link DrainHandle} for *registry*. */
-export function makeDrainHandle(registry: SessionRegistry): DrainHandle {
+/** Build a {@link DrainHandle} for *registry*. `stopReaper`, when supplied,
+ *  is invoked by `shutdown()` so the periodic reaper interval is cleared and
+ *  the handle fully releases its resources. */
+export function makeDrainHandle(registry: SessionRegistry, stopReaper?: () => void): DrainHandle {
   return {
     drain: () => registry.setDraining(true),
-    shutdown: () => registry.shutdown(),
+    shutdown: () => {
+      stopReaper?.();
+      registry.shutdown();
+    },
     isDraining: () => registry.draining,
     setDraining: (v) => registry.setDraining(v),
   };
