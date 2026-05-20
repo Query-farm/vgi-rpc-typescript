@@ -65,8 +65,8 @@ export function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest 
   // its `.get(0)` round-trip is unreliable for those types. On flechette
   // those same types extract cleanly via `col.get(0)`, and `col.data[0]`
   // is a Batch (not a Data) so the arrow-js passthrough trick doesn't
-  // apply. Gate on backend.
-  const useOpaquePassthrough = backend.name === "arrow-js";
+  // apply. The backend advertises whether passthrough is needed.
+  const useOpaquePassthrough = backend.opaquePassthrough;
   for (let i = 0; i < schema.fields.length; i++) {
     const field = schema.fields[i];
     if (useOpaquePassthrough && (isMap(field.type) || isOpaquePassthroughType(field.type))) {
@@ -75,26 +75,28 @@ export function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest 
       continue;
     }
     let value = batch.getChildAt(i)?.get(0);
-    // Normalize arrow-js BigNum wrappers (DecimalBigNum / IntBigNum) to
-    // primitive BigInt. The stdio reader is arrow-js-coupled (the
-    // facade has no streaming reader surface), so on the flechette
-    // facade we still receive arrow-js batches whose Decimal/Int64
-    // columns return BigNum objects. Downstream construction goes
-    // through the flechette facade and expects a primitive — without
-    // this normalization the encoder treats the BigNum as a Number
-    // and the value loses precision.
-    if (
-      value &&
-      typeof value === "object" &&
-      (value as any)?.constructor?.name?.includes("BigNum") &&
-      isOpaquePassthroughType(field.type)
-    ) {
+    // Normalize arrow-js DecimalBigNum wrappers to primitive BigInt.
+    //
+    // TODO: remove once the stdio transport reads through a facade-aware
+    // reader. The stdio reader is arrow-js-coupled (the facade exposes no
+    // streaming reader), so under the flechette facade we still receive
+    // arrow-js batches; an opaque Decimal column then yields a
+    // `DecimalBigNum` (a Uint32Array subclass whose `.toString()` is the
+    // numeric value). Downstream construction goes through the flechette
+    // facade and expects a primitive — without this the encoder treats the
+    // BigNum as a Number and loses precision.
+    //
+    // Detect structurally via `instanceof Uint32Array` rather than by
+    // constructor name (which minifies away): DecimalBigNum is the only
+    // opaque type whose `.get(0)` returns a Uint32Array, so this also
+    // excludes binary `Uint8Array` values from being mis-parsed as BigInt.
+    if (value instanceof Uint32Array && isOpaquePassthroughType(field.type)) {
       // BigInt(decimalBigNum) triggers arrow-js's
       // Symbol.toPrimitive('number') path which throws for values
       // outside the safe-integer range. Go through `.toString()`
-      // instead — bigNumToString handles arbitrary precision.
+      // instead — it handles arbitrary precision.
       try {
-        value = BigInt((value as { toString(): string }).toString());
+        value = BigInt((value as unknown as { toString(): string }).toString());
       } catch {
         // leave as-is on unexpected shape
       }

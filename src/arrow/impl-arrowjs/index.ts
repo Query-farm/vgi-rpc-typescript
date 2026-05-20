@@ -52,7 +52,7 @@ import type {
   VgiSchema,
 } from "../types.js";
 
-export const backend: VgiBackendInfo = { name: "arrow-js" };
+export const backend: VgiBackendInfo = { name: "arrow-js", opaquePassthrough: true };
 
 // ----- Type factories ------------------------------------------------------
 

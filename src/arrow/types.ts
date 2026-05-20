@@ -37,6 +37,14 @@ export interface VgiBatch {
 
 export interface VgiBackendInfo {
   readonly name: "arrow-js" | "flechette";
+  /**
+   * Whether this backend's `.get(0)` round-trip is unreliable for opaque
+   * column types (Map/Date/Time/Timestamp/Duration/Decimal/LargeUtf8/
+   * LargeBinary/FixedSizeBinary/Dictionary), requiring the request parser to
+   * pass the raw column data straight through instead of materializing a
+   * value. True for arrow-js; false for flechette (which extracts cleanly).
+   */
+  readonly opaquePassthrough: boolean;
 }
 
 export type VgiColumnData = unknown;

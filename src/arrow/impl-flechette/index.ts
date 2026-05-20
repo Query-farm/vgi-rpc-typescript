@@ -49,7 +49,7 @@ import type {
 } from "../types.js";
 import { readFirstRecordBatchMeta } from "./message-meta.js";
 
-export const backend: VgiBackendInfo = { name: "flechette" };
+export const backend: VgiBackendInfo = { name: "flechette", opaquePassthrough: false };
 
 const EXTRACT_OPTS = {
   useBigInt: true,
