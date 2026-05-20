@@ -24,6 +24,18 @@ import { assembleDictionaryBatches, assembleSchema, tableToIPC } from './table-t
  * concatenation produces a stream with multiple EOS markers, which causes
  * readers to stop after the first table's batches.
  *
+ * Dictionary constraint: a single set of dictionary batches is emitted up
+ * front, taken from the first table that contributes data (see the
+ * `dataTable` lookup below). All tables sharing a Dictionary-typed field
+ * MUST therefore use the SAME dictionary values — per-table dictionary
+ * deltas / replacements are NOT supported. This holds for vgi-rpc's wire
+ * pattern (zero-or-more empty metadata/log batches followed by result
+ * batches that share one schema and one dictionary), which is the only
+ * caller. Encoding tables with divergent dictionaries would emit a stream
+ * whose later batches reference dictionary ids the reader resolves to the
+ * wrong values; if that ever becomes a use case, this path must emit
+ * per-table dictionary batches keyed by id instead.
+ *
  * @param {Table[]} tables The Arrow tables to encode (must share a schema).
  * @param {object} [options] Encoding options.
  * @param {Sink} [options.sink] IPC byte consumer.

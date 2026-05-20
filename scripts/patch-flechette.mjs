@@ -39,11 +39,32 @@
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+// The patches in `flechette-patches/` are hand-merged against this exact
+// upstream version. flechette is pinned to a github fork branch, so a
+// dependency bump can change the source these patches overwrite without
+// changing how `bun install` resolves it. If the installed version drifts,
+// the patched files may no longer line up with the rest of the package
+// (e.g. a renamed internal export) and the flechette backend breaks in
+// subtle, hard-to-trace ways. Bump this constant whenever the patches are
+// re-merged against a new flechette release.
+const EXPECTED_FLECHETTE_VERSION = "2.4.0";
+
 const ROOT = resolve(import.meta.dirname, "..", "node_modules", "@uwdata", "flechette");
 if (!existsSync(ROOT)) {
   // Flechette not installed (fresh clone before `bun install`). Skip
   // silently — postinstall fires again after the install completes.
   process.exit(0);
+}
+
+const installedPkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
+if (installedPkg.version !== EXPECTED_FLECHETTE_VERSION) {
+  console.error(
+    `patch-flechette: WARNING — installed @uwdata/flechette is ` +
+      `${installedPkg.version}, but the patches in scripts/flechette-patches/ ` +
+      `were merged against ${EXPECTED_FLECHETTE_VERSION}. They may not apply ` +
+      `correctly. Re-merge the patches and update EXPECTED_FLECHETTE_VERSION ` +
+      `in scripts/patch-flechette.mjs.`,
+  );
 }
 
 const PATCHED_FILES = [
