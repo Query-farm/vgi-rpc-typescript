@@ -38,7 +38,15 @@ import {
   tableToIPC,
 } from "@uwdata/flechette";
 
-import type { VgiBackendInfo, VgiBatch, VgiColumnData, VgiDataType, VgiField, VgiSchema } from "../types.js";
+import type {
+  IncrementalEncoder,
+  VgiBackendInfo,
+  VgiBatch,
+  VgiColumnData,
+  VgiDataType,
+  VgiField,
+  VgiSchema,
+} from "../types.js";
 import { readFirstRecordBatchMeta } from "./message-meta.js";
 
 export const backend: VgiBackendInfo = { name: "flechette" };
@@ -318,16 +326,44 @@ export function serializeBatches(_schema: VgiSchema, batches: VgiBatch[]): Uint8
   return tablesToIPC(batches as any[], { format: "stream" }) as Uint8Array;
 }
 
+/** Arrow Type ids: Int=2, Float=3. */
+function isNumericTypeId(typeId: number): boolean {
+  return typeId === 2 || typeId === 3;
+}
+
+/** Materialize a source column's values cast to a numeric destination type:
+ *  int64/uint64 want BigInt, everything else (smaller ints, floats) wants
+ *  Number. Nulls pass through. */
+function castNumericValues(col: any, dstType: VgiDataType): any[] {
+  const wantsBigInt = dstType.typeId === 2 && (dstType as any).bitWidth === 64;
+  const out: any[] = [];
+  for (let r = 0; r < col.length; r++) {
+    const v = col.get(r);
+    if (v == null) {
+      out.push(v);
+    } else if (wantsBigInt) {
+      out.push(typeof v === "bigint" ? v : BigInt(Math.trunc(Number(v))));
+    } else {
+      out.push(typeof v === "bigint" ? Number(v) : v);
+    }
+  }
+  return out;
+}
+
 /**
- * Mostly no-op under flechette: the IPC reader already produces specific
- * types (no Int_/Float_ generic-type quirk that arrow-js exhibits), and
- * flechette doesn't expose `batch.data.children` for column-by-column type
- * rewriting. We still surface field-name / field-count mismatches as
- * TypeErrors so the dispatch layer can convert them to RpcError — matches
- * the arrow-js path's contract.
+ * Rebuild a batch's columns to match a target schema's field types.
+ *
+ * flechette's IPC reader produces specific types upfront (no Int_/Float_
+ * generic-type quirk that arrow-js exhibits), but a cast-compatible client
+ * can still send e.g. int64 where the method declares float64. Mirror the
+ * arrow-js backend: materialize+rebuild numeric columns whose type differs
+ * from the expected field type. Non-numeric mismatches (and matching types)
+ * keep their existing column. Field-name / field-count mismatches surface as
+ * TypeErrors so the dispatch layer can convert them to RpcError.
  */
 export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBatch {
-  const batchSchema = (batch as any)?.schema;
+  const t = batch as any;
+  const batchSchema = t?.schema;
   if (!batchSchema || !schema) return batch;
   const batchFields = batchSchema.fields ?? [];
   const expectedFields = schema.fields ?? [];
@@ -341,5 +377,38 @@ export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBat
       throw new TypeError(`Batch field[${i}] is '${got}', expected '${want}'.`);
     }
   }
-  return batch;
+
+  let mutated = false;
+  const cols: Column<any>[] = expectedFields.map((f: VgiField, i: number) => {
+    const srcCol = t.getChildAt(i);
+    const srcType = srcCol.type as VgiDataType;
+    const dstType = f.type;
+    if (srcType.typeId === dstType.typeId) return srcCol;
+    if (isNumericTypeId(srcType.typeId) && isNumericTypeId(dstType.typeId)) {
+      mutated = true;
+      return f_columnFromArray(castNumericValues(srcCol, dstType), dstType as any, EXTRACT_OPTS);
+    }
+    return srcCol;
+  });
+
+  if (!mutated) return batch;
+  const rebuilt = buildTablePreservingNullable(schema, cols) as any;
+  if (t._vgiRecordMetadata) attachBatchMetadata(rebuilt, t._vgiRecordMetadata);
+  return rebuilt as unknown as VgiBatch;
+}
+
+/**
+ * Not supported on flechette: the lockstep stdio exchange protocol needs an
+ * incremental IPC writer (emit each batch's framing bytes before reading
+ * the next input), and flechette only exposes a one-shot table encoder.
+ * The flechette backend is selected for workerd / browser / worker, which
+ * are HTTP-only (no stdio), so this factory is never reached there. The
+ * stdio server requires the arrow-js backend.
+ */
+export function createIncrementalEncoder(_s: VgiSchema): IncrementalEncoder {
+  throw new Error(
+    "Incremental IPC streaming (stdio producer/exchange) is not supported on the flechette " +
+      "Arrow backend. Use the arrow-js backend for the stdio transport, or the HTTP transport " +
+      "on workerd/browser builds.",
+  );
 }

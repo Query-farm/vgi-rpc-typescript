@@ -12,24 +12,7 @@
 // embedded-arrow / IPC-roundtrip handlers. Type *classes* used to live
 // here too; the conformance protocol now constructs schemas/types via the
 // vgi-rpc Arrow facade (imports below) so it can run on either backend.
-import {
-  Field as A_Field,
-  Float64 as A_Float64,
-  Int16 as A_Int16,
-  Int32 as A_Int32,
-  Int64 as A_Int64,
-  List as A_List,
-  Struct as A_Struct,
-  Utf8 as A_Utf8,
-  type Data,
-  Map_,
-  makeData,
-  type RecordBatch,
-  RecordBatchReader,
-  RecordBatchStreamWriter,
-  recordBatchFromArrays,
-  vectorFromArray,
-} from "@query-farm/apache-arrow";
+import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter } from "@query-farm/apache-arrow";
 import {
   binary,
   bool as boolType,
@@ -144,82 +127,6 @@ const RICH_HEADER_SCHEMA = schema([
   field("annotated_float32", float32Type(), false),
   field("dict_str_str", richMapStrStr, false),
 ]);
-
-// ---------------------------------------------------------------------------
-// Data builders for complex types in RichHeader
-// ---------------------------------------------------------------------------
-
-function buildStructPointData(x: number, y: number): Data {
-  const xData = vectorFromArray([x], float64()).data[0];
-  const yData = vectorFromArray([y], float64()).data[0];
-  return makeData({
-    type: POINT_STRUCT,
-    length: 1,
-    children: [xData, yData],
-    nullCount: 0,
-  });
-}
-
-function buildNullStructPointData(): Data {
-  // PyArrow requires valid-sized child buffers even for null struct entries.
-  // Use vectorFromArray to build proper Float64 children with valid buffers.
-  const xData = vectorFromArray([0], float64()).data[0];
-  const yData = vectorFromArray([0], float64()).data[0];
-  return makeData({
-    type: POINT_STRUCT,
-    length: 1,
-    children: [xData, yData],
-    nullCount: 1,
-    nullBitmap: new Uint8Array([0]),
-  });
-}
-
-function buildListOfPointsData(points: { x: number; y: number }[]): Data {
-  const offsets = new Int32Array([0, points.length]);
-  const xData = vectorFromArray(
-    points.map((p) => p.x),
-    float64(),
-  ).data[0];
-  const yData = vectorFromArray(
-    points.map((p) => p.y),
-    float64(),
-  ).data[0];
-  const structData = makeData({
-    type: POINT_STRUCT,
-    length: points.length,
-    children: [xData, yData],
-    nullCount: 0,
-  });
-  const listType = list(field("item", POINT_STRUCT, false));
-  return makeData({
-    type: listType,
-    length: 1,
-    valueOffsets: offsets,
-    child: structData,
-    nullCount: 0,
-  } as any);
-}
-
-function buildMapDataFromEntries(keyField: Field, valueField: Field, keys: any[], values: any[]): Data {
-  const offsets = new Int32Array([0, keys.length]);
-  const keyData = vectorFromArray(keys, keyField.type).data[0];
-  const valData = vectorFromArray(values, valueField.type).data[0];
-  const entriesStruct = struct([keyField, valueField]);
-  const entriesData = makeData({
-    type: entriesStruct,
-    length: keys.length,
-    children: [keyData, valData],
-    nullCount: 0,
-  });
-  const mapT = mapType(keyField, valueField);
-  return makeData({
-    type: mapT,
-    length: 1,
-    valueOffsets: offsets,
-    child: entriesData,
-    nullCount: 0,
-  } as any);
-}
 
 // ---------------------------------------------------------------------------
 // buildRichHeader — deterministic header values matching Python exactly
@@ -378,15 +285,9 @@ protocol.unary("echo_list", {
   params: schema([field("values", listUtf8, false)]),
   result: schema([field("result", listUtf8, false)]),
   handler: (p) => {
-    // Backend-agnostic extraction: arrow-js returns a Vector with .get(i);
-    // flechette returns a plain JS array. Both are iterable.
-    const vec = p.values;
-    const arr: string[] = Array.from(vec, (v: any) => (v?.get ? v : v));
-    if (vec && typeof vec.get === "function" && typeof vec.length === "number") {
-      arr.length = 0;
-      for (let i = 0; i < vec.length; i++) arr.push(vec.get(i));
-    }
-    return { result: arr };
+    // Backend-agnostic extraction: arrow-js returns a Vector, flechette a
+    // plain JS array. Both are iterable, so Array.from handles either.
+    return { result: Array.from(p.values as Iterable<string>) };
   },
 });
 
@@ -997,9 +898,8 @@ protocol.exchange<{ factor: number }>("exchange_cast_compatible", {
     const col = input.getChildAt(0)!;
     const values: number[] = [];
     for (let i = 0; i < input.numRows; i++) {
-      const raw = col.get(i);
-      const num = typeof raw === "bigint" ? Number(raw) : Number(raw);
-      values.push(num * state.factor);
+      // Number() coerces both bigint (int64 input) and number (float64).
+      values.push(Number(col.get(i)) * state.factor);
     }
     out.emit({ value: values });
   },

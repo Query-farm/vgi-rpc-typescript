@@ -185,6 +185,28 @@ export interface SessionEntry {
   lock: AsyncMutex;
 }
 
+/**
+ * Derive the registry partition key for a request principal.
+ *
+ * Both the dispatch path and the `DELETE /__session__` teardown path MUST
+ * compute this identically — otherwise a session opened on one path can't
+ * be looked up on the other. The NUL separator (rather than a space)
+ * keeps `{domain:"a", principal:"b "}` from colliding with
+ * `{domain:"a ", principal:"b"}`. Anonymous requests collapse to a
+ * single sentinel.
+ *
+ * `domain` / `principal` are the authenticated identity fields, or
+ * null/undefined for anonymous.
+ */
+export function sessionPrincipalKey(
+  authenticated: boolean,
+  domain: string | null | undefined,
+  principal: string | null | undefined,
+): string {
+  if (!authenticated) return "\u0000anonymous";
+  return `${domain ?? ""}\u0000${principal ?? ""}`;
+}
+
 /** Hex-encode a session_id Uint8Array (24-char lowercase hex). */
 export function sessionIdHex(sessionId: Uint8Array): string {
   let s = "";

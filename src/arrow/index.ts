@@ -12,6 +12,7 @@ export {
   // Construction
   columnFromArray,
   conformBatchToSchema,
+  createIncrementalEncoder,
   dateDay,
   decimal,
   deserializeBatch,
@@ -76,6 +77,7 @@ export {
   TypeId,
 } from "./predicates.js";
 export type {
+  IncrementalEncoder,
   VgiBackendInfo,
   VgiBatch,
   VgiColumn,

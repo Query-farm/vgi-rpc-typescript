@@ -63,6 +63,7 @@ import {
   type StickySink,
   sealSessionToken,
   sessionIdHex,
+  sessionPrincipalKey,
   startSessionReaper,
 } from "./sticky.js";
 import { computeAad } from "./token.js";
@@ -574,14 +575,14 @@ export function createHttpHandler(
       // authenticated principal (matching `computeAad` in `token.ts`);
       // the registry's principalKey compounds domain+principal as
       // defense-in-depth.
-      let principalKey = "\u0000anonymous";
+      let principalKey = sessionPrincipalKey(false, null, null);
       let aadPrincipal: string | null = null;
       if (authenticate) {
         try {
           const auth = await authenticate(request);
           if (auth?.authenticated) {
             aadPrincipal = auth.principal ?? "";
-            principalKey = `${auth.domain ?? ""}\u0000${auth.principal ?? ""}`;
+            principalKey = sessionPrincipalKey(true, auth.domain, auth.principal);
           }
         } catch {
           // Anonymous principal — stale / forged tokens already won't
@@ -672,7 +673,7 @@ export function createHttpHandler(
     if (stickyEnabled && sessionRegistry) {
       const auth = ctx.authContext;
       const aadPrincipal = auth?.authenticated ? (auth.principal ?? "") : null;
-      const principalKey = auth?.authenticated ? `${auth.domain ?? ""} ${auth.principal ?? ""}` : " anonymous";
+      const principalKey = sessionPrincipalKey(!!auth?.authenticated, auth?.domain, auth?.principal);
       const aad = computeAad(aadPrincipal);
       const acceptOpens = (request.headers.get(SESSION_ACCEPT_HEADER) ?? "").trim().toLowerCase() === "true";
       const sessionHeader = (request.headers.get(SESSION_HEADER) ?? "").trim();

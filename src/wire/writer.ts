@@ -1,13 +1,8 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  type RecordBatch as A_RecordBatch,
-  type Schema as A_Schema,
-  RecordBatchStreamWriter,
-} from "@query-farm/apache-arrow";
-import type { VgiBatch, VgiSchema } from "../arrow/index.js";
-import { serializeBatches } from "../arrow/index.js";
+import type { IncrementalEncoder, VgiBatch, VgiSchema } from "../arrow/index.js";
+import { createIncrementalEncoder, serializeBatches } from "../arrow/index.js";
 
 const STDOUT_FD = 1;
 
@@ -100,70 +95,41 @@ export class IpcStreamWriter {
 /**
  * An open IPC stream that supports incremental batch writes.
  *
- * Uses RecordBatchStreamWriter with internal buffering (no pipe to stdout).
- * After each operation, drains the writer's internal AsyncByteQueue buffer
- * and writes bytes synchronously via writeAll(). This avoids deadlocks
- * caused by Node.js async stream piping when stdin reads block before
- * stdout writes flush through the event loop.
+ * Drives a backend {@link IncrementalEncoder} and flushes its bytes
+ * synchronously via writeAll() after each operation. This avoids
+ * deadlocks caused by Node.js async stream piping when stdin reads block
+ * before stdout writes flush through the event loop.
  *
- * **Arrow-js only:** the stdio exchange protocol is lockstep — the client
- * reads each response batch before sending the next input. Buffering
- * via `serializeBatches`-at-close would deadlock the protocol. The
- * incremental writer that satisfies both constraints is arrow-js's
- * `RecordBatchStreamWriter`. flechette has no equivalent surface, so
- * the stdio worker effectively requires the arrow-js backend. workerd /
- * browser deployments use HTTP (no stdio), so this is fine in practice;
- * conformance under `flechette-pipe` is marked xfail for stream tests.
+ * The encoder is obtained from the Arrow facade, so this file no longer
+ * imports arrow-js directly — keeping arrow-js out of the flechette
+ * (workerd/browser) bundle. The flechette encoder throws on
+ * construction; the stdio exchange protocol is lockstep (the client
+ * reads each response batch before sending the next input) which needs
+ * an incremental writer flechette doesn't provide. workerd/browser
+ * deployments use HTTP (no stdio), so the flechette path is never
+ * reached there; `flechette-pipe` conformance is xfailed for streams.
  */
 export class IncrementalStream {
-  private writer: RecordBatchStreamWriter;
+  private readonly encoder: IncrementalEncoder;
   private readonly fd: number;
   private closed = false;
 
   constructor(fd: number, schema: VgiSchema) {
     this.fd = fd;
-    this.writer = new RecordBatchStreamWriter();
-    // Buffer internally (no sink) — we drain manually via writeAll
-    this.writer.reset(undefined, schema as unknown as A_Schema);
-    this.drain();
+    this.encoder = createIncrementalEncoder(schema);
+    writeAll(this.fd, this.encoder.start());
   }
 
-  /**
-   * Write a single batch to the stream. Bytes are flushed synchronously.
-   *
-   * Uses _writeRecordBatch() directly to bypass the Arrow writer's schema
-   * comparison in write(). The public write() method calls compareSchemas()
-   * and auto-closes the writer if the batch's schema differs (e.g., in
-   * nullability), silently dropping the batch. Since our output schema is
-   * set at stream open time and all batches are structurally compatible,
-   * we skip the comparison.
-   */
+  /** Write a single batch; bytes are flushed synchronously. */
   write(batch: VgiBatch): void {
     if (this.closed) throw new Error("Stream already closed");
-    (this.writer as any)._writeRecordBatch(batch as unknown as A_RecordBatch);
-    this.drain();
+    writeAll(this.fd, this.encoder.writeBatch(batch));
   }
 
-  /**
-   * Close the stream (writes EOS marker synchronously).
-   */
+  /** Close the stream (writes EOS marker synchronously). */
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    // EOS marker: continuation (0xFFFFFFFF) + metadata length (0x00000000)
-    const eos = new Uint8Array(new Int32Array([-1, 0]).buffer);
-    writeAll(this.fd, eos);
-  }
-
-  /**
-   * Drain buffered bytes from the Arrow writer's internal queue
-   * and write them synchronously to the output fd.
-   */
-  private drain(): void {
-    const values = (this.writer as any)._sink._values as Uint8Array[];
-    for (const chunk of values) {
-      writeAll(this.fd, chunk);
-    }
-    values.length = 0;
+    writeAll(this.fd, this.encoder.finish());
   }
 }

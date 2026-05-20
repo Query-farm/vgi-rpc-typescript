@@ -42,7 +42,15 @@ import {
 // Local type-only helpers used by conformBatchToSchema.
 type _NeedsCast = (src: A_DataType, dst: A_DataType) => boolean;
 
-import type { VgiBackendInfo, VgiBatch, VgiColumnData, VgiDataType, VgiField, VgiSchema } from "../types.js";
+import type {
+  IncrementalEncoder,
+  VgiBackendInfo,
+  VgiBatch,
+  VgiColumnData,
+  VgiDataType,
+  VgiField,
+  VgiSchema,
+} from "../types.js";
 
 export const backend: VgiBackendInfo = { name: "arrow-js" };
 
@@ -137,6 +145,43 @@ export function serializeBatch(batch: VgiBatch): Uint8Array {
   (writer as any)._writeRecordBatch(a);
   writer.close();
   return writer.toUint8Array(true);
+}
+
+/**
+ * Incremental IPC encoder over arrow-js's `RecordBatchStreamWriter`. Each
+ * call drains the writer's internal sink queue and returns the new bytes,
+ * so the caller can flush them synchronously between lockstep turns.
+ *
+ * `_writeRecordBatch` is called directly (rather than the public `write`)
+ * to bypass arrow-js's schema comparison, which would auto-close the
+ * writer and silently drop a batch whose schema differs only in
+ * nullability — our output schema is fixed at open time and all batches
+ * are structurally compatible.
+ */
+export function createIncrementalEncoder(s: VgiSchema): IncrementalEncoder {
+  const writer = new RecordBatchStreamWriter();
+  writer.reset(undefined, s as unknown as A_Schema);
+  const drain = (): Uint8Array => {
+    const values = (writer as any)._sink._values as Uint8Array[];
+    const total = values.reduce((n, c) => n + c.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of values) {
+      out.set(c, off);
+      off += c.length;
+    }
+    values.length = 0;
+    return out;
+  };
+  return {
+    start: () => drain(),
+    writeBatch(batch: VgiBatch): Uint8Array {
+      (writer as any)._writeRecordBatch(batch as unknown as A_RecordBatch);
+      return drain();
+    },
+    // EOS marker: continuation (0xFFFFFFFF) + metadata length (0x00000000).
+    finish: () => new Uint8Array(new Int32Array([-1, 0]).buffer),
+  };
 }
 
 export function deserializeBatch(bytes: Uint8Array): VgiBatch {

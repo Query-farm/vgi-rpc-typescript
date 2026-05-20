@@ -40,3 +40,26 @@ export interface VgiBackendInfo {
 }
 
 export type VgiColumnData = unknown;
+
+/**
+ * Incremental IPC stream encoder for the lockstep stdio transport.
+ *
+ * The stdio exchange protocol is lockstep — the client reads each response
+ * batch (and its framing bytes) before sending the next input — so we
+ * cannot buffer-then-emit at close. Each call returns the wire bytes to
+ * flush immediately. Only the stdio server uses this; HTTP serializes
+ * whole responses via {@link serializeBatches}.
+ *
+ * The arrow-js backend implements this over `RecordBatchStreamWriter`.
+ * The flechette backend has no incremental-writer surface and its
+ * factory throws — keeping arrow-js out of the flechette (workerd/
+ * browser) bundle, which is HTTP-only anyway.
+ */
+export interface IncrementalEncoder {
+  /** Bytes for the schema preamble (continuation + schema message). */
+  start(): Uint8Array;
+  /** Bytes for one record batch message. */
+  writeBatch(batch: VgiBatch): Uint8Array;
+  /** Bytes for the end-of-stream marker. */
+  finish(): Uint8Array;
+}
