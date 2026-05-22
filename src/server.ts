@@ -217,7 +217,7 @@ export class VgiRpcServer {
     if (batches.length === 0) {
       const err = new RpcError("ProtocolError", "Request stream contains no batches", "");
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, this.serverId, null);
-      writer.writeStream(EMPTY_SCHEMA, [errBatch]);
+      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
 
@@ -234,7 +234,7 @@ export class VgiRpcServer {
     } catch (e: any) {
       // Write error response for protocol/version errors
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, e, this.serverId, null);
-      writer.writeStream(EMPTY_SCHEMA, [errBatch]);
+      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       if (e instanceof VersionError || e instanceof RpcError) {
         return; // Continue serving
       }
@@ -244,7 +244,7 @@ export class VgiRpcServer {
     // Handle __describe__ — lazy-build on first request.
     if (methodName === DESCRIBE_METHOD_NAME && this.enableDescribe) {
       const { batch } = await this.describeInfo();
-      writer.writeStream(batch.schema, [batch]);
+      await writer.writeStream(batch.schema, [batch]);
       return;
     }
 
@@ -257,7 +257,7 @@ export class VgiRpcServer {
         `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
       );
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, this.serverId, requestId);
-      writer.writeStream(EMPTY_SCHEMA, [errBatch]);
+      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
 
@@ -272,7 +272,7 @@ export class VgiRpcServer {
       } catch (exc) {
         const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
         const errBatch = buildErrorBatch(errSchema, exc as Error, this.serverId, requestId);
-        writer.writeStream(errSchema, [errBatch]);
+        await writer.writeStream(errSchema, [errBatch]);
         return;
       }
     }

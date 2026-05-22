@@ -32,9 +32,9 @@ export async function dispatchUnary(
     }
     // Collect log batches (from clientLog) + result batch
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
-    writer.writeStream(schema, batches);
+    await writer.writeStream(schema, batches);
   } catch (error: any) {
     const batch = buildErrorBatch(schema, error, serverId, requestId);
-    writer.writeStream(schema, [batch]);
+    await writer.writeStream(schema, [batch]);
   }
 }

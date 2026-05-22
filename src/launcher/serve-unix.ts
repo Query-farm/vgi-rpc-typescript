@@ -214,12 +214,16 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
   async function handleConnection(socket: Socket): Promise<void> {
     // The reader takes any Node Readable; sockets are duplex Readables.
     const reader = await IpcStreamReader.create(socket);
-    // For the writer we need a file descriptor.  Node exposes the AF_UNIX
-    // socket fd via `_handle.fd` (private but stable across versions).
-    // Fall back to async stream-write if `fd` is unavailable (e.g. Bun's
-    // node:net polyfill returns undefined here).
-    const fd = (socket as unknown as { _handle?: { fd?: number } })?._handle?.fd;
-    const writer = typeof fd === "number" ? new IpcStreamWriter(fd) : new IpcStreamWriter(/* stdout fallback */);
+    // Build the writer over the Socket itself, not its raw fd. AF_UNIX
+    // sockets in Node are non-blocking; a fd-based writer would do
+    // `fs.writeSync` and busy-wait on EAGAIN whenever the ~8 KB kernel send
+    // buffer fills (trivial for any Arrow batch of meaningful size). That
+    // synchronous wait freezes the shared event loop and starves every
+    // *other* connection's handler — observed as 30 s `catalog_attach`
+    // timeouts from co-running unittest processes. Going through
+    // `socket.write` + `'drain'` lets the JS thread yield while the kernel
+    // drains the buffer.
+    const writer = new IpcStreamWriter(socket);
 
     try {
       // Fire on_serve_start lazily — first request retries on hook failure.
@@ -263,7 +267,7 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
     if (batches.length === 0) {
       const err = new RpcError("ProtocolError", "Request stream contains no batches", "");
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, serverId, null);
-      writer.writeStream(EMPTY_SCHEMA, [errBatch]);
+      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
     const batch = batches[0];
@@ -277,14 +281,14 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
       requestId = parsed.requestId;
     } catch (e: unknown) {
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, e as Error, serverId, null);
-      writer.writeStream(EMPTY_SCHEMA, [errBatch]);
+      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       if (e instanceof VersionError || e instanceof RpcError) return;
       throw e;
     }
 
     if (methodName === DESCRIBE_METHOD_NAME && enableDescribe) {
       const { batch: descBatch } = await describeInfo();
-      writer.writeStream(descBatch.schema, [descBatch]);
+      await writer.writeStream(descBatch.schema, [descBatch]);
       return;
     }
 
@@ -294,7 +298,7 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
       const available = [...methods.keys()].sort();
       const err = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, serverId, requestId);
-      writer.writeStream(EMPTY_SCHEMA, [errBatch]);
+      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
 

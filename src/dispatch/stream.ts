@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { conformBatchToSchema, schema as makeSchema } from "../arrow/index.js";
+import { conformBatchToSchema, schema as makeSchema, withBatchMetadata } from "../arrow/index.js";
 import { CANCEL_KEY } from "../constants.js";
 import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
 import type { MethodDefinition, TransportKind } from "../types.js";
@@ -49,7 +49,7 @@ export async function dispatchStream(
   } catch (error: any) {
     const errSchema = method.headerSchema ?? EMPTY_SCHEMA;
     const errBatch = buildErrorBatch(errSchema, error, serverId, requestId);
-    writer.writeStream(errSchema, [errBatch]);
+    await writer.writeStream(errSchema, [errBatch]);
     // Still need to consume the input stream from the client
     const inputSchema = await reader.openNextStream();
     if (inputSchema) {
@@ -76,10 +76,10 @@ export async function dispatchStream(
       const headerValues = method.headerInit(params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, serverId, requestId);
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
-      writer.writeStream(method.headerSchema, headerBatches);
+      await writer.writeStream(method.headerSchema, headerBatches);
     } catch (error: any) {
       const errBatch = buildErrorBatch(method.headerSchema, error, serverId, requestId);
-      writer.writeStream(method.headerSchema, [errBatch]);
+      await writer.writeStream(method.headerSchema, [errBatch]);
       // Drain input stream so client doesn't hang
       const inputSchema = await reader.openNextStream();
       if (inputSchema) {
@@ -93,7 +93,7 @@ export async function dispatchStream(
   const inputSchema = await reader.openNextStream();
   if (!inputSchema) {
     const errBatch = buildErrorBatch(outputSchema, new Error("Expected input stream but got EOF"), serverId, requestId);
-    writer.writeStream(outputSchema, [errBatch]);
+    await writer.writeStream(outputSchema, [errBatch]);
     return;
   }
 
@@ -162,7 +162,13 @@ export async function dispatchStream(
         if (externalConfig) {
           batch = await maybeExternalizeBatch(batch, externalConfig);
         }
-        stream.write(batch);
+        // Attach per-emit metadata (e.g. vgi_batch_index,
+        // vgi_partition_values#b64) as the RecordBatch message's
+        // custom_metadata so the C++ extension can read it off the wire.
+        if (emitted.metadata && emitted.metadata.size > 0) {
+          batch = withBatchMetadata(batch, emitted.metadata);
+        }
+        await stream.write(batch);
       }
 
       if (out.finished) {
@@ -170,10 +176,10 @@ export async function dispatchStream(
       }
     }
   } catch (error: any) {
-    stream.write(buildErrorBatch(outputSchema, error, serverId, requestId));
+    await stream.write(buildErrorBatch(outputSchema, error, serverId, requestId));
   }
 
-  stream.close();
+  await stream.close();
 
   // Drain remaining input so transport stays synchronized for next request.
   // Matches Python's _drain_stream() called after every streaming method.

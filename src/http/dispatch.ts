@@ -457,7 +457,15 @@ export async function httpDispatchStreamExchange(
       // Stream is done — return data WITHOUT state token.
       // The absence of a token tells the client there's no more data.
       for (const emitted of out.batches) {
-        batches.push(emitted.batch);
+        // Preserve per-emit metadata (vgi_batch_index,
+        // vgi_partition_values#b64) as the RecordBatch custom_metadata.
+        if (emitted.metadata && emitted.metadata.size > 0) {
+          const md = new Map<string, string>(emitted.batch.metadata ?? []);
+          for (const [k, v] of emitted.metadata) md.set(k, v);
+          batches.push(withBatchMetadata(emitted.batch, md));
+        } else {
+          batches.push(emitted.batch);
+        }
       }
     } else {
       // More data may follow — repack state into token for next exchange.
@@ -470,6 +478,8 @@ export async function httpDispatchStreamExchange(
         const batch = emitted.batch;
         if (batch.numRows > 0) {
           const mergedMeta = new Map<string, string>(batch.metadata ?? []);
+          // Fold in per-emit metadata (vgi_batch_index, vgi_partition_values#b64).
+          if (emitted.metadata) for (const [k, v] of emitted.metadata) mergedMeta.set(k, v);
           mergedMeta.set(STATE_KEY, token);
           batches.push(withBatchMetadata(batch, mergedMeta));
         } else {
@@ -591,6 +601,13 @@ async function produceStreamResponse(
           batch = await maybeExternalizeBatch(batch, ctx.externalLocation);
           cumulativeExternalBytes += predicted;
         }
+      }
+      // Preserve per-emit metadata (vgi_batch_index, vgi_partition_values#b64)
+      // as the RecordBatch custom_metadata so the C++ extension reads it.
+      if (emitted.metadata && emitted.metadata.size > 0) {
+        const md = new Map<string, string>(batch.metadata ?? []);
+        for (const [k, v] of emitted.metadata) md.set(k, v);
+        batch = withBatchMetadata(batch, md);
       }
       allBatches.push(batch);
       if (maxBytes != null) {
