@@ -7,14 +7,14 @@ import {
   DataType,
   Float64,
   Int64,
-  makeData,
-  RecordBatch,
   RecordBatchReader,
   type Schema,
-  Struct,
   Utf8,
-  vectorFromArray,
 } from "@query-farm/apache-arrow";
+import {
+  emptyBatchWithMetadata,
+  singleRowBatchWithMetadata,
+} from "#vgi-rpc-arrow";
 import {
   LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
@@ -98,36 +98,31 @@ export function buildRequestIpc(
     metadata.set(PROTOCOL_VERSION_KEY, options.protocolVersion);
   }
 
+  // Build the batch through the impl-agnostic #vgi-rpc-arrow layer so this
+  // works under both backends. `buildRequestIpc` previously constructed an
+  // apache-arrow RecordBatch directly and handed it to `serializeIpcStream`,
+  // which then dispatched to the backend's `serializeBatches`. Under the
+  // browser/worker condition that backend is flechette, and flechette's
+  // `tablesToIPC` cannot read apache-arrow's RecordBatch shape — the cross-
+  // impl mixing was silently broken (no browser tests cover this path; see
+  // test/client/ipc-cross-impl.test.ts). The abstract helpers produce a
+  // 0-row metadata-bearing batch for the empty-schema case (which servers
+  // accept identically to a 1-row × 0-col batch) and a 1-row batch with
+  // coerced field values otherwise.
   if (schema.fields.length === 0) {
-    const structType = new Struct(schema.fields);
-    const data = makeData({
-      type: structType,
-      length: 1,
-      children: [],
-      nullCount: 0,
-    });
-    const batch = new RecordBatch(schema, data, metadata);
+    const batch = emptyBatchWithMetadata(schema, metadata);
     return serializeIpcStream(schema, [batch]);
   }
 
-  const children = schema.fields.map((f) => {
+  const coerced: Record<string, any> = {};
+  for (const f of schema.fields) {
     const raw = params[f.name];
     // Missing values must be sent as null. arrow-js's typed-array builders
     // throw "Invalid argument type in ToBigInt" when handed `undefined` for
     // an Int64 column; null builds a proper validity bitmap entry instead.
-    const val = raw === undefined ? null : coerceForArrow(f.type, raw);
-    return vectorFromArray([val], f.type).data[0];
-  });
-
-  const structType = new Struct(schema.fields);
-  const data = makeData({
-    type: structType,
-    length: 1,
-    children,
-    nullCount: 0,
-  });
-
-  const batch = new RecordBatch(schema, data, metadata);
+    coerced[f.name] = raw === undefined ? null : coerceForArrow(f.type, raw);
+  }
+  const batch = singleRowBatchWithMetadata(schema, coerced, metadata);
   return serializeIpcStream(schema, [batch]);
 }
 

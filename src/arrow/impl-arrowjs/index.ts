@@ -33,6 +33,8 @@ import {
   Uint32 as A_Uint32,
   Uint64 as A_Uint64,
   Utf8 as A_Utf8,
+  Data as A_Data,
+  DataType as A_DataTypeNS,
   makeData as a_makeData,
   vectorFromArray as a_vectorFromArray,
   RecordBatchReader,
@@ -274,7 +276,7 @@ export function emptyBatchWithMetadata(s: VgiSchema, metadata?: Map<string, stri
 /** Recursive empty-Data builder — needed for nested types so arrow-js's
  *  IPC writer doesn't crash on List/Map/Struct/Union with absent children. */
 function makeEmptyDataRecursive(type: A_DataType): any {
-  const M = require("@query-farm/apache-arrow");
+  const M = { DataType: A_DataTypeNS, Data: A_Data };
   if (M.DataType.isStruct(type)) {
     const children = (type as any).children.map((f: any) => makeEmptyDataRecursive(f.type));
     return a_makeData({ type, length: 0, children, nullCount: 0 } as any);
@@ -325,7 +327,7 @@ export function singleRowBatchWithMetadata(
   metadata?: Map<string, string>,
 ): VgiBatch {
   const a = s as unknown as A_Schema;
-  const M = require("@query-farm/apache-arrow");
+  const M = { DataType: A_DataTypeNS, Data: A_Data };
   const children = a.fields.map((f) => {
     const val = values[f.name];
     if (val instanceof M.Data) return val;
@@ -340,7 +342,7 @@ export function singleRowBatchWithMetadata(
  *  value is an arrow-js Data instance. flechette: always false (the
  *  flechette backend doesn't surface this opaque-type quirk). */
 export function isOpaqueData(val: unknown): boolean {
-  const M = require("@query-farm/apache-arrow");
+  const M = { DataType: A_DataTypeNS, Data: A_Data };
   return val instanceof M.Data;
 }
 

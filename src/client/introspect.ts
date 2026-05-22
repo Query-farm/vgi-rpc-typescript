@@ -1,7 +1,8 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Schema as ArrowSchema, type RecordBatch, RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
+import { Schema as ArrowSchema, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
+import { deserializeSchema as deserializeSchemaImpl } from "#vgi-rpc-arrow";
 import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY, PROTOCOL_VERSION_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
@@ -30,11 +31,22 @@ export interface ServiceDescription {
   methods: MethodInfo[];
 }
 
-/** Deserialize a schema from IPC bytes (schema message + EOS). */
-async function deserializeSchema(bytes: Uint8Array): Promise<Schema> {
-  const reader = await RecordBatchReader.from(bytes);
-  await reader.open();
-  return reader.schema!;
+/**
+ * Deserialize a schema from IPC bytes (schema message + EOS).
+ *
+ * Must dispatch via `#vgi-rpc-arrow` so the resulting type instances are
+ * the same impl (apache-arrow / flechette) as the rest of the active
+ * backend. Using apache-arrow's `RecordBatchReader` directly here used to
+ * silently mix impls: in browser builds the backend is flechette, and a
+ * flechette builder receiving an apache-arrow `Binary` type defaults to
+ * the wrong offsets buffer (Uint8Array instead of Int32Array) and emits
+ * a 0-byte value where a populated binary column was expected. The
+ * downstream symptom is "Tried reading schema message, was null or
+ * length 0" from the server when it tries to open the (empty) binary
+ * column as a nested IPC stream. See test/client/ipc-cross-impl.test.ts.
+ */
+function deserializeSchema(bytes: Uint8Array): Schema {
+  return deserializeSchemaImpl(bytes) as unknown as Schema;
 }
 
 /**
