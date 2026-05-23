@@ -385,11 +385,18 @@ export function createHttpHandler(
     kind: transportKind,
   };
 
-  function addCorsHeaders(headers: Headers, isOptions = false): void {
+  function addCorsHeaders(headers: Headers, isOptions = false, requestedHeaders?: string | null): void {
     if (corsOrigins) {
       headers.set("Access-Control-Allow-Origin", corsOrigins);
       headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
-      headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      // Reflect the preflight's requested headers so clients may send custom
+      // VGI request headers (e.g. x-vgi-accept-encoding, VGI-Session) without a
+      // hard-coded allow-list. Mirrors the Python framework, whose preflight
+      // echoes Access-Control-Request-Headers. Falls back to the common pair.
+      headers.set(
+        "Access-Control-Allow-Headers",
+        requestedHeaders && requestedHeaders.length > 0 ? requestedHeaders : "Content-Type, Authorization",
+      );
       headers.set(
         "Access-Control-Expose-Headers",
         `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}, VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled`,
@@ -484,7 +491,7 @@ export function createHttpHandler(
     // CORS preflight + capability discovery
     if (request.method === "OPTIONS") {
       const headers = new Headers();
-      addCorsHeaders(headers, true);
+      addCorsHeaders(headers, true, request.headers.get("Access-Control-Request-Headers"));
       addCapabilityHeaders(headers, true);
       // Always answer OPTIONS so capability discovery via OPTIONS /health (or
       // any other path) works even when CORS isn't enabled.  Falls back to
