@@ -7,14 +7,12 @@ import {
   DataType,
   Float64,
   Int64,
+  type RecordBatch,
   RecordBatchReader,
   type Schema,
   Utf8,
 } from "@query-farm/apache-arrow";
-import {
-  emptyBatchWithMetadata,
-  singleRowBatchWithMetadata,
-} from "#vgi-rpc-arrow";
+import { emptyBatchWithMetadata, singleRowBatchWithMetadata } from "#vgi-rpc-arrow";
 import {
   LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
