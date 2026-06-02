@@ -29,21 +29,10 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import {
-  Field,
-  Float64,
-  Schema,
-  Utf8,
-} from "@query-farm/apache-arrow";
-
-import * as flechetteImpl from "../../src/arrow/impl-flechette/index.js";
+import { Field, Float64, Schema, Utf8 } from "@query-farm/apache-arrow";
 import * as arrowjsImpl from "../../src/arrow/impl-arrowjs/index.js";
-import {
-  PROTOCOL_VERSION_KEY,
-  REQUEST_VERSION,
-  REQUEST_VERSION_KEY,
-  RPC_METHOD_KEY,
-} from "../../src/constants.js";
+import * as flechetteImpl from "../../src/arrow/impl-flechette/index.js";
+import { PROTOCOL_VERSION_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
 
 const impls = [
   { name: "impl-arrowjs", impl: arrowjsImpl },
@@ -95,11 +84,7 @@ for (const { name, impl } of impls) {
       const schema = new Schema([new Field("name", new Utf8(), true)]);
       const metadata = buildExpectedMetadata("catalog_attach", "1.0.0");
 
-      const batch = impl.singleRowBatchWithMetadata(
-        schema as any,
-        { name: "albemarle_gis" },
-        metadata,
-      );
+      const batch = impl.singleRowBatchWithMetadata(schema as any, { name: "albemarle_gis" }, metadata);
       const bytes = impl.serializeBatches(schema as any, [batch as any]);
       expect(bytes.byteLength).toBeGreaterThan(0);
 
@@ -138,14 +123,9 @@ describe("buildRequestIpc empty-schema regression — apache-arrow batch passed 
   // apache-arrow batch doesn't surface that field.
   it("flechette.serializeBatches refuses an apache-arrow RecordBatch", () => {
     const schema = new Schema([]);
-    const apacheBatch = arrowjsImpl.emptyBatchWithMetadata(
-      schema as any,
-      buildExpectedMetadata("__describe__"),
-    );
+    const apacheBatch = arrowjsImpl.emptyBatchWithMetadata(schema as any, buildExpectedMetadata("__describe__"));
 
-    expect(() =>
-      flechetteImpl.serializeBatches(schema as any, [apacheBatch as any]),
-    ).toThrow(); // any throw is fine — the point is that mixing impls is incoherent.
+    expect(() => flechetteImpl.serializeBatches(schema as any, [apacheBatch as any])).toThrow(); // any throw is fine — the point is that mixing impls is incoherent.
   });
 });
 
@@ -172,9 +152,7 @@ describe("introspect.deserializeSchema returns impl-native types", () => {
     // serialized as a Schema IPC message. Both impls' deserializeSchema
     // should accept it and return a type instance whose factory matches
     // their own backend.
-    const apacheSchema = arrowjsImpl.schema([
-      arrowjsImpl.field("request", arrowjsImpl.binary() as any, true),
-    ]);
+    const apacheSchema = arrowjsImpl.schema([arrowjsImpl.field("request", arrowjsImpl.binary() as any, true)]);
     const ipcBytes = arrowjsImpl.serializeSchema(apacheSchema);
 
     // Bun default condition resolves to impl-arrowjs. Re-imports of the
@@ -184,11 +162,7 @@ describe("introspect.deserializeSchema returns impl-native types", () => {
     for (const { name, impl } of impls) {
       const decoded: any = impl.deserializeSchema(ipcBytes);
       const payload = new Uint8Array([1, 2, 3, 4, 5]);
-      const batch = impl.singleRowBatchWithMetadata(
-        decoded,
-        { request: payload },
-        buildExpectedMetadata("test"),
-      );
+      const batch = impl.singleRowBatchWithMetadata(decoded, { request: payload }, buildExpectedMetadata("test"));
       const wire = impl.serializeBatches(decoded, [batch as any]);
       const re: any = impl.deserializeBatch(wire);
       const got = (re.getChildAt ? re.getChildAt(0) : re.getChild?.("request"))?.get?.(0);
@@ -223,9 +197,7 @@ describe("introspect → buildRequestIpc end-to-end (catalog_attach shape)", () 
     it(`${name}: schema-deserialize → binary-encode → re-decode round-trips`, () => {
       // Build the schema (`request: binary`) and emit just-its IPC bytes,
       // matching what the server includes in its __describe__ response.
-      const originalSchema = impl.schema([
-        impl.field("request", impl.binary() as any, true),
-      ]);
+      const originalSchema = impl.schema([impl.field("request", impl.binary() as any, true)]);
       const schemaBytes = impl.serializeSchema(originalSchema);
 
       // Deserialize the schema the way introspect.ts does for paramsSchema.

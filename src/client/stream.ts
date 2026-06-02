@@ -250,7 +250,9 @@ export class HttpStreamSession implements StreamSession {
 
     // Follow continuation tokens
     while (true) {
-      const responseBody = await this._sendContinuation(this._stateToken);
+      const stateToken = this._stateToken;
+      if (stateToken === null) return;
+      const responseBody = await this._sendContinuation(stateToken);
       const { batches } = await readResponseBatches(responseBody);
 
       let gotContinuation = false;

@@ -3,7 +3,9 @@
 import {
   Binary as A_Binary,
   Bool as A_Bool,
+  Data as A_Data,
   type DataType as A_DataType,
+  DataType as A_DataTypeNS,
   DateDay as A_DateDay,
   Decimal as A_Decimal,
   Dictionary as A_Dictionary,
@@ -33,8 +35,6 @@ import {
   Uint32 as A_Uint32,
   Uint64 as A_Uint64,
   Utf8 as A_Utf8,
-  Data as A_Data,
-  DataType as A_DataTypeNS,
   makeData as a_makeData,
   vectorFromArray as a_vectorFromArray,
   RecordBatchReader,
