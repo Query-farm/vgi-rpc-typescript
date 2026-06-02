@@ -284,7 +284,7 @@
 
     "@types/tough-cookie": ["@types/tough-cookie@4.0.5", "", {}, "sha512-/Ad8+nIOV7Rl++6f1BdKxFSMgmoqEoYbHRpPcx3JEfv8VRsQe9Z4mCXeJBzxs7mbHY/XOZZuXlRNfhpVPbs6ZA=="],
 
-    "@uwdata/flechette": ["@uwdata/flechette@github:Query-farm/flechette#a3ccb59", {}, "Query-farm-flechette-a3ccb59"],
+    "@uwdata/flechette": ["@uwdata/flechette@github:Query-farm/flechette#a83e388", {}, "Query-farm-flechette-a83e388"],
 
     "abort-controller": ["abort-controller@3.0.0", "", { "dependencies": { "event-target-shim": "^5.0.0" } }, "sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg=="],
 
