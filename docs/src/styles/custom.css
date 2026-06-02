@@ -1,81 +1,89 @@
-/* Farm-themed color palette matching vgi-rpc.query.farm */
-
-/* Google Fonts: Inter + JetBrains Mono */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
 /*
- * Farm palette reference (from vgi-rpc.query.farm):
- *   --color-farm-green-deep:    #2d5016
- *   --color-farm-green-field:   #4a7c23
- *   --color-farm-green-light:   #6ba034
- *   --color-farm-gold:          #c8a43a
- *   --color-farm-gold-light:    #d4b64e
- *   --color-farm-cream:         #faf8f0
- *   --color-farm-cream-dark:    #f0ece0
- *   --color-farm-dark:          #1a1a0e
- *   --color-farm-dark-card:     #252518
- *   --color-farm-dark-border:   #3a3a28
- *   --color-farm-text:          #2c2c1e
- *   --color-farm-text-muted:    #6b6b5a
- *   --color-farm-text-light:    #f5f0e0
- *   --color-farm-text-light-muted: #b8b0a0
+ * Farm-themed Starlight palette, aligned to the query.farm design system
+ * (query-farm-astro/src/styles/global.css).
+ *
+ * Palette tokens:
+ *   Earth (brown, primary):   earth-50 #f9f7f4 … earth-900 #4d3c2f
+ *   Soil  (warm neutral):     soil-50  #f7f6f4 … soil-900  #3d342a
+ *   Harvest (green, accent):  500 #22c55e · 600 #16a34a · 700 #15803d · 900 #14532d
+ *   Duck (yellow, secondary): 400 #fbbf24 · 500 #f59e0b
+ *
+ * Typography:
+ *   Inter           — body / UI
+ *   Outfit          — display / headings
+ *   JetBrains Mono  — code
  */
 
-/* ── Dark mode (default in Starlight) ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ── Dark mode (Starlight default) ── */
 :root {
-	/* Accent: farm gold */
-	--sl-color-accent-low: #2e2810;
-	--sl-color-accent: #c8a43a;
-	--sl-color-accent-high: #f5f0e0;
+	/* Accent: harvest green */
+	--sl-color-accent-low: #14532d;
+	--sl-color-accent: #22c55e;
+	--sl-color-accent-high: #bbf7d0;
 
-	/* Warm earthy grays instead of blue-gray */
-	--sl-color-white: #f5f0e0;
-	--sl-color-gray-1: #d4cbae;
-	--sl-color-gray-2: #b8b0a0;
-	--sl-color-gray-3: #6b6b5a;
-	--sl-color-gray-4: #4a4a38;
-	--sl-color-gray-5: #3a3a28;
-	--sl-color-gray-6: #252518;
-	--sl-color-black: #1a1a0e;
+	/* Warm earth/soil neutrals instead of blue-gray */
+	--sl-color-white: #f9f7f4;
+	--sl-color-gray-1: #f0ebe3;
+	--sl-color-gray-2: #cab89d;
+	--sl-color-gray-3: #9d7f5e;
+	--sl-color-gray-4: #6b5743;
+	--sl-color-gray-5: #4a3e2f;
+	--sl-color-gray-6: #36302a;
+	--sl-color-black: #211c16;
 
-	/* Semantic colors using farm palette */
-	--sl-hue-green: 101;
-	--sl-hue-orange: 41;
+	/* Inline links: a brighter harvest green for warm dark surfaces */
+	--sl-color-text-accent: #4ade80;
 
 	/* Fonts */
-	--sl-font: 'Inter', system-ui, -apple-system, sans-serif;
+	--sl-font: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
 	--sl-font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
 }
 
-/* ── Light mode ── */
+/* ── Light mode (query.farm cream + brown + green) ── */
 :root[data-theme='light'] {
-	/* Accent: farm green */
-	--sl-color-accent-low: #e8f0dc;
-	--sl-color-accent: #4a7c23;
-	--sl-color-accent-high: #2d5016;
+	/* Accent: deeper harvest green for light backgrounds */
+	--sl-color-accent-low: #dcfce7;
+	--sl-color-accent: #16a34a;
+	--sl-color-accent-high: #14532d;
 
-	/* Warm earthy grays */
-	--sl-color-white: #2c2c1e;
-	--sl-color-gray-1: #3a3a2a;
-	--sl-color-gray-2: #4a4a38;
-	--sl-color-gray-3: #6b6b5a;
-	--sl-color-gray-4: #8b8b7a;
-	--sl-color-gray-5: #d4cbae;
-	--sl-color-gray-6: #f0ece0;
-	--sl-color-gray-7: #f5f2e8;
-	--sl-color-black: #faf8f0;
+	/* Warm neutrals: dark soil text on cream */
+	--sl-color-white: #3d342a;
+	--sl-color-gray-1: #4a3e2f;
+	--sl-color-gray-2: #5a4a36;
+	--sl-color-gray-3: #705e41;
+	--sl-color-gray-4: #a18c68;
+	--sl-color-gray-5: #d3cab9;
+	--sl-color-gray-6: #e8e4df;
+	--sl-color-gray-7: #f0ebe3;
+	--sl-color-black: #f7f6f4;
+
+	--sl-color-text-accent: #15803d;
 }
 
-/* ── Links: use gold in dark, green in light ── */
-:root {
-	--sl-color-text-accent: #d4b64e;
+/* ── Display font for headings + site title (Outfit) ── */
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6),
+.content-panel h1,
+.site-title,
+.hero h1,
+.hero .tagline,
+h1, h2, h3, h4, h5, h6 {
+	font-family: 'Outfit', 'Inter', ui-sans-serif, system-ui, sans-serif;
+	font-weight: 600;
+	letter-spacing: -0.02em;
 }
 
-:root[data-theme='light'] {
-	--sl-color-text-accent: #4a7c23;
+.site-title {
+	font-weight: 700;
 }
 
-/* ── Code block styling ── */
+/* Text selection uses the harvest accent */
+::selection {
+	background-color: rgba(34, 197, 94, 0.25);
+}
+
+/* ── Code blocks ── */
 pre code {
 	font-size: 0.8125em;
 }
