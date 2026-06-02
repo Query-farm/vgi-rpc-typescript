@@ -15,7 +15,7 @@ import {
   int32,
   float,
   type OutputCollector,
-} from "vgi-rpc";
+} from "@query-farm/vgi-rpc";
 
 const protocol = new Protocol("Streaming");
 
@@ -51,6 +51,7 @@ protocol.producer<{ limit: number; current: number; batchSize: number }>(
     },
     doc: "Count from 0 to limit-1, emitting n and n_squared.",
     defaults: { batch_size: 1 },
+    paramTypes: { limit: "int", batch_size: "int" },
   },
 );
 

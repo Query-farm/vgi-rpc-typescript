@@ -50,7 +50,7 @@ export default defineConfig({
         {
           icon: "github",
           label: "GitHub",
-          href: "https://github.com/rustyconover/vgi-rpc-typescript",
+          href: "https://github.com/Query-farm/vgi-rpc-typescript",
         },
       ],
       credits: false,
@@ -86,7 +86,12 @@ export default defineConfig({
             { label: "Client Logging", slug: "guides/client-logging" },
             { label: "Error Handling", slug: "guides/error-handling" },
             { label: "HTTP Transport", slug: "guides/http-transport" },
+            { label: "Compression", slug: "guides/compression" },
+            { label: "Large Payloads", slug: "guides/large-payloads" },
+            { label: "Sticky Sessions", slug: "guides/sticky-sessions" },
             { label: "Authentication", slug: "guides/authentication" },
+            { label: "OAuth & PKCE", slug: "guides/oauth" },
+            { label: "Unix Socket Launcher", slug: "guides/launcher" },
           ],
         },
         {

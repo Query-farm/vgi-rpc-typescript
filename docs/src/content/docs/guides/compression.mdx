@@ -1,0 +1,89 @@
+---
+title: Compression
+description: Compress vgi-rpc request and response bodies over the HTTP transport with zstd and gzip.
+---
+
+The HTTP transport can compress both request and response bodies. Request decompression is always on; response compression is opt-in via `compressionLevel`. Compression is negotiated with standard `Content-Encoding` and `Accept-Encoding` headers, so it interoperates with the Python `vgi-rpc[http]` client and the DuckDB VGI extension.
+
+See the [HTTP Transport guide](/guides/http-transport/) for the rest of the HTTP surface.
+
+## Request decompression
+
+The handler transparently decodes request bodies that arrive with `Content-Encoding: zstd` or `gzip` — no configuration required. After decoding, the decompressed bytes are parsed as the Arrow IPC request as usual.
+
+- **zstd** uses `zstdDecompress` (`Bun.zstdDecompressSync` on Bun, `node:zlib` on Node ≥ 22.15 / Deno ≥ 2.6.9, and a pure-JS `fzstd` fallback so runtimes without a native codec — e.g. Cloudflare workerd — can still decode zstd request bodies).
+- **gzip** uses the Web platform `DecompressionStream`, available on Bun, Node, Deno, and workerd.
+
+Any other `Content-Encoding` value is rejected with `415 Unsupported Media Type`.
+
+:::note
+The Python `http_connect()` client sends zstd-compressed request bodies by default at compression level 3, and the Python `vgi-rpc[http]` stack also defaults to gzip on some paths. Because both codecs are decoded server-side, no extra configuration is needed for interop.
+:::
+
+## Decompression-bomb defense
+
+`maxDecompressedRequestBytes` caps the *post-decompression* size of a request body. This defends against decompression bombs — a tiny compressed frame that declares (or inflates to) hundreds of megabytes — which would otherwise blow past `maxRequestBytes`, since that limit only sees the compressed payload.
+
+```typescript
+import { createHttpHandler } from "@query-farm/vgi-rpc";
+
+const handler = createHttpHandler(protocol, {
+  maxRequestBytes: 10_000_000,              // 10 MB compressed-body limit
+  maxDecompressedRequestBytes: 160_000_000, // 160 MB decompressed cap
+});
+```
+
+- **Default:** when omitted, it falls back to `maxRequestBytes * 16` if `maxRequestBytes` is set, otherwise it is unbounded.
+- **zstd** is checked twice: the declared `Frame_Content_Size` in the frame header is rejected *before* allocation when it exceeds the cap, and the actual output size is re-checked afterward (covering frames that omit the size).
+- **gzip** is bounded incrementally during the streaming decode (the gzip footer's size field is mod 2³² and can't be trusted for a pre-check).
+
+When the cap is exceeded the request fails with `413` (Payload Too Large); other decode failures return `400`.
+
+## Response compression
+
+Set `compressionLevel` to enable response compression. Responses are then compressed according to the client's `Accept-Encoding`:
+
+```typescript
+const handler = createHttpHandler(protocol, {
+  compressionLevel: 3, // zstd level 1-22; enables response compression
+});
+```
+
+Codec selection per response:
+
+- **zstd** is preferred when the client sends `Accept-Encoding: zstd` *and* the runtime can encode zstd (Bun, Node ≥ 22.15, Deno ≥ 2.6.9). The `compressionLevel` value is passed through as the zstd level (valid range 1–22).
+- **gzip** is used as the fallback when the client accepts gzip but zstd isn't available or wasn't requested. Gzip uses the Web `CompressionStream`, which does not expose a level — `compressionLevel` only affects zstd.
+- If the client accepts neither, the response is sent uncompressed.
+
+The chosen codec is reported back in the response's `Content-Encoding` header.
+
+:::note
+`compressionLevel` gates response compression overall. When it is unset, responses are never compressed regardless of `Accept-Encoding`.
+:::
+
+### Advertised capabilities
+
+When `compressionLevel` is set, the server advertises the codecs it can produce in the `VGI-Supported-Encodings` response header (e.g. `zstd, gzip`, or just `gzip` on a runtime without a zstd encoder such as workerd). Capability-aware clients use this to decide what to request.
+
+## Client-side compression
+
+The HTTP client (`httpConnect`) takes a matching `compressionLevel` option. When set, the client:
+
+- Compresses every request body with **zstd** and sends `Content-Encoding: zstd`.
+- Sends `Accept-Encoding: zstd` and transparently decodes zstd responses.
+
+```typescript
+import { httpConnect } from "@query-farm/vgi-rpc";
+
+const client = httpConnect("http://localhost:8080", {
+  compressionLevel: 3,
+});
+
+const result = await client.call("add", { a: 1, b: 2 });
+```
+
+:::caution
+Client-side compression requires a runtime with a zstd encoder (Bun, Node ≥ 22.15, Deno ≥ 2.6.9). If the zstd module can't be loaded, the client silently sends requests uncompressed — it does not fall back to gzip on the request side.
+:::
+
+For interoperability: the Python `http_connect()` client compresses request bodies with zstd at level 3 by default, and the TypeScript server decodes both zstd and gzip request bodies, so a Python client and a TypeScript server (or vice versa) negotiate compression without extra configuration.

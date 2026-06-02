@@ -88,6 +88,16 @@ produce: (state, out) => {
 },
 ```
 
+`clientLog` accepts an optional third `extra` argument — a `Record<string, string>` of structured fields attached to the log batch alongside the message:
+
+```typescript
+clientLog(level: string, message: string, extra?: Record<string, string>): void;
+```
+
+```typescript
+out.clientLog("INFO", "Processing batch", { batch: String(state.current) });
+```
+
 See [Client Logging](/guides/client-logging/) for more details.
 
 ## Int64 coercion

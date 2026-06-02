@@ -10,7 +10,7 @@ Errors thrown in handlers are automatically caught, serialized, and transmitted 
 Throw any `Error` from a handler to signal a failure:
 
 ```typescript
-import { Protocol, float } from "vgi-rpc";
+import { Protocol, float } from "@query-farm/vgi-rpc";
 
 const protocol = new Protocol("MyService");
 
@@ -31,7 +31,29 @@ The error message is transmitted to the client and the transport remains clean f
 Errors are transmitted as zero-row Arrow batches with `EXCEPTION`-level metadata:
 
 - `vgi_rpc.log_level` set to `EXCEPTION`
-- `vgi_rpc.log_message` containing the error message
+- `vgi_rpc.log_message` containing the error message (`"{ExceptionType}: {message}"`)
+- `vgi_rpc.error_kind` — optional. Present when the thrown error carries an
+  `errorKind` marker (see [Typed error classes](#typed-error-classes) below). Lets
+  clients branch on the error category without string-matching the message.
+- `vgi_rpc.log_extra` — a JSON blob with structured fields:
+
+```json
+{
+  "exception_type": "ServerDrainingError",
+  "exception_message": "server is draining",
+  "traceback": "...",
+  "error_kind": "server_draining"
+}
+```
+
+`error_kind` is only included in the `log_extra` payload when the error carries
+an `errorKind` marker.
+
+### HTTP transport
+
+Over the HTTP transport the error category is also surfaced as the
+`X-VGI-RPC-Error` response header (the `RPC_ERROR_HEADER` constant), so clients
+can inspect it without reading the Arrow body.
 
 ## Error classes
 
@@ -40,7 +62,7 @@ Errors are transmitted as zero-row Arrow batches with `EXCEPTION`-level metadata
 Represents an error received from the RPC protocol:
 
 ```typescript
-import { RpcError } from "vgi-rpc";
+import { RpcError } from "@query-farm/vgi-rpc";
 
 class RpcError extends Error {
   readonly errorType: string;
@@ -54,12 +76,47 @@ class RpcError extends Error {
 Thrown when the client sends an unsupported request version:
 
 ```typescript
-import { VersionError } from "vgi-rpc";
+import { VersionError } from "@query-farm/vgi-rpc";
 
 class VersionError extends Error {
   // Inherits message from Error
 }
 ```
+
+## Typed error classes
+
+Several built-in error classes carry a stable `errorKind` marker that is hoisted
+onto the error batch as the `vgi_rpc.error_kind` metadata key (and into the
+`X-VGI-RPC-Error` header over HTTP). Throw these from a handler to signal a
+specific, machine-readable condition. The corresponding `ERROR_KIND_*` string
+constants are exported for matching on the client side.
+
+```typescript
+import {
+  MethodNotImplementedError,
+  ServerDrainingError,
+  SessionLostError,
+  ERROR_KIND_METHOD_NOT_IMPLEMENTED,
+  ERROR_KIND_SERVER_DRAINING,
+  ERROR_KIND_SESSION_LOST,
+} from "@query-farm/vgi-rpc";
+```
+
+| Class | `errorKind` value | Constant | Meaning |
+|-------|-------------------|----------|---------|
+| `MethodNotImplementedError` | `method_not_implemented` | `ERROR_KIND_METHOD_NOT_IMPLEMENTED` | The client invoked a method the server does not implement. |
+| `ServerDrainingError` | `server_draining` | `ERROR_KIND_SERVER_DRAINING` | A session was requested while the server is draining. |
+| `SessionLostError` | `session_lost` | `ERROR_KIND_SESSION_LOST` | A sticky session token is malformed, expired, evicted, or bound to a different worker / principal (HTTP only). |
+
+### ProtocolVersionError
+
+`ProtocolVersionError` extends `VersionError` and is thrown by the server when
+the client's declared `vgi_rpc.protocol_version` is incompatible with the
+server's (exact major + minor match required; patch ignored). It carries the
+`protocol_version_mismatch` error kind and a directional message indicating
+which side to upgrade. Because it subclasses `VersionError`, existing catch
+sites continue to write a typed error stream and keep serving. It is not
+exported from the package index — it is produced internally by the server.
 
 ## Streaming errors
 

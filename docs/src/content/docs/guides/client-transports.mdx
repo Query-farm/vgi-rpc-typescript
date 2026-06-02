@@ -3,7 +3,11 @@ title: Client Transports
 description: Connect to vgi-rpc servers over HTTP, subprocess pipes, or raw streams.
 ---
 
-The vgi-rpc client library provides three transport functions that all return the same `RpcClient` interface. Pick the transport that fits your deployment and use `call()`, `stream()`, `describe()`, and `close()` identically across all of them.
+The vgi-rpc client library provides three connect functions that all return the same `RpcClient` interface. Pick the transport that fits your deployment and use `call()`, `stream()`, `describe()`, and `close()` identically across all of them.
+
+:::note
+This page covers the client-side connect functions. To **serve** over an AF_UNIX socket via the launcher (`serveUnix`), see the [Unix Socket Launcher](/guides/launcher/) guide.
+:::
 
 :::tip
 For setting up an HTTP server, see the [HTTP Transport](/guides/http-transport/) server guide.
@@ -25,11 +29,12 @@ interface RpcClient {
 Use `httpConnect` to talk to a running HTTP server:
 
 ```typescript
-import { httpConnect } from "vgi-rpc";
+import { httpConnect } from "@query-farm/vgi-rpc";
 
 const client = httpConnect("http://localhost:8080", {
-  prefix: "/vgi",          // URL path prefix (default: "/vgi")
+  prefix: "/vgi",          // URL path prefix (default: "" — root)
   compressionLevel: 3,     // zstd compression (omit to disable)
+  authorization: "Bearer <token>", // sent as the Authorization header
   onLog: (msg) => console.log(`[${msg.level}] ${msg.message}`),
 });
 
@@ -39,14 +44,16 @@ console.log(result); // { result: 5 }
 client.close();
 ```
 
-HTTP transport is stateless — stream continuity is managed via HMAC-signed state tokens exchanged in batch metadata.
+HTTP transport is stateless — stream continuity is managed via XChaCha20-Poly1305 AEAD-sealed state tokens exchanged in batch metadata.
+
+The `authorization` option (HTTP only) sets the `Authorization` request header. All three connect functions also accept an `externalLocation` option for configuring out-of-band data transfer locations.
 
 ## Subprocess Transport
 
 Use `subprocessConnect` to spawn a server process and communicate over its stdin/stdout pipes:
 
 ```typescript
-import { subprocessConnect } from "vgi-rpc";
+import { subprocessConnect } from "@query-farm/vgi-rpc";
 
 const client = subprocessConnect(["bun", "run", "server.ts"], {
   cwd: "./my-project",                // working directory
@@ -66,7 +73,7 @@ client.close(); // kills the subprocess
 Use `pipeConnect` for low-level control when you already have a `ReadableStream` and writable sink:
 
 ```typescript
-import { pipeConnect } from "vgi-rpc";
+import { pipeConnect } from "@query-farm/vgi-rpc";
 
 const client = pipeConnect(readable, writable, {
   onLog: (msg) => console.log(msg),
@@ -143,18 +150,20 @@ Every `RpcClient` has a `describe()` method:
 
 ```typescript
 const desc = await client.describe();
-console.log(desc.protocolName); // "Calculator"
+console.log(desc.protocolName);    // "Calculator"
+console.log(desc.protocolVersion); // server-declared protocol version
 
 for (const method of desc.methods) {
   console.log(`${method.name} (${method.type})`);
-  // method.paramsSchema, method.resultSchema, method.doc, ...
+  // method.paramsSchema, method.resultSchema, and (for stream methods)
+  // method.inputSchema / method.outputSchema / method.headerSchema
 }
 ```
 
 For standalone HTTP introspection without creating a full client:
 
 ```typescript
-import { httpIntrospect } from "vgi-rpc";
+import { httpIntrospect } from "@query-farm/vgi-rpc";
 
 const desc = await httpIntrospect("http://localhost:8080", { prefix: "/vgi" });
 ```
@@ -162,16 +171,22 @@ const desc = await httpIntrospect("http://localhost:8080", { prefix: "/vgi" });
 For custom transports, parse raw describe batches:
 
 ```typescript
-import { parseDescribeResponse } from "vgi-rpc";
+import { parseDescribeResponse } from "@query-farm/vgi-rpc";
 
 const desc = await parseDescribeResponse(batches, onLog);
 ```
+
+:::caution
+`ServiceDescription` returns `protocolName`, `protocolVersion`, and `methods: MethodInfo[]`. Under the slim DESCRIBE v4 wire schema, the `doc`, `paramTypes`, and `defaults` fields on `MethodInfo` are no longer carried on the wire, so they come back `undefined` at runtime even though the type still declares them. Treat the schema fields (`paramsSchema`, `resultSchema`, `inputSchema`, `outputSchema`, `headerSchema`) as the reliable source of method shape.
+:::
 
 ## Log Messages
 
 All transports accept an `onLog` callback that receives log messages sent by the server during method execution:
 
 ```typescript
+import { httpConnect } from "@query-farm/vgi-rpc";
+
 const client = httpConnect("http://localhost:8080", {
   onLog: (msg) => {
     console.log(`[${msg.level}] ${msg.message}`);

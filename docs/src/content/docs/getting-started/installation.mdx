@@ -10,12 +10,12 @@ vgi-rpc requires [Bun](https://bun.sh/) runtime.
 ## Install the package
 
 ```bash
-bun add vgi-rpc
+bun add @query-farm/vgi-rpc
 ```
 
 ## Optional: Python CLI
 
-The [vgi-rpc CLI](https://github.com/rustyconover/vgi-rpc) is useful for testing and introspecting your servers:
+The [vgi-rpc CLI](https://github.com/Query-farm/vgi-rpc-python) is useful for testing and introspecting your servers:
 
 ```bash
 pip install vgi-rpc[cli]
@@ -28,7 +28,7 @@ The CLI can describe services, call unary methods, and interact with streaming m
 Create a minimal server to verify everything works:
 
 ```typescript
-import { Protocol, VgiRpcServer, str } from "vgi-rpc";
+import { Protocol, VgiRpcServer, str } from "@query-farm/vgi-rpc";
 
 const protocol = new Protocol("Hello");
 

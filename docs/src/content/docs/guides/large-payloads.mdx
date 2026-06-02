@@ -1,0 +1,191 @@
+---
+title: Large Payloads
+description: Cap response sizes, offload big batches to external storage, and upload large requests via pre-signed URLs.
+---
+
+Arrow batches can get big. vgi-rpc gives you three cooperating mechanisms for keeping large payloads off the inline wire:
+
+- **Response size caps** — refuse (or, for producers, split) responses that exceed a byte budget.
+- **External-location offloading** — replace an oversized batch with a tiny zero-row "pointer" batch that the peer resolves out-of-band from object storage.
+- **Request upload URLs** — let a client upload a large request payload to a pre-signed URL and send the server a pointer instead.
+
+All of these are most relevant to the [HTTP transport](/guides/http-transport/). External-location resolution also works on the pipe and subprocess client transports.
+
+## Response size caps
+
+Two `HttpHandlerOptions` cap how much a single response may produce:
+
+| Option | Applies to | Behavior |
+|--------|------------|----------|
+| `maxResponseBytes` | unary, stream-exchange (**hard**); producer streams (**soft**) | Hard: overshoot replaces the response with an `EXCEPTION` batch. Soft: overshoot mints a continuation token and the producer resumes on the next request. |
+| `maxExternalizedResponseBytes` | every response that externalizes | **Always hard** — externalized uploads have no continuation-token escape valve. |
+
+```typescript
+import { createHttpHandler } from "@query-farm/vgi-rpc";
+
+const handler = createHttpHandler(protocol, {
+  maxResponseBytes: 5_000_000,              // 5 MB inline body cap
+  maxExternalizedResponseBytes: 50_000_000, // 50 MB external-upload cap per response
+});
+```
+
+When a **hard** cap is exceeded the handler discards the data it had built and returns a stream carrying only an `EXCEPTION` batch (surfaced to the client as an `RpcError`). For unary and exchange this is the `maxResponseBytes` body cap; for any transport it is the `maxExternalizedResponseBytes` upload cap, which is pre-flighted *before* the upload is incurred so the bytes never leave the server.
+
+For **producer** streams, `maxResponseBytes` is a soft budget: when the accumulated body crosses it, the producer loop appends a zero-row continuation-token batch and stops, and the client resumes by calling `/{method}/exchange` with that token.
+
+The handler advertises these caps to clients via response headers `VGI-Max-Response-Bytes` and `VGI-Max-Externalized-Response-Bytes`. Undefined means unbounded.
+
+:::note
+`maxStreamResponseBytes` is the deprecated, producer-only predecessor of `maxResponseBytes`. If both are set, the producer loop prefers `maxStreamResponseBytes` for its soft budget; otherwise it falls through to `maxResponseBytes`. Prefer `maxResponseBytes` for new code.
+:::
+
+## External-location offloading
+
+Instead of refusing a large batch, the server can upload it to object storage and leave only a **pointer batch** on the wire: a zero-row batch (same schema) whose custom metadata carries `vgi_rpc.location` (the retrieval URL) and `vgi_rpc.location.sha256` (the SHA-256 digest of the raw IPC bytes). The peer detects the pointer, fetches the data, verifies the checksum, and continues as if the batch had arrived inline. See the [wire-protocol reference](/reference/wire-protocol/#external-location-pointers) for the exact pointer-batch format.
+
+Externalized payloads do **not** count toward `maxResponseBytes` — only the tiny pointer batch rides on the wire.
+
+### Configuring the server
+
+Pass an `ExternalLocationConfig` as the `externalLocation` option:
+
+```typescript
+import { createHttpHandler, type ExternalStorage, type ExternalLocationConfig } from "@query-farm/vgi-rpc";
+
+class S3Storage implements ExternalStorage {
+  async upload(data: Uint8Array, contentEncoding: string): Promise<string> {
+    // Persist `data` (Arrow IPC bytes, possibly zstd-compressed) and return
+    // an HTTPS URL the peer can GET. `contentEncoding` is "zstd" when the
+    // config enabled compression, otherwise "".
+    return await putObjectAndSign(data, contentEncoding);
+  }
+}
+
+const externalLocation: ExternalLocationConfig = {
+  storage: new S3Storage(),
+  externalizeThresholdBytes: 1_048_576,        // default 1 MB; batches at/above this are offloaded
+  compression: { algorithm: "zstd", level: 3 }, // optional; omit to upload uncompressed
+  // urlValidator defaults to httpsOnlyValidator; pass null to disable validation
+};
+
+const handler = createHttpHandler(protocol, {
+  externalLocation,
+  maxExternalizedResponseBytes: 50_000_000,
+});
+```
+
+The handler advertises whether externalization is enabled via the `VGI-Externalization-Enabled` response header.
+
+### `ExternalLocationConfig`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `storage` | `ExternalStorage` | Backend used to upload batch IPC bytes. |
+| `externalizeThresholdBytes?` | `number` | Minimum batch IPC byte size that triggers offloading. Default: `1048576` (1 MB). |
+| `compression?` | `{ algorithm: "zstd"; level?: number }` | Optionally zstd-compress uploaded data. `level` defaults to `3`. |
+| `urlValidator?` | `((url: string) => void) \| null` | Called before fetching a pointer URL; throw to reject. Default: `httpsOnlyValidator`. Pass `null` to disable validation entirely. |
+
+### `ExternalStorage`
+
+The storage backend is a single-method interface you implement:
+
+```typescript
+interface ExternalStorage {
+  /** Upload IPC data and return a URL for retrieval. */
+  upload(data: Uint8Array, contentEncoding: string): Promise<string>;
+}
+```
+
+`data` is the serialized Arrow IPC stream for the batch (zstd-compressed when `compression` is configured). `contentEncoding` is `"zstd"` in that case, otherwise `""` — if you persist it as the object's `Content-Encoding`, `resolveExternalLocation` will transparently decompress on the read side. The returned URL must be fetchable by the peer (and, by default, must be HTTPS). Object lifecycle/cleanup is your responsibility — vgi-rpc never deletes uploaded objects.
+
+### `httpsOnlyValidator`
+
+The default URL validator. It throws unless the URL uses the `https:` scheme:
+
+```typescript
+import { httpsOnlyValidator } from "@query-farm/vgi-rpc";
+
+httpsOnlyValidator("https://bucket.example/abc"); // ok
+httpsOnlyValidator("http://bucket.example/abc");  // throws
+```
+
+Supply your own `urlValidator` (e.g. an allowlist of trusted hosts) to harden against fetching from attacker-controlled locations, or set it to `null` to skip validation (only for trusted, e.g. loopback, deployments).
+
+### Working with pointer batches directly
+
+These helpers underlie the automatic offloading and are exported for advanced/manual use:
+
+```typescript
+import {
+  maybeExternalizeBatch,
+  resolveExternalLocation,
+  makeExternalLocationBatch,
+  isExternalLocationBatch,
+} from "@query-farm/vgi-rpc";
+```
+
+- **`maybeExternalizeBatch(batch, config?)`** — write path. If `config.storage` is set, the batch has rows, and its IPC size is at or above the threshold, it serializes the batch (optionally zstd-compressing), uploads it, and returns a pointer batch carrying the location and SHA-256. Otherwise returns the batch unchanged.
+- **`resolveExternalLocation(batch, config?)`** — read path. If the batch is a pointer (and `config` is provided), it validates the URL, fetches it, decompresses if the response is `Content-Encoding: zstd` (capped at 16× the compressed size as a decompression-bomb defense), verifies the SHA-256, and returns the resolved data batch. Non-pointer batches pass through unchanged.
+- **`makeExternalLocationBatch(schema, url, sha256?)`** — builds a zero-row pointer batch with the given schema, setting `vgi_rpc.location` (and `vgi_rpc.location.sha256` when provided).
+- **`isExternalLocationBatch(batch)`** — returns `true` for a zero-row batch carrying `vgi_rpc.location` (and *not* a log/error batch).
+
+## Request externalization (upload URLs)
+
+The size caps and external storage above protect the response side. For large **requests**, the client can upload its payload to a pre-signed URL and send the server a pointer instead of the inline body.
+
+### Server: vending upload URLs
+
+Set `uploadUrlProvider` to expose `POST {prefix}/__upload_url__/init`. The route is exempt from `maxRequestBytes` (it exists precisely to escape that limit). A client POSTs a tiny request asking for `count` URL pairs (clamped to 100); the handler responds with an Arrow batch of `upload_url`, `download_url`, and `expires_at` rows.
+
+```typescript
+import { createHttpHandler } from "@query-farm/vgi-rpc";
+
+const handler = createHttpHandler(protocol, {
+  maxRequestBytes: 10_000_000,   // inline request bodies above this should externalize
+  maxUploadBytes: 500_000_000,   // advertised max external upload (VGI-Max-Upload-Bytes)
+  uploadUrlProvider: {
+    async generateUploadUrl() {
+      const { putUrl, getUrl, expires } = await signUploadPair();
+      return { uploadUrl: putUrl, downloadUrl: getUrl, expiresAt: expires };
+    },
+  },
+  // To then resolve the uploaded request payload server-side, also configure
+  // externalLocation with a storage/validator.
+  externalLocation,
+});
+```
+
+The provider implements `generateUploadUrl()`, returning `{ uploadUrl, downloadUrl, expiresAt }`: `uploadUrl` is the pre-signed PUT the client uploads to, `downloadUrl` is the GET the server fetches from, and `expiresAt` is the pair's UTC expiry. Implementations must be safe to call concurrently, and the operator owns object cleanup.
+
+When configured, the handler advertises `VGI-Upload-URL-Support: true` and (if set) `VGI-Max-Upload-Bytes` on responses. On the dispatch side, when a request arrives as an external-location pointer, the unary handler resolves it via the configured `externalLocation`, re-attaches the outer dispatch metadata (method name, version, request id), and parses parameters as usual.
+
+### Client: automatic request externalization
+
+When the client (`httpConnect`) sees that the server advertises upload-URL support and a `maxRequestBytes` smaller than the body it is about to send, it transparently fetches a pre-signed pair from `/__upload_url__/init`, PUTs the request IPC bytes to `uploadUrl`, and sends the server a pointer referencing `downloadUrl`. It also retries this way if a plain POST returns `413 Payload Too Large`. The client passes its `externalLocation.urlValidator` through to validate vended URLs.
+
+## Client-side `externalLocation`
+
+The client connect functions — `httpConnect`, `pipeConnect`, and `subprocessConnect` — accept an `externalLocation` option of the same `ExternalLocationConfig` type. The client uses it to:
+
+- **Resolve** externalized response batches it receives (fetch + verify + decompress the pointer).
+- Source the `urlValidator` used when externalizing large **requests** (HTTP only).
+
+```typescript
+import { httpConnect, httpsOnlyValidator, type ExternalStorage } from "@query-farm/vgi-rpc";
+
+const client = httpConnect("https://api.example.com", {
+  externalLocation: {
+    storage: myStorage,            // ExternalStorage (only used for client-vended request uploads, if any)
+    urlValidator: httpsOnlyValidator,
+  },
+});
+```
+
+:::caution
+Resolving a pointer means fetching an arbitrary URL chosen by the peer. Keep `urlValidator` strict (HTTPS-only at minimum, ideally a host allowlist) unless you fully trust the other side.
+:::
+
+## Related
+
+- [HTTP Transport](/guides/http-transport/) — routes, configuration, and where these options live.
+- [Wire Protocol reference](/reference/wire-protocol/#external-location-pointers) — the on-the-wire format of external-location pointer batches.

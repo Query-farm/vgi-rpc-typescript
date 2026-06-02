@@ -3,7 +3,7 @@ title: Wire Protocol
 description: Technical details of the Arrow IPC wire protocol.
 ---
 
-vgi-rpc implements the same wire protocol as the Python [vgi-rpc](https://github.com/rustyconover/vgi-rpc) framework, ensuring cross-language compatibility.
+vgi-rpc implements the same wire protocol as the Python [vgi-rpc](https://github.com/Query-farm/vgi-rpc-python) framework, ensuring cross-language compatibility.
 
 ## Overview
 
@@ -16,7 +16,8 @@ Each request is a single Arrow IPC stream containing one `RecordBatch`:
 - The batch schema fields correspond to method parameters
 - Batch metadata carries the method name and protocol version:
   - `vgi_rpc.method` — the method name to invoke
-  - `vgi_rpc.request_version` — protocol version (currently `"1"`)
+  - `vgi_rpc.request_version` — wire framing version (currently `"1"`)
+  - `vgi_rpc.protocol_version` — optional application protocol surface version (semver `MAJOR.MINOR.PATCH`)
   - `vgi_rpc.request_id` — optional request correlation ID
 
 ## Response format
@@ -43,10 +44,21 @@ Zero-row batches with metadata:
 
 ### Error batches
 
-Zero-row batches with exception metadata:
+Errors are reported as zero-row batches with EXCEPTION metadata:
 
 - `vgi_rpc.log_level` set to `"EXCEPTION"`
-- `vgi_rpc.log_message` containing the error message
+- `vgi_rpc.log_message` containing the formatted error message (`"<ExceptionType>: <message>"`)
+- `vgi_rpc.error_kind` — optional top-level error category (only present for typed exceptions)
+- `vgi_rpc.log_extra` — JSON blob carrying `exception_type`, `exception_message`, `traceback`, and (when present) `error_kind`
+
+Over HTTP, error responses additionally set the `X-VGI-RPC-Error` response header.
+
+`vgi_rpc.error_kind` values include:
+
+- `method_not_implemented`
+- `session_lost`
+- `server_draining`
+- `protocol_version_mismatch`
 
 ## Streaming protocol
 
@@ -66,35 +78,88 @@ Exchange streams use a **lockstep** protocol:
 
 This interleaved read/write pattern prevents deadlocks when both sides buffer data on stdin/stdout pipes.
 
+### Cancellation
+
+A client cancels an in-flight stream by writing an input batch whose metadata
+carries `vgi_rpc.cancel` (the `CANCEL_KEY`). On receipt, the server ends the
+stream cleanly, running any server-side `onCancel` hook exactly once.
+
+### External location pointers
+
+Large batches may be replaced on the wire by a zero-row "pointer" batch that
+carries:
+
+- `vgi_rpc.location` — an out-of-band location the peer resolves to fetch the
+  real payload
+- `vgi_rpc.location.sha256` — the SHA-256 digest of the referenced payload for
+  integrity verification
+
+## Protocol version enforcement
+
+Requests may carry `vgi_rpc.protocol_version`, the application protocol surface
+version in canonical semver (`MAJOR.MINOR.PATCH`). At the dispatch boundary the
+server enforces an exact **major + minor** match (the patch component is
+ignored). A mismatch raises a protocol-version error with `error_kind` set to
+`protocol_version_mismatch`. This is distinct from `vgi_rpc.request_version`,
+which versions the wire framing itself.
+
 ## Metadata keys
 
 | Key | Value | Description |
 |-----|-------|-------------|
 | `vgi_rpc.method` | Method name | Identifies the RPC method |
-| `vgi_rpc.request_version` | `"1"` | Protocol version |
+| `vgi_rpc.request_version` | `"1"` | Wire framing version |
+| `vgi_rpc.protocol_version` | Semver string | Application protocol surface version |
 | `vgi_rpc.request_id` | UUID string | Request correlation ID |
-| `vgi_rpc.log_level` | Level string | Log/error level |
-| `vgi_rpc.log_message` | Message string | Log/error message |
-| `vgi_rpc.log_extra` | JSON string | Additional metadata |
 | `vgi_rpc.server_id` | ID string | Server identifier |
 | `vgi_rpc.protocol_name` | Name string | Protocol name (in describe) |
-| `vgi_rpc.describe_version` | `"2"` | Describe protocol version |
-| `vgi_rpc.stream_state` | Token string | HTTP streaming state token |
+| `vgi_rpc.describe_version` | `"4"` | Describe protocol version |
+| `vgi_rpc.protocol_hash` | Hex digest | SHA-256 hash of the describe payload |
+| `vgi_rpc.log_level` | Level string | Log/error level (`"EXCEPTION"` for errors) |
+| `vgi_rpc.log_message` | Message string | Log/error message |
+| `vgi_rpc.log_extra` | JSON string | Additional metadata |
+| `vgi_rpc.error_kind` | Kind string | Error category (typed exceptions) |
+| `vgi_rpc.cancel` | Marker | Client-initiated stream cancellation |
+| `vgi_rpc.location` | Location string | External payload pointer |
+| `vgi_rpc.location.sha256` | Hex digest | SHA-256 of the referenced payload |
+| `vgi_rpc.stream_state#b64` | Token string | HTTP streaming state token |
 
 ## Introspection
 
-The `__describe__` method is a special built-in that returns service metadata:
+The `__describe__` method is a special built-in that returns service metadata.
+Introspection is **enabled by default** (`enableDescribe` defaults to `true` on
+`VgiRpcServer`); disable it with `enableDescribe: false`.
 
-- Method names, types, parameter schemas, and documentation
-- Enabled by setting `enableDescribe: true` on `VgiRpcServer`
-- Response uses describe protocol version `"2"`
+The response is a single Arrow batch using the slim DESCRIBE protocol version
+`"4"` schema, with these 8 columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `name` | utf8 | Method name |
+| `method_type` | utf8 | Method type (`unary`, `stream`, …) |
+| `has_return` | bool | Whether the method returns a result |
+| `params_schema_ipc` | binary | Arrow IPC schema bytes for parameters |
+| `result_schema_ipc` | binary | Arrow IPC schema bytes for the result |
+| `has_header` | bool | Whether a stream header schema is defined |
+| `header_schema_ipc` | binary | Arrow IPC schema bytes for the header |
+| `is_exchange` | bool | `true` for exchange, `false` for producer, null otherwise |
+
+The Arrow IPC schema bytes are the authoritative type information on the wire.
+Python-flavoured documentation columns (`doc`, `param_types_json`,
+`param_defaults_json`, `param_docs_json`) are **not** transmitted — the
+`Protocol` class is the source of human-readable type info.
+
+The response's custom metadata carries `vgi_rpc.protocol_hash`, a SHA-256 hex
+digest computed to mirror Python's `compute_protocol_hash` byte-for-byte. It is
+stable within a port; cross-port byte equality is not guaranteed because Arrow
+IPC schema bytes vary across language Arrow libraries.
 
 ## HTTP wire format
 
 When using HTTP transport, the wire format wraps the same Arrow IPC streams in HTTP request/response bodies:
 
 - Content-Type: `application/vnd.apache.arrow.stream`
-- State tokens in `vgi_rpc.stream_state` batch metadata enable stateless streaming
-- Tokens are HMAC-SHA256 signed, base64-encoded, and time-limited
+- State tokens in `vgi_rpc.stream_state#b64` batch metadata enable stateless streaming
+- Tokens are sealed with **XChaCha20-Poly1305 AEAD** (wire format v4), base64-encoded, and time-limited. Tamper and forgery resistance comes from the Poly1305 authentication tag, and each token is bound to its authenticated principal via the AEAD associated data, so a token minted for one identity fails to open when presented by another.
 
 See [HTTP Transport](/guides/http-transport/) for the HTTP-specific routing and state management details.
