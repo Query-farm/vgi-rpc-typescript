@@ -1,5 +1,16 @@
 ---
 // Simplified homepage — prose-first, one code example, one terminal proof.
+import { Code } from "@astrojs/starlight/components";
+
+const serverExample = `const protocol = new Protocol("Calculator");
+
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: async ({ a, b }) => ({ result: a + b }),
+});
+
+new VgiRpcServer(protocol).run();`;
 ---
 
 <section class="home-content">
@@ -21,17 +32,7 @@
 
   <div class="code-section">
     <p class="code-label">A complete RPC server in 8 lines</p>
-    <div class="code-block">
-      <pre><code><span class="kw">const</span> protocol = <span class="kw">new</span> <span class="cls">Protocol</span>(<span class="str">"Calculator"</span>);
-
-protocol.<span class="fn">unary</span>(<span class="str">"add"</span>, {'{'}
-  params: {'{'} a: <span class="typ">float</span>, b: <span class="typ">float</span> {'}'},
-  result: {'{'} result: <span class="typ">float</span> {'}'},
-  handler: <span class="kw">async</span> ({'{'} a, b {'}'}) =&gt; ({'{'} result: a + b {'}'}),
-{'}'});
-
-<span class="kw">new</span> <span class="cls">VgiRpcServer</span>(protocol).<span class="fn">run</span>();</code></pre>
-    </div>
+    <Code code={serverExample} lang="ts" />
   </div>
 
   <div class="terminal-section">
@@ -95,31 +96,11 @@ protocol.<span class="fn">unary</span>(<span class="str">"add"</span>, {'{'}
     letter-spacing: 0.05em;
     font-weight: 500;
   }
-  .code-block {
-    border-radius: 0.75rem;
-    overflow: hidden;
-    border: 1px solid #2d5016;
-    background: #0d2818;
-  }
-  .code-block pre {
+  /* The code example renders via Starlight's <Code> component, which uses
+     the shared "farm-theme" Expressive Code config — no hand-rolled markup. */
+  .code-section :global(.expressive-code) {
     margin: 0;
-    padding: 1.5rem;
-    overflow-x: auto;
-    font-size: 0.875rem;
-    line-height: 1.7;
   }
-  .code-block code {
-    font-family: var(--__sl-font-mono);
-    background: none;
-    color: #e8f5e9;
-  }
-
-  /* ── Syntax colors (query.farm "farm-theme") ── */
-  .kw { color: #66bb6a; font-weight: 700; }
-  .cls { color: #fff59d; }
-  .fn { color: #ffeb3b; }
-  .str { color: #c5e1a5; }
-  .typ { color: #fff59d; }
 
   /* ── Terminal proof ── */
   .terminal-section {
@@ -153,11 +134,14 @@ protocol.<span class="fn">unary</span>(<span class="str">"add"</span>, {'{'}
     padding: 1rem 1.25rem;
     font-size: 0.8125rem;
     line-height: 1.7;
+    background: transparent;
   }
-  .terminal code {
+  /* Beat Starlight's `.sl-markdown-content pre code` color rule so the
+     un-marked command text isn't inherited dark on the dark-green terminal. */
+  .terminal pre code {
     font-family: var(--__sl-font-mono);
     background: none;
-    color: #e8f5e9;
+    color: #e8f5e9 !important;
   }
   .prompt { color: #66bb6a; font-weight: 700; }
   .out { color: #c5e1a5; }
