@@ -10,7 +10,7 @@ vgi-rpc provides shorthand type singletons that eliminate boilerplate when decla
 Instead of constructing `Schema` and `Field` objects manually, use the shorthand syntax:
 
 ```typescript
-import { str, int, float } from "vgi-rpc";
+import { str, int, float } from "@query-farm/vgi-rpc";
 
 protocol.unary("echo", {
   params: { name: str, count: int, value: float },
@@ -41,28 +41,34 @@ protocol.unary("echo", {
 |-----------|-----------|-------------------|
 | `str` | `Utf8` | `str` |
 | `bytes` | `Binary` | `bytes` |
+| `bool` | `Bool` | `bool` |
 | `int` | `Int64` | `int` |
+| `int8` | `Int8` | `Annotated[int, ArrowType(pa.int8())]` |
+| `int16` | `Int16` | `Annotated[int, ArrowType(pa.int16())]` |
 | `int32` | `Int32` | `Annotated[int, ArrowType(pa.int32())]` |
+| `uint8` | `Uint8` | `Annotated[int, ArrowType(pa.uint8())]` |
+| `uint16` | `Uint16` | `Annotated[int, ArrowType(pa.uint16())]` |
+| `uint32` | `Uint32` | `Annotated[int, ArrowType(pa.uint32())]` |
+| `uint64` | `Uint64` | `Annotated[int, ArrowType(pa.uint64())]` |
 | `float` | `Float64` | `float` |
 | `float32` | `Float32` | `Annotated[float, ArrowType(pa.float32())]` |
-| `bool` | `Bool` | `bool` |
 
 ## The `SchemaLike` type
 
-Methods accept either a full `Schema` object or a `Record<string, DataType>` shorthand:
+Methods accept a full `Schema` object, anything structurally schema-shaped, or a record mapping field names to a `DataType` **or** a `Field`:
 
 ```typescript
-type SchemaLike = Schema | Record<string, DataType>;
+type SchemaLike = Schema | SchemaShape | Record<string, DataType | Field>;
 ```
 
-The `toSchema()` function converts a shorthand record into a proper Arrow `Schema`. All fields created via shorthand are non-nullable.
+A record value may be a bare `DataType` (in which case the field is created non-nullable) or a fully-constructed `Field` (when you need control over nullability or per-field metadata). The `toSchema()` function converts any `SchemaLike` into a proper Arrow `Schema`.
 
 ## Complex types
 
 For types not covered by the singletons — `List`, `Map`, `Dictionary`, `Struct`, or nullable fields — use the full `Schema`/`Field` constructors from `@query-farm/apache-arrow`:
 
 ```typescript
-import { Schema, Field, List, new Utf8 } from "@query-farm/apache-arrow";
+import { Schema, Field, List, Utf8 } from "@query-farm/apache-arrow";
 
 protocol.unary("tags", {
   params: new Schema([

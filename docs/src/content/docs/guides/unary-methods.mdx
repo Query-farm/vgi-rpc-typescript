@@ -8,7 +8,7 @@ Unary methods handle a single request and return a single response — the most 
 ## Basic usage
 
 ```typescript
-import { Protocol, float } from "vgi-rpc";
+import { Protocol, float } from "@query-farm/vgi-rpc";
 
 const protocol = new Protocol("MyService");
 
@@ -65,6 +65,21 @@ protocol.unary("greet", {
 ```
 
 Clients can discover method documentation by calling `vgi-rpc describe`.
+
+## Parameter type hints
+
+By default, vgi-rpc infers Python-style parameter type strings from the `params` schema (for example `int`, `float`, `str`). To override or supplement these hints — for instance when a field uses a complex Arrow type that cannot be inferred — provide the optional `paramTypes` field:
+
+```typescript
+protocol.unary("scale", {
+  params: { value: float },
+  result: { result: float },
+  handler: async ({ value }) => ({ result: value * 2 }),
+  paramTypes: { value: "float" },
+});
+```
+
+When omitted, `paramTypes` is derived automatically via `inferParamTypes(params)`.
 
 ## Error handling
 

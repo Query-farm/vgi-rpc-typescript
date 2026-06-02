@@ -17,7 +17,11 @@ const server = new VgiRpcServer(protocol, {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enableDescribe` | `boolean` | `true` | Register the `__describe__` introspection method |
-| `serverId` | `string` | Random 12-char UUID | Server identifier included in response metadata |
+| `serverId` | `string` | Random 12-char hex ID | Server identifier included in response metadata |
+| `protocolVersion` | `string` | `""` | Operator-supplied protocol-contract version label, surfaced on dispatch info / access-log records |
+| `dispatchHook` | `DispatchHook` | — | Observability hook invoked at the start and end of every dispatch (tracing, metrics) |
+| `externalLocation` | `ExternalLocationConfig` | — | External storage config for externalizing large response batches |
+| `onServeStart` | `ServeStartHook` | — | Lifecycle hook fired once before the first dispatched request (receives the `TransportKind`) |
 
 ## HttpHandlerOptions
 
@@ -26,31 +30,33 @@ The `createHttpHandler` function accepts an optional `HttpHandlerOptions` object
 ```typescript
 const handler = createHttpHandler(protocol, {
   prefix: "/api",
-  signingKey: myKey,
+  tokenKey: myKey,
   tokenTtl: 7200,
   corsOrigins: "*",
   maxRequestBytes: 10_000_000,
-  maxStreamResponseBytes: 5_000_000,
+  maxResponseBytes: 5_000_000,
   serverId: "http-01",
   stateSerializer: customSerializer,
 });
 ```
 
-### Options reference
+### Routing
 
 #### `prefix`
 
 - **Type:** `string`
-- **Default:** `"/vgi"`
+- **Default:** `""` (root)
 
-URL path prefix for all endpoints. All method routes are mounted under this prefix.
+URL path prefix for all endpoints. All method routes are mounted under this prefix. Pass e.g. `"/vgi"` to mount everything under `/vgi`.
 
-#### `signingKey`
+### State tokens
+
+#### `tokenKey`
 
 - **Type:** `Uint8Array`
 - **Default:** Random 32 bytes
 
-HMAC-SHA256 signing key for state tokens. Provide a stable key if you need tokens to survive server restarts.
+XChaCha20-Poly1305 (AEAD) master key, 32 bytes, used to seal stream state tokens. Provide a stable key if you need tokens to survive a restart or load-balance across workers; if omitted, a random key is generated and tokens will not survive a restart.
 
 #### `tokenTtl`
 
@@ -59,38 +65,10 @@ HMAC-SHA256 signing key for state tokens. Provide a stable key if you need token
 
 State token time-to-live in seconds. Set to `0` to disable TTL checks.
 
-#### `corsOrigins`
-
-- **Type:** `string`
-- **Default:** `undefined` (no CORS headers)
-
-CORS allowed origins. When set, `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`, and `Access-Control-Allow-Headers` headers are added to all responses. `OPTIONS` preflight requests are handled automatically.
-
-#### `maxRequestBytes`
-
-- **Type:** `number`
-- **Default:** `undefined` (unlimited)
-
-Maximum request body size in bytes. Requests exceeding this limit receive a `413` response. The limit is also advertised via the `VGI-Max-Request-Bytes` header on the `__capabilities__` endpoint.
-
-#### `maxStreamResponseBytes`
-
-- **Type:** `number`
-- **Default:** `undefined` (unlimited)
-
-Maximum bytes before a producer stream emits a continuation token instead of more data. This limits memory usage for large stream responses.
-
-#### `serverId`
-
-- **Type:** `string`
-- **Default:** Random 12-char UUID
-
-Server ID included in response metadata. Useful for identifying which server handled a request in multi-server deployments.
-
 #### `stateSerializer`
 
 - **Type:** `StateSerializer`
-- **Default:** JSON serializer with BigInt support
+- **Default:** `jsonStateSerializer` (JSON with BigInt support)
 
 Custom serializer for stream state objects stored in state tokens.
 
@@ -101,7 +79,219 @@ interface StateSerializer {
 }
 ```
 
-The default serializer uses JSON with special handling for `BigInt` values (prefixed with `__bigint__:`).
+The default `jsonStateSerializer` uses JSON with special handling for `BigInt` values (prefixed with `__bigint__:`).
+
+### Size limits
+
+#### `maxRequestBytes`
+
+- **Type:** `number`
+- **Default:** `undefined` (unlimited)
+
+Maximum request body size in bytes. Requests exceeding this limit are rejected. The limit is also advertised via the `VGI-Max-Request-Bytes` header.
+
+#### `maxDecompressedRequestBytes`
+
+- **Type:** `number`
+- **Default:** `maxRequestBytes * 16` if set, otherwise unbounded
+
+Cap on the post-decompression size of a `Content-Encoding: zstd` request body, in bytes. Defends against zstd decompression bombs where a tiny compressed frame declares a huge decompressed size.
+
+#### `maxResponseBytes`
+
+- **Type:** `number`
+- **Default:** `undefined` (unbounded)
+
+HTTP body cap. Hard for unary and stream-exchange responses (overshoot surfaces as `200` + an `X-VGI-RPC-Error` EXCEPTION batch); soft for producer streams (overshoot mints a continuation token). Externalized payloads do not count toward this. Advertised via `VGI-Max-Response-Bytes`.
+
+#### `maxStreamResponseBytes`
+
+- **Type:** `number`
+- **Default:** `undefined` (unbounded)
+
+:::caution[Deprecated]
+Use `maxResponseBytes` instead. The cap now governs all HTTP method responses (unary, exchange, producer), not just producer streams.
+:::
+
+#### `maxExternalizedResponseBytes`
+
+- **Type:** `number`
+- **Default:** `undefined` (unbounded)
+
+Cap on bytes uploaded to external storage during one HTTP response. Always hard — externalized uploads have no escape valve. Advertised via `VGI-Max-Externalized-Response-Bytes`.
+
+#### `maxUploadBytes`
+
+- **Type:** `number`
+- **Default:** `undefined`
+
+Optional advertised maximum upload size, surfaced via `VGI-Max-Upload-Bytes`.
+
+### CORS & compression
+
+#### `corsOrigins`
+
+- **Type:** `string`
+- **Default:** `undefined` (no CORS headers)
+
+CORS allowed origins. When set, `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`, and `Access-Control-Allow-Headers` headers are added to all responses. `OPTIONS` preflight requests are handled automatically.
+
+#### `corsMaxAge`
+
+- **Type:** `number | null`
+- **Default:** `7200` (2 hours)
+
+`Access-Control-Max-Age` value in seconds for preflight `OPTIONS` responses. Set to `null` to omit the header.
+
+#### `compressionLevel`
+
+- **Type:** `number`
+- **Default:** `undefined` (disabled)
+
+zstd compression level (1–22) for responses. If set, responses are compressed when the client sends `Accept-Encoding: zstd`.
+
+### Authentication & OAuth
+
+#### `authenticate`
+
+- **Type:** `AuthenticateFn`
+- **Default:** — (no authentication)
+
+Optional authentication callback. Called for each request before dispatch.
+
+#### `oauthResourceMetadata`
+
+- **Type:** `OAuthResourceMetadata`
+- **Default:** —
+
+Optional RFC 9728 OAuth Protected Resource Metadata. Served at the well-known endpoint.
+
+#### `oauthPkceScope`
+
+- **Type:** `string`
+- **Default:** `"openid email"`
+
+OAuth scope for PKCE authorization requests.
+
+#### `allowedReturnOrigins`
+
+- **Type:** `ReadonlySet<string>`
+- **Default:** `Set(["https://cupola.query-farm.services"])`
+
+Allowed return-to origins for external frontend redirects.
+
+### Sticky sessions
+
+#### `enableSticky`
+
+- **Type:** `boolean`
+- **Default:** `false`
+
+Enable opt-in sticky sessions. When enabled the server advertises `VGI-Sticky-Enabled: true`, honours `VGI-Session` / `VGI-Session-Accept` headers, and exposes a `DELETE {prefix}/__session__` teardown endpoint.
+
+#### `stickyDefaultTtl`
+
+- **Type:** `number`
+- **Default:** `300`
+
+Default session TTL in seconds when `ctx.openSession` is called without an explicit `ttl` override.
+
+#### `stickyEchoHeaders`
+
+- **Type:** `Record<string, string>`
+- **Default:** —
+
+Headers the server emits as `VGI-Echo-<name>: <value>` on the session-opening response. A conformant client captures them and replays them on every subsequent request in the session (used for client-driven routing, e.g. `fly-force-instance-id` on Fly.io).
+
+### External storage
+
+#### `externalLocation`
+
+- **Type:** `ExternalLocationConfig`
+- **Default:** —
+
+External storage config for externalizing large response batches.
+
+#### `uploadUrlProvider`
+
+- **Type:** `UploadUrlProvider`
+- **Default:** —
+
+Provider for vending pre-signed upload URLs to clients via `{prefix}/__upload_url__/init`.
+
+### HTML pages
+
+#### `enableLandingPage`
+
+- **Type:** `boolean`
+- **Default:** `true`
+
+Enable the HTML landing page at `GET {prefix}/`.
+
+#### `enableDescribePage`
+
+- **Type:** `boolean`
+- **Default:** `true`
+
+Enable the HTML describe / API reference page at `GET {prefix}/describe`.
+
+#### `enableNotFoundPage`
+
+- **Type:** `boolean`
+- **Default:** `true`
+
+Enable the HTML 404 page for unmatched `GET` routes.
+
+#### `enableHealthEndpoint`
+
+- **Type:** `boolean`
+- **Default:** `true`
+
+Enable the JSON health endpoint at `GET {prefix}/health`.
+
+#### `protocolName`
+
+- **Type:** `string`
+- **Default:** the Protocol's name
+
+Protocol name shown in HTML pages.
+
+#### `repositoryUrl`
+
+- **Type:** `string`
+- **Default:** —
+
+URL to the service's source repository, shown in the landing / describe pages.
+
+### Identity & observability
+
+#### `serverId`
+
+- **Type:** `string`
+- **Default:** Random ID
+
+Server ID included in response metadata. Useful for identifying which server handled a request in multi-server deployments.
+
+#### `protocolVersion`
+
+- **Type:** `string`
+- **Default:** —
+
+Operator-supplied protocol-contract version label, surfaced on every access-log record.
+
+#### `dispatchHook`
+
+- **Type:** `DispatchHook`
+- **Default:** —
+
+Optional dispatch hook for observability (tracing, metrics).
+
+#### `onServeStart`
+
+- **Type:** `ServeStartHook`
+- **Default:** —
+
+Optional lifecycle hook fired once on the first dispatched request. Lazy-firing keeps it fork-safe for pre-fork servers.
 
 ## HttpConnectOptions
 
@@ -109,7 +299,7 @@ The `httpConnect` function accepts an optional `HttpConnectOptions` object:
 
 ```typescript
 const client = httpConnect("http://localhost:8080", {
-  prefix: "/vgi",
+  prefix: "/api",
   compressionLevel: 3,
   onLog: (msg) => console.log(`[${msg.level}] ${msg.message}`),
 });
@@ -117,9 +307,11 @@ const client = httpConnect("http://localhost:8080", {
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `prefix` | `string` | `"/vgi"` | URL path prefix |
+| `prefix` | `string` | `""` (root) | URL path prefix |
 | `onLog` | `(msg: LogMessage) => void` | — | Log message callback |
 | `compressionLevel` | `number` | — | zstd compression level (omit to disable) |
+| `authorization` | `string` | — | `Authorization` header value (e.g. `"Bearer <token>"`) sent with every request |
+| `externalLocation` | `ExternalLocationConfig` | — | External storage config for resolving externalized batches |
 
 ## PipeConnectOptions
 
@@ -128,6 +320,7 @@ The `pipeConnect` function accepts an optional `PipeConnectOptions` object:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `onLog` | `(msg: LogMessage) => void` | — | Log message callback |
+| `externalLocation` | `ExternalLocationConfig` | — | External storage config for resolving externalized batches |
 
 ## SubprocessConnectOptions
 
@@ -147,4 +340,5 @@ const client = subprocessConnect(["bun", "run", "server.ts"], {
 | `cwd` | `string` | — | Working directory for subprocess |
 | `env` | `Record<string, string>` | — | Additional environment variables |
 | `stderr` | `"inherit" \| "pipe" \| "ignore"` | `"ignore"` | Subprocess stderr handling |
-| `onLog` | `(msg: LogMessage) => void` | — | Log message callback |
+| `onLog` | `(msg: LogMessage) => void` | — | Log message callback (inherited from `PipeConnectOptions`) |
+| `externalLocation` | `ExternalLocationConfig` | — | External storage config for resolving externalized batches (inherited from `PipeConnectOptions`) |

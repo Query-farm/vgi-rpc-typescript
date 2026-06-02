@@ -8,7 +8,7 @@ In addition to stdin/stdout, vgi-rpc can serve methods over HTTP using the `crea
 ## Quick start
 
 ```typescript
-import { Protocol, float, createHttpHandler } from "vgi-rpc";
+import { Protocol, float, createHttpHandler } from "@query-farm/vgi-rpc";
 
 const protocol = new Protocol("Calculator");
 
@@ -24,7 +24,7 @@ Bun.serve({ port: 8080, fetch: handler });
 
 ## Compatibility
 
-The handler returns a standard `(Request) => Response | Promise<Response>` function compatible with:
+`createHttpHandler(protocol, options)` returns a standard `(Request) => Response | Promise<Response>` function compatible with:
 
 - **Bun** — `Bun.serve({ fetch: handler })`
 - **Deno** — `Deno.serve(handler)`
@@ -32,30 +32,38 @@ The handler returns a standard `(Request) => Response | Promise<Response>` funct
 
 ## Routes
 
-All routes are under a configurable prefix (default: `/vgi`):
+All routes are served under a configurable `prefix`. The default prefix is `""` (root), so the examples below show the root-mounted paths. When you set a `prefix` (e.g. `/api`), it is prepended to every path.
 
 | Route | Method | Description |
 |-------|--------|-------------|
-| `{prefix}/{name}` | POST | Unary method call |
-| `{prefix}/{name}/init` | POST | Initialize a stream (producer or exchange) |
-| `{prefix}/{name}/exchange` | POST | Send/receive a stream batch |
-| `{prefix}/__describe__` | POST | Service introspection |
-| `{prefix}/__capabilities__` | OPTIONS | Server capabilities |
+| `/{method}` | POST | Unary method call |
+| `/{method}/init` | POST | Initialize a stream (producer or exchange) |
+| `/{method}/exchange` | POST | Send/receive a stream batch |
+| `/__describe__` | POST | Machine-readable Arrow describe batch |
+| `/__upload_url__/init` | POST | Request a pre-signed upload URL (when `uploadUrlProvider` is set) |
+| `/__session__` | DELETE | Tear down a sticky session (when `enableSticky` is set) |
+| `/describe` | GET | HTML describe / API-reference page |
+| `/` | GET | HTML landing page |
+| `/health` | GET | JSON health probe (auth-exempt) |
 
-All POST requests must use `Content-Type: application/vnd.apache.arrow.stream`.
+POST requests carrying Arrow bodies must use `Content-Type: application/vnd.apache.arrow.stream` (exported as `ARROW_CONTENT_TYPE`).
+
+When OAuth is configured (see [OAuth](/guides/oauth/)), additional routes are mounted: `GET /_oauth/callback`, `GET /_oauth/logout`, `POST /_oauth/token`, and `GET /.well-known/oauth-protected-resource{prefix}`.
 
 ## Stateless streaming
 
-HTTP streaming uses HMAC-SHA256 signed state tokens to maintain stream state across requests:
+HTTP streaming uses sealed state tokens to carry stream state across requests, so no server-side session storage is required:
 
-1. Client calls `/{method}/init` with parameters → receives first batch + state token
-2. Client calls `/{method}/exchange` with state token + input batch → receives output batch + new token
-3. Repeat step 2 until the stream ends
+1. Client calls `/{method}/init` with parameters → receives the first batch plus a state token
+2. Client calls `/{method}/exchange` with the state token + input batch → receives an output batch plus a fresh token
+3. Repeat step 2 until the stream ends (the final response carries no token)
 
-State tokens are:
-- Signed with HMAC-SHA256 to prevent tampering
-- Time-limited (default: 1 hour TTL)
-- Self-contained (no server-side session storage needed)
+State tokens are sealed with **XChaCha20-Poly1305 AEAD** (wire format v4):
+
+- The Poly1305 authentication tag makes tokens tamper- and forgery-resistant — any modification to the ciphertext fails to decrypt.
+- Tokens are bound to the authenticated principal via the AEAD associated data (AAD). A token sealed for principal A cannot be replayed by principal B (or by an anonymous caller, and vice versa).
+- Tokens are time-limited (default `tokenTtl`: 1 hour; `0` disables the TTL check).
+- The sealing key is the 32-byte `tokenKey` master key. If you omit it, a random key is generated at startup — fine for a single process, but tokens then won't survive a restart or work across load-balanced workers. Supply a shared `tokenKey` to make tokens portable across workers.
 
 ## Configuration
 
@@ -63,22 +71,56 @@ Pass `HttpHandlerOptions` to customize behavior:
 
 ```typescript
 const handler = createHttpHandler(protocol, {
-  prefix: "/api",
-  signingKey: myKey,           // HMAC key (random 32 bytes if omitted)
-  tokenTtl: 7200,             // Token TTL in seconds (default: 3600)
-  corsOrigins: "*",            // CORS allowed origins
-  maxRequestBytes: 10_000_000, // Max request body size
-  maxStreamResponseBytes: 5_000_000, // Max bytes before continuation token
-  serverId: "my-server",      // Server ID in response metadata
-  stateSerializer: custom,    // Custom state serializer
+  prefix: "/api",                    // path prefix for all routes (default: "" / root)
+  tokenKey: myKey,                   // 32-byte XChaCha20-Poly1305 master key (random if omitted)
+  tokenTtl: 7200,                    // state-token TTL in seconds (default: 3600; 0 disables)
+  serverId: "my-server",             // server ID in response metadata (random if omitted)
+  corsOrigins: "*",                  // CORS allowed origins
+  corsMaxAge: 7200,                  // Access-Control-Max-Age for preflight (default: 7200; null omits)
+  maxRequestBytes: 10_000_000,       // max request body size
+  maxDecompressedRequestBytes: 160_000_000, // cap on decompressed request size (zstd-bomb defense)
+  maxResponseBytes: 5_000_000,       // response body cap (hard for unary/exchange, soft for producer)
+  maxExternalizedResponseBytes: 50_000_000, // cap on externalized payload bytes per response
+  compressionLevel: 3,              // enable response compression (gzip/zstd) at this level
+  authenticate: myAuthFn,            // authentication callback (see Authentication)
+  enableSticky: true,                // opt-in sticky sessions
 });
 ```
 
+Key options:
+
+| Option | Description |
+|--------|-------------|
+| `prefix` | Path prefix for all routes. Default `""` (root). |
+| `tokenKey` | 32-byte XChaCha20-Poly1305 master key sealing stream-state tokens. Random if omitted. |
+| `tokenTtl` | State-token TTL in seconds. Default `3600`; `0` disables TTL checks. |
+| `corsOrigins` | CORS allowed origins; enables CORS headers when set. |
+| `corsMaxAge` | `Access-Control-Max-Age` for preflight responses. Default `7200`; `null` omits it. |
+| `maxRequestBytes` | Max request body size. Advertised via `VGI-Max-Request-Bytes`. |
+| `maxDecompressedRequestBytes` | Cap on post-decompression request size (zstd/gzip bomb defense). Defaults to `maxRequestBytes * 16` when that is set. |
+| `maxResponseBytes` | Response body cap. Hard for unary/exchange, soft for producer (overshoot mints a continuation token). |
+| `maxExternalizedResponseBytes` | Hard cap on bytes uploaded to external storage during one response. |
+| `compressionLevel` | Enables response compression (gzip/zstd) at this level. |
+| `authenticate` | Per-request authentication callback. |
+| `enableSticky` | Opt-in sticky sessions. See [Sticky Sessions](/guides/sticky-sessions/). |
+| `externalLocation` / `uploadUrlProvider` / `maxUploadBytes` | Large-payload externalization. See [Large Payloads](/guides/large-payloads/). |
+| `dispatchHook` / `onServeStart` | Observability / lifecycle hooks. |
+| `serverId` | Server ID in response metadata. Random if omitted. |
+| `maxStreamResponseBytes` | **Deprecated** — use `maxResponseBytes`. The producer-only soft cap; kept for backward compatibility. |
+
 See [Configuration](/reference/configuration/) for full details on each option.
+
+## Request and response compression
+
+The handler transparently decompresses request bodies sent with `Content-Encoding: zstd` or `gzip`. `maxDecompressedRequestBytes` caps the decompressed size to defend against decompression bombs (a tiny compressed frame inflating to hundreds of MB).
+
+When `compressionLevel` is set, responses are compressed (zstd preferred when the runtime can encode it, otherwise gzip) according to the client's `Accept-Encoding`. The server advertises what it can produce via `VGI-Supported-Encodings`.
+
+See the [Compression guide](/guides/compression/) for details.
 
 ## CORS
 
-Set `corsOrigins` to enable CORS headers on all responses:
+Set `corsOrigins` to enable CORS headers on responses:
 
 ```typescript
 const handler = createHttpHandler(protocol, {
@@ -86,16 +128,32 @@ const handler = createHttpHandler(protocol, {
 });
 ```
 
-The handler automatically responds to `OPTIONS` preflight requests.
+The handler answers `OPTIONS` preflight requests automatically. The preflight reflects the request's `Access-Control-Request-Headers` back in `Access-Control-Allow-Headers`, so clients can send custom VGI request headers without a hard-coded allow-list. `corsMaxAge` controls how long browsers cache the preflight (default 2 hours; `null` omits the header), and the relevant VGI response headers are surfaced via `Access-Control-Expose-Headers`.
+
+## Health endpoint
+
+`GET /health` returns a small JSON document (`{ "status": "ok", ... }`) and is exempt from authentication, so orchestrators and load balancers can probe the server even when every RPC endpoint requires auth. Disable it with `enableHealthEndpoint: false`.
+
+## Cookies for unary methods
+
+Unary handlers can read request cookies — the handler parses the incoming `Cookie` header per request and exposes the values to the handler context. OAuth uses a `_vgi_auth` cookie to carry the authenticated session for browser flows.
+
+## Sticky sessions
+
+Sticky sessions are opt-in via `enableSticky` (with `stickyDefaultTtl` and `stickyEchoHeaders`). When enabled, the server advertises `VGI-Sticky-Enabled: true`, honors session headers, and exposes a `DELETE /__session__` teardown endpoint. See [Sticky Sessions](/guides/sticky-sessions/) for the full lifecycle.
+
+## Large payloads / external storage
+
+Large response (and request) payloads can be externalized to object storage instead of riding inline on the wire, leaving only small pointer batches. Configure `externalLocation`, `uploadUrlProvider`, and `maxUploadBytes`. See [Large Payloads](/guides/large-payloads/) for details.
 
 ## Authentication
 
-Pass an `authenticate` callback to protect your endpoints. vgi-rpc ships with factories for bearer tokens, JWT, mTLS, and XFCC. See the [Authentication guide](/guides/authentication/) for full details.
+Pass an `authenticate` callback to protect your endpoints. vgi-rpc ships with factories for bearer tokens, JWT, mTLS, and XFCC. See the [Authentication guide](/guides/authentication/) and the [OAuth guide](/guides/oauth/) for full details.
 
 Quick example with bearer tokens:
 
 ```typescript
-import { createHttpHandler, bearerAuthenticateStatic, AuthContext } from "vgi-rpc";
+import { createHttpHandler, bearerAuthenticateStatic, AuthContext } from "@query-farm/vgi-rpc";
 
 const auth = bearerAuthenticateStatic({
   tokens: {
@@ -104,7 +162,7 @@ const auth = bearerAuthenticateStatic({
 });
 
 const handler = createHttpHandler(protocol, {
-  signingKey: myKey,
+  tokenKey: myKey,
   authenticate: auth,
 });
 ```
@@ -112,7 +170,7 @@ const handler = createHttpHandler(protocol, {
 Multiple strategies can be combined with `chainAuthenticate` — for example, accepting both mTLS and bearer tokens:
 
 ```typescript
-import { chainAuthenticate, mtlsAuthenticateSubject, bearerAuthenticateStatic } from "vgi-rpc";
+import { chainAuthenticate, mtlsAuthenticateSubject, bearerAuthenticateStatic, AuthContext } from "@query-farm/vgi-rpc";
 
 const auth = chainAuthenticate(
   mtlsAuthenticateSubject({ allowedSubjects: new Set(["my-service"]) }),
@@ -131,4 +189,3 @@ vgi-rpc --url http://localhost:8080 describe
 # Call a unary method
 vgi-rpc --url http://localhost:8080 call add a=1.0 b=2.0
 ```
-

@@ -1,0 +1,236 @@
+---
+title: OAuth & PKCE
+description: Browser sign-in for the HTTP transport via RFC 9728 resource metadata, the PKCE authorization-code flow, and WWW-Authenticate challenges.
+---
+
+The HTTP transport can advertise [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) OAuth Protected Resource Metadata, run a browser PKCE authorization-code redirect flow, and emit `WWW-Authenticate` challenges that point clients at an authorization server. This lets interactive HTML pages and CLI/SPA clients sign in against your OIDC provider.
+
+OAuth builds on top of the regular [Authentication](/guides/authentication/) machinery: you still supply an `authenticate` callback (for example [`jwtAuthenticate`](/guides/authentication/#jwt)), and OAuth adds the discovery, redirect, and cookie-session layer on top of it.
+
+## How it fits together
+
+The PKCE flow is activated automatically when **both** of these are configured on [`createHttpHandler`](/guides/http-transport/):
+
+- an `authenticate` callback that validates bearer tokens, and
+- an `oauthResourceMetadata` whose `clientId` is set and whose `authorizationServers[0]` is a valid OIDC issuer.
+
+When both are present, the handler:
+
+- serves the resource-metadata document at `GET /.well-known/oauth-protected-resource{prefix}`,
+- mounts `GET /_oauth/callback`, `GET /_oauth/logout`, and `POST /_oauth/token`,
+- redirects unauthenticated **browser** GETs (requests with `Accept: text/html`) to the authorization server instead of returning `401`,
+- wraps your `authenticate` so it *also* accepts the bearer token from the `_vgi_auth` cookie, and
+- emits a `WWW-Authenticate` challenge on every `401`.
+
+:::note
+OAuth PKCE depends on `node:crypto`, so it runs under Bun and Node.js but not on workerd/Cloudflare Workers. Leave `oauthResourceMetadata.clientId` unset on those runtimes.
+:::
+
+## Server configuration
+
+Pass an `OAuthResourceMetadata` object as `oauthResourceMetadata`:
+
+```typescript
+import {
+  Protocol,
+  float,
+  createHttpHandler,
+  jwtAuthenticate,
+  type OAuthResourceMetadata,
+} from "@query-farm/vgi-rpc";
+
+const protocol = new Protocol("Calculator");
+protocol.unary("add", {
+  params: { a: float, b: float },
+  result: { result: float },
+  handler: ({ a, b }) => ({ result: a + b }),
+});
+
+const oauthResourceMetadata: OAuthResourceMetadata = {
+  resource: "https://api.example.com",
+  authorizationServers: ["https://accounts.google.com"],
+  scopesSupported: ["openid", "email"],
+  clientId: "1234567890-abc.apps.googleusercontent.com",
+  // Optional server-side secret; see the token-exchange proxy below.
+  clientSecret: process.env.OAUTH_CLIENT_SECRET,
+  useIdTokenAsBearer: true,
+};
+
+const handler = createHttpHandler(protocol, {
+  tokenKey: myKey,
+  authenticate: jwtAuthenticate({
+    issuer: "https://accounts.google.com",
+    audience: oauthResourceMetadata.clientId!,
+  }),
+  oauthResourceMetadata,
+});
+
+Bun.serve({ port: 8080, fetch: handler });
+```
+
+### `OAuthResourceMetadata` fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `resource` | `string` (required) | The protected resource's canonical URL. Used as the metadata `resource` value and as the base for the `/_oauth/callback` redirect URI. |
+| `authorizationServers` | `string[]` (required) | Authorization-server issuer URLs. The PKCE flow uses `authorizationServers[0]` for OIDC discovery. |
+| `scopesSupported` | `string[]` | Scopes the resource advertises. When non-empty, these become the PKCE authorization request's `scope` (space-joined), taking precedence over `oauthPkceScope`. |
+| `bearerMethodsSupported` | `string[]` | Advertised bearer methods (e.g. `["header"]`). |
+| `resourceSigningAlgValuesSupported` | `string[]` | JWS algorithms the resource accepts. |
+| `resourceName` | `string` | Human-readable resource name. |
+| `resourceDocumentation` | `string` | Documentation URL. |
+| `resourcePolicyUri` | `string` | Policy URL. |
+| `resourceTosUri` | `string` | Terms-of-service URL. |
+| `clientId` | `string` | OAuth `client_id` clients should use. **Setting this enables the PKCE redirect flow.** Must contain only URL-safe characters `[A-Za-z0-9-._~]`. |
+| `clientSecret` | `string` | Server-side `client_secret`. Must be URL-safe. Enables the token-exchange proxy (see below). |
+| `deviceCodeClientId` | `string` | `client_id` for the OAuth device-code flow. Must be URL-safe. |
+| `deviceCodeClientSecret` | `string` | `client_secret` for the device-code flow. Must be URL-safe. |
+| `useIdTokenAsBearer` | `boolean` | When `true`, the OIDC `id_token` is used as the bearer token instead of `access_token`. |
+
+`oauthResourceMetadataToJson(metadata)` converts the camelCase metadata object into the RFC 9728 snake_case JSON document (and validates the URL-safe constraints on the client/secret fields). The handler calls it for you; it is also exported from `@query-farm/vgi-rpc` if you need to render the document yourself.
+
+## Protected-resource metadata endpoint
+
+`GET /.well-known/oauth-protected-resource{prefix}` returns the RFC 9728 document as JSON (`Cache-Control: public, max-age=60`):
+
+```bash
+curl https://api.example.com/.well-known/oauth-protected-resource
+```
+
+```json
+{
+  "resource": "https://api.example.com",
+  "authorization_servers": ["https://accounts.google.com"],
+  "scopes_supported": ["openid", "email"],
+  "client_id": "1234567890-abc.apps.googleusercontent.com",
+  "use_id_token_as_bearer": true
+}
+```
+
+When PKCE **and** a server-side `clientSecret` are configured, the document additionally advertises a `token_endpoint` pointing at the handler's own `/_oauth/token` proxy (see below), so SPA clients can complete token exchanges without holding the secret.
+
+The well-known path tracks the route `prefix`. With `prefix: "/api"` the endpoint is `GET /.well-known/oauth-protected-resource/api`.
+
+## WWW-Authenticate challenge
+
+Whenever `oauthResourceMetadata` is configured and a request fails authentication, the `401` response carries a `WWW-Authenticate: Bearer` challenge pointing at the metadata endpoint:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource",
+  client_id="1234567890-abc.apps.googleusercontent.com", use_id_token_as_bearer="true"
+```
+
+The challenge includes `resource_metadata` plus whichever of `client_id`, `client_secret`, `device_code_client_id`, `device_code_client_secret`, and `use_id_token_as_bearer` you configured. A client can parse these directly (see the discovery helpers below) or follow `resource_metadata` to fetch the full document.
+
+## Browser PKCE redirect flow
+
+For interactive HTML pages, an unauthenticated browser GET (`Accept: text/html`) is redirected into the standard PKCE authorization-code flow rather than receiving a bare `401`:
+
+1. The handler generates a PKCE `code_verifier`/`code_challenge` (S256) and a CSRF `state` nonce, stores them in a short-lived signed `_vgi_oauth_session` cookie (10-minute lifetime, HMAC-signed with a key derived from your `tokenKey`), and redirects the browser to the authorization server's `authorization_endpoint`.
+2. The user signs in. The authorization server redirects back to `GET {prefix}/_oauth/callback?code=...&state=...`.
+3. The callback validates `state` (constant-time) against the session cookie, exchanges the `code` at the OIDC `token_endpoint`, and sets the bearer token in a JS-readable `_vgi_auth` cookie before redirecting back to the originally requested page.
+
+The redirect URI registered with your authorization server must be `{resource}{prefix}/_oauth/callback` (derived from `oauthResourceMetadata.resource`). The session cookie's `Secure` flag is set automatically when `resource` is an `https://` URL.
+
+### The `_vgi_auth` cookie and `cookieAuthenticate`
+
+After a successful exchange, the token is stored in a `_vgi_auth` cookie (not `HttpOnly`, so the landing/describe pages can read it to show the signed-in user). On subsequent requests, the handler must accept that cookie as a credential. It does so by wrapping your `authenticate` callback with `cookieAuthenticate`, which reads the named cookie (default `_vgi_auth`), rewrites the request with an `Authorization: Bearer <token>` header, and delegates to your inner authenticator. `createHttpHandler` chains this in for you automatically — `chainAuthenticate(yourAuth, cookieAuth)` — so a request authenticates whether the token arrives in the `Authorization` header **or** the cookie.
+
+:::note
+`cookieAuthenticate` is wired up internally by `createHttpHandler`; you do not need to import or call it for the OAuth flow. It is exported from the library's HTTP module but is **not** re-exported from the `@query-farm/vgi-rpc` package root, so there is no public `import` for it. If you need cookie-based auth for a non-OAuth setup, replicate the pattern: read the cookie, set an `Authorization` header, and call your inner `AuthenticateFn`.
+:::
+
+### `GET /_oauth/logout`
+
+Clears the `_vgi_auth` cookie (`Max-Age=0`) and redirects back to `{prefix}/`. The landing and describe pages render a "Sign out" link pointing here.
+
+## Token-exchange proxy (`POST /_oauth/token`)
+
+SPA PKCE clients cannot safely hold a `client_secret`, but some IdPs (notably Google "Web application" clients) reject token-endpoint requests that omit one. When PKCE is active, `POST {prefix}/_oauth/token` acts as a CORS-aware proxy: it accepts an `application/x-www-form-urlencoded` `authorization_code` or `refresh_token` grant from the browser, injects the server-side `client_secret`, forwards the request to the real OIDC `token_endpoint`, and returns the IdP response verbatim.
+
+- This route is **exempt from authentication** — it is the mechanism by which a client obtains a token.
+- It only accepts `grant_type` of `authorization_code` or `refresh_token`; any other grant is rejected with `400 unsupported_grant_type`.
+- A submitted `client_id`, if present, must match the configured `clientId`, otherwise `400 invalid_client`.
+- CORS `Access-Control-Allow-Origin` is set only for `localhost` (over `http`) or origins in `allowedReturnOrigins`.
+
+The proxy URL is advertised as `token_endpoint` in the protected-resource metadata only when both PKCE and `clientSecret` are configured.
+
+## Device-code flow
+
+For headless or input-constrained clients, advertise device-code credentials via `deviceCodeClientId` / `deviceCodeClientSecret`. These appear in both the protected-resource metadata document and the `WWW-Authenticate` challenge:
+
+```typescript
+const oauthResourceMetadata: OAuthResourceMetadata = {
+  resource: "https://api.example.com",
+  authorizationServers: ["https://accounts.google.com"],
+  clientId: "web-client.apps.googleusercontent.com",
+  deviceCodeClientId: "device-client.apps.googleusercontent.com",
+  deviceCodeClientSecret: process.env.DEVICE_CODE_SECRET,
+};
+```
+
+vgi-rpc advertises these values so a client can run the [device authorization grant](https://www.rfc-editor.org/rfc/rfc8628) directly against the authorization server. The server's role is discovery only — it does not proxy the device-code endpoints.
+
+## Client-side discovery
+
+The package exports helpers (re-exported from `@query-farm/vgi-rpc`) for discovering and consuming OAuth metadata.
+
+### From the well-known endpoint
+
+`httpOAuthMetadata(baseUrl, prefix?)` fetches `/.well-known/oauth-protected-resource{prefix}` and returns an `OAuthResourceMetadataResponse`, or `null` if the server does not serve it. `fetchOAuthMetadata(metadataUrl)` fetches an explicit metadata URL (and throws on a non-OK response).
+
+```typescript
+import { httpOAuthMetadata } from "@query-farm/vgi-rpc";
+
+const meta = await httpOAuthMetadata("https://api.example.com");
+if (meta) {
+  console.log(meta.resource);             // "https://api.example.com"
+  console.log(meta.authorizationServers); // ["https://accounts.google.com"]
+  console.log(meta.clientId);             // "1234567890-abc.apps.googleusercontent.com"
+  console.log(meta.useIdTokenAsBearer);   // true
+}
+```
+
+The `OAuthResourceMetadataResponse` type mirrors the server fields in camelCase: `resource`, `authorizationServers`, `scopesSupported`, `bearerMethodsSupported`, `resourceSigningAlgValuesSupported`, `resourceName`, `resourceDocumentation`, `resourcePolicyUri`, `resourceTosUri`, `clientId`, `clientSecret`, `useIdTokenAsBearer`, `deviceCodeClientId`, and `deviceCodeClientSecret`.
+
+### From a WWW-Authenticate challenge
+
+When a request returns `401`, parse the `WWW-Authenticate` header directly instead of a round-trip to the well-known endpoint:
+
+```typescript
+import {
+  parseResourceMetadataUrl,
+  parseClientId,
+  parseClientSecret,
+  parseUseIdTokenAsBearer,
+  parseDeviceCodeClientId,
+  parseDeviceCodeClientSecret,
+  fetchOAuthMetadata,
+} from "@query-farm/vgi-rpc";
+
+const resp = await fetch("https://api.example.com/add", { method: "POST" });
+if (resp.status === 401) {
+  const challenge = resp.headers.get("WWW-Authenticate") ?? "";
+
+  const clientId = parseClientId(challenge);                  // string | null
+  const useIdToken = parseUseIdTokenAsBearer(challenge);      // boolean
+  const deviceId = parseDeviceCodeClientId(challenge);        // string | null
+  const deviceSecret = parseDeviceCodeClientSecret(challenge);// string | null
+  const clientSecret = parseClientSecret(challenge);          // string | null
+
+  // Or follow resource_metadata for the full document:
+  const metaUrl = parseResourceMetadataUrl(challenge);        // string | null
+  if (metaUrl) {
+    const meta = await fetchOAuthMetadata(metaUrl);
+    // ... begin the appropriate OAuth flow with meta.authorizationServers[0]
+  }
+}
+```
+
+Each `parse*` helper returns the value from the `Bearer` challenge, or `null` (or `false` for `parseUseIdTokenAsBearer`) when the parameter is absent.
+
+## See also
+
+- [Authentication](/guides/authentication/) — the `authenticate` callbacks (`jwtAuthenticate`, `bearerAuthenticate`, mTLS, chaining) that OAuth builds on.
+- [HTTP Transport](/guides/http-transport/) — routes, configuration, and the stateless streaming model.

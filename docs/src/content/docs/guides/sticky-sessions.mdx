@@ -1,0 +1,177 @@
+---
+title: Sticky Sessions
+description: Pin a client's subsequent HTTP requests to the same worker and bind server-side session state across calls.
+---
+
+Sticky sessions are an opt-in feature of the [HTTP transport](/guides/http-transport/) that lets an RPC method bind a server-side state object to the worker process that created it. Subsequent requests from the same client restore that object as `ctx.session`, so a method can keep a DB cursor, a loaded model, or an open file handle alive across calls.
+
+The session is keyed by a short-lived, AEAD-sealed token carried in the `VGI-Session` request header. The non-sticky wire path is byte-identical to the pre-sticky framework — nothing changes unless you enable it.
+
+:::caution[State is per-worker]
+Session state lives **in-process** in a per-worker registry. A token minted by one worker can only be resumed on that same worker (the token embeds the server's `serverId`). In a load-balanced or pre-fork deployment, the client must be routed back to the originating worker — see [Client-driven routing with echo headers](#client-driven-routing-with-echo-headers).
+:::
+
+## What sticky sessions solve
+
+Without sticky sessions, every HTTP request is independent and any per-call state must be reconstructed from scratch (or carried in a [stateless stream token](/guides/http-transport/#stateless-streaming)). Sticky sessions are useful when:
+
+- Re-establishing state per request is expensive (loading a model, opening a connection, warming a cache).
+- The state cannot be serialized into a token (an open socket, a file handle, a live cursor).
+- You need a sequence of related unary calls to share a server-side object.
+
+## Enabling sticky sessions
+
+Pass `enableSticky: true` to `createHttpHandler()`:
+
+```typescript
+import { Protocol, int, createHttpHandler } from "@query-farm/vgi-rpc";
+
+const protocol = new Protocol("Sessions");
+
+const handler = createHttpHandler(protocol, {
+  enableSticky: true,        // opt-in (default: false)
+  stickyDefaultTtl: 300,     // default session TTL in seconds (default: 300)
+  stickyEchoHeaders: {       // headers echoed on the opening response (default: {})
+    "fly-force-instance-id": process.env.FLY_ALLOC_ID ?? "",
+  },
+});
+
+Bun.serve({ port: 8080, fetch: handler });
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enableSticky` | `boolean` | `false` | Enable sticky sessions on this handler. |
+| `stickyDefaultTtl` | `number` | `300` | Session TTL in seconds used when `ctx.openSession` is called without an explicit `ttl`. |
+| `stickyEchoHeaders` | `Record<string, string>` | `{}` | Headers emitted as `VGI-Echo-<name>: <value>` on the session-opening response. See [client-driven routing](#client-driven-routing-with-echo-headers). |
+
+When sticky is enabled, the server advertises the capability on every response via these headers:
+
+- `VGI-Sticky-Enabled: true`
+- `VGI-Sticky-Default-TTL: <seconds>`
+- `VGI-Sticky-Echo-Headers: <comma-separated names>` (only when `stickyEchoHeaders` is non-empty)
+
+Sticky sessions are HTTP-only. The session API throws on other transports.
+
+## Opening and using a session in a handler
+
+The session API lives on the handler's `CallContext` (`ctx`):
+
+```typescript
+protocol.unary("open_counter", {
+  params: { start: int },
+  result: { value: int },
+  handler: async ({ start }, ctx) => {
+    // Bind server-side state to a new session.
+    ctx.openSession({ count: start });
+    return { value: start };
+  },
+});
+
+protocol.unary("increment", {
+  params: {},
+  result: { value: int },
+  handler: async (_params, ctx) => {
+    // Resume the state bound by a prior request on this session.
+    const state = ctx.session as { count: number } | null;
+    if (state === null) throw new Error("no session");
+    state.count += 1;
+    return { value: state.count };
+  },
+});
+
+protocol.unary("done", {
+  params: {},
+  result: {},
+  handler: async (_params, ctx) => {
+    ctx.closeSession();
+    return {};
+  },
+});
+```
+
+Context API (`CallContext` in `src/types.ts`):
+
+- `ctx.session: unknown | null` — the live state object, or `null` when no session is bound to this request.
+- `ctx.sessionId: string | null` — opaque 24-char hex session id. Survives `closeSession()` so post-close access-log records still carry the id.
+- `ctx.openSession(state, ttl?)` — register `state` for subsequent requests. `ttl` (seconds) overrides `stickyDefaultTtl`. Throws if the client did not opt in (see below), if a session is already active for this request, or on a non-HTTP transport.
+- `ctx.closeSession()` — invalidate the session bound to this request. Idempotent.
+
+:::note
+If the state object exposes a `close()` method, the registry calls it automatically when the session is closed, expires, or is evicted during shutdown. Use this to release sockets, cursors, or file handles.
+:::
+
+## How a session is established and identified on the wire
+
+The flow is client-driven and uses a small set of `VGI-Session*` headers.
+
+1. **Client opts in.** To allow a handler to open a session, the client must send `VGI-Session-Accept: true` on the request. If `ctx.openSession()` is called without this header, it throws a `RuntimeError` ("client did not opt in to sticky sessions"). This prevents a server from minting sessions for clients that aren't prepared to track them.
+2. **Server mints a token.** When a handler calls `ctx.openSession(state)`, the server stores `state` in the per-worker registry under a random 12-byte session id, seals a token, and emits it on the response as `VGI-Session: <token>`. If `stickyEchoHeaders` is configured, those are also emitted on this opening response as `VGI-Echo-<name>: <value>`.
+3. **Client replays the token.** On each subsequent request, the client sends `VGI-Session: <token>` (the value it received). The server decrypts the token, looks up the registry entry, and exposes it as `ctx.session`.
+4. **Server closes the session.** When a handler calls `ctx.closeSession()` (or the client issues `DELETE /__session__`), the entry is removed, `state.close?.()` is invoked, and the response carries `VGI-Session-Close: true`.
+
+The token is sealed with the same XChaCha20-Poly1305 key (`tokenKey`) used for stream-state tokens, and is bound to the authenticated principal via the AEAD associated data. The plaintext frame embeds the `serverId`, the session id, and the absolute `expires_at`.
+
+### Session resolution failures
+
+If a request carries a `VGI-Session` token that cannot be honored, the server returns an HTTP 200 response carrying a `SessionLostError` (surfaced as an `X-VGI-RPC-Error` EXCEPTION batch). This happens when:
+
+- The token is malformed, was sealed with a different key, or is bound to a different principal (cross-principal replay).
+- The token's embedded `serverId` does not match this worker ("session token was issued by a different worker").
+- The registry entry is missing, expired, or evicted ("session not found, expired, or principal mismatch").
+
+A conformant client treats `SessionLostError` as a signal to re-open the session.
+
+:::note
+Concurrent requests carrying the same `VGI-Session` token are **serialized** by a per-session lock — calls on one session run one at a time, so the shared state object never sees concurrent mutation.
+:::
+
+## Session lifetime and TTL
+
+Each session has an absolute expiry computed at open time: `now + (ttl ?? stickyDefaultTtl)` seconds. The default `stickyDefaultTtl` is **300 seconds**; override per session via the second argument to `ctx.openSession(state, ttl)`.
+
+Expiry is enforced two ways:
+
+- **Lazy** — a resume that lands on an expired entry evicts it (calling `state.close?.()`) and reports a miss.
+- **Background reaper** — a periodic timer (roughly once per second) sweeps and evicts every expired entry. The timer is `unref`'d so it does not keep the process alive.
+
+Note the TTL is **not** refreshed on resume — a session expires `ttl` seconds after it was opened regardless of activity. To extend a session, open a fresh one.
+
+## Tearing down a session: `DELETE /__session__`
+
+When sticky is enabled, the handler exposes a teardown route at `DELETE {prefix}/__session__`. The client sends the session token in the `VGI-Session` header. This is the explicit, client-initiated counterpart to a handler calling `ctx.closeSession()`.
+
+```bash
+curl -X DELETE http://localhost:8080/__session__ \
+  -H "VGI-Session: <token>"
+```
+
+The endpoint is deliberately **idempotent and non-probing**:
+
+- A missing token, a malformed/forged token, a `serverId` mismatch, or a registry miss all return **HTTP 200** with no body — so the endpoint cannot be used to discover which session ids are live.
+- A successful close returns **HTTP 204** with `VGI-Session-Close: true`.
+
+If an `authenticate` callback is configured, the teardown path runs it so the principal binding matches the dispatch flow; auth failures are treated as anonymous and fall through to the idempotent 200.
+
+## Client-driven routing with echo headers
+
+Because session state is pinned to a single worker, a load balancer must route resume requests back to the worker that minted the token. `stickyEchoHeaders` supports this:
+
+1. The server is configured with `stickyEchoHeaders`, e.g. `{ "fly-force-instance-id": "<this-instance>" }`.
+2. On the session-opening response, the server emits each as `VGI-Echo-<name>: <value>` (here, `VGI-Echo-fly-force-instance-id`). It also advertises the captured names in `VGI-Sticky-Echo-Headers`.
+3. A conformant client captures every `VGI-Echo-<name>` and replays the corresponding `<name>: <value>` header on **every** subsequent request in the session.
+4. The platform's router (e.g. Fly.io's `fly-force-instance-id`) uses that header to pin the request to the originating instance.
+
+Echo headers are emitted **only on the opening response**, since that is when the client learns which worker to stick to.
+
+## Client-side considerations
+
+- Send `VGI-Session-Accept: true` on any request where the server might open a session; otherwise `ctx.openSession()` fails.
+- Capture the `VGI-Session` token from the opening response and replay it on every subsequent request, until you receive `VGI-Session-Close: true` (or issue `DELETE /__session__`).
+- Capture any `VGI-Echo-<name>` headers from the opening response and replay the underlying `<name>` headers for the life of the session so the load balancer pins you to the right worker.
+- Treat a `SessionLostError` as "the session is gone" — re-open rather than retrying blindly.
+- The handler exposes a `DrainHandle` (via the internal `_onStickyHandle` hook) so operators can `drain()` (reject new sessions while letting existing ones finish) and `shutdown()` (close every live session) during graceful shutdown.
+
+## See also
+
+- [HTTP Transport](/guides/http-transport/) — routes, configuration, and stateless streaming.

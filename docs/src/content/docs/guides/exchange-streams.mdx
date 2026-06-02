@@ -8,7 +8,7 @@ Exchange streams implement bidirectional streaming where the client sends batche
 ## Basic usage
 
 ```typescript
-import { Protocol, float, type OutputCollector } from "vgi-rpc";
+import { Protocol, float, type OutputCollector } from "@query-farm/vgi-rpc";
 import { type RecordBatch } from "@query-farm/apache-arrow";
 
 const protocol = new Protocol("MyService");
@@ -40,14 +40,16 @@ The `exchange` function **must** emit exactly one data batch per call. Unlike pr
 ```typescript
 type ExchangeFn<S> = (
   state: S,
-  input: RecordBatch,
+  input: VgiBatch,
   out: OutputCollector,
 ) => Promise<void> | void;
 ```
 
 - **`state`** — mutable state object from `init`
-- **`input`** — the Arrow `RecordBatch` sent by the client
+- **`input`** — the input batch sent by the client, typed as `VgiBatch` (the backend-abstract batch type from the Arrow facade)
 - **`out`** — `OutputCollector` for emitting the response batch
+
+The example above annotates `input` as the arrow-js `RecordBatch`, which works structurally because `RecordBatch` satisfies the `VgiBatch` shape. The canonical type, however, is `VgiBatch` — prefer it when you want code that stays backend-agnostic.
 
 ## Reading input data
 
@@ -98,6 +100,31 @@ protocol.exchange<TransformState>("transform", {
   },
 });
 ```
+
+## Cancellation
+
+A client can cancel an in-flight exchange stream by sending an input batch whose metadata carries the `vgi_rpc.cancel` key (the `CANCEL_KEY` constant). The server ends the stream cleanly **without calling `exchange` again** for that batch.
+
+Register an optional `onCancel` hook on the exchange config to release resources held in `state`. It runs exactly once on cancellation:
+
+```typescript
+protocol.exchange<TransformState>("transform", {
+  params: { factor: float },
+  inputSchema: { value: float },
+  outputSchema: { value: float },
+  init: async ({ factor }) => ({ factor, totalProcessed: 0 }),
+  exchange: async (state, input, out) => {
+    const value = input.getChildAt(0)?.get(0) as number;
+    out.emitRow({ value: value * state.factor });
+  },
+  onCancel: (state) => {
+    // Cleanup; runs once when the client cancels.
+    // Signature: (state: S) => void | Promise<void>
+  },
+});
+```
+
+The TypeScript client does not expose a dedicated `cancel()` method — cancellation is initiated by sending the cancel-metadata input batch, and `onCancel` is the server-side hook that responds to it.
 
 ## Stream headers
 

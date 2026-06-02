@@ -80,10 +80,12 @@ const auth = jwtAuthenticate({
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `issuer` | `string` | required | Expected `iss` claim (used for OIDC discovery) |
-| `audience` | `string` | required | Expected `aud` claim |
+| `audience` | `string \| string[]` | required | Expected `aud` claim |
 | `jwksUri` | `string` | — | Explicit JWKS URL (discovered from issuer if omitted) |
 | `principalClaim` | `string` | `"sub"` | JWT claim to use as `principal` |
 | `domain` | `string` | `"jwt"` | `AuthContext.domain` value |
+
+When `audience` is an array, each value is tried in order until one validates — useful when a single endpoint accepts tokens minted for several audiences.
 
 ## Mutual TLS (mTLS)
 
@@ -225,7 +227,7 @@ const auth = chainAuthenticate(
 );
 
 const handler = createHttpHandler(protocol, {
-  signingKey: myKey,
+  tokenKey: myKey,
   authenticate: auth,
 });
 ```
@@ -238,6 +240,20 @@ When a request arrives with a client certificate header, mTLS is tried first. If
 | Bad / missing credentials | Plain `Error` | Tries next authenticator |
 | Authenticated but forbidden | `Error` with `name === "PermissionError"` | Propagates immediately |
 | Bug in authenticator | `TypeError`, `RangeError`, etc. | Propagates immediately |
+
+## Cookie-based auth
+
+`cookieAuthenticate` wraps any inner authenticator so it can *also* accept the bearer token from a browser cookie (default name `_vgi_auth`) rather than only the `Authorization` header. It reads the cookie, rewrites the request with an `Authorization: Bearer <token>` header, and delegates to the inner authenticator:
+
+```typescript
+const auth = cookieAuthenticate(jwtAuthenticate({ issuer, audience }));
+```
+
+This is what powers the browser session cookie set by the OAuth PKCE flow. `cookieAuthenticate` lives in the library's `http` module (it is not re-exported from the package root).
+
+## OAuth
+
+For interactive, browser-based sign-in, vgi-rpc can serve RFC 9728 OAuth Protected Resource Metadata, run the PKCE authorization-code redirect flow, handle the `/_oauth/*` routes, and emit `WWW-Authenticate` challenges. See the [OAuth guide](/guides/oauth/) for the full setup, including the device-code flow and how the cookie session described above is issued.
 
 ## Wiring it up
 
@@ -254,11 +270,13 @@ protocol.unary("add", {
 });
 
 const handler = createHttpHandler(protocol, {
-  signingKey: myKey,
+  tokenKey: myKey,
   authenticate: auth, // any AuthenticateFn from above
 });
 
 Bun.serve({ port: 8080, fetch: handler });
 ```
+
+`tokenKey` is the XChaCha20-Poly1305 master key (32 bytes) used to seal stream-state tokens; a random key is generated if omitted. Supply your own when tokens must survive a restart or be shared across load-balanced workers.
 
 Unauthenticated requests receive a `401 Unauthorized` response.

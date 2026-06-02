@@ -46,6 +46,15 @@ protocol.<span class="fn">unary</span>(<span class="str">"add"</span>, {'{'}
     </div>
   </div>
 
+  <div class="next-steps">
+    <p class="code-label">Next steps</p>
+    <div class="links">
+      <a href="/getting-started/installation/">Install &amp; build your first server</a>
+      <a href="/guides/client-transports/">Connect a client (subprocess, pipe, HTTP)</a>
+      <a href="/guides/http-transport/">Serve and consume over HTTP</a>
+    </div>
+  </div>
+
 </section>
 
 <style>
@@ -150,4 +159,23 @@ protocol.<span class="fn">unary</span>(<span class="str">"add"</span>, {'{'}
   }
   .prompt { color: #4a7c23; font-weight: 700; }
   .out { color: var(--sl-color-gray-2); }
+
+  /* ── Next steps ── */
+  .next-steps {
+    margin-top: 3rem;
+  }
+  .next-steps .links {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .next-steps a {
+    color: var(--sl-color-text-accent);
+    text-decoration: none;
+    font-size: var(--sl-text-base);
+  }
+  .next-steps a:hover {
+    text-decoration: underline;
+  }
 </style>

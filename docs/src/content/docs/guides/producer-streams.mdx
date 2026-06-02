@@ -8,7 +8,7 @@ Producer streams let the server emit a sequence of output batches from a single 
 ## Basic usage
 
 ```typescript
-import { Protocol, int32 } from "vgi-rpc";
+import { Protocol, int32 } from "@query-farm/vgi-rpc";
 
 const protocol = new Protocol("MyService");
 
@@ -99,6 +99,34 @@ produce: async (state, out) => {
   out.emit({ n: nValues, n_squared: sqValues });
 },
 ```
+
+## Cancellation
+
+A client can cancel an in-flight producer stream by sending an input batch whose metadata carries the `vgi_rpc.cancel` key (the `CANCEL_KEY` constant). When the server sees this, it ends the stream cleanly **without calling `produce` again**.
+
+If you need to release resources held in `state` (open files, connections, etc.), register an optional `onCancel` hook on the producer config. It runs exactly once on cancellation:
+
+```typescript
+protocol.producer<CountState>("count", {
+  params: { limit: int32 },
+  outputSchema: { n: int32, n_squared: int32 },
+  init: async ({ limit }) => ({ limit, current: 0 }),
+  produce: async (state, out) => {
+    if (state.current >= state.limit) {
+      out.finish();
+      return;
+    }
+    out.emitRow({ n: state.current, n_squared: state.current ** 2 });
+    state.current++;
+  },
+  onCancel: (state) => {
+    // Cleanup; runs once when the client cancels.
+    // Signature: (state: S) => void | Promise<void>
+  },
+});
+```
+
+The TypeScript client does not expose a dedicated `cancel()` method — cancellation is initiated by sending the cancel-metadata input batch, and `onCancel` is the server-side hook that responds to it.
 
 ## Stream headers
 
