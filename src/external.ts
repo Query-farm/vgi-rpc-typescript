@@ -54,7 +54,12 @@ export interface ExternalLocationConfig {
   /** Minimum batch byte size to trigger externalization. Default: 1MB. */
   externalizeThresholdBytes?: number;
   /** Optional zstd compression for uploaded data. */
-  compression?: { algorithm: "zstd"; level?: number };
+  compression?: {
+    /** Compression algorithm; only `"zstd"` is currently supported. */
+    algorithm: "zstd";
+    /** zstd compression level. Default: 3. */
+    level?: number;
+  };
   /** URL validator called before fetching. Throw to reject. Default: HTTPS-only. */
   urlValidator?: ((url: string) => void) | null;
 }

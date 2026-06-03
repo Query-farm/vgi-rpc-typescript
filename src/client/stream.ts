@@ -19,6 +19,12 @@ type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
  */
 export type PostFn = (url: string, body: Uint8Array) => Promise<Response>;
 
+/**
+ * {@link StreamSession} implementation for the HTTP transport. Stream state is
+ * carried statelessly across requests via an HMAC state token: each
+ * {@link HttpStreamSession.exchange} or producer-continuation POST sends the
+ * current token and receives the next one in the response metadata.
+ */
 export class HttpStreamSession implements StreamSession {
   private _baseUrl: string;
   private _prefix: string;
@@ -82,6 +88,7 @@ export class HttpStreamSession implements StreamSession {
     });
   }
 
+  /** The stream's one-time header row, or `null` if the method declares no header. */
   get header(): Record<string, any> | null {
     return this._header;
   }
@@ -305,6 +312,7 @@ export class HttpStreamSession implements StreamSession {
     return this._readResponse(resp);
   }
 
+  /** No-op: the HTTP transport is stateless, so there is nothing to tear down. */
   close(): void {
     // No-op for HTTP (stateless)
   }

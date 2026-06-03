@@ -11,6 +11,7 @@ import {
 import { RPC_ERROR_HEADER } from "../constants.js";
 import type { CookieSpec } from "../types.js";
 
+/** MIME type for Arrow IPC stream request and response bodies. */
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
 
 // Sticky session header conventions (HTTP-only). Mirrors Python's

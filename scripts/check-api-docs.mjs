@@ -15,8 +15,10 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-// Lower this as JSDoc is added to public exports. It is a ceiling, not a goal.
-const BASELINE = Number(process.env.API_DOC_BASELINE ?? 169);
+// Every public export is currently documented, so the baseline is 0: any new
+// undocumented public export fails this gate. If you must add an exception,
+// raise this number deliberately (and ideally open a follow-up to document it).
+const BASELINE = Number(process.env.API_DOC_BASELINE ?? 0);
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const docsDir = resolve(repoRoot, "docs");

@@ -50,10 +50,11 @@ export default defineConfig({
           typeDoc: {
             readme: "none",
             excludeInternal: true,
-            // notDocumented: report (but don't yet fail on) public symbols
-            // missing a JSDoc comment — this is the coverage ratchet target.
-            // Flip treatWarningsAsErrors to true once JSDoc is backfilled to
-            // make undocumented public exports a hard CI failure.
+            // notDocumented surfaces public symbols missing a JSDoc comment.
+            // Hard enforcement lives in the dedicated `make docs-api-coverage`
+            // gate (scripts/check-api-docs.mjs, baseline 0) rather than here, so
+            // a stray undocumented export never blocks a docs deploy — it fails
+            // the coverage check in CI instead.
             // notExported is off: public types legitimately reference internal
             // helper types that we don't publish as standalone pages.
             validation: {

@@ -15,11 +15,15 @@ import { computeHash } from "./hash.js";
 
 /** Filesystem layout for one worker tuple: `<state_dir>/<hash>.{lock,sock,meta}`. */
 export interface SocketPaths {
+  /** Advisory lockfile path (`<hash>.lock`) guarding launch + liveness. */
   lockPath: string;
+  /** AF_UNIX socket path (`<hash>.sock`) the worker binds. */
   sockPath: string;
+  /** Launch-metadata JSON path (`<hash>.meta`) read by `--status`. */
   metaPath: string;
 }
 
+/** Derive the lock/sock/meta path triple for a worker `hashId` under `stateDir`. */
 export function socketPaths(stateDir: string, hashId: string): SocketPaths {
   return {
     lockPath: path.join(stateDir, `${hashId}.lock`),
@@ -97,15 +101,23 @@ export function writeMeta(metaPath: string, workerArgv: readonly string[], cwd: 
 // Status / GC
 // ---------------------------------------------------------------------------
 
+/** One row of `--status` output describing a launched worker tuple. */
 export interface StatusRow {
+  /** Canonical hash identifying the worker tuple (the `<hash>` filename stem). */
   hashId: string;
+  /** Worker argv recorded at launch, or `[]` when the meta file is missing. */
   cmd: string[];
+  /** Working directory recorded at launch, or `""` when unknown. */
   cwd: string;
+  /** AF_UNIX socket path the worker binds. */
   socket: string;
+  /** Unix epoch seconds the worker was launched, or `null` when unknown. */
   startedAt: number | null;
+  /** Whether a probe connection to {@link StatusRow.socket} currently succeeds. */
   alive: boolean;
 }
 
+/** Outcome of a {@link gcStateDir} sweep. */
 export interface GcResult {
   /** Hash IDs of stale entries that were removed. */
   cleaned: string[];

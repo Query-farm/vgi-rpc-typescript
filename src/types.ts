@@ -5,8 +5,14 @@ import { batchFromColumns, isBatch, type VgiBatch, type VgiSchema } from "./arro
 import { AuthContext } from "./auth.js";
 import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
+/**
+ * Whether an RPC method is request/response or streaming. Mirrors Python's
+ * `MethodType` and is carried in the `__describe__` payload.
+ */
 export enum MethodType {
+  /** Single request batch in, single result batch out. */
   UNARY = "unary",
+  /** Streamed batches — either a producer or an exchange stream. */
   STREAM = "stream",
 }
 
@@ -25,8 +31,11 @@ export enum MethodType {
  * - `UNIX` — AF_UNIX socket handler (the launcher path).
  */
 export enum TransportKind {
+  /** Stdio worker — the standalone {@link VgiRpcServer} loop. */
   PIPE = "pipe",
+  /** Fetch-style HTTP handler (`createHttpHandler`). */
   HTTP = "http",
+  /** AF_UNIX socket handler (the launcher path). */
   UNIX = "unix",
 }
 
@@ -46,6 +55,9 @@ export type ServeStartHook = (kind: TransportKind) => void | Promise<void>;
 
 /** Logging interface available to handlers. */
 export interface LogContext {
+  /** Emit a client-directed log message (sent as a zero-row log batch on the
+   *  wire). `level` is a severity label such as `"info"`, `"warning"`, or
+   *  `"error"`; `extra` carries optional structured string key/value pairs. */
   clientLog(level: string, message: string, extra?: Record<string, string>): void;
 }
 
@@ -90,6 +102,8 @@ export interface StickyContext {
 
 /** Extended context with authentication info, available to handlers. */
 export interface CallContext extends LogContext {
+  /** Authenticated principal for this call; {@link AuthContext.anonymous} when
+   *  the request was not authenticated. */
   readonly auth: AuthContext;
   /** Coarse identifier of the bound transport, or `undefined` until the
    *  server begins serving (the value is committed by the lifecycle hook
@@ -200,23 +214,47 @@ export type HeaderInit = (params: Record<string, any>, state: any, ctx: LogConte
  */
 export type OnCancelFn<S = any> = (state: S) => Promise<void> | void;
 
+/**
+ * In-memory definition of one registered RPC method, produced by the
+ * {@link Protocol} builder and consumed by the dispatch layer. Which optional
+ * fields are populated depends on the method {@link type}: `handler` for unary
+ * methods, `producerInit`/`producerFn` for producer streams, and
+ * `exchangeInit`/`exchangeFn` for exchange streams.
+ */
 export interface MethodDefinition {
+  /** Method name as registered on the protocol. */
   name: string;
+  /** Whether the method is unary or streaming. */
   type: MethodType;
+  /** Schema of the request parameters batch. */
   paramsSchema: VgiSchema;
+  /** Schema of the unary result batch (unused for streams). */
   resultSchema: VgiSchema;
+  /** Schema of streamed output batches (producer and exchange streams). */
   outputSchema?: VgiSchema;
+  /** Schema of streamed input batches (exchange streams only). */
   inputSchema?: VgiSchema;
+  /** Implementation for unary methods. */
   handler?: UnaryHandler;
+  /** Builds the initial state object for a producer stream. */
   producerInit?: ProducerInit;
+  /** Produces output batches for a producer stream. */
   producerFn?: ProducerFn;
+  /** Builds the initial state object for an exchange stream. */
   exchangeInit?: ExchangeInit;
+  /** Handles each input batch of an exchange stream. */
   exchangeFn?: ExchangeFn;
+  /** Schema of the optional per-stream header batch. */
   headerSchema?: VgiSchema;
+  /** Builds the optional header batch emitted before the first output batch. */
   headerInit?: HeaderInit;
+  /** Optional hook run when the client cancels a stream. */
   onCancel?: OnCancelFn;
+  /** Human-readable method documentation, surfaced via introspection. */
   doc?: string;
+  /** Default values applied to omitted request parameters. */
   defaults?: Record<string, any>;
+  /** Human-readable parameter type names, surfaced via introspection. */
   paramTypes?: Record<string, string>;
 }
 
@@ -264,11 +302,17 @@ export interface DispatchInfo {
 
 /** Per-call I/O counters, matching Python's CallStatistics. */
 export interface CallStatistics {
+  /** Number of input batches read from the client. */
   inputBatches: number;
+  /** Number of output batches written to the client. */
   outputBatches: number;
+  /** Total rows across all input batches. */
   inputRows: number;
+  /** Total rows across all output batches. */
   outputRows: number;
+  /** Total serialized bytes of all input batches. */
   inputBytes: number;
+  /** Total serialized bytes of all output batches. */
   outputBytes: number;
 }
 
@@ -280,7 +324,11 @@ export type HookToken = unknown;
  * Implementations must be safe for concurrent use (HTTP transport is concurrent).
  */
 export interface DispatchHook {
+  /** Invoked before the method runs. The returned {@link HookToken} is opaque
+   *  to the framework and passed back to {@link onDispatchEnd}. */
   onDispatchStart(info: DispatchInfo): HookToken;
+  /** Invoked after the method completes or throws. `stats` carries the per-call
+   *  I/O counters; `error` is set only when the dispatch failed. */
   onDispatchEnd(token: HookToken, info: DispatchInfo, stats: CallStatistics, error?: Error): void;
 }
 
@@ -304,6 +352,8 @@ export class OutputCollector implements CallContext {
   private _cookieSinkEnabled = false;
   private _responseCookies: CookieSpec[] = [];
   private _stickyContext: StickyContext | null = null;
+  /** Authenticated principal for this call; {@link AuthContext.anonymous} when
+   *  the request was not authenticated. */
   readonly auth: AuthContext;
   readonly cookies: ReadonlyMap<string, string>;
   readonly kind?: TransportKind;
@@ -423,14 +473,18 @@ export class OutputCollector implements CallContext {
     sink.action = "close";
   }
 
+  /** Schema of the data batches this collector emits. */
   get outputSchema(): VgiSchema {
     return this._outputSchema;
   }
 
+  /** True once {@link finish} has been called (producer streams only). */
   get finished(): boolean {
     return this._finished;
   }
 
+  /** Batches emitted so far this call — the single data batch plus any log
+   *  batches, in emission order. Consumed by the dispatch layer. */
   get batches(): EmittedBatch[] {
     return this._batches;
   }

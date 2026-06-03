@@ -8,14 +8,27 @@ export type AuthenticateFn = (request: Request) => AuthContext | Promise<AuthCon
 
 /** RFC 9728 OAuth Protected Resource Metadata. */
 export interface OAuthResourceMetadata {
+  /** The protected resource's canonical URL. Doubles as the base for the
+   *  `/_oauth/callback` redirect URI. */
   resource: string;
+  /** Authorization-server issuer URLs. The PKCE flow uses
+   *  `authorizationServers[0]` for OIDC discovery. */
   authorizationServers: string[];
+  /** Scopes the resource advertises. When non-empty these become the PKCE
+   *  authorization request's space-joined `scope`, taking precedence over
+   *  {@link HttpHandlerOptions.oauthPkceScope}. */
   scopesSupported?: string[];
+  /** Advertised bearer methods (e.g. `["header"]`). */
   bearerMethodsSupported?: string[];
+  /** JWS algorithms the resource accepts. */
   resourceSigningAlgValuesSupported?: string[];
+  /** Human-readable resource name. */
   resourceName?: string;
+  /** Documentation URL for the resource. */
   resourceDocumentation?: string;
+  /** Policy URL for the resource. */
   resourcePolicyUri?: string;
+  /** Terms-of-service URL for the resource. */
   resourceTosUri?: string;
   /** OAuth client_id that clients should use with the authorization server. */
   clientId?: string;

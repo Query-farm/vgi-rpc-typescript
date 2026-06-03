@@ -75,6 +75,13 @@ class PipeIncrementalWriter {
 // PipeStreamSession — lockstep streaming over pipes
 // ---------------------------------------------------------------------------
 
+/**
+ * {@link StreamSession} implementation for the pipe/subprocess transport.
+ * Drives lockstep streaming over a single bidirectional pipe: each
+ * {@link PipeStreamSession.exchange} or iteration step writes one input batch
+ * and reads one output batch. Holds the connection's single-threaded busy lock
+ * until closed.
+ */
 export class PipeStreamSession implements StreamSession {
   private _reader: IpcStreamReader;
   private _writeFn: WriteFn;
@@ -109,6 +116,7 @@ export class PipeStreamSession implements StreamSession {
     this._externalConfig = opts.externalConfig;
   }
 
+  /** The stream's one-time header row, or `null` if the method declares no header. */
   get header(): Record<string, any> | null {
     return this._header;
   }
@@ -335,6 +343,11 @@ export class PipeStreamSession implements StreamSession {
     }
   }
 
+  /**
+   * End the stream: close the input side (or send an empty stream if nothing
+   * was sent yet) and drain the server's remaining output in the background,
+   * releasing the connection's busy lock once the drain completes.
+   */
   close(): void {
     if (this._closed) return;
     this._closed = true;
@@ -377,6 +390,12 @@ export class PipeStreamSession implements StreamSession {
 // pipeConnect — create an RpcClient over raw readable/writable streams
 // ---------------------------------------------------------------------------
 
+/**
+ * Connect to a vgi-rpc server over a raw bidirectional pipe (a readable stream
+ * of server output plus a writable for client input). The connection is
+ * single-threaded: only one call or stream may be in flight at a time. The
+ * `__describe__` handshake is sent before the reader is opened to avoid deadlock.
+ */
 export function pipeConnect(
   readable: ReadableStream<Uint8Array>,
   writable: PipeWritable,
@@ -616,6 +635,11 @@ export function pipeConnect(
 // subprocessConnect — spawn a process and wrap with pipeConnect
 // ---------------------------------------------------------------------------
 
+/**
+ * Spawn a server process (via `Bun.spawn`) and connect to it over its
+ * stdin/stdout using {@link pipeConnect}. The returned client's
+ * {@link RpcClient.close} also kills the subprocess.
+ */
 export function subprocessConnect(cmd: string[], options?: SubprocessConnectOptions): RpcClient {
   const proc = Bun.spawn(cmd, {
     stdin: "pipe",

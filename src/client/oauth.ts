@@ -3,14 +3,23 @@
 
 /** RFC 9728 OAuth Protected Resource Metadata (client-side response). */
 export interface OAuthResourceMetadataResponse {
+  /** The protected resource's canonical URL (`resource`). */
   resource: string;
+  /** Authorization-server issuer URLs; the first is used for OIDC discovery (`authorization_servers`). */
   authorizationServers: string[];
+  /** Scopes the resource advertises (`scopes_supported`). */
   scopesSupported?: string[];
+  /** Advertised bearer methods, e.g. `["header"]` (`bearer_methods_supported`). */
   bearerMethodsSupported?: string[];
+  /** JWS algorithms the resource accepts (`resource_signing_alg_values_supported`). */
   resourceSigningAlgValuesSupported?: string[];
+  /** Human-readable resource name (`resource_name`). */
   resourceName?: string;
+  /** Documentation URL for the resource (`resource_documentation`). */
   resourceDocumentation?: string;
+  /** Policy URL for the resource (`resource_policy_uri`). */
   resourcePolicyUri?: string;
+  /** Terms-of-service URL for the resource (`resource_tos_uri`). */
   resourceTosUri?: string;
   /** OAuth client_id advertised by the server. */
   clientId?: string;

@@ -5,6 +5,7 @@ import * as oauth from "oauth4webapi";
 import { AuthContext } from "../auth.js";
 import type { AuthenticateFn } from "./auth.js";
 
+/** Options for {@link jwtAuthenticate}, configuring JWT Bearer-token validation. */
 export interface JwtAuthenticateOptions {
   /** The expected `iss` claim (also used to discover AS metadata). */
   issuer: string;

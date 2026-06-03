@@ -139,10 +139,15 @@ export function packStateToken(
   return bytesToBase64(wire);
 }
 
+/** Decrypted payload of a state token, as returned by {@link unpackStateToken}. */
 export interface UnpackedToken {
+  /** Serialized stream-state bytes carried by the token. */
   stateBytes: Uint8Array;
+  /** Serialized output-schema IPC bytes. */
   schemaBytes: Uint8Array;
+  /** Serialized input-schema IPC bytes (exchange streams). */
   inputSchemaBytes: Uint8Array;
+  /** Unix epoch seconds at which the token was minted (used for TTL checks). */
   createdAt: number;
 }
 

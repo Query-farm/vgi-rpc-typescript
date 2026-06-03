@@ -18,6 +18,7 @@ import type { CallStatistics, DispatchHook, DispatchInfo, HookToken } from "./ty
 
 /** Where the hook writes formatted JSON lines. */
 export interface AccessLogSink {
+  /** Write one access-log line. The trailing newline is included by the caller. */
   write(line: string): void;
 }
 
@@ -39,6 +40,7 @@ function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?:
 export class FdSink implements AccessLogSink {
   private readonly _writeSync = _loadWriteSync();
   constructor(private readonly fd: number) {}
+  /** Write `line` to the file descriptor, looping until the buffer is fully flushed. */
   write(line: string): void {
     const buf = new TextEncoder().encode(line);
     let offset = 0;
@@ -112,11 +114,14 @@ export class AccessLogHook implements DispatchHook {
     }
   }
 
+  /** Capture a high-resolution start timestamp; returned token feeds {@link onDispatchEnd}. */
   onDispatchStart(_info: DispatchInfo): HookToken {
     const token: StartToken = { startNs: process.hrtime.bigint() };
     return token;
   }
 
+  /** Emit one access-log JSON record for the completed dispatch (best-effort;
+   *  write errors are swallowed so logging never breaks a request). */
   onDispatchEnd(token: HookToken, info: DispatchInfo, stats: CallStatistics, error?: Error): void {
     const t = token as StartToken | undefined;
     const durationMs = t ? roundTo2(Number(process.hrtime.bigint() - t.startNs) / 1_000_000) : 0;

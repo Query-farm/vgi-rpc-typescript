@@ -112,7 +112,9 @@ export interface HttpHandlerOptions {
 
 /** Serializer for stream state objects stored in state tokens. */
 export interface StateSerializer {
+  /** Encode a stream-state object into the bytes sealed inside a state token. */
   serialize(state: any): Uint8Array;
+  /** Decode the bytes recovered from a state token back into a state object. */
   deserialize(bytes: Uint8Array): any;
 }
 

@@ -4,8 +4,11 @@
 /** Error thrown when the server encounters an RPC protocol error. */
 export class RpcError extends Error {
   constructor(
+    /** Remote error class name (e.g. `"ValueError"`). */
     public readonly errorType: string,
+    /** Human-readable message from the remote error. */
     public readonly errorMessage: string,
+    /** Remote stack-trace text, or an empty string when unavailable. */
     public readonly remoteTraceback: string,
   ) {
     super(`${errorType}: ${errorMessage}`);
@@ -21,10 +24,12 @@ export class VersionError extends Error {
   }
 }
 
-/** Well-known values for the `vgi_rpc.error_kind` batch metadata key. Mirrors
- *  Python's `vgi_rpc.metadata.ERROR_KIND_*` constants. */
+/** `vgi_rpc.error_kind` batch-metadata value for {@link MethodNotImplementedError}.
+ *  Mirrors Python's `vgi_rpc.metadata.ERROR_KIND_*` constants. */
 export const ERROR_KIND_METHOD_NOT_IMPLEMENTED = "method_not_implemented";
+/** `vgi_rpc.error_kind` batch-metadata value for {@link SessionLostError}. */
 export const ERROR_KIND_SESSION_LOST = "session_lost";
+/** `vgi_rpc.error_kind` batch-metadata value for {@link ServerDrainingError}. */
 export const ERROR_KIND_SERVER_DRAINING = "server_draining";
 export const ERROR_KIND_PROTOCOL_VERSION_MISMATCH = "protocol_version_mismatch";
 
@@ -68,7 +73,9 @@ export function parseProtocolVersion(value: string): [number, number, number] {
  *  string-matching the message.
  */
 export class MethodNotImplementedError extends Error {
+  /** Typed `vgi_rpc.error_kind` marker for this error class. */
   static readonly errorKind = ERROR_KIND_METHOD_NOT_IMPLEMENTED;
+  /** Typed `vgi_rpc.error_kind` marker hoisted onto the error batch metadata. */
   readonly errorKind = ERROR_KIND_METHOD_NOT_IMPLEMENTED;
   constructor(message: string) {
     super(message);
@@ -79,7 +86,9 @@ export class MethodNotImplementedError extends Error {
 /** Raised when a sticky session token is malformed, expired, evicted, or
  *  bound to a different worker / principal. HTTP-only. */
 export class SessionLostError extends Error {
+  /** Typed `vgi_rpc.error_kind` marker for this error class. */
   static readonly errorKind = ERROR_KIND_SESSION_LOST;
+  /** Typed `vgi_rpc.error_kind` marker hoisted onto the error batch metadata. */
   readonly errorKind = ERROR_KIND_SESSION_LOST;
   constructor(message: string) {
     super(message);
@@ -89,7 +98,9 @@ export class SessionLostError extends Error {
 
 /** Raised when `ctx.openSession` is called while the server is draining. */
 export class ServerDrainingError extends Error {
+  /** Typed `vgi_rpc.error_kind` marker for this error class. */
   static readonly errorKind = ERROR_KIND_SERVER_DRAINING;
+  /** Typed `vgi_rpc.error_kind` marker hoisted onto the error batch metadata. */
   readonly errorKind = ERROR_KIND_SERVER_DRAINING;
   constructor(message: string) {
     super(message);

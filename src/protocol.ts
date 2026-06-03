@@ -23,6 +23,7 @@ const EMPTY_SCHEMA = makeSchema([]);
  * Register unary, producer, and exchange methods, then pass to `VgiRpcServer`.
  */
 export class Protocol {
+  /** Service / protocol name, exposed to clients via introspection. */
   readonly name: string;
   /**
    * Application protocol surface version. When non-empty, the server enforces
@@ -162,6 +163,8 @@ export class Protocol {
     return this;
   }
 
+  /** Snapshot of the registered methods, keyed by method name. Returns a copy,
+   *  so mutating it does not affect the protocol. */
   getMethods(): Map<string, MethodDefinition> {
     return new Map(this._methods);
   }

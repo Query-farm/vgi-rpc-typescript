@@ -24,11 +24,18 @@ function _loadNodeCrypto(): { X509Certificate: any; createHash: any } {
 
 /** A single element from an `x-forwarded-client-cert` header. */
 export interface XfccElement {
+  /** Hex SHA-256 digest of the client certificate (`Hash` key). */
   hash: string | null;
+  /** URL-decoded PEM of the client certificate (`Cert` key), if the proxy
+   *  forwarded it. */
   cert: string | null;
+  /** Certificate Subject DN (`Subject` key). */
   subject: string | null;
+  /** URL-decoded URI-type Subject Alternative Name (`URI` key). */
   uri: string | null;
+  /** DNS-type Subject Alternative Names (`DNS` keys); may repeat in the header. */
   dns: readonly string[];
+  /** URL-decoded URI of the proxy that presented the cert (`By` key). */
   by: string | null;
 }
 

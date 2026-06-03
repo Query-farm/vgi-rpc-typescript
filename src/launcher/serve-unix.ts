@@ -79,6 +79,7 @@ export interface ServeUnixOptions {
 
 /** Handle returned by {@link serveUnix} for callers that want to stop the server. */
 export interface ServeUnixHandle {
+  /** Absolute path of the bound AF_UNIX socket the server is listening on. */
   readonly socketPath: string;
   /** Shut down the listener and unlink the socket file. */
   stop(): Promise<void>;
