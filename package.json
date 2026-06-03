@@ -49,10 +49,10 @@
   },
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
-    "@query-farm/apache-arrow": "*",
+    "@query-farm/apache-arrow": "^21.1.1",
     "@uwdata/flechette": "github:Query-farm/flechette#fix/timestamp-bigint-encode",
     "fzstd": "^0.1.1",
-    "oauth4webapi": "^3.8.5"
+    "oauth4webapi": "^3.8.6"
   },
   "peerDependencies": {
     "@opentelemetry/api": ">=1.4.0",
@@ -75,15 +75,15 @@
     }
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.5",
-    "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/resources": "^2.6.0",
-    "@opentelemetry/sdk-metrics": "^2.6.0",
-    "@opentelemetry/sdk-trace-base": "^2.6.0",
-    "@opentelemetry/semantic-conventions": "^1.40.0",
-    "@aws-sdk/client-s3": "^3.750.0",
-    "@aws-sdk/s3-request-presigner": "^3.750.0",
-    "@google-cloud/storage": "^7.15.0",
+    "@biomejs/biome": "^2.4.16",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-metrics": "^2.7.1",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
+    "@aws-sdk/client-s3": "^3.1059.0",
+    "@aws-sdk/s3-request-presigner": "^3.1059.0",
+    "@google-cloud/storage": "^7.19.0",
     "@types/bun": "latest"
   },
   "scripts": {

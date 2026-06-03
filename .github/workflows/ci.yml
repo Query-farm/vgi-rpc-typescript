@@ -114,13 +114,13 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install JS dependencies
         run: bun install && bun run postinstall
 
       - name: Install Python dependencies
-        run: pip install "vgi-rpc[http,cli,external]>=0.18.0" pytest
+        run: pip install "vgi-rpc[http,cli,external]>=0.19.0" pytest
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v

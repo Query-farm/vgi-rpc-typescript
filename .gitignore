@@ -4,3 +4,4 @@ dist/
 .conformance-bundles/
 .smoke-bundle/
 __pycache__/
+.playwright-mcp/
