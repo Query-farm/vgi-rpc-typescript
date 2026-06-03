@@ -383,8 +383,59 @@ def conformance_conn(
     return factory
 
 
+@pytest.fixture(params=_TRANSPORTS)
+def conformance_describe(
+    request: pytest.FixtureRequest,
+    ts_transport: SubprocessTransport,
+    ts_http_port: int,
+    ts_http_zstd_port: int,
+) -> "ServiceDescription":
+    """Introspect the TS worker under test via a real ``__describe__`` call.
+
+    Parallels ``conformance_conn`` (same transport matrix) so the upstream
+    ``TestDescribeConformance`` suite validates ``__describe__`` over the wire
+    against the actual Bun/Node/Deno worker rather than an in-process Python
+    server.  The TS server enables describe by default.
+    """
+    from vgi_rpc.http import http_introspect
+    from vgi_rpc.introspect import introspect
+
+    param = request.param
+    if param in ("pipe", "flechette-pipe"):
+        cmd = BUN_FLECHETTE_WORKER if param == "flechette-pipe" else BUN_WORKER
+        transport = SubprocessTransport(cmd)
+        try:
+            return introspect(transport)
+        finally:
+            transport.close()
+    if param == "subprocess":
+        return introspect(ts_transport)
+    # Everything else is HTTP — resolve the right port for the variant.
+    if param == "http":
+        port = ts_http_port
+    elif param == "http-zstd":
+        port = ts_http_zstd_port
+    elif param == "http_externalize_always":
+        port = request.getfixturevalue("conformance_http_externalize_always_port")
+    elif param == "node-http":
+        port = request.getfixturevalue("ts_node_http_port")
+    elif param == "node-http-zstd":
+        port = request.getfixturevalue("ts_node_http_zstd_port")
+    elif param == "deno-http":
+        port = request.getfixturevalue("ts_deno_http_port")
+    elif param == "deno-http-zstd":
+        port = request.getfixturevalue("ts_deno_http_zstd_port")
+    elif param == "flechette-http":
+        port = request.getfixturevalue("ts_flechette_http_port")
+    else:
+        raise AssertionError(f"unhandled transport for conformance_describe: {param}")
+    return http_introspect(base_url=f"http://127.0.0.1:{port}")
+
+
 # Import all test classes from the conformance pytest suite (shipped with the package)
 from vgi_rpc.conformance._pytest_suite import *  # noqa: F401,F403,E402
+
+from vgi_rpc.introspect import ServiceDescription  # noqa: E402
 
 
 from vgi_rpc.rpc import AnnotatedBatch, RpcError  # noqa: E402

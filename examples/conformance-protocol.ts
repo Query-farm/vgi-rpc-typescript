@@ -203,7 +203,7 @@ function _serializeBatch(schema: Schema, batch: RecordBatch): Uint8Array {
 // must support the per-request `vgi_rpc.protocol_version` metadata key that
 // vgi-rpc enforces at the dispatch boundary. Mirrors Python's
 // ConformanceService.protocol_version.
-export const protocol = new Protocol("Conformance", { protocolVersion: "1.0.0" });
+export const protocol = new Protocol("ConformanceService", { protocolVersion: "1.0.0" });
 
 // ===== Scalar Echo (5) =====
 

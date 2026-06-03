@@ -156,10 +156,12 @@ export async function buildDescribeBatch(
     const headerIpc = method.headerSchema ? serializeSchema(method.headerSchema) : null;
     headerSchemas.push(headerIpc);
 
-    let isExchange: boolean | null;
-    if (method.exchangeFn) isExchange = true;
-    else if (method.producerFn) isExchange = false;
-    else isExchange = null;
+    // v4 slim schema: `is_exchange` is vestigial and always null — producer
+    // vs exchange is already derivable from `method_type` + the presence of an
+    // input/params schema. The cross-language describe spec asserts null for
+    // every stream method (and the Python reference emits null for all), so we
+    // never populate it. See vgi-rpc conformance describe_stream_properties.
+    const isExchange: boolean | null = null;
     isExchanges.push(isExchange);
 
     hashRows.push({
