@@ -16,11 +16,18 @@ jobs:
       deployments: write
     steps:
       - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: 'npm'
           cache-dependency-path: docs/package-lock.json
+      # The generated API reference (starlight-typedoc) resolves the source
+      # graph through the root node_modules, so install root deps first.
+      - name: Install root dependencies
+        run: bun install && bun run postinstall
       - run: npm ci
         working-directory: docs
       - run: npm run build
