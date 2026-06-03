@@ -1,0 +1,54 @@
+/** Options for {@link httpConnect}, the HTTP-transport RPC client. */
+export interface HttpConnectOptions {
+    /** Route prefix the server mounts its methods under (e.g. `/api`). Trailing slashes are stripped. Defaults to no prefix. */
+    prefix?: string;
+    /** Callback invoked for each log/error message the server emits during a request. */
+    onLog?: (msg: LogMessage) => void;
+    /** When set, request bodies are zstd-compressed at this level and `Accept-Encoding: zstd` is sent. Omit to disable compression. */
+    compressionLevel?: number;
+    /** Authorization header value (e.g. "Bearer <token>"). Sent with every request. */
+    authorization?: string;
+    /** External storage config for resolving externalized batches. */
+    externalLocation?: import("../external.js").ExternalLocationConfig;
+}
+/** A log or error message delivered to an {@link HttpConnectOptions.onLog} callback. */
+export interface LogMessage {
+    /** Severity, mirroring the server's log level (e.g. `INFO`, `WARNING`, `EXCEPTION`). */
+    level: string;
+    /** The human-readable log text. */
+    message: string;
+    /** Optional structured fields attached to the log record. */
+    extra?: Record<string, any>;
+}
+/**
+ * A live streaming method call. Exchange methods drive the server with
+ * {@link StreamSession.exchange}; producer methods are consumed by async
+ * iteration. Always {@link StreamSession.close} when done.
+ */
+export interface StreamSession {
+    /** The method's header row (returned once at stream start), or `null` if the method declares no header. */
+    readonly header: Record<string, any> | null;
+    /** Send one batch of input rows and receive the server's corresponding output rows (exchange streams). */
+    exchange(input: Record<string, any>[]): Promise<Record<string, any>[]>;
+    /** Iterate the server-produced output batches one row-array at a time (producer streams). */
+    [Symbol.asyncIterator](): AsyncIterableIterator<Record<string, any>[]>;
+    /** Tear down the stream, flushing/draining the underlying transport. */
+    close(): void;
+}
+/** Options for {@link pipeConnect}, the client over raw readable/writable streams. */
+export interface PipeConnectOptions {
+    /** Callback invoked for each log/error message the server emits during a request. */
+    onLog?: (msg: LogMessage) => void;
+    /** External storage config for resolving externalized batches. */
+    externalLocation?: import("../external.js").ExternalLocationConfig;
+}
+/** Options for {@link subprocessConnect}, which spawns a server process and pipes to it. */
+export interface SubprocessConnectOptions extends PipeConnectOptions {
+    /** Working directory for the spawned process. Defaults to the current directory. */
+    cwd?: string;
+    /** Extra environment variables, merged over the current `process.env`. */
+    env?: Record<string, string>;
+    /** How to handle the child's stderr. Defaults to `"ignore"`. */
+    stderr?: "inherit" | "pipe" | "ignore";
+}
+//# sourceMappingURL=types.d.ts.map
