@@ -1,4 +1,4 @@
-.PHONY: all build build-types build-js test test-unit test-integration test-conformance test-smoke typecheck lint clean distclean docs docs-dev help
+.PHONY: all build build-types build-js test test-unit test-integration test-conformance test-smoke typecheck lint clean distclean docs docs-dev docs-api-coverage help
 
 # Python with vgi-rpc installed.  Defaults to the editable local install in
 # the sibling vgi-rpc checkout (which is the source of truth for the
@@ -60,6 +60,10 @@ docs: ## Build documentation site
 
 docs-dev: ## Start docs dev server
 	cd docs && npm install && npm run dev
+
+docs-api-coverage: node_modules ## Gate: fail if public API doc coverage regresses
+	cd docs && npm install
+	node scripts/check-api-docs.mjs
 
 clean: ## Remove build artifacts
 	rm -rf dist

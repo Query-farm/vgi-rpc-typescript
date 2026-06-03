@@ -7,8 +7,13 @@
     "preview": "astro preview"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.33.2",
-    "astro": "^5.18.2",
+    "@astrojs/starlight": "^0.39.3",
+    "astro": "^6.4.3",
     "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "starlight-typedoc": "^0.23.0",
+    "typedoc": "^0.28.19",
+    "typedoc-plugin-markdown": "^4.12.0"
   }
 }

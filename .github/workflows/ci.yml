@@ -60,6 +60,31 @@ jobs:
           test -f dist/index.js
           test -f dist/index.d.ts
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install root dependencies
+        run: bun install && bun run postinstall
+
+      - name: Install docs dependencies
+        run: cd docs && npm install
+
+      - name: Build documentation site (generates API reference)
+        run: cd docs && npm run build
+
+      - name: Check API documentation coverage
+        run: node scripts/check-api-docs.mjs
+
   runtime-smoke-test:
     runs-on: ubuntu-latest
     steps:
