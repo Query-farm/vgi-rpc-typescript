@@ -38,6 +38,8 @@ import {
   tableToIPC,
 } from "@uwdata/flechette";
 
+import { toFlechetteType } from "./normalize-type.js";
+
 import type {
   IncrementalEncoder,
   VgiBackendInfo,
@@ -129,7 +131,7 @@ export function serializeSchema(s: VgiSchema): Uint8Array {
   // empty schemas, which then leaked into state-token-embedded schema
   // bytes and made `exchange_zero_columns` etc. see a 1-column schema
   // on the next round-trip.
-  const cols = s.fields.map((f) => f_columnFromArray([], f.type as any));
+  const cols = s.fields.map((f) => f_columnFromArray([], toFlechetteType(f.type) as any));
   const table = buildTablePreservingNullable(s, cols) as any;
   return tableToIPC(table, { format: "stream" }) as Uint8Array;
 }
@@ -169,7 +171,7 @@ export function deserializeBatch(bytes: Uint8Array): VgiBatch {
 // ----- Construction --------------------------------------------------------
 
 export function columnFromArray(values: any[], type: VgiDataType): VgiColumnData {
-  return f_columnFromArray(values, type as any, EXTRACT_OPTS) as VgiColumnData;
+  return f_columnFromArray(values, toFlechetteType(type) as any, EXTRACT_OPTS) as VgiColumnData;
 }
 
 // flechette's `tableFromColumns` discards per-field `nullable`/`metadata` —
@@ -213,7 +215,7 @@ export function singleRowBatch(s: VgiSchema, values: Record<string, any>): VgiBa
     if (f.type.typeId === 2 /* Int */ && (f.type as any).bitWidth === 64 && typeof val === "number") {
       val = BigInt(val);
     }
-    cols.push(f_columnFromArray(coerceValuesForType([val], f.type), f.type as any, EXTRACT_OPTS));
+    cols.push(f_columnFromArray(coerceValuesForType([val], f.type), toFlechetteType(f.type) as any, EXTRACT_OPTS));
   }
   return buildTablePreservingNullable(s, cols);
 }
@@ -223,7 +225,7 @@ export function batchFromColumns(s: VgiSchema, columns: Record<string, any[]>): 
   const cols: Column<any>[] = [];
   for (const f of s.fields) {
     const vals = columns[f.name] ?? new Array(numRows).fill(null);
-    cols.push(f_columnFromArray(coerceValuesForType(vals, f.type), f.type as any, EXTRACT_OPTS));
+    cols.push(f_columnFromArray(coerceValuesForType(vals, f.type), toFlechetteType(f.type) as any, EXTRACT_OPTS));
   }
   return buildTablePreservingNullable(s, cols);
 }
@@ -240,7 +242,7 @@ export function batchFromColumnData(
 }
 
 export function emptyColumnData(type: VgiDataType): VgiColumnData {
-  return f_columnFromArray([], type as any, EXTRACT_OPTS) as VgiColumnData;
+  return f_columnFromArray([], toFlechetteType(type) as any, EXTRACT_OPTS) as VgiColumnData;
 }
 
 /**
@@ -255,7 +257,7 @@ export function emptyColumnData(type: VgiDataType): VgiColumnData {
 export function emptyBatchWithMetadata(s: VgiSchema, metadata?: Map<string, string>): VgiBatch {
   const cols: Record<string, Column<any>> = {};
   for (const f of s.fields) {
-    cols[f.name] = f_columnFromArray([], f.type as any, EXTRACT_OPTS);
+    cols[f.name] = f_columnFromArray([], toFlechetteType(f.type) as any, EXTRACT_OPTS);
   }
   const t = tableFromColumns(cols) as any;
   attachBatchMetadata(t, metadata);
@@ -274,7 +276,7 @@ export function singleRowBatchWithMetadata(
     if (f.type.typeId === 2 /* Int */ && (f.type as any).bitWidth === 64 && typeof val === "number") {
       val = BigInt(val);
     }
-    cols[f.name] = f_columnFromArray([val], f.type as any, EXTRACT_OPTS);
+    cols[f.name] = f_columnFromArray([val], toFlechetteType(f.type) as any, EXTRACT_OPTS);
   }
   const t = tableFromColumns(cols) as any;
   attachBatchMetadata(t, metadata);
@@ -386,7 +388,7 @@ export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBat
     if (srcType.typeId === dstType.typeId) return srcCol;
     if (isNumericTypeId(srcType.typeId) && isNumericTypeId(dstType.typeId)) {
       mutated = true;
-      return f_columnFromArray(castNumericValues(srcCol, dstType), dstType as any, EXTRACT_OPTS);
+      return f_columnFromArray(castNumericValues(srcCol, dstType), toFlechetteType(dstType) as any, EXTRACT_OPTS);
     }
     return srcCol;
   });
