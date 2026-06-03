@@ -26,6 +26,12 @@ const farmTheme = {
 
 export default defineConfig({
   site: "https://vgi-rpc-typescript.query.farm",
+  // Astro 6 stopped defaulting `markdown.gfm` to true. `.md` files still get
+  // GFM (baked into @astrojs/markdown-remark), but @astrojs/mdx reads `gfm`
+  // from the resolved markdown config, sees undefined, and skips remark-gfm —
+  // so tables/strikethrough silently break in every .mdx page. Re-enable it
+  // explicitly so MDX inherits GFM again.
+  markdown: { gfm: true },
   integrations: [
     starlight({
       title: "vgi-rpc",
