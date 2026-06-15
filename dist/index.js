@@ -3256,13 +3256,7 @@ async function buildDescribeBatch(protocolName, methods, serverId, protocolVersi
     hasHeaders.push(hasHeader);
     const headerIpc = method.headerSchema ? serializeSchema2(method.headerSchema) : null;
     headerSchemas.push(headerIpc);
-    let isExchange;
-    if (method.exchangeFn)
-      isExchange = true;
-    else if (method.producerFn)
-      isExchange = false;
-    else
-      isExchange = null;
+    const isExchange = null;
     isExchanges.push(isExchange);
     hashRows.push({
       name,
@@ -9569,4 +9563,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=577B8BC5B26DC1B764756E2164756E21
+//# debugId=03000096478B827564756E2164756E21

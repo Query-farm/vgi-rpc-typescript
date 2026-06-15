@@ -16,11 +16,28 @@
 // flechette differs on: Int uses `signed`, arrow-js uses `isSigned`).
 
 import {
-  Type,
+  binary,
+  bool,
+  date,
+  decimal,
+  dictionary,
+  duration,
   field as f_field,
-  nullType, bool, int, float, utf8, binary, fixedSizeBinary,
-  decimal, date, time, timestamp, duration, interval,
-  list, largeList, fixedSizeList, struct, map, dictionary, union,
+  fixedSizeBinary,
+  fixedSizeList,
+  float,
+  int,
+  interval,
+  largeList,
+  list,
+  map,
+  nullType,
+  struct,
+  Type,
+  time,
+  timestamp,
+  union,
+  utf8,
 } from "@uwdata/flechette";
 
 function fField(f: any): any {

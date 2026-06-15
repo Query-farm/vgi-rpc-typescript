@@ -37,9 +37,6 @@ import {
   tablesToIPC,
   tableToIPC,
 } from "@uwdata/flechette";
-
-import { toFlechetteType } from "./normalize-type.js";
-
 import type {
   IncrementalEncoder,
   VgiBackendInfo,
@@ -50,6 +47,7 @@ import type {
   VgiSchema,
 } from "../types.js";
 import { readFirstRecordBatchMeta } from "./message-meta.js";
+import { toFlechetteType } from "./normalize-type.js";
 
 export const backend: VgiBackendInfo = { name: "flechette", opaquePassthrough: false };
 
