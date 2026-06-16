@@ -36,7 +36,7 @@ import {
   tableFromIPC,
   tablesToIPC,
   tableToIPC,
-} from "@uwdata/flechette";
+} from "@query-farm/flechette";
 import type {
   IncrementalEncoder,
   VgiBackendInfo,

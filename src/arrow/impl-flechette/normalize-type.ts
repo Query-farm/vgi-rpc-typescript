@@ -38,7 +38,7 @@ import {
   timestamp,
   union,
   utf8,
-} from "@uwdata/flechette";
+} from "@query-farm/flechette";
 
 function fField(f: any): any {
   return f_field(f.name, toFlechetteType(f.type), f.nullable ?? true, f.metadata ?? null);
