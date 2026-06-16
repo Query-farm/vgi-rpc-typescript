@@ -1,0 +1,113 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
+// Runtime-agnostic exports shared by every entry point. This module MUST NOT
+// (transitively) import node-only APIs (node:net/fs/child_process), so it can
+// be bundled for Cloudflare Workers / browsers via `./index.workerd.ts`. The
+// AF_UNIX launcher (node-only) is added on top of this in `./index.ts` for the
+// node/bun barrel; CF builds get this core without it.
+
+export { AccessLogHook, type AccessLogSink, FdSink } from "./access-log.js";
+export { AuthContext } from "./auth.js";
+export * from "./client/index.js";
+export {
+  DESCRIBE_METHOD_NAME,
+  DESCRIBE_VERSION,
+  DESCRIBE_VERSION_KEY,
+  ERROR_KIND_KEY,
+  LOG_EXTRA_KEY,
+  LOG_LEVEL_KEY,
+  LOG_MESSAGE_KEY,
+  PROTOCOL_NAME_KEY,
+  REQUEST_ID_KEY,
+  REQUEST_VERSION,
+  REQUEST_VERSION_KEY,
+  RPC_ERROR_HEADER,
+  RPC_METHOD_KEY,
+  SERVER_ID_KEY,
+  STATE_KEY,
+} from "./constants.js";
+export {
+  ERROR_KIND_METHOD_NOT_IMPLEMENTED,
+  ERROR_KIND_SERVER_DRAINING,
+  ERROR_KIND_SESSION_LOST,
+  MethodNotImplementedError,
+  RpcError,
+  ServerDrainingError,
+  SessionLostError,
+  VersionError,
+} from "./errors.js";
+export {
+  type ExternalLocationConfig,
+  type ExternalStorage,
+  httpsOnlyValidator,
+  isExternalLocationBatch,
+  makeExternalLocationBatch,
+  maybeExternalizeBatch,
+  resolveExternalLocation,
+} from "./external.js";
+export {
+  ARROW_CONTENT_TYPE,
+  type AuthenticateFn,
+  type BearerValidateFn,
+  bearerAuthenticate,
+  bearerAuthenticateStatic,
+  type CertValidateFn,
+  chainAuthenticate,
+  createHttpHandler,
+  type HttpHandlerOptions,
+  type JwtAuthenticateOptions,
+  jsonStateSerializer,
+  jwtAuthenticate,
+  mtlsAuthenticate,
+  mtlsAuthenticateFingerprint,
+  mtlsAuthenticateSubject,
+  mtlsAuthenticateXfcc,
+  type OAuthResourceMetadata,
+  oauthResourceMetadataToJson,
+  parseXfcc,
+  type StateSerializer,
+  type UnpackedToken,
+  unpackStateToken,
+  type XfccElement,
+  type XfccValidateFn,
+} from "./http/index.js";
+export { Protocol } from "./protocol.js";
+export {
+  bool,
+  bytes,
+  float,
+  float32,
+  inferParamTypes,
+  int,
+  int8,
+  int16,
+  int32,
+  type SchemaLike,
+  str,
+  toSchema,
+  uint8,
+  uint16,
+  uint32,
+  uint64,
+} from "./schema.js";
+export { VgiRpcServer } from "./server.js";
+export {
+  type CallContext,
+  type CallStatistics,
+  type DispatchHook,
+  type DispatchInfo,
+  type ExchangeFn,
+  type ExchangeInit,
+  type HeaderInit,
+  type HookToken,
+  type LogContext,
+  type MethodDefinition,
+  MethodType,
+  OutputCollector,
+  type ProducerFn,
+  type ProducerInit,
+  type ServeStartHook,
+  TransportKind,
+  type UnaryHandler,
+} from "./types.js";

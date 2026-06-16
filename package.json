@@ -1,6 +1,6 @@
 {
   "name": "@query-farm/vgi-rpc",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "license": "Apache-2.0",
   "homepage": "https://vgi-rpc-typescript.query.farm",
   "repository": {
@@ -13,9 +13,9 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "workerd": "./src/index.ts",
-      "worker": "./src/index.ts",
-      "browser": "./src/index.ts",
+      "workerd": "./src/index.workerd.ts",
+      "worker": "./src/index.workerd.ts",
+      "browser": "./src/index.workerd.ts",
       "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

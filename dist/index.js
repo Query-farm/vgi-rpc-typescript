@@ -8168,6 +8168,597 @@ function mtlsAuthenticateSubject(options) {
   }
   return mtlsAuthenticate({ validate, header, checkExpiry });
 }
+// src/schema.ts
+var str = utf8();
+var bytes = binary();
+var int = int64();
+var int322 = int32();
+var int162 = int16();
+var int82 = int8();
+var uint82 = uint8();
+var uint162 = uint16();
+var uint322 = uint32();
+var uint642 = uint64();
+var float = float64();
+var float322 = float32();
+var bool2 = bool();
+function isField(x) {
+  return x != null && typeof x.name === "string" && x.type != null && typeof x.nullable === "boolean";
+}
+function isDataType(x) {
+  return x != null && typeof x.typeId === "number";
+}
+function toSchema(spec) {
+  const maybeFields = spec.fields;
+  if (Array.isArray(maybeFields)) {
+    const out = [];
+    for (const f of maybeFields) {
+      if (isField(f)) {
+        out.push(f);
+      } else {
+        out.push(field(f.name, f.type, f.nullable ?? true, f.metadata));
+      }
+    }
+    return schema(out);
+  }
+  const fields = [];
+  for (const [name, value] of Object.entries(spec)) {
+    if (isField(value)) {
+      fields.push(value);
+    } else if (isDataType(value)) {
+      fields.push(field(name, value, false));
+    } else {
+      throw new TypeError(`Invalid schema value for "${name}": expected DataType or Field, got ${typeof value}`);
+    }
+  }
+  return schema(fields);
+}
+function inferParamTypes(spec) {
+  const sch = toSchema(spec);
+  if (sch.fields.length === 0)
+    return;
+  const result = {};
+  for (const f of sch.fields) {
+    let mapped;
+    if (isUtf8(f.type))
+      mapped = "str";
+    else if (isBinary(f.type))
+      mapped = "bytes";
+    else if (isBool(f.type))
+      mapped = "bool";
+    else if (isFloat(f.type))
+      mapped = "float";
+    else if (isInt(f.type))
+      mapped = "int";
+    if (!mapped)
+      return;
+    result[f.name] = mapped;
+  }
+  return result;
+}
+
+// src/protocol.ts
+var EMPTY_SCHEMA3 = schema([]);
+
+class Protocol {
+  name;
+  protocolVersion;
+  protocolVersionParts;
+  _methods = new Map;
+  constructor(name, options) {
+    this.name = name;
+    const raw = options?.protocolVersion;
+    if (raw === undefined || raw === "") {
+      this.protocolVersion = "";
+      this.protocolVersionParts = null;
+    } else {
+      this.protocolVersion = raw;
+      this.protocolVersionParts = parseProtocolVersion(raw);
+    }
+  }
+  unary(name, config) {
+    const params = toSchema(config.params);
+    this._methods.set(name, {
+      name,
+      type: "unary" /* UNARY */,
+      paramsSchema: params,
+      resultSchema: toSchema(config.result),
+      handler: config.handler,
+      doc: config.doc,
+      defaults: config.defaults,
+      paramTypes: config.paramTypes ?? inferParamTypes(params)
+    });
+    return this;
+  }
+  producer(name, config) {
+    const params = toSchema(config.params);
+    this._methods.set(name, {
+      name,
+      type: "stream" /* STREAM */,
+      paramsSchema: params,
+      resultSchema: EMPTY_SCHEMA3,
+      outputSchema: toSchema(config.outputSchema),
+      inputSchema: EMPTY_SCHEMA3,
+      producerInit: config.init,
+      producerFn: config.produce,
+      onCancel: config.onCancel,
+      headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
+      headerInit: config.headerInit,
+      doc: config.doc,
+      defaults: config.defaults,
+      paramTypes: config.paramTypes ?? inferParamTypes(params)
+    });
+    return this;
+  }
+  exchange(name, config) {
+    const params = toSchema(config.params);
+    this._methods.set(name, {
+      name,
+      type: "stream" /* STREAM */,
+      paramsSchema: params,
+      resultSchema: EMPTY_SCHEMA3,
+      inputSchema: toSchema(config.inputSchema),
+      outputSchema: toSchema(config.outputSchema),
+      exchangeInit: config.init,
+      exchangeFn: config.exchange,
+      onCancel: config.onCancel,
+      headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
+      headerInit: config.headerInit,
+      doc: config.doc,
+      defaults: config.defaults,
+      paramTypes: config.paramTypes ?? inferParamTypes(params)
+    });
+    return this;
+  }
+  getMethods() {
+    return new Map(this._methods);
+  }
+}
+// src/dispatch/stream.ts
+var EMPTY_SCHEMA4 = schema([]);
+async function dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, kind) {
+  const isProducer = !!method.producerFn;
+  let state;
+  try {
+    if (isProducer) {
+      state = await method.producerInit(params);
+    } else {
+      state = await method.exchangeInit(params);
+    }
+  } catch (error) {
+    const errSchema = method.headerSchema ?? EMPTY_SCHEMA4;
+    const errBatch = buildErrorBatch(errSchema, error, serverId, requestId);
+    await writer.writeStream(errSchema, [errBatch]);
+    const inputSchema2 = await reader.openNextStream();
+    if (inputSchema2) {
+      while (await reader.readNextBatch() !== null) {}
+    }
+    return;
+  }
+  const outputSchema = state?.__outputSchema ?? method.outputSchema;
+  const effectiveProducer = state?.__isProducer ?? isProducer;
+  if (method.headerSchema && method.headerInit) {
+    try {
+      const headerOut = new OutputCollector(method.headerSchema, true, serverId, requestId, undefined, undefined, kind);
+      const headerValues = method.headerInit(params, state, headerOut);
+      const headerBatch = buildResultBatch(method.headerSchema, headerValues, serverId, requestId);
+      const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
+      await writer.writeStream(method.headerSchema, headerBatches);
+    } catch (error) {
+      const errBatch = buildErrorBatch(method.headerSchema, error, serverId, requestId);
+      await writer.writeStream(method.headerSchema, [errBatch]);
+      const inputSchema2 = await reader.openNextStream();
+      if (inputSchema2) {
+        while (await reader.readNextBatch() !== null) {}
+      }
+      return;
+    }
+  }
+  const inputSchema = await reader.openNextStream();
+  if (!inputSchema) {
+    const errBatch = buildErrorBatch(outputSchema, new Error("Expected input stream but got EOF"), serverId, requestId);
+    await writer.writeStream(outputSchema, [errBatch]);
+    return;
+  }
+  const stream = writer.openStream(outputSchema);
+  const expectedInputSchema = state?.__inputSchema ?? method.inputSchema;
+  try {
+    while (true) {
+      let inputBatch = await reader.readNextBatch();
+      if (!inputBatch)
+        break;
+      if (inputBatch.metadata?.get(CANCEL_KEY)) {
+        if (method.onCancel) {
+          try {
+            await method.onCancel(state);
+          } catch (err2) {
+            console.debug?.(`onCancel hook failed: ${err2 instanceof Error ? err2.message : err2}`);
+          }
+        }
+        break;
+      }
+      if (expectedInputSchema && !effectiveProducer && inputBatch.schema !== expectedInputSchema) {
+        try {
+          inputBatch = conformBatchToSchema(inputBatch, expectedInputSchema);
+        } catch (e) {
+          if (e instanceof TypeError)
+            throw e;
+          console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId, undefined, undefined, kind);
+      if (isProducer) {
+        await method.producerFn(state, out);
+      } else {
+        await method.exchangeFn(state, inputBatch, out);
+      }
+      for (const emitted of out.batches) {
+        let batch = emitted.batch;
+        if (externalConfig) {
+          batch = await maybeExternalizeBatch(batch, externalConfig);
+        }
+        if (emitted.metadata && emitted.metadata.size > 0) {
+          batch = withBatchMetadata(batch, emitted.metadata);
+        }
+        await stream.write(batch);
+      }
+      if (out.finished) {
+        break;
+      }
+    }
+  } catch (error) {
+    await stream.write(buildErrorBatch(outputSchema, error, serverId, requestId));
+  }
+  await stream.close();
+  try {
+    while (await reader.readNextBatch() !== null) {}
+  } catch {}
+}
+
+// src/dispatch/unary.ts
+async function dispatchUnary(method, params, writer, serverId, requestId, externalConfig, kind) {
+  const schema2 = method.resultSchema;
+  const out = new OutputCollector(schema2, true, serverId, requestId, undefined, undefined, kind);
+  try {
+    const result = await method.handler(params, out);
+    let resultBatch = buildResultBatch(schema2, result, serverId, requestId);
+    if (externalConfig) {
+      resultBatch = await maybeExternalizeBatch(resultBatch, externalConfig);
+    }
+    const batches = [...out.batches.map((b) => b.batch), resultBatch];
+    await writer.writeStream(schema2, batches);
+  } catch (error) {
+    const batch = buildErrorBatch(schema2, error, serverId, requestId);
+    await writer.writeStream(schema2, [batch]);
+  }
+}
+
+// src/wire/writer.ts
+var STDOUT_FD = 1;
+var _NODE_FS_MOD2 = "node:fs";
+var _writeSync = null;
+function _loadWriteSync2() {
+  if (_writeSync)
+    return _writeSync;
+  const req = import.meta.require ?? globalThis.require ?? null;
+  if (!req) {
+    throw new Error("IpcStreamWriter requires Bun or Node.js CJS for sync node:fs.writeSync. " + "Subprocess transport is not available in this runtime.");
+  }
+  const fs = req(_NODE_FS_MOD2);
+  _writeSync = fs.writeSync.bind(fs);
+  return _writeSync;
+}
+function writeAll(fd, data) {
+  const writeSync = _loadWriteSync2();
+  let offset = 0;
+  while (offset < data.length) {
+    try {
+      const written = writeSync(fd, data, offset, data.length - offset);
+      if (written <= 0)
+        throw new Error(`writeSync returned ${written}`);
+      offset += written;
+    } catch (e) {
+      if (e.code === "EAGAIN") {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+async function socketWriteAll(socket, data) {
+  if (socket.destroyed || socket.writableEnded) {
+    throw new Error("socketWriteAll: socket is already closed");
+  }
+  const ok = socket.write(data);
+  if (ok)
+    return;
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      socket.off("drain", onDrain);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err2) => {
+      cleanup();
+      reject(err2);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    socket.once("drain", onDrain);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+  });
+}
+
+class IpcStreamWriter {
+  target;
+  constructor(fdOrSocket = STDOUT_FD) {
+    if (typeof fdOrSocket === "number") {
+      this.target = { kind: "fd", fd: fdOrSocket };
+    } else {
+      this.target = { kind: "socket", socket: fdOrSocket };
+    }
+  }
+  async writeStream(schema2, batches) {
+    const bytes2 = serializeBatches(schema2, batches);
+    if (this.target.kind === "fd") {
+      writeAll(this.target.fd, bytes2);
+    } else {
+      await socketWriteAll(this.target.socket, bytes2);
+    }
+  }
+  openStream(schema2) {
+    return new IncrementalStream(this.target, schema2);
+  }
+}
+
+class IncrementalStream {
+  encoder;
+  target;
+  closed = false;
+  writeChain = Promise.resolve();
+  constructor(target, schema2) {
+    this.target = target;
+    this.encoder = createIncrementalEncoder(schema2);
+    this.enqueue(this.encoder.start());
+  }
+  async write(batch) {
+    if (this.closed)
+      throw new Error("Stream already closed");
+    return this.enqueue(this.encoder.writeBatch(batch));
+  }
+  async close() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    return this.enqueue(this.encoder.finish());
+  }
+  enqueue(bytes2) {
+    const next = this.writeChain.then(() => {
+      if (this.target.kind === "fd") {
+        writeAll(this.target.fd, bytes2);
+        return;
+      }
+      return socketWriteAll(this.target.socket, bytes2);
+    });
+    this.writeChain = next.catch(() => {
+      return;
+    });
+    return next;
+  }
+}
+
+// src/server.ts
+var EMPTY_SCHEMA5 = schema([]);
+function randomStreamId() {
+  const bytes2 = new Uint8Array(16);
+  crypto.getRandomValues(bytes2);
+  let out = "";
+  for (let i = 0;i < bytes2.length; i++) {
+    out += bytes2[i].toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+class VgiRpcServer {
+  protocol;
+  enableDescribe;
+  serverId;
+  _describePromise = null;
+  protocolVersion;
+  dispatchHook = null;
+  externalConfig;
+  onServeStart = null;
+  serveStartFired = false;
+  constructor(protocol, options) {
+    this.protocol = protocol;
+    this.enableDescribe = options?.enableDescribe ?? true;
+    this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    this.dispatchHook = options?.dispatchHook ?? null;
+    this.externalConfig = options?.externalLocation;
+    this.protocolVersion = options?.protocolVersion ?? "";
+    this.onServeStart = options?.onServeStart ?? null;
+  }
+  async notifyTransport(kind) {
+    if (this.serveStartFired)
+      return;
+    if (this.onServeStart) {
+      await this.onServeStart(kind);
+    }
+    this.serveStartFired = true;
+  }
+  async describeInfo() {
+    if (!this._describePromise) {
+      this._describePromise = buildDescribeBatch(this.protocol.name, this.protocol.getMethods(), this.serverId, this.protocol.protocolVersion || undefined).then(({ batch, metadata }) => ({
+        batch,
+        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? ""
+      }));
+    }
+    return this._describePromise;
+  }
+  checkProtocolVersion(clientVersion) {
+    const serverParts = this.protocol.protocolVersionParts;
+    const serverVersion = this.protocol.protocolVersion;
+    if (clientVersion === undefined) {
+      throw new ProtocolVersionError(`VGI client/worker protocol_version mismatch.
+` + `  Client: <not declared>
+` + `  Server: ${serverVersion}
+` + "  Direction: the client did not send a vgi_rpc.protocol_version " + "metadata key. This is either a vgi-rpc framework bug or a " + "non-VGI client connecting to a VGI worker.");
+    }
+    let clientParts;
+    try {
+      clientParts = parseProtocolVersion(clientVersion);
+    } catch {
+      throw new ProtocolVersionError(`VGI client/worker protocol_version mismatch.
+` + `  Client: ${clientVersion}
+` + `  Server: ${serverVersion}
+` + "  Direction: client sent a malformed protocol_version. " + "Expected canonical semver MAJOR.MINOR.PATCH.");
+    }
+    if (clientParts[0] === serverParts[0] && clientParts[1] === serverParts[1]) {
+      return;
+    }
+    const clientOlder = clientParts[0] < serverParts[0] || clientParts[0] === serverParts[0] && clientParts[1] < serverParts[1];
+    const direction = clientOlder ? `client is too old; upgrade the VGI extension/client to a version supporting protocol_version ${serverVersion}.` : `server is too old; upgrade the VGI worker to a version supporting protocol_version ${clientVersion}.`;
+    throw new ProtocolVersionError(`VGI client/worker protocol_version mismatch.
+` + `  Client: ${clientVersion}
+` + `  Server: ${serverVersion}
+` + `  Direction: ${direction}`);
+  }
+  async run() {
+    const stdin = process.stdin;
+    if (process.stdin.isTTY || process.stdout.isTTY) {
+      process.stderr.write("WARNING: This process communicates via Arrow IPC on stdin/stdout " + `and is not intended to be run interactively.
+` + "It should be launched as a subprocess by an RPC client " + `(e.g. vgi_rpc.connect()).
+`);
+    }
+    const reader = await IpcStreamReader.create(stdin);
+    const writer = new IpcStreamWriter;
+    try {
+      while (true) {
+        await this.notifyTransport("pipe" /* PIPE */);
+        await this.serveOne(reader, writer);
+      }
+    } catch (e) {
+      if (e.message?.includes("closed") || e.message?.includes("Expected Schema Message") || e.message?.includes("null or length 0") || e.code === "EPIPE" || e.code === "ERR_STREAM_PREMATURE_CLOSE" || e.code === "ERR_STREAM_DESTROYED" || e instanceof Error && e.message.includes("EOF")) {
+        return;
+      }
+      throw e;
+    } finally {
+      await reader.cancel();
+    }
+  }
+  async serveOne(reader, writer) {
+    const stream = await reader.readStream();
+    if (!stream) {
+      throw new Error("EOF");
+    }
+    const { schema: schema2, batches } = stream;
+    if (batches.length === 0) {
+      const err2 = new RpcError("ProtocolError", "Request stream contains no batches", "");
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA5, err2, this.serverId, null);
+      await writer.writeStream(EMPTY_SCHEMA5, [errBatch]);
+      return;
+    }
+    const batch = batches[0];
+    let methodName;
+    let params;
+    let requestId;
+    try {
+      const parsed = parseRequest(schema2, batch);
+      methodName = parsed.methodName;
+      params = parsed.params;
+      requestId = parsed.requestId;
+    } catch (e) {
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA5, e, this.serverId, null);
+      await writer.writeStream(EMPTY_SCHEMA5, [errBatch]);
+      if (e instanceof VersionError || e instanceof RpcError) {
+        return;
+      }
+      throw e;
+    }
+    if (methodName === DESCRIBE_METHOD_NAME && this.enableDescribe) {
+      const { batch: batch2 } = await this.describeInfo();
+      await writer.writeStream(batch2.schema, [batch2]);
+      return;
+    }
+    const methods = this.protocol.getMethods();
+    const method = methods.get(methodName);
+    if (!method) {
+      const available = [...methods.keys()].sort();
+      const err2 = new MethodNotImplementedError(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA5, err2, this.serverId, requestId);
+      await writer.writeStream(EMPTY_SCHEMA5, [errBatch]);
+      return;
+    }
+    if (this.protocol.protocolVersionParts !== null) {
+      try {
+        const md = batch.metadata;
+        this.checkProtocolVersion(md?.get(PROTOCOL_VERSION_KEY));
+      } catch (exc) {
+        const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA5;
+        const errBatch = buildErrorBatch(errSchema, exc, this.serverId, requestId);
+        await writer.writeStream(errSchema, [errBatch]);
+        return;
+      }
+    }
+    const methodType = method.type === "unary" /* UNARY */ ? "unary" : "stream";
+    let requestData;
+    try {
+      requestData = serializeBatch(batch);
+    } catch {}
+    let streamId;
+    if (methodType === "stream") {
+      streamId = randomStreamId();
+    }
+    const { protocolHash } = await this.describeInfo();
+    const info = {
+      method: methodName,
+      methodType,
+      serverId: this.serverId,
+      requestId,
+      protocol: this.protocol.name,
+      protocolHash,
+      protocolVersion: this.protocolVersion,
+      kind: "pipe" /* PIPE */,
+      principal: "",
+      authDomain: "",
+      authenticated: false,
+      remoteAddr: "",
+      requestData,
+      streamId
+    };
+    const stats = {
+      inputBatches: 0,
+      outputBatches: 0,
+      inputRows: 0,
+      outputRows: 0,
+      inputBytes: 0,
+      outputBytes: 0
+    };
+    const token = this.dispatchHook?.onDispatchStart(info);
+    let dispatchError;
+    applyDefaults(params, method.defaults);
+    try {
+      if (method.type === "unary" /* UNARY */) {
+        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig, "pipe" /* PIPE */);
+      } else {
+        await dispatchStream(method, params, writer, reader, this.serverId, requestId, this.externalConfig, "pipe" /* PIPE */);
+      }
+    } catch (e) {
+      dispatchError = e instanceof Error ? e : new Error(String(e));
+      throw e;
+    } finally {
+      this.dispatchHook?.onDispatchEnd(token, info, stats, dispatchError);
+    }
+  }
+}
 // src/launcher/hash.ts
 var HASH_LEN = 16;
 function canonicalJson(value) {
@@ -8649,250 +9240,7 @@ function delay(ms) {
 import { existsSync as existsSync2, unlinkSync as unlinkSync3 } from "node:fs";
 import { createServer } from "node:net";
 import * as path2 from "node:path";
-
-// src/dispatch/stream.ts
-var EMPTY_SCHEMA3 = schema([]);
-async function dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, kind) {
-  const isProducer = !!method.producerFn;
-  let state;
-  try {
-    if (isProducer) {
-      state = await method.producerInit(params);
-    } else {
-      state = await method.exchangeInit(params);
-    }
-  } catch (error) {
-    const errSchema = method.headerSchema ?? EMPTY_SCHEMA3;
-    const errBatch = buildErrorBatch(errSchema, error, serverId, requestId);
-    await writer.writeStream(errSchema, [errBatch]);
-    const inputSchema2 = await reader.openNextStream();
-    if (inputSchema2) {
-      while (await reader.readNextBatch() !== null) {}
-    }
-    return;
-  }
-  const outputSchema = state?.__outputSchema ?? method.outputSchema;
-  const effectiveProducer = state?.__isProducer ?? isProducer;
-  if (method.headerSchema && method.headerInit) {
-    try {
-      const headerOut = new OutputCollector(method.headerSchema, true, serverId, requestId, undefined, undefined, kind);
-      const headerValues = method.headerInit(params, state, headerOut);
-      const headerBatch = buildResultBatch(method.headerSchema, headerValues, serverId, requestId);
-      const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
-      await writer.writeStream(method.headerSchema, headerBatches);
-    } catch (error) {
-      const errBatch = buildErrorBatch(method.headerSchema, error, serverId, requestId);
-      await writer.writeStream(method.headerSchema, [errBatch]);
-      const inputSchema2 = await reader.openNextStream();
-      if (inputSchema2) {
-        while (await reader.readNextBatch() !== null) {}
-      }
-      return;
-    }
-  }
-  const inputSchema = await reader.openNextStream();
-  if (!inputSchema) {
-    const errBatch = buildErrorBatch(outputSchema, new Error("Expected input stream but got EOF"), serverId, requestId);
-    await writer.writeStream(outputSchema, [errBatch]);
-    return;
-  }
-  const stream = writer.openStream(outputSchema);
-  const expectedInputSchema = state?.__inputSchema ?? method.inputSchema;
-  try {
-    while (true) {
-      let inputBatch = await reader.readNextBatch();
-      if (!inputBatch)
-        break;
-      if (inputBatch.metadata?.get(CANCEL_KEY)) {
-        if (method.onCancel) {
-          try {
-            await method.onCancel(state);
-          } catch (err2) {
-            console.debug?.(`onCancel hook failed: ${err2 instanceof Error ? err2.message : err2}`);
-          }
-        }
-        break;
-      }
-      if (expectedInputSchema && !effectiveProducer && inputBatch.schema !== expectedInputSchema) {
-        try {
-          inputBatch = conformBatchToSchema(inputBatch, expectedInputSchema);
-        } catch (e) {
-          if (e instanceof TypeError)
-            throw e;
-          console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
-        }
-      }
-      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId, undefined, undefined, kind);
-      if (isProducer) {
-        await method.producerFn(state, out);
-      } else {
-        await method.exchangeFn(state, inputBatch, out);
-      }
-      for (const emitted of out.batches) {
-        let batch = emitted.batch;
-        if (externalConfig) {
-          batch = await maybeExternalizeBatch(batch, externalConfig);
-        }
-        if (emitted.metadata && emitted.metadata.size > 0) {
-          batch = withBatchMetadata(batch, emitted.metadata);
-        }
-        await stream.write(batch);
-      }
-      if (out.finished) {
-        break;
-      }
-    }
-  } catch (error) {
-    await stream.write(buildErrorBatch(outputSchema, error, serverId, requestId));
-  }
-  await stream.close();
-  try {
-    while (await reader.readNextBatch() !== null) {}
-  } catch {}
-}
-
-// src/dispatch/unary.ts
-async function dispatchUnary(method, params, writer, serverId, requestId, externalConfig, kind) {
-  const schema2 = method.resultSchema;
-  const out = new OutputCollector(schema2, true, serverId, requestId, undefined, undefined, kind);
-  try {
-    const result = await method.handler(params, out);
-    let resultBatch = buildResultBatch(schema2, result, serverId, requestId);
-    if (externalConfig) {
-      resultBatch = await maybeExternalizeBatch(resultBatch, externalConfig);
-    }
-    const batches = [...out.batches.map((b) => b.batch), resultBatch];
-    await writer.writeStream(schema2, batches);
-  } catch (error) {
-    const batch = buildErrorBatch(schema2, error, serverId, requestId);
-    await writer.writeStream(schema2, [batch]);
-  }
-}
-
-// src/wire/writer.ts
-var STDOUT_FD = 1;
-var _NODE_FS_MOD2 = "node:fs";
-var _writeSync = null;
-function _loadWriteSync2() {
-  if (_writeSync)
-    return _writeSync;
-  const req = import.meta.require ?? globalThis.require ?? null;
-  if (!req) {
-    throw new Error("IpcStreamWriter requires Bun or Node.js CJS for sync node:fs.writeSync. " + "Subprocess transport is not available in this runtime.");
-  }
-  const fs = req(_NODE_FS_MOD2);
-  _writeSync = fs.writeSync.bind(fs);
-  return _writeSync;
-}
-function writeAll(fd, data) {
-  const writeSync2 = _loadWriteSync2();
-  let offset = 0;
-  while (offset < data.length) {
-    try {
-      const written = writeSync2(fd, data, offset, data.length - offset);
-      if (written <= 0)
-        throw new Error(`writeSync returned ${written}`);
-      offset += written;
-    } catch (e) {
-      if (e.code === "EAGAIN") {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
-        continue;
-      }
-      throw e;
-    }
-  }
-}
-async function socketWriteAll(socket, data) {
-  if (socket.destroyed || socket.writableEnded) {
-    throw new Error("socketWriteAll: socket is already closed");
-  }
-  const ok = socket.write(data);
-  if (ok)
-    return;
-  await new Promise((resolve, reject) => {
-    const cleanup = () => {
-      socket.off("drain", onDrain);
-      socket.off("error", onError);
-      socket.off("close", onClose);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err2) => {
-      cleanup();
-      reject(err2);
-    };
-    const onClose = () => {
-      cleanup();
-      resolve();
-    };
-    socket.once("drain", onDrain);
-    socket.once("error", onError);
-    socket.once("close", onClose);
-  });
-}
-
-class IpcStreamWriter {
-  target;
-  constructor(fdOrSocket = STDOUT_FD) {
-    if (typeof fdOrSocket === "number") {
-      this.target = { kind: "fd", fd: fdOrSocket };
-    } else {
-      this.target = { kind: "socket", socket: fdOrSocket };
-    }
-  }
-  async writeStream(schema2, batches) {
-    const bytes = serializeBatches(schema2, batches);
-    if (this.target.kind === "fd") {
-      writeAll(this.target.fd, bytes);
-    } else {
-      await socketWriteAll(this.target.socket, bytes);
-    }
-  }
-  openStream(schema2) {
-    return new IncrementalStream(this.target, schema2);
-  }
-}
-
-class IncrementalStream {
-  encoder;
-  target;
-  closed = false;
-  writeChain = Promise.resolve();
-  constructor(target, schema2) {
-    this.target = target;
-    this.encoder = createIncrementalEncoder(schema2);
-    this.enqueue(this.encoder.start());
-  }
-  async write(batch) {
-    if (this.closed)
-      throw new Error("Stream already closed");
-    return this.enqueue(this.encoder.writeBatch(batch));
-  }
-  async close() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    return this.enqueue(this.encoder.finish());
-  }
-  enqueue(bytes) {
-    const next = this.writeChain.then(() => {
-      if (this.target.kind === "fd") {
-        writeAll(this.target.fd, bytes);
-        return;
-      }
-      return socketWriteAll(this.target.socket, bytes);
-    });
-    this.writeChain = next.catch(() => {
-      return;
-    });
-    return next;
-  }
-}
-
-// src/launcher/serve-unix.ts
-var EMPTY_SCHEMA4 = schema([]);
+var EMPTY_SCHEMA6 = schema([]);
 async function serveUnix(protocol, options) {
   const sockPath = path2.resolve(options.unixPath);
   const idleTimeoutS = options.idleTimeout ?? 300;
@@ -9018,8 +9366,8 @@ async function serveUnix(protocol, options) {
     const { schema: schema2, batches } = stream;
     if (batches.length === 0) {
       const err2 = new RpcError("ProtocolError", "Request stream contains no batches", "");
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA4, err2, serverId, null);
-      await writer.writeStream(EMPTY_SCHEMA4, [errBatch]);
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, err2, serverId, null);
+      await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
       return;
     }
     const batch = batches[0];
@@ -9032,8 +9380,8 @@ async function serveUnix(protocol, options) {
       params = parsed.params;
       requestId = parsed.requestId;
     } catch (e) {
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA4, e, serverId, null);
-      await writer.writeStream(EMPTY_SCHEMA4, [errBatch]);
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, e, serverId, null);
+      await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
       if (e instanceof VersionError || e instanceof RpcError)
         return;
       throw e;
@@ -9048,8 +9396,8 @@ async function serveUnix(protocol, options) {
     if (!method) {
       const available = [...methods.keys()].sort();
       const err2 = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA4, err2, serverId, requestId);
-      await writer.writeStream(EMPTY_SCHEMA4, [errBatch]);
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, err2, serverId, requestId);
+      await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
       return;
     }
     const methodType = method.type === "unary" /* UNARY */ ? "unary" : "stream";
@@ -9119,356 +9467,6 @@ async function serveUnix(protocol, options) {
     stop: shutdown,
     done
   };
-}
-// src/schema.ts
-var str = utf8();
-var bytes = binary();
-var int = int64();
-var int322 = int32();
-var int162 = int16();
-var int82 = int8();
-var uint82 = uint8();
-var uint162 = uint16();
-var uint322 = uint32();
-var uint642 = uint64();
-var float = float64();
-var float322 = float32();
-var bool2 = bool();
-function isField(x) {
-  return x != null && typeof x.name === "string" && x.type != null && typeof x.nullable === "boolean";
-}
-function isDataType(x) {
-  return x != null && typeof x.typeId === "number";
-}
-function toSchema(spec) {
-  const maybeFields = spec.fields;
-  if (Array.isArray(maybeFields)) {
-    const out = [];
-    for (const f of maybeFields) {
-      if (isField(f)) {
-        out.push(f);
-      } else {
-        out.push(field(f.name, f.type, f.nullable ?? true, f.metadata));
-      }
-    }
-    return schema(out);
-  }
-  const fields = [];
-  for (const [name, value] of Object.entries(spec)) {
-    if (isField(value)) {
-      fields.push(value);
-    } else if (isDataType(value)) {
-      fields.push(field(name, value, false));
-    } else {
-      throw new TypeError(`Invalid schema value for "${name}": expected DataType or Field, got ${typeof value}`);
-    }
-  }
-  return schema(fields);
-}
-function inferParamTypes(spec) {
-  const sch = toSchema(spec);
-  if (sch.fields.length === 0)
-    return;
-  const result = {};
-  for (const f of sch.fields) {
-    let mapped;
-    if (isUtf8(f.type))
-      mapped = "str";
-    else if (isBinary(f.type))
-      mapped = "bytes";
-    else if (isBool(f.type))
-      mapped = "bool";
-    else if (isFloat(f.type))
-      mapped = "float";
-    else if (isInt(f.type))
-      mapped = "int";
-    if (!mapped)
-      return;
-    result[f.name] = mapped;
-  }
-  return result;
-}
-
-// src/protocol.ts
-var EMPTY_SCHEMA5 = schema([]);
-
-class Protocol {
-  name;
-  protocolVersion;
-  protocolVersionParts;
-  _methods = new Map;
-  constructor(name, options) {
-    this.name = name;
-    const raw = options?.protocolVersion;
-    if (raw === undefined || raw === "") {
-      this.protocolVersion = "";
-      this.protocolVersionParts = null;
-    } else {
-      this.protocolVersion = raw;
-      this.protocolVersionParts = parseProtocolVersion(raw);
-    }
-  }
-  unary(name, config) {
-    const params = toSchema(config.params);
-    this._methods.set(name, {
-      name,
-      type: "unary" /* UNARY */,
-      paramsSchema: params,
-      resultSchema: toSchema(config.result),
-      handler: config.handler,
-      doc: config.doc,
-      defaults: config.defaults,
-      paramTypes: config.paramTypes ?? inferParamTypes(params)
-    });
-    return this;
-  }
-  producer(name, config) {
-    const params = toSchema(config.params);
-    this._methods.set(name, {
-      name,
-      type: "stream" /* STREAM */,
-      paramsSchema: params,
-      resultSchema: EMPTY_SCHEMA5,
-      outputSchema: toSchema(config.outputSchema),
-      inputSchema: EMPTY_SCHEMA5,
-      producerInit: config.init,
-      producerFn: config.produce,
-      onCancel: config.onCancel,
-      headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
-      headerInit: config.headerInit,
-      doc: config.doc,
-      defaults: config.defaults,
-      paramTypes: config.paramTypes ?? inferParamTypes(params)
-    });
-    return this;
-  }
-  exchange(name, config) {
-    const params = toSchema(config.params);
-    this._methods.set(name, {
-      name,
-      type: "stream" /* STREAM */,
-      paramsSchema: params,
-      resultSchema: EMPTY_SCHEMA5,
-      inputSchema: toSchema(config.inputSchema),
-      outputSchema: toSchema(config.outputSchema),
-      exchangeInit: config.init,
-      exchangeFn: config.exchange,
-      onCancel: config.onCancel,
-      headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
-      headerInit: config.headerInit,
-      doc: config.doc,
-      defaults: config.defaults,
-      paramTypes: config.paramTypes ?? inferParamTypes(params)
-    });
-    return this;
-  }
-  getMethods() {
-    return new Map(this._methods);
-  }
-}
-// src/server.ts
-var EMPTY_SCHEMA6 = schema([]);
-function randomStreamId() {
-  const bytes2 = new Uint8Array(16);
-  crypto.getRandomValues(bytes2);
-  let out = "";
-  for (let i = 0;i < bytes2.length; i++) {
-    out += bytes2[i].toString(16).padStart(2, "0");
-  }
-  return out;
-}
-
-class VgiRpcServer {
-  protocol;
-  enableDescribe;
-  serverId;
-  _describePromise = null;
-  protocolVersion;
-  dispatchHook = null;
-  externalConfig;
-  onServeStart = null;
-  serveStartFired = false;
-  constructor(protocol, options) {
-    this.protocol = protocol;
-    this.enableDescribe = options?.enableDescribe ?? true;
-    this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-    this.dispatchHook = options?.dispatchHook ?? null;
-    this.externalConfig = options?.externalLocation;
-    this.protocolVersion = options?.protocolVersion ?? "";
-    this.onServeStart = options?.onServeStart ?? null;
-  }
-  async notifyTransport(kind) {
-    if (this.serveStartFired)
-      return;
-    if (this.onServeStart) {
-      await this.onServeStart(kind);
-    }
-    this.serveStartFired = true;
-  }
-  async describeInfo() {
-    if (!this._describePromise) {
-      this._describePromise = buildDescribeBatch(this.protocol.name, this.protocol.getMethods(), this.serverId, this.protocol.protocolVersion || undefined).then(({ batch, metadata }) => ({
-        batch,
-        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? ""
-      }));
-    }
-    return this._describePromise;
-  }
-  checkProtocolVersion(clientVersion) {
-    const serverParts = this.protocol.protocolVersionParts;
-    const serverVersion = this.protocol.protocolVersion;
-    if (clientVersion === undefined) {
-      throw new ProtocolVersionError(`VGI client/worker protocol_version mismatch.
-` + `  Client: <not declared>
-` + `  Server: ${serverVersion}
-` + "  Direction: the client did not send a vgi_rpc.protocol_version " + "metadata key. This is either a vgi-rpc framework bug or a " + "non-VGI client connecting to a VGI worker.");
-    }
-    let clientParts;
-    try {
-      clientParts = parseProtocolVersion(clientVersion);
-    } catch {
-      throw new ProtocolVersionError(`VGI client/worker protocol_version mismatch.
-` + `  Client: ${clientVersion}
-` + `  Server: ${serverVersion}
-` + "  Direction: client sent a malformed protocol_version. " + "Expected canonical semver MAJOR.MINOR.PATCH.");
-    }
-    if (clientParts[0] === serverParts[0] && clientParts[1] === serverParts[1]) {
-      return;
-    }
-    const clientOlder = clientParts[0] < serverParts[0] || clientParts[0] === serverParts[0] && clientParts[1] < serverParts[1];
-    const direction = clientOlder ? `client is too old; upgrade the VGI extension/client to a version supporting protocol_version ${serverVersion}.` : `server is too old; upgrade the VGI worker to a version supporting protocol_version ${clientVersion}.`;
-    throw new ProtocolVersionError(`VGI client/worker protocol_version mismatch.
-` + `  Client: ${clientVersion}
-` + `  Server: ${serverVersion}
-` + `  Direction: ${direction}`);
-  }
-  async run() {
-    const stdin = process.stdin;
-    if (process.stdin.isTTY || process.stdout.isTTY) {
-      process.stderr.write("WARNING: This process communicates via Arrow IPC on stdin/stdout " + `and is not intended to be run interactively.
-` + "It should be launched as a subprocess by an RPC client " + `(e.g. vgi_rpc.connect()).
-`);
-    }
-    const reader = await IpcStreamReader.create(stdin);
-    const writer = new IpcStreamWriter;
-    try {
-      while (true) {
-        await this.notifyTransport("pipe" /* PIPE */);
-        await this.serveOne(reader, writer);
-      }
-    } catch (e) {
-      if (e.message?.includes("closed") || e.message?.includes("Expected Schema Message") || e.message?.includes("null or length 0") || e.code === "EPIPE" || e.code === "ERR_STREAM_PREMATURE_CLOSE" || e.code === "ERR_STREAM_DESTROYED" || e instanceof Error && e.message.includes("EOF")) {
-        return;
-      }
-      throw e;
-    } finally {
-      await reader.cancel();
-    }
-  }
-  async serveOne(reader, writer) {
-    const stream = await reader.readStream();
-    if (!stream) {
-      throw new Error("EOF");
-    }
-    const { schema: schema2, batches } = stream;
-    if (batches.length === 0) {
-      const err2 = new RpcError("ProtocolError", "Request stream contains no batches", "");
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, err2, this.serverId, null);
-      await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
-      return;
-    }
-    const batch = batches[0];
-    let methodName;
-    let params;
-    let requestId;
-    try {
-      const parsed = parseRequest(schema2, batch);
-      methodName = parsed.methodName;
-      params = parsed.params;
-      requestId = parsed.requestId;
-    } catch (e) {
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, e, this.serverId, null);
-      await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
-      if (e instanceof VersionError || e instanceof RpcError) {
-        return;
-      }
-      throw e;
-    }
-    if (methodName === DESCRIBE_METHOD_NAME && this.enableDescribe) {
-      const { batch: batch2 } = await this.describeInfo();
-      await writer.writeStream(batch2.schema, [batch2]);
-      return;
-    }
-    const methods = this.protocol.getMethods();
-    const method = methods.get(methodName);
-    if (!method) {
-      const available = [...methods.keys()].sort();
-      const err2 = new MethodNotImplementedError(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, err2, this.serverId, requestId);
-      await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
-      return;
-    }
-    if (this.protocol.protocolVersionParts !== null) {
-      try {
-        const md = batch.metadata;
-        this.checkProtocolVersion(md?.get(PROTOCOL_VERSION_KEY));
-      } catch (exc) {
-        const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA6;
-        const errBatch = buildErrorBatch(errSchema, exc, this.serverId, requestId);
-        await writer.writeStream(errSchema, [errBatch]);
-        return;
-      }
-    }
-    const methodType = method.type === "unary" /* UNARY */ ? "unary" : "stream";
-    let requestData;
-    try {
-      requestData = serializeBatch(batch);
-    } catch {}
-    let streamId;
-    if (methodType === "stream") {
-      streamId = randomStreamId();
-    }
-    const { protocolHash } = await this.describeInfo();
-    const info = {
-      method: methodName,
-      methodType,
-      serverId: this.serverId,
-      requestId,
-      protocol: this.protocol.name,
-      protocolHash,
-      protocolVersion: this.protocolVersion,
-      kind: "pipe" /* PIPE */,
-      principal: "",
-      authDomain: "",
-      authenticated: false,
-      remoteAddr: "",
-      requestData,
-      streamId
-    };
-    const stats = {
-      inputBatches: 0,
-      outputBatches: 0,
-      inputRows: 0,
-      outputRows: 0,
-      inputBytes: 0,
-      outputBytes: 0
-    };
-    const token = this.dispatchHook?.onDispatchStart(info);
-    let dispatchError;
-    applyDefaults(params, method.defaults);
-    try {
-      if (method.type === "unary" /* UNARY */) {
-        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig, "pipe" /* PIPE */);
-      } else {
-        await dispatchStream(method, params, writer, reader, this.serverId, requestId, this.externalConfig, "pipe" /* PIPE */);
-      }
-    } catch (e) {
-      dispatchError = e instanceof Error ? e : new Error(String(e));
-      throw e;
-    } finally {
-      this.dispatchHook?.onDispatchEnd(token, info, stats, dispatchError);
-    }
-  }
 }
 export {
   unpackStateToken,
@@ -9563,4 +9561,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=03000096478B827564756E2164756E21
+//# debugId=4D9D32B49233679B64756E2164756E21
