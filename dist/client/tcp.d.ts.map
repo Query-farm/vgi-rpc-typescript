@@ -1,0 +1,1 @@
+{"version":3,"file":"tcp.d.ts","sourceRoot":"","sources":["../../src/client/tcp.ts"],"names":[],"mappings":"AAeA,OAAO,KAAK,EAAE,SAAS,EAAE,MAAM,cAAc,CAAC;AAE9C,OAAO,KAAK,EAAE,iBAAiB,EAAE,MAAM,YAAY,CAAC;AAEpD;;;;;;;;;;;;;;GAcG;AACH,wBAAgB,UAAU,CAAC,IAAI,EAAE,MAAM,EAAE,IAAI,EAAE,MAAM,EAAE,OAAO,CAAC,EAAE,iBAAiB,GAAG,SAAS,CAiC7F"}

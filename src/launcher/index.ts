@@ -22,6 +22,7 @@
 export { computeHash } from "./hash.js";
 export { type LaunchConfig, launch } from "./launch.js";
 export { acquireLock, type FileLockHandle, tryAcquireLock } from "./lock.js";
+export { type ServeTcpHandle, type ServeTcpOptions, serveTcp } from "./serve-tcp.js";
 export { type ServeUnixHandle, type ServeUnixOptions, serveUnix } from "./serve-unix.js";
 export {
   defaultStateDir,

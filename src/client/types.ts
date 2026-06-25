@@ -49,6 +49,14 @@ export interface PipeConnectOptions {
   externalLocation?: import("../external.js").ExternalLocationConfig;
 }
 
+/**
+ * Options for {@link tcpConnect}, the raw-TCP-socket RPC client.
+ *
+ * SECURITY: raw TCP carries no authentication or TLS — connect only to
+ * trusted endpoints (use {@link httpConnect} for untrusted networks).
+ */
+export interface TcpConnectOptions extends PipeConnectOptions {}
+
 /** Options for {@link subprocessConnect}, which spawns a server process and pipes to it. */
 export interface SubprocessConnectOptions extends PipeConnectOptions {
   /** Working directory for the spawned process. Defaults to the current directory. */

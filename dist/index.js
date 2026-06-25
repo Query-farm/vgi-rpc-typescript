@@ -734,130 +734,42 @@ var init_zstd = __esm(() => {
   isBun = typeof globalThis.Bun !== "undefined";
 });
 
-// src/access-log.ts
-var _NODE_FS_MOD = "node:fs";
-function _loadWriteSync() {
-  const req = import.meta.require ?? globalThis.require ?? null;
-  if (!req) {
-    throw new Error("FdSink requires Node.js or Bun (node:fs.writeSync). For other runtimes, " + "supply a custom AccessLogSink that wraps console.log or your logger.");
-  }
-  return req(_NODE_FS_MOD).writeSync;
-}
+// src/client/tcp.ts
+import { connect } from "node:net";
 
-class FdSink {
-  fd;
-  _writeSync = _loadWriteSync();
-  constructor(fd) {
-    this.fd = fd;
-  }
-  write(line) {
-    const buf = new TextEncoder().encode(line);
-    let offset = 0;
-    while (offset < buf.length) {
-      const n = this._writeSync(this.fd, buf, offset, buf.length - offset);
-      if (n <= 0)
-        throw new Error(`access-log writeSync returned ${n}`);
-      offset += n;
-    }
-  }
-}
-function rfc3339Utc() {
-  const d = new Date;
-  const yyyy = d.getUTCFullYear().toString().padStart(4, "0");
-  const mm = (d.getUTCMonth() + 1).toString().padStart(2, "0");
-  const dd = d.getUTCDate().toString().padStart(2, "0");
-  const hh = d.getUTCHours().toString().padStart(2, "0");
-  const mi = d.getUTCMinutes().toString().padStart(2, "0");
-  const ss = d.getUTCSeconds().toString().padStart(2, "0");
-  const ms = d.getUTCMilliseconds().toString().padStart(3, "0");
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}.${ms}Z`;
-}
-function base64(bytes) {
-  return Buffer.from(bytes).toString("base64");
-}
-function roundTo2(f) {
-  return Math.round(f * 100) / 100;
-}
+// src/client/pipe.ts
+import {
+  Field,
+  makeData,
+  RecordBatch,
+  RecordBatchStreamWriter as RecordBatchStreamWriter2,
+  Schema,
+  Struct,
+  vectorFromArray
+} from "@query-farm/apache-arrow";
 
-class AccessLogHook {
-  sink;
-  serverVersion;
-  level;
-  constructor(sink, options = {}) {
-    this.sink = sink;
-    if (typeof options === "string") {
-      this.serverVersion = options;
-      this.level = "INFO";
-    } else {
-      this.serverVersion = options.serverVersion ?? "";
-      this.level = options.level ?? "INFO";
-    }
-  }
-  onDispatchStart(_info) {
-    const token = { startNs: process.hrtime.bigint() };
-    return token;
-  }
-  onDispatchEnd(token, info, stats, error) {
-    const t = token;
-    const durationMs = t ? roundTo2(Number(process.hrtime.bigint() - t.startNs) / 1e6) : 0;
-    const status = error ? "error" : "ok";
-    const errType = error ? error.type ?? error.constructor.name : "";
-    const errMsg = error?.message ?? "";
-    const protocol = info.protocol ?? "";
-    const rec = {
-      timestamp: rfc3339Utc(),
-      level: "INFO",
-      logger: "vgi_rpc.access",
-      message: `${protocol}.${info.method} ${status}`,
-      server_id: info.serverId,
-      protocol,
-      protocol_hash: info.protocolHash ?? "",
-      method: info.method,
-      method_type: info.methodType,
-      principal: info.principal ?? "",
-      auth_domain: info.authDomain ?? "",
-      authenticated: info.authenticated ?? false,
-      remote_addr: info.remoteAddr ?? "",
-      duration_ms: durationMs,
-      status,
-      error_type: errType
-    };
-    if (errMsg)
-      rec.error_message = errMsg;
-    if (this.serverVersion)
-      rec.server_version = this.serverVersion;
-    if (info.protocolVersion)
-      rec.protocol_version = info.protocolVersion;
-    if (info.requestId)
-      rec.request_id = info.requestId;
-    if (info.requestData && info.requestData.length > 0) {
-      const encoded = base64(info.requestData);
-      if (this.level === "DEBUG") {
-        rec.request_data = encoded;
-      } else {
-        rec.original_request_bytes = encoded.length;
-        rec.truncated = true;
-      }
-    }
-    if (info.methodType === "stream") {
-      rec.stream_id = info.streamId ?? "00000000000000000000000000000000";
-    }
-    if (info.cancelled)
-      rec.cancelled = true;
-    if (stats.inputBatches + stats.outputBatches + stats.inputRows + stats.outputRows + stats.inputBytes + stats.outputBytes !== 0) {
-      rec.input_batches = stats.inputBatches;
-      rec.output_batches = stats.outputBatches;
-      rec.input_rows = stats.inputRows;
-      rec.output_rows = stats.outputRows;
-      rec.input_bytes = stats.inputBytes;
-      rec.output_bytes = stats.outputBytes;
-    }
-    try {
-      this.sink.write(`${JSON.stringify(rec)}
-`);
-    } catch {}
-  }
-}
+// src/constants.ts
+var RPC_METHOD_KEY = "vgi_rpc.method";
+var LOG_LEVEL_KEY = "vgi_rpc.log_level";
+var LOG_MESSAGE_KEY = "vgi_rpc.log_message";
+var LOG_EXTRA_KEY = "vgi_rpc.log_extra";
+var REQUEST_VERSION_KEY = "vgi_rpc.request_version";
+var REQUEST_VERSION = "1";
+var SERVER_ID_KEY = "vgi_rpc.server_id";
+var REQUEST_ID_KEY = "vgi_rpc.request_id";
+var PROTOCOL_NAME_KEY = "vgi_rpc.protocol_name";
+var DESCRIBE_VERSION_KEY = "vgi_rpc.describe_version";
+var PROTOCOL_HASH_KEY = "vgi_rpc.protocol_hash";
+var DESCRIBE_VERSION = "4";
+var PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
+var DESCRIBE_METHOD_NAME = "__describe__";
+var STATE_KEY = "vgi_rpc.stream_state#b64";
+var CANCEL_KEY = "vgi_rpc.cancel";
+var LOCATION_KEY = "vgi_rpc.location";
+var LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
+var RPC_ERROR_HEADER = "X-VGI-RPC-Error";
+var ERROR_KIND_KEY = "vgi_rpc.error_kind";
+
 // src/errors.ts
 class RpcError extends Error {
   errorType;
@@ -926,49 +838,6 @@ class ServerDrainingError extends Error {
     this.name = "ServerDrainingError";
   }
 }
-
-// src/auth.ts
-class AuthContext {
-  domain;
-  authenticated;
-  principal;
-  claims;
-  constructor(domain, authenticated, principal, claims = {}) {
-    this.domain = domain;
-    this.authenticated = authenticated;
-    this.principal = principal;
-    this.claims = claims;
-  }
-  static anonymous() {
-    return new AuthContext("", false, null);
-  }
-  requireAuthenticated() {
-    if (!this.authenticated) {
-      throw new RpcError("AuthenticationError", "Authentication required", "");
-    }
-  }
-}
-// src/constants.ts
-var RPC_METHOD_KEY = "vgi_rpc.method";
-var LOG_LEVEL_KEY = "vgi_rpc.log_level";
-var LOG_MESSAGE_KEY = "vgi_rpc.log_message";
-var LOG_EXTRA_KEY = "vgi_rpc.log_extra";
-var REQUEST_VERSION_KEY = "vgi_rpc.request_version";
-var REQUEST_VERSION = "1";
-var SERVER_ID_KEY = "vgi_rpc.server_id";
-var REQUEST_ID_KEY = "vgi_rpc.request_id";
-var PROTOCOL_NAME_KEY = "vgi_rpc.protocol_name";
-var DESCRIBE_VERSION_KEY = "vgi_rpc.describe_version";
-var PROTOCOL_HASH_KEY = "vgi_rpc.protocol_hash";
-var DESCRIBE_VERSION = "4";
-var PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
-var DESCRIBE_METHOD_NAME = "__describe__";
-var STATE_KEY = "vgi_rpc.stream_state#b64";
-var CANCEL_KEY = "vgi_rpc.cancel";
-var LOCATION_KEY = "vgi_rpc.location";
-var LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
-var RPC_ERROR_HEADER = "X-VGI-RPC-Error";
-var ERROR_KIND_KEY = "vgi_rpc.error_kind";
 
 // src/arrow/impl-arrowjs/index.ts
 import {
@@ -1509,63 +1378,6 @@ async function readRequestFromBody(body) {
   return { schema: batch.schema, batch };
 }
 
-// src/client/capabilities.ts
-var MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes";
-var UPLOAD_URL_HEADER = "VGI-Upload-URL-Support";
-var MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes";
-function parseHeaderInt(headers, name) {
-  const raw = headers.get(name) ?? headers.get(name.toLowerCase());
-  if (raw == null)
-    return null;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-function parseCapabilitiesFromHeaders(headers) {
-  const uploadRaw = headers.get(UPLOAD_URL_HEADER) ?? headers.get(UPLOAD_URL_HEADER.toLowerCase());
-  const uploadUrlSupport = uploadRaw === "true";
-  let cacheExpiresAt = null;
-  const cc = headers.get("Cache-Control") ?? headers.get("cache-control");
-  if (cc) {
-    for (const token of cc.split(",")) {
-      const t = token.trim().toLowerCase();
-      if (t.startsWith("max-age=")) {
-        const seconds = Number.parseFloat(t.slice("max-age=".length));
-        if (Number.isFinite(seconds)) {
-          cacheExpiresAt = Date.now() + seconds * 1000;
-        }
-        break;
-      }
-    }
-  }
-  return {
-    maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
-    uploadUrlSupport,
-    maxUploadBytes: parseHeaderInt(headers, MAX_UPLOAD_BYTES_HEADER),
-    cacheExpiresAt
-  };
-}
-function isCapabilitySnapshotFresh(snapshot) {
-  if (!snapshot)
-    return false;
-  if (snapshot.cacheExpiresAt == null)
-    return true;
-  return Date.now() < snapshot.cacheExpiresAt;
-}
-
-// src/client/introspect.ts
-import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
-
-// src/client/ipc.ts
-import {
-  Binary,
-  Bool,
-  DataType,
-  Float64,
-  Int64,
-  RecordBatchReader as RecordBatchReader3,
-  Utf8
-} from "@query-farm/apache-arrow";
-
 // src/wire/reader.ts
 import { RecordBatchReader as RecordBatchReader2 } from "@query-farm/apache-arrow";
 
@@ -1637,7 +1449,19 @@ class IpcStreamReader {
   }
 }
 
+// src/client/introspect.ts
+import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
+
 // src/client/ipc.ts
+import {
+  Binary,
+  Bool,
+  DataType,
+  Float64,
+  Int64,
+  RecordBatchReader as RecordBatchReader3,
+  Utf8
+} from "@query-farm/apache-arrow";
 function inferArrowType(value) {
   if (typeof value === "string")
     return new Utf8;
@@ -1853,8 +1677,663 @@ async function httpIntrospect(baseUrl, options) {
   return parseDescribeResponse(batches);
 }
 
+// src/client/pipe.ts
+class PipeIncrementalWriter {
+  writer;
+  writeFn;
+  closed = false;
+  constructor(writeFn, schema2) {
+    this.writeFn = writeFn;
+    this.writer = new RecordBatchStreamWriter2;
+    this.writer.reset(undefined, schema2);
+    this.drain();
+  }
+  write(batch) {
+    if (this.closed)
+      throw new Error("PipeIncrementalWriter already closed");
+    this.writer._writeRecordBatch(batch);
+    this.drain();
+  }
+  close() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    const eos = new Uint8Array(new Int32Array([-1, 0]).buffer);
+    this.writeFn(eos);
+  }
+  drain() {
+    const values = this.writer._sink._values;
+    for (const chunk of values) {
+      this.writeFn(chunk);
+    }
+    values.length = 0;
+  }
+}
+
+class PipeStreamSession {
+  _reader;
+  _writeFn;
+  _onLog;
+  _header;
+  _inputWriter = null;
+  _inputSchema = null;
+  _outputStreamOpened = false;
+  _closed = false;
+  _outputSchema;
+  _releaseBusy;
+  _setDrainPromise;
+  _externalConfig;
+  constructor(opts) {
+    this._reader = opts.reader;
+    this._writeFn = opts.writeFn;
+    this._onLog = opts.onLog;
+    this._header = opts.header;
+    this._outputSchema = opts.outputSchema;
+    this._releaseBusy = opts.releaseBusy;
+    this._setDrainPromise = opts.setDrainPromise;
+    this._externalConfig = opts.externalConfig;
+  }
+  get header() {
+    return this._header;
+  }
+  async _readOutputBatch() {
+    while (true) {
+      const batch = await this._reader.readNextBatch();
+      if (batch === null)
+        return null;
+      if (batch.numRows === 0) {
+        if (isExternalLocationBatch(batch)) {
+          return await resolveExternalLocation(batch, this._externalConfig);
+        }
+        if (dispatchLogOrError(batch, this._onLog)) {
+          continue;
+        }
+      }
+      return batch;
+    }
+  }
+  async _ensureOutputStream() {
+    if (this._outputStreamOpened)
+      return;
+    this._outputStreamOpened = true;
+    const schema2 = await this._reader.openNextStream();
+    if (!schema2) {
+      throw new RpcError("ProtocolError", "Expected output stream but got EOF", "");
+    }
+  }
+  async exchange(input) {
+    if (this._closed) {
+      throw new RpcError("ProtocolError", "Stream session is closed", "");
+    }
+    let inputSchema;
+    let batch;
+    if (input.length === 0) {
+      inputSchema = this._inputSchema ?? this._outputSchema;
+      const children = inputSchema.fields.map((f) => {
+        return makeData({ type: f.type, length: 0, nullCount: 0 });
+      });
+      const structType = new Struct(inputSchema.fields);
+      const data = makeData({
+        type: structType,
+        length: 0,
+        children,
+        nullCount: 0
+      });
+      batch = new RecordBatch(inputSchema, data);
+    } else {
+      const keys = Object.keys(input[0]);
+      const fields = keys.map((key) => {
+        let sample;
+        for (const row of input) {
+          if (row[key] != null) {
+            sample = row[key];
+            break;
+          }
+        }
+        const arrowType = inferArrowType(sample);
+        return new Field(key, arrowType, true);
+      });
+      inputSchema = new Schema(fields);
+      if (this._inputSchema) {
+        const cached = this._inputSchema;
+        if (cached.fields.length !== inputSchema.fields.length || cached.fields.some((f, i) => f.name !== inputSchema.fields[i].name)) {
+          throw new RpcError("ProtocolError", `Exchange input schema changed: expected [${cached.fields.map((f) => f.name).join(", ")}] ` + `but got [${inputSchema.fields.map((f) => f.name).join(", ")}]`, "");
+        }
+      } else {
+        this._inputSchema = inputSchema;
+      }
+      const children = inputSchema.fields.map((f) => {
+        const values = input.map((row) => row[f.name]);
+        return vectorFromArray(values, f.type).data[0];
+      });
+      const structType = new Struct(inputSchema.fields);
+      const data = makeData({
+        type: structType,
+        length: input.length,
+        children,
+        nullCount: 0
+      });
+      batch = new RecordBatch(inputSchema, data);
+    }
+    if (!this._inputWriter) {
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
+    }
+    this._inputWriter.write(batch);
+    await this._ensureOutputStream();
+    try {
+      const outputBatch = await this._readOutputBatch();
+      if (outputBatch === null) {
+        return [];
+      }
+      return extractBatchRows(outputBatch);
+    } catch (e) {
+      await this._cleanup();
+      throw e;
+    }
+  }
+  async _cleanup() {
+    if (this._closed)
+      return;
+    this._closed = true;
+    if (this._inputWriter) {
+      this._inputWriter.close();
+      this._inputWriter = null;
+    }
+    try {
+      if (this._outputStreamOpened) {
+        while (await this._reader.readNextBatch() !== null) {}
+      }
+    } catch {}
+    this._releaseBusy();
+  }
+  async* [Symbol.asyncIterator]() {
+    if (this._closed)
+      return;
+    try {
+      const tickSchema = new Schema([]);
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
+      const structType = new Struct(tickSchema.fields);
+      const tickData = makeData({
+        type: structType,
+        length: 0,
+        children: [],
+        nullCount: 0
+      });
+      const tickBatch = new RecordBatch(tickSchema, tickData);
+      while (true) {
+        this._inputWriter.write(tickBatch);
+        await this._ensureOutputStream();
+        const outputBatch = await this._readOutputBatch();
+        if (outputBatch === null) {
+          break;
+        }
+        yield extractBatchRows(outputBatch);
+      }
+    } finally {
+      if (this._inputWriter) {
+        this._inputWriter.close();
+        this._inputWriter = null;
+      }
+      try {
+        if (this._outputStreamOpened) {
+          while (await this._reader.readNextBatch() !== null) {}
+        }
+      } catch {}
+      this._closed = true;
+      this._releaseBusy();
+    }
+  }
+  close() {
+    if (this._closed)
+      return;
+    this._closed = true;
+    if (this._inputWriter) {
+      this._inputWriter.close();
+      this._inputWriter = null;
+    } else {
+      const emptySchema = new Schema([]);
+      const ipc = serializeIpcStream(emptySchema, []);
+      this._writeFn(ipc);
+    }
+    const drainPromise = (async () => {
+      try {
+        if (!this._outputStreamOpened) {
+          const schema2 = await this._reader.openNextStream();
+          if (schema2) {
+            while (await this._reader.readNextBatch() !== null) {}
+          }
+        } else {
+          while (await this._reader.readNextBatch() !== null) {}
+        }
+      } catch {} finally {
+        this._releaseBusy();
+      }
+    })();
+    this._setDrainPromise(drainPromise);
+  }
+}
+function pipeConnect(readable, writable, options) {
+  const onLog = options?.onLog;
+  const externalConfig = options?.externalLocation;
+  let reader = null;
+  let readerPromise = null;
+  let methodCache = null;
+  let protocolName = "";
+  let serverProtocolVersion = "";
+  let _busy = false;
+  let _drainPromise = null;
+  let closed = false;
+  const writeFn = (bytes) => {
+    writable.write(bytes);
+    writable.flush?.();
+  };
+  async function ensureReader() {
+    if (reader)
+      return reader;
+    if (!readerPromise) {
+      readerPromise = IpcStreamReader.create(readable);
+    }
+    reader = await readerPromise;
+    return reader;
+  }
+  async function acquireBusy() {
+    if (_drainPromise) {
+      await _drainPromise;
+      _drainPromise = null;
+    }
+    if (_busy) {
+      throw new Error("Pipe transport is busy — another call or stream is in progress. " + "Pipe connections are single-threaded; wait for the current operation to complete.");
+    }
+    _busy = true;
+  }
+  function releaseBusy() {
+    _busy = false;
+  }
+  function setDrainPromise(p) {
+    _drainPromise = p;
+  }
+  async function ensureMethodCache() {
+    if (methodCache)
+      return methodCache;
+    await acquireBusy();
+    try {
+      const emptySchema = new Schema([]);
+      const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
+      writeFn(body);
+      const r = await ensureReader();
+      const response = await r.readStream();
+      if (!response) {
+        throw new Error("EOF reading __describe__ response");
+      }
+      const desc = await parseDescribeResponse(response.batches, onLog);
+      protocolName = desc.protocolName;
+      serverProtocolVersion = desc.protocolVersion;
+      methodCache = new Map(desc.methods.map((m) => [m.name, m]));
+      return methodCache;
+    } finally {
+      releaseBusy();
+    }
+  }
+  return {
+    async call(method, params) {
+      const methods = await ensureMethodCache();
+      await acquireBusy();
+      try {
+        const info = methods.get(method);
+        if (!info) {
+          throw new Error(`Unknown method: '${method}'`);
+        }
+        const r = await ensureReader();
+        const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+        writeFn(body);
+        const response = await r.readStream();
+        if (!response) {
+          throw new Error("EOF reading response");
+        }
+        let resultBatch = null;
+        for (let batch of response.batches) {
+          if (batch.numRows === 0) {
+            if (isExternalLocationBatch(batch)) {
+              batch = await resolveExternalLocation(batch, externalConfig);
+            } else {
+              dispatchLogOrError(batch, onLog);
+              continue;
+            }
+          }
+          resultBatch = batch;
+        }
+        if (!resultBatch) {
+          return null;
+        }
+        const rows = extractBatchRows(resultBatch);
+        if (rows.length === 0)
+          return null;
+        if (info.resultSchema.fields.length === 0)
+          return null;
+        return rows[0];
+      } finally {
+        releaseBusy();
+      }
+    },
+    async stream(method, params) {
+      const methods = await ensureMethodCache();
+      await acquireBusy();
+      try {
+        const info = methods.get(method);
+        if (!info) {
+          throw new Error(`Unknown method: '${method}'`);
+        }
+        const r = await ensureReader();
+        const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+        writeFn(body);
+        let header = null;
+        if (info.headerSchema) {
+          const headerStream = await r.readStream();
+          if (headerStream) {
+            for (const batch of headerStream.batches) {
+              if (batch.numRows === 0) {
+                dispatchLogOrError(batch, onLog);
+                continue;
+              }
+              const rows = extractBatchRows(batch);
+              if (rows.length > 0) {
+                header = rows[0];
+              }
+            }
+          }
+        }
+        const outputSchema = info.outputSchema ?? info.resultSchema;
+        return new PipeStreamSession({
+          reader: r,
+          writeFn,
+          onLog,
+          header,
+          outputSchema,
+          releaseBusy,
+          setDrainPromise,
+          externalConfig
+        });
+      } catch (e) {
+        try {
+          const r = await ensureReader();
+          const emptySchema = new Schema([]);
+          const ipc = serializeIpcStream(emptySchema, []);
+          writeFn(ipc);
+          const outStream = await r.readStream();
+        } catch {}
+        releaseBusy();
+        throw e;
+      }
+    },
+    async describe() {
+      const methods = await ensureMethodCache();
+      return {
+        protocolName,
+        protocolVersion: serverProtocolVersion,
+        methods: [...methods.values()]
+      };
+    },
+    close() {
+      if (closed)
+        return;
+      closed = true;
+      writable.end();
+    }
+  };
+}
+function subprocessConnect(cmd, options) {
+  const proc = Bun.spawn(cmd, {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: options?.stderr ?? "ignore",
+    cwd: options?.cwd,
+    env: options?.env ? { ...process.env, ...options.env } : undefined
+  });
+  const stdout = proc.stdout;
+  const writable = {
+    write(data) {
+      proc.stdin.write(data);
+    },
+    flush() {
+      proc.stdin.flush();
+    },
+    end() {
+      proc.stdin.end();
+    }
+  };
+  const client = pipeConnect(stdout, writable, {
+    onLog: options?.onLog,
+    externalLocation: options?.externalLocation
+  });
+  const originalClose = client.close;
+  client.close = () => {
+    originalClose.call(client);
+    try {
+      proc.kill();
+    } catch {}
+  };
+  return client;
+}
+
+// src/client/tcp.ts
+function tcpConnect(host, port, options) {
+  const socket = connect({ host, port });
+  socket.setNoDelay(true);
+  socket.on("error", () => {});
+  const readable = socket;
+  const writable = {
+    write(data) {
+      socket.write(data);
+    },
+    end() {
+      socket.end();
+    }
+  };
+  const client = pipeConnect(readable, writable, {
+    onLog: options?.onLog,
+    externalLocation: options?.externalLocation
+  });
+  const originalClose = client.close;
+  client.close = () => {
+    originalClose.call(client);
+    try {
+      socket.destroy();
+    } catch {}
+  };
+  return client;
+}
+// src/access-log.ts
+var _NODE_FS_MOD = "node:fs";
+function _loadWriteSync() {
+  const req = import.meta.require ?? globalThis.require ?? null;
+  if (!req) {
+    throw new Error("FdSink requires Node.js or Bun (node:fs.writeSync). For other runtimes, " + "supply a custom AccessLogSink that wraps console.log or your logger.");
+  }
+  return req(_NODE_FS_MOD).writeSync;
+}
+
+class FdSink {
+  fd;
+  _writeSync = _loadWriteSync();
+  constructor(fd) {
+    this.fd = fd;
+  }
+  write(line) {
+    const buf = new TextEncoder().encode(line);
+    let offset = 0;
+    while (offset < buf.length) {
+      const n = this._writeSync(this.fd, buf, offset, buf.length - offset);
+      if (n <= 0)
+        throw new Error(`access-log writeSync returned ${n}`);
+      offset += n;
+    }
+  }
+}
+function rfc3339Utc() {
+  const d = new Date;
+  const yyyy = d.getUTCFullYear().toString().padStart(4, "0");
+  const mm = (d.getUTCMonth() + 1).toString().padStart(2, "0");
+  const dd = d.getUTCDate().toString().padStart(2, "0");
+  const hh = d.getUTCHours().toString().padStart(2, "0");
+  const mi = d.getUTCMinutes().toString().padStart(2, "0");
+  const ss = d.getUTCSeconds().toString().padStart(2, "0");
+  const ms = d.getUTCMilliseconds().toString().padStart(3, "0");
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}.${ms}Z`;
+}
+function base64(bytes) {
+  return Buffer.from(bytes).toString("base64");
+}
+function roundTo2(f) {
+  return Math.round(f * 100) / 100;
+}
+
+class AccessLogHook {
+  sink;
+  serverVersion;
+  level;
+  constructor(sink, options = {}) {
+    this.sink = sink;
+    if (typeof options === "string") {
+      this.serverVersion = options;
+      this.level = "INFO";
+    } else {
+      this.serverVersion = options.serverVersion ?? "";
+      this.level = options.level ?? "INFO";
+    }
+  }
+  onDispatchStart(_info) {
+    const token = { startNs: process.hrtime.bigint() };
+    return token;
+  }
+  onDispatchEnd(token, info, stats, error) {
+    const t = token;
+    const durationMs = t ? roundTo2(Number(process.hrtime.bigint() - t.startNs) / 1e6) : 0;
+    const status = error ? "error" : "ok";
+    const errType = error ? error.type ?? error.constructor.name : "";
+    const errMsg = error?.message ?? "";
+    const protocol = info.protocol ?? "";
+    const rec = {
+      timestamp: rfc3339Utc(),
+      level: "INFO",
+      logger: "vgi_rpc.access",
+      message: `${protocol}.${info.method} ${status}`,
+      server_id: info.serverId,
+      protocol,
+      protocol_hash: info.protocolHash ?? "",
+      method: info.method,
+      method_type: info.methodType,
+      principal: info.principal ?? "",
+      auth_domain: info.authDomain ?? "",
+      authenticated: info.authenticated ?? false,
+      remote_addr: info.remoteAddr ?? "",
+      duration_ms: durationMs,
+      status,
+      error_type: errType
+    };
+    if (errMsg)
+      rec.error_message = errMsg;
+    if (this.serverVersion)
+      rec.server_version = this.serverVersion;
+    if (info.protocolVersion)
+      rec.protocol_version = info.protocolVersion;
+    if (info.requestId)
+      rec.request_id = info.requestId;
+    if (info.requestData && info.requestData.length > 0) {
+      const encoded = base64(info.requestData);
+      if (this.level === "DEBUG") {
+        rec.request_data = encoded;
+      } else {
+        rec.original_request_bytes = encoded.length;
+        rec.truncated = true;
+      }
+    }
+    if (info.methodType === "stream") {
+      rec.stream_id = info.streamId ?? "00000000000000000000000000000000";
+    }
+    if (info.cancelled)
+      rec.cancelled = true;
+    if (stats.inputBatches + stats.outputBatches + stats.inputRows + stats.outputRows + stats.inputBytes + stats.outputBytes !== 0) {
+      rec.input_batches = stats.inputBatches;
+      rec.output_batches = stats.outputBatches;
+      rec.input_rows = stats.inputRows;
+      rec.output_rows = stats.outputRows;
+      rec.input_bytes = stats.inputBytes;
+      rec.output_bytes = stats.outputBytes;
+    }
+    try {
+      this.sink.write(`${JSON.stringify(rec)}
+`);
+    } catch {}
+  }
+}
+// src/auth.ts
+class AuthContext {
+  domain;
+  authenticated;
+  principal;
+  claims;
+  constructor(domain, authenticated, principal, claims = {}) {
+    this.domain = domain;
+    this.authenticated = authenticated;
+    this.principal = principal;
+    this.claims = claims;
+  }
+  static anonymous() {
+    return new AuthContext("", false, null);
+  }
+  requireAuthenticated() {
+    if (!this.authenticated) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
+  }
+}
+// src/client/capabilities.ts
+var MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes";
+var UPLOAD_URL_HEADER = "VGI-Upload-URL-Support";
+var MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes";
+function parseHeaderInt(headers, name) {
+  const raw = headers.get(name) ?? headers.get(name.toLowerCase());
+  if (raw == null)
+    return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function parseCapabilitiesFromHeaders(headers) {
+  const uploadRaw = headers.get(UPLOAD_URL_HEADER) ?? headers.get(UPLOAD_URL_HEADER.toLowerCase());
+  const uploadUrlSupport = uploadRaw === "true";
+  let cacheExpiresAt = null;
+  const cc = headers.get("Cache-Control") ?? headers.get("cache-control");
+  if (cc) {
+    for (const token of cc.split(",")) {
+      const t = token.trim().toLowerCase();
+      if (t.startsWith("max-age=")) {
+        const seconds = Number.parseFloat(t.slice("max-age=".length));
+        if (Number.isFinite(seconds)) {
+          cacheExpiresAt = Date.now() + seconds * 1000;
+        }
+        break;
+      }
+    }
+  }
+  return {
+    maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
+    uploadUrlSupport,
+    maxUploadBytes: parseHeaderInt(headers, MAX_UPLOAD_BYTES_HEADER),
+    cacheExpiresAt
+  };
+}
+function isCapabilitySnapshotFresh(snapshot) {
+  if (!snapshot)
+    return false;
+  if (snapshot.cacheExpiresAt == null)
+    return true;
+  return Date.now() < snapshot.cacheExpiresAt;
+}
+
 // src/client/stream.ts
-import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
+import { Field as Field2, makeData as makeData2, RecordBatch as RecordBatch2, Schema as Schema2, Struct as Struct2, vectorFromArray as vectorFromArray2 } from "@query-farm/apache-arrow";
 class HttpStreamSession {
   _baseUrl;
   _prefix;
@@ -1939,7 +2418,7 @@ class HttpStreamSession {
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
       const metadata2 = new Map;
       metadata2.set(STATE_KEY, this._stateToken);
-      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, metadata2);
+      const batchWithMeta = new RecordBatch2(zeroSchema, emptyBatch.data, metadata2);
       return this._doExchange(zeroSchema, [batchWithMeta]);
     }
     const keys = Object.keys(input[0]);
@@ -1953,15 +2432,15 @@ class HttpStreamSession {
       }
       const arrowType = inferArrowType(sample);
       const nullable = input.some((row) => row[key] == null);
-      return new Field(key, arrowType, nullable);
+      return new Field2(key, arrowType, nullable);
     });
-    const inputSchema = new Schema(fields);
+    const inputSchema = new Schema2(fields);
     const children = inputSchema.fields.map((f) => {
       const values = input.map((row) => row[f.name]);
-      return vectorFromArray(values, f.type).data[0];
+      return vectorFromArray2(values, f.type).data[0];
     });
-    const structType = new Struct(inputSchema.fields);
-    const data = makeData({
+    const structType = new Struct2(inputSchema.fields);
+    const data = makeData2({
       type: structType,
       length: input.length,
       children,
@@ -1969,7 +2448,7 @@ class HttpStreamSession {
     });
     const metadata = new Map;
     metadata.set(STATE_KEY, this._stateToken);
-    const batch = new RecordBatch(inputSchema, data, metadata);
+    const batch = new RecordBatch2(inputSchema, data, metadata);
     return this._doExchange(inputSchema, [batch]);
   }
   async _doExchange(schema2, batches) {
@@ -2000,16 +2479,16 @@ class HttpStreamSession {
   }
   _buildEmptyBatch(schema2) {
     const children = schema2.fields.map((f) => {
-      return makeData({ type: f.type, length: 0, nullCount: 0 });
+      return makeData2({ type: f.type, length: 0, nullCount: 0 });
     });
-    const structType = new Struct(schema2.fields);
-    const data = makeData({
+    const structType = new Struct2(schema2.fields);
+    const data = makeData2({
       type: structType,
       length: 0,
       children,
       nullCount: 0
     });
-    return new RecordBatch(schema2, data);
+    return new RecordBatch2(schema2, data);
   }
   async* [Symbol.asyncIterator]() {
     for (let batch of this._pendingBatches) {
@@ -2057,17 +2536,17 @@ class HttpStreamSession {
     }
   }
   async _sendContinuation(token) {
-    const emptySchema = new Schema([]);
+    const emptySchema = new Schema2([]);
     const metadata = new Map;
     metadata.set(STATE_KEY, token);
-    const structType = new Struct(emptySchema.fields);
-    const data = makeData({
+    const structType = new Struct2(emptySchema.fields);
+    const data = makeData2({
       type: structType,
       length: 1,
       children: [],
       nullCount: 0
     });
-    const batch = new RecordBatch(emptySchema, data, metadata);
+    const batch = new RecordBatch2(emptySchema, data, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
     const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
     if (resp.status === 401) {
@@ -2079,9 +2558,9 @@ class HttpStreamSession {
 }
 
 // src/client/uploadUrl.ts
-import { Field as Field2, Int64 as Int642, RecordBatchReader as RecordBatchReader4, Schema as Schema2 } from "@query-farm/apache-arrow";
+import { Field as Field3, Int64 as Int642, RecordBatchReader as RecordBatchReader4, Schema as Schema3 } from "@query-farm/apache-arrow";
 var UPLOAD_URL_METHOD = "__upload_url__";
-var UPLOAD_URL_PARAMS_SCHEMA = new Schema2([new Field2("count", new Int642, false)]);
+var UPLOAD_URL_PARAMS_SCHEMA = new Schema3([new Field3("count", new Int642, false)]);
 async function requestUploadUrls(baseUrl, prefix, count, authorization) {
   const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA, { count: BigInt(count) }, UPLOAD_URL_METHOD);
   const headers = { "Content-Type": ARROW_CONTENT_TYPE };
@@ -2154,8 +2633,8 @@ async function buildPointerRequestBody(originalBody, downloadUrl) {
     if (!merged.has(k))
       merged.set(k, v);
   }
-  const { RecordBatch: RecordBatch2 } = await import("@query-farm/apache-arrow");
-  const pointerWithMeta = new RecordBatch2(schema2, pointer.data, merged);
+  const { RecordBatch: RecordBatch3 } = await import("@query-farm/apache-arrow");
+  const pointerWithMeta = new RecordBatch3(schema2, pointer.data, merged);
   return serializeIpcStream(schema2, [pointerWithMeta]);
 }
 async function externalizeRequestBody(body, opts) {
@@ -2573,454 +3052,6 @@ function parseDeviceCodeClientSecret(wwwAuthenticate) {
     return null;
   return match[1];
 }
-// src/client/pipe.ts
-import {
-  Field as Field3,
-  makeData as makeData2,
-  RecordBatch as RecordBatch2,
-  RecordBatchStreamWriter as RecordBatchStreamWriter2,
-  Schema as Schema3,
-  Struct as Struct2,
-  vectorFromArray as vectorFromArray2
-} from "@query-farm/apache-arrow";
-class PipeIncrementalWriter {
-  writer;
-  writeFn;
-  closed = false;
-  constructor(writeFn, schema2) {
-    this.writeFn = writeFn;
-    this.writer = new RecordBatchStreamWriter2;
-    this.writer.reset(undefined, schema2);
-    this.drain();
-  }
-  write(batch) {
-    if (this.closed)
-      throw new Error("PipeIncrementalWriter already closed");
-    this.writer._writeRecordBatch(batch);
-    this.drain();
-  }
-  close() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    const eos = new Uint8Array(new Int32Array([-1, 0]).buffer);
-    this.writeFn(eos);
-  }
-  drain() {
-    const values = this.writer._sink._values;
-    for (const chunk of values) {
-      this.writeFn(chunk);
-    }
-    values.length = 0;
-  }
-}
-
-class PipeStreamSession {
-  _reader;
-  _writeFn;
-  _onLog;
-  _header;
-  _inputWriter = null;
-  _inputSchema = null;
-  _outputStreamOpened = false;
-  _closed = false;
-  _outputSchema;
-  _releaseBusy;
-  _setDrainPromise;
-  _externalConfig;
-  constructor(opts) {
-    this._reader = opts.reader;
-    this._writeFn = opts.writeFn;
-    this._onLog = opts.onLog;
-    this._header = opts.header;
-    this._outputSchema = opts.outputSchema;
-    this._releaseBusy = opts.releaseBusy;
-    this._setDrainPromise = opts.setDrainPromise;
-    this._externalConfig = opts.externalConfig;
-  }
-  get header() {
-    return this._header;
-  }
-  async _readOutputBatch() {
-    while (true) {
-      const batch = await this._reader.readNextBatch();
-      if (batch === null)
-        return null;
-      if (batch.numRows === 0) {
-        if (isExternalLocationBatch(batch)) {
-          return await resolveExternalLocation(batch, this._externalConfig);
-        }
-        if (dispatchLogOrError(batch, this._onLog)) {
-          continue;
-        }
-      }
-      return batch;
-    }
-  }
-  async _ensureOutputStream() {
-    if (this._outputStreamOpened)
-      return;
-    this._outputStreamOpened = true;
-    const schema2 = await this._reader.openNextStream();
-    if (!schema2) {
-      throw new RpcError("ProtocolError", "Expected output stream but got EOF", "");
-    }
-  }
-  async exchange(input) {
-    if (this._closed) {
-      throw new RpcError("ProtocolError", "Stream session is closed", "");
-    }
-    let inputSchema;
-    let batch;
-    if (input.length === 0) {
-      inputSchema = this._inputSchema ?? this._outputSchema;
-      const children = inputSchema.fields.map((f) => {
-        return makeData2({ type: f.type, length: 0, nullCount: 0 });
-      });
-      const structType = new Struct2(inputSchema.fields);
-      const data = makeData2({
-        type: structType,
-        length: 0,
-        children,
-        nullCount: 0
-      });
-      batch = new RecordBatch2(inputSchema, data);
-    } else {
-      const keys = Object.keys(input[0]);
-      const fields = keys.map((key) => {
-        let sample;
-        for (const row of input) {
-          if (row[key] != null) {
-            sample = row[key];
-            break;
-          }
-        }
-        const arrowType = inferArrowType(sample);
-        return new Field3(key, arrowType, true);
-      });
-      inputSchema = new Schema3(fields);
-      if (this._inputSchema) {
-        const cached = this._inputSchema;
-        if (cached.fields.length !== inputSchema.fields.length || cached.fields.some((f, i) => f.name !== inputSchema.fields[i].name)) {
-          throw new RpcError("ProtocolError", `Exchange input schema changed: expected [${cached.fields.map((f) => f.name).join(", ")}] ` + `but got [${inputSchema.fields.map((f) => f.name).join(", ")}]`, "");
-        }
-      } else {
-        this._inputSchema = inputSchema;
-      }
-      const children = inputSchema.fields.map((f) => {
-        const values = input.map((row) => row[f.name]);
-        return vectorFromArray2(values, f.type).data[0];
-      });
-      const structType = new Struct2(inputSchema.fields);
-      const data = makeData2({
-        type: structType,
-        length: input.length,
-        children,
-        nullCount: 0
-      });
-      batch = new RecordBatch2(inputSchema, data);
-    }
-    if (!this._inputWriter) {
-      this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
-    }
-    this._inputWriter.write(batch);
-    await this._ensureOutputStream();
-    try {
-      const outputBatch = await this._readOutputBatch();
-      if (outputBatch === null) {
-        return [];
-      }
-      return extractBatchRows(outputBatch);
-    } catch (e) {
-      await this._cleanup();
-      throw e;
-    }
-  }
-  async _cleanup() {
-    if (this._closed)
-      return;
-    this._closed = true;
-    if (this._inputWriter) {
-      this._inputWriter.close();
-      this._inputWriter = null;
-    }
-    try {
-      if (this._outputStreamOpened) {
-        while (await this._reader.readNextBatch() !== null) {}
-      }
-    } catch {}
-    this._releaseBusy();
-  }
-  async* [Symbol.asyncIterator]() {
-    if (this._closed)
-      return;
-    try {
-      const tickSchema = new Schema3([]);
-      this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
-      const structType = new Struct2(tickSchema.fields);
-      const tickData = makeData2({
-        type: structType,
-        length: 0,
-        children: [],
-        nullCount: 0
-      });
-      const tickBatch = new RecordBatch2(tickSchema, tickData);
-      while (true) {
-        this._inputWriter.write(tickBatch);
-        await this._ensureOutputStream();
-        const outputBatch = await this._readOutputBatch();
-        if (outputBatch === null) {
-          break;
-        }
-        yield extractBatchRows(outputBatch);
-      }
-    } finally {
-      if (this._inputWriter) {
-        this._inputWriter.close();
-        this._inputWriter = null;
-      }
-      try {
-        if (this._outputStreamOpened) {
-          while (await this._reader.readNextBatch() !== null) {}
-        }
-      } catch {}
-      this._closed = true;
-      this._releaseBusy();
-    }
-  }
-  close() {
-    if (this._closed)
-      return;
-    this._closed = true;
-    if (this._inputWriter) {
-      this._inputWriter.close();
-      this._inputWriter = null;
-    } else {
-      const emptySchema = new Schema3([]);
-      const ipc = serializeIpcStream(emptySchema, []);
-      this._writeFn(ipc);
-    }
-    const drainPromise = (async () => {
-      try {
-        if (!this._outputStreamOpened) {
-          const schema2 = await this._reader.openNextStream();
-          if (schema2) {
-            while (await this._reader.readNextBatch() !== null) {}
-          }
-        } else {
-          while (await this._reader.readNextBatch() !== null) {}
-        }
-      } catch {} finally {
-        this._releaseBusy();
-      }
-    })();
-    this._setDrainPromise(drainPromise);
-  }
-}
-function pipeConnect(readable, writable, options) {
-  const onLog = options?.onLog;
-  const externalConfig = options?.externalLocation;
-  let reader = null;
-  let readerPromise = null;
-  let methodCache = null;
-  let protocolName = "";
-  let serverProtocolVersion = "";
-  let _busy = false;
-  let _drainPromise = null;
-  let closed = false;
-  const writeFn = (bytes) => {
-    writable.write(bytes);
-    writable.flush?.();
-  };
-  async function ensureReader() {
-    if (reader)
-      return reader;
-    if (!readerPromise) {
-      readerPromise = IpcStreamReader.create(readable);
-    }
-    reader = await readerPromise;
-    return reader;
-  }
-  async function acquireBusy() {
-    if (_drainPromise) {
-      await _drainPromise;
-      _drainPromise = null;
-    }
-    if (_busy) {
-      throw new Error("Pipe transport is busy — another call or stream is in progress. " + "Pipe connections are single-threaded; wait for the current operation to complete.");
-    }
-    _busy = true;
-  }
-  function releaseBusy() {
-    _busy = false;
-  }
-  function setDrainPromise(p) {
-    _drainPromise = p;
-  }
-  async function ensureMethodCache() {
-    if (methodCache)
-      return methodCache;
-    await acquireBusy();
-    try {
-      const emptySchema = new Schema3([]);
-      const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
-      writeFn(body);
-      const r = await ensureReader();
-      const response = await r.readStream();
-      if (!response) {
-        throw new Error("EOF reading __describe__ response");
-      }
-      const desc = await parseDescribeResponse(response.batches, onLog);
-      protocolName = desc.protocolName;
-      serverProtocolVersion = desc.protocolVersion;
-      methodCache = new Map(desc.methods.map((m) => [m.name, m]));
-      return methodCache;
-    } finally {
-      releaseBusy();
-    }
-  }
-  return {
-    async call(method, params) {
-      const methods = await ensureMethodCache();
-      await acquireBusy();
-      try {
-        const info = methods.get(method);
-        if (!info) {
-          throw new Error(`Unknown method: '${method}'`);
-        }
-        const r = await ensureReader();
-        const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
-        writeFn(body);
-        const response = await r.readStream();
-        if (!response) {
-          throw new Error("EOF reading response");
-        }
-        let resultBatch = null;
-        for (let batch of response.batches) {
-          if (batch.numRows === 0) {
-            if (isExternalLocationBatch(batch)) {
-              batch = await resolveExternalLocation(batch, externalConfig);
-            } else {
-              dispatchLogOrError(batch, onLog);
-              continue;
-            }
-          }
-          resultBatch = batch;
-        }
-        if (!resultBatch) {
-          return null;
-        }
-        const rows = extractBatchRows(resultBatch);
-        if (rows.length === 0)
-          return null;
-        if (info.resultSchema.fields.length === 0)
-          return null;
-        return rows[0];
-      } finally {
-        releaseBusy();
-      }
-    },
-    async stream(method, params) {
-      const methods = await ensureMethodCache();
-      await acquireBusy();
-      try {
-        const info = methods.get(method);
-        if (!info) {
-          throw new Error(`Unknown method: '${method}'`);
-        }
-        const r = await ensureReader();
-        const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
-        writeFn(body);
-        let header = null;
-        if (info.headerSchema) {
-          const headerStream = await r.readStream();
-          if (headerStream) {
-            for (const batch of headerStream.batches) {
-              if (batch.numRows === 0) {
-                dispatchLogOrError(batch, onLog);
-                continue;
-              }
-              const rows = extractBatchRows(batch);
-              if (rows.length > 0) {
-                header = rows[0];
-              }
-            }
-          }
-        }
-        const outputSchema = info.outputSchema ?? info.resultSchema;
-        return new PipeStreamSession({
-          reader: r,
-          writeFn,
-          onLog,
-          header,
-          outputSchema,
-          releaseBusy,
-          setDrainPromise,
-          externalConfig
-        });
-      } catch (e) {
-        try {
-          const r = await ensureReader();
-          const emptySchema = new Schema3([]);
-          const ipc = serializeIpcStream(emptySchema, []);
-          writeFn(ipc);
-          const outStream = await r.readStream();
-        } catch {}
-        releaseBusy();
-        throw e;
-      }
-    },
-    async describe() {
-      const methods = await ensureMethodCache();
-      return {
-        protocolName,
-        protocolVersion: serverProtocolVersion,
-        methods: [...methods.values()]
-      };
-    },
-    close() {
-      if (closed)
-        return;
-      closed = true;
-      writable.end();
-    }
-  };
-}
-function subprocessConnect(cmd, options) {
-  const proc = Bun.spawn(cmd, {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: options?.stderr ?? "ignore",
-    cwd: options?.cwd,
-    env: options?.env ? { ...process.env, ...options.env } : undefined
-  });
-  const stdout = proc.stdout;
-  const writable = {
-    write(data) {
-      proc.stdin.write(data);
-    },
-    flush() {
-      proc.stdin.flush();
-    },
-    end() {
-      proc.stdin.end();
-    }
-  };
-  const client = pipeConnect(stdout, writable, {
-    onLog: options?.onLog,
-    externalLocation: options?.externalLocation
-  });
-  const originalClose = client.close;
-  client.close = () => {
-    originalClose.call(client);
-    try {
-      proc.kill();
-    } catch {}
-  };
-  return client;
-}
 // src/http/auth.ts
 function oauthResourceMetadataToJson(metadata) {
   const json = {
@@ -3304,6 +3335,7 @@ var TransportKind;
   TransportKind2["PIPE"] = "pipe";
   TransportKind2["HTTP"] = "http";
   TransportKind2["UNIX"] = "unix";
+  TransportKind2["TCP"] = "tcp";
 })(TransportKind ||= {});
 var EMPTY_COOKIES = new Map;
 function cookieNotUnaryHttpError() {
@@ -9236,13 +9268,12 @@ function onceExit(proc) {
 function delay(ms) {
   return new Promise((r) => setTimeout(r, Math.max(0, ms)));
 }
-// src/launcher/serve-unix.ts
-import { existsSync as existsSync2, unlinkSync as unlinkSync3 } from "node:fs";
+// src/launcher/serve-tcp.ts
 import { createServer } from "node:net";
-import * as path2 from "node:path";
 var EMPTY_SCHEMA6 = schema([]);
-async function serveUnix(protocol, options) {
-  const sockPath = path2.resolve(options.unixPath);
+async function serveTcp(protocol, options = {}) {
+  const host = options.host ?? "127.0.0.1";
+  const requestedPort = options.port ?? 0;
   const idleTimeoutS = options.idleTimeout ?? 300;
   const startupGraceS = options.startupGraceSeconds ?? 5;
   const protocolVersion = options.protocolVersion ?? "";
@@ -9251,13 +9282,8 @@ async function serveUnix(protocol, options) {
   const dispatchHook = options.dispatchHook ?? null;
   const externalConfig = options.externalLocation;
   const onServeStart = options.onServeStart ?? null;
-  const backlog = options.backlog ?? 16;
+  const backlog = options.backlog ?? 128;
   const announcementSink = options.announcementSink ?? process.stdout;
-  if (existsSync2(sockPath)) {
-    try {
-      unlinkSync3(sockPath);
-    } catch {}
-  }
   let describePromise = null;
   function describeInfo() {
     if (!describePromise) {
@@ -9273,7 +9299,7 @@ async function serveUnix(protocol, options) {
     if (serveStartFired)
       return;
     if (onServeStart) {
-      await onServeStart("unix" /* UNIX */);
+      await onServeStart("tcp" /* TCP */);
     }
     serveStartFired = true;
   }
@@ -9282,8 +9308,8 @@ async function serveUnix(protocol, options) {
   let idleTimer = null;
   let resolveDone = () => {};
   let rejectDone = () => {};
-  const done = new Promise((resolve2, reject) => {
-    resolveDone = resolve2;
+  const done = new Promise((resolve, reject) => {
+    resolveDone = resolve;
     rejectDone = reject;
   });
   let stopped = false;
@@ -9309,19 +9335,19 @@ async function serveUnix(protocol, options) {
       return;
     stopped = true;
     disarmIdleTimer();
-    await new Promise((resolve2) => {
-      server.close(() => resolve2());
+    await new Promise((resolve) => {
+      server.close(() => resolve());
     });
-    try {
-      unlinkSync3(sockPath);
-    } catch {}
     resolveDone();
   }
   server.on("connection", (socket) => {
+    try {
+      socket.setNoDelay(true);
+    } catch {}
     activeConnections += 1;
     disarmIdleTimer();
     handleConnection(socket).catch((err2) => {
-      process.stderr.write(`vgi-rpc/unix: connection failed: ${err2?.message ?? err2}
+      process.stderr.write(`vgi-rpc/tcp: connection failed: ${err2?.message ?? err2}
 `);
     }).finally(() => {
       activeConnections -= 1;
@@ -9414,6 +9440,237 @@ async function serveUnix(protocol, options) {
       protocol: protocol.name,
       protocolHash,
       protocolVersion,
+      kind: "tcp" /* TCP */,
+      principal: "",
+      authDomain: "",
+      authenticated: false,
+      remoteAddr: "",
+      requestData
+    };
+    const stats = {
+      inputBatches: 0,
+      outputBatches: 0,
+      inputRows: 0,
+      outputRows: 0,
+      inputBytes: 0,
+      outputBytes: 0
+    };
+    const token = dispatchHook?.onDispatchStart(info);
+    let dispatchError;
+    applyDefaults(params, method.defaults);
+    try {
+      if (method.type === "unary" /* UNARY */) {
+        await dispatchUnary(method, params, writer, serverId, requestId, externalConfig, "tcp" /* TCP */);
+      } else {
+        await dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, "tcp" /* TCP */);
+      }
+    } catch (e) {
+      dispatchError = e instanceof Error ? e : new Error(String(e));
+      throw e;
+    } finally {
+      dispatchHook?.onDispatchEnd(token, info, stats, dispatchError);
+    }
+  }
+  await new Promise((resolve, reject) => {
+    server.listen({ host, port: requestedPort, backlog }, () => resolve());
+    server.once("error", (err2) => reject(err2));
+  });
+  const address = server.address();
+  const boundPort = typeof address === "object" && address ? address.port : requestedPort;
+  options.onBound?.(host, boundPort);
+  announcementSink.write(`TCP:${host}:${boundPort}
+`);
+  if (idleTimeoutS > 0) {
+    setTimeout(() => {
+      if (activeConnections === 0 && !stopped)
+        armIdleTimer();
+    }, startupGraceS * 1000).unref?.();
+  }
+  return {
+    host,
+    port: boundPort,
+    stop: shutdown,
+    done
+  };
+}
+// src/launcher/serve-unix.ts
+import { existsSync as existsSync2, unlinkSync as unlinkSync3 } from "node:fs";
+import { createServer as createServer2 } from "node:net";
+import * as path2 from "node:path";
+var EMPTY_SCHEMA7 = schema([]);
+async function serveUnix(protocol, options) {
+  const sockPath = path2.resolve(options.unixPath);
+  const idleTimeoutS = options.idleTimeout ?? 300;
+  const startupGraceS = options.startupGraceSeconds ?? 5;
+  const protocolVersion = options.protocolVersion ?? "";
+  const serverId = options.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  const enableDescribe = options.enableDescribe ?? true;
+  const dispatchHook = options.dispatchHook ?? null;
+  const externalConfig = options.externalLocation;
+  const onServeStart = options.onServeStart ?? null;
+  const backlog = options.backlog ?? 16;
+  const announcementSink = options.announcementSink ?? process.stdout;
+  if (existsSync2(sockPath)) {
+    try {
+      unlinkSync3(sockPath);
+    } catch {}
+  }
+  let describePromise = null;
+  function describeInfo() {
+    if (!describePromise) {
+      describePromise = buildDescribeBatch(protocol.name, protocol.getMethods(), serverId).then(({ batch, metadata }) => ({
+        batch,
+        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? ""
+      }));
+    }
+    return describePromise;
+  }
+  let serveStartFired = false;
+  async function notifyTransport() {
+    if (serveStartFired)
+      return;
+    if (onServeStart) {
+      await onServeStart("unix" /* UNIX */);
+    }
+    serveStartFired = true;
+  }
+  const server = createServer2({ allowHalfOpen: false });
+  let activeConnections = 0;
+  let idleTimer = null;
+  let resolveDone = () => {};
+  let rejectDone = () => {};
+  const done = new Promise((resolve2, reject) => {
+    resolveDone = resolve2;
+    rejectDone = reject;
+  });
+  let stopped = false;
+  function armIdleTimer() {
+    if (idleTimeoutS <= 0)
+      return;
+    if (idleTimer)
+      clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (activeConnections === 0 && !stopped) {
+        shutdown();
+      }
+    }, idleTimeoutS * 1000);
+  }
+  function disarmIdleTimer() {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  }
+  async function shutdown() {
+    if (stopped)
+      return;
+    stopped = true;
+    disarmIdleTimer();
+    await new Promise((resolve2) => {
+      server.close(() => resolve2());
+    });
+    try {
+      unlinkSync3(sockPath);
+    } catch {}
+    resolveDone();
+  }
+  server.on("connection", (socket) => {
+    activeConnections += 1;
+    disarmIdleTimer();
+    handleConnection(socket).catch((err2) => {
+      process.stderr.write(`vgi-rpc/unix: connection failed: ${err2?.message ?? err2}
+`);
+    }).finally(() => {
+      activeConnections -= 1;
+      socket.destroy();
+      if (activeConnections === 0 && !stopped) {
+        armIdleTimer();
+      }
+    });
+  });
+  server.on("error", (err2) => {
+    if (stopped)
+      return;
+    rejectDone(err2);
+  });
+  async function handleConnection(socket) {
+    const reader = await IpcStreamReader.create(socket);
+    const writer = new IpcStreamWriter(socket);
+    try {
+      await notifyTransport();
+      while (true) {
+        try {
+          await serveOnce(reader, writer);
+        } catch (e) {
+          const err2 = e;
+          if (err2?.message?.includes("closed") || err2?.message?.includes("Expected Schema Message") || err2?.message?.includes("null or length 0") || err2?.message?.includes("EOF") || err2?.code === "EPIPE" || err2?.code === "ERR_STREAM_PREMATURE_CLOSE" || err2?.code === "ERR_STREAM_DESTROYED") {
+            return;
+          }
+          throw e;
+        }
+      }
+    } finally {
+      try {
+        await reader.cancel();
+      } catch {}
+    }
+  }
+  async function serveOnce(reader, writer) {
+    const stream = await reader.readStream();
+    if (!stream) {
+      throw new Error("EOF");
+    }
+    const { schema: schema2, batches } = stream;
+    if (batches.length === 0) {
+      const err2 = new RpcError("ProtocolError", "Request stream contains no batches", "");
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA7, err2, serverId, null);
+      await writer.writeStream(EMPTY_SCHEMA7, [errBatch]);
+      return;
+    }
+    const batch = batches[0];
+    let methodName;
+    let params;
+    let requestId;
+    try {
+      const parsed = parseRequest(schema2, batch);
+      methodName = parsed.methodName;
+      params = parsed.params;
+      requestId = parsed.requestId;
+    } catch (e) {
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA7, e, serverId, null);
+      await writer.writeStream(EMPTY_SCHEMA7, [errBatch]);
+      if (e instanceof VersionError || e instanceof RpcError)
+        return;
+      throw e;
+    }
+    if (methodName === DESCRIBE_METHOD_NAME && enableDescribe) {
+      const { batch: descBatch } = await describeInfo();
+      await writer.writeStream(descBatch.schema, [descBatch]);
+      return;
+    }
+    const methods = protocol.getMethods();
+    const method = methods.get(methodName);
+    if (!method) {
+      const available = [...methods.keys()].sort();
+      const err2 = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA7, err2, serverId, requestId);
+      await writer.writeStream(EMPTY_SCHEMA7, [errBatch]);
+      return;
+    }
+    const methodType = method.type === "unary" /* UNARY */ ? "unary" : "stream";
+    let requestData;
+    try {
+      requestData = serializeBatch(batch);
+    } catch {}
+    const { protocolHash } = await describeInfo();
+    const info = {
+      method: methodName,
+      methodType,
+      serverId,
+      requestId,
+      protocol: protocol.name,
+      protocolHash,
+      protocolVersion,
       kind: "unix" /* UNIX */,
       principal: "",
       authDomain: "",
@@ -9476,11 +9733,13 @@ export {
   uint162 as uint16,
   tryAcquireLock,
   toSchema,
+  tcpConnect,
   subprocessConnect,
   str,
   statusRows,
   socketPaths,
   serveUnix,
+  serveTcp,
   resolveExternalLocation,
   probeSocket,
   pipeConnect,
@@ -9561,4 +9820,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=4D9D32B49233679B64756E2164756E21
+//# debugId=EB2D2F8879345A8964756E2164756E21

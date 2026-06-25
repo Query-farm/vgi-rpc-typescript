@@ -22,4 +22,5 @@ export type {
   PipeConnectOptions,
   StreamSession,
   SubprocessConnectOptions,
+  TcpConnectOptions,
 } from "./types.js";

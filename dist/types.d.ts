@@ -23,6 +23,8 @@ export declare enum MethodType {
  * - `PIPE` — Stdio worker (the standalone {@link VgiRpcServer} loop).
  * - `HTTP` — Fetch-style HTTP handler (`createHttpHandler`).
  * - `UNIX` — AF_UNIX socket handler (the launcher path).
+ * - `TCP` — AF_INET socket handler. Raw Arrow-IPC framing over a bare TCP
+ *   socket — no auth/TLS; use `HTTP` for untrusted networks.
  */
 export declare enum TransportKind {
     /** Stdio worker — the standalone {@link VgiRpcServer} loop. */
@@ -30,7 +32,10 @@ export declare enum TransportKind {
     /** Fetch-style HTTP handler (`createHttpHandler`). */
     HTTP = "http",
     /** AF_UNIX socket handler (the launcher path). */
-    UNIX = "unix"
+    UNIX = "unix",
+    /** AF_INET (TCP) socket handler. Raw Arrow-IPC framing over a bare TCP
+     *  socket — no authentication or TLS; trusted networks only. */
+    TCP = "tcp"
 }
 /**
  * Optional lifecycle hook fired once per process before the first

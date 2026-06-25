@@ -1,6 +1,9 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+// Node-only raw-TCP client (statically imports `node:net`, so it lives outside
+// the runtime-agnostic core that browser/workerd bundles re-export).
+export { tcpConnect } from "./client/tcp.js";
 // Full node/bun barrel: the runtime-agnostic core plus the node-only AF_UNIX
 // launcher. Cloudflare Worker / browser builds resolve `./index.workerd.ts`
 // (the `workerd`/`worker`/`browser` export conditions) instead, which omits
@@ -16,10 +19,13 @@ export {
   type LaunchConfig,
   launch,
   probeSocket,
+  type ServeTcpHandle,
+  type ServeTcpOptions,
   type ServeUnixHandle,
   type ServeUnixOptions,
   type SocketPaths,
   type StatusRow,
+  serveTcp,
   serveUnix,
   socketPaths,
   statusRows,

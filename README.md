@@ -16,7 +16,7 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 - **Runtime introspection** — opt-in `__describe__` method for dynamic service discovery via the CLI
 - **Result validation** — missing required fields in handler results throw descriptive errors at emit time
 - **Authentication** — bearer tokens, JWT, mTLS (PEM-in-header and XFCC), with chainable authenticators
-- **Three client transports** — HTTP, subprocess, and raw pipe, all sharing a unified `RpcClient` interface
+- **Four client transports** — HTTP, subprocess, raw pipe, and raw TCP (`tcpConnect` / `serveTcp`), all sharing a unified `RpcClient` interface. Raw TCP carries no auth/TLS and defaults to loopback (`127.0.0.1`) — trusted networks only; use HTTP otherwise.
 
 ## Installation
 
