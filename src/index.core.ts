@@ -92,6 +92,7 @@ export {
   uint64,
 } from "./schema.js";
 export { VgiRpcServer } from "./server.js";
+export { serveStream, type ServeStreamOptions } from "./serve-stream.js";
 export {
   type CallContext,
   type CallStatistics,

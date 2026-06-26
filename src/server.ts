@@ -161,10 +161,8 @@ export class VgiRpcServer {
     );
   }
 
-  /** Start the server loop. Reads requests until stdin closes. */
+  /** Start the server loop over stdin/stdout. Reads requests until stdin closes. */
   async run(): Promise<void> {
-    const stdin = process.stdin as unknown as ReadableStream<Uint8Array>;
-
     // Warn if running interactively
     if (process.stdin.isTTY || process.stdout.isTTY) {
       process.stderr.write(
@@ -174,21 +172,44 @@ export class VgiRpcServer {
           "(e.g. vgi_rpc.connect()).\n",
       );
     }
+    const stdin = process.stdin as unknown as ReadableStream<Uint8Array>;
+    // writable omitted → IpcStreamWriter defaults to the stdout fd.
+    await this.serveConnection(stdin);
+  }
 
-    const reader = await IpcStreamReader.create(stdin);
-    const writer = new IpcStreamWriter();
+  /**
+   * Serve requests over an explicit byte-stream pair until the readable ends —
+   * the transport-agnostic core that {@link run} (stdin/stdout) is built on.
+   *
+   * Use this to serve over any duplex channel that the stdio/unix/tcp helpers
+   * don't cover: a Web Worker / `MessagePort` bridge, an in-memory pipe, or a
+   * pre-connected socket. The loop, on_serve_start firing, and EOF/broken-pipe
+   * handling are identical to {@link run}.
+   *
+   * @param readable incoming request bytes — a web `ReadableStream<Uint8Array>`
+   *   or a Node `Readable` (e.g. a `Duplex` bridging a MessagePort).
+   * @param writable outgoing response sink — a stdout-like fd number, or a
+   *   `net.Socket` / structurally-compatible `Duplex`. Omit for the stdout fd.
+   * @param transportKind reported to the `on_serve_start` hook (default `PIPE`).
+   */
+  async serveConnection(
+    readable: ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+    writable?: number | import("node:net").Socket,
+    transportKind: TransportKind = TransportKind.PIPE,
+  ): Promise<void> {
+    const reader = await IpcStreamReader.create(readable);
+    const writer = new IpcStreamWriter(writable);
 
     try {
       while (true) {
-        // Fire on_serve_start lazily so the hook can do work that
-        // depends on the transport binding (matches Python which fires
-        // it inside serve()). Inside the loop so a failure on the very
+        // Fire on_serve_start lazily so the hook can do work that depends on
+        // the transport binding. Inside the loop so a failure on the very
         // first request can be retried.
-        await this.notifyTransport(TransportKind.PIPE);
+        await this.notifyTransport(transportKind);
         await this.serveOne(reader, writer);
       }
     } catch (e: any) {
-      // EOF or broken pipe → clean exit
+      // EOF or broken pipe / closed channel → clean exit
       if (
         e.message?.includes("closed") ||
         e.message?.includes("Expected Schema Message") ||
