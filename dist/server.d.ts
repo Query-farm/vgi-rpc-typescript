@@ -20,10 +20,15 @@ export declare class VgiRpcServer {
      *  re-fires rather than silently skipping. Mirrors Python 7b3999c. */
     private serveStartFired;
     constructor(protocol: Protocol, options?: {
+        /** Enable the `describe` RPC method (service self-description). Default `true`. */
         enableDescribe?: boolean;
+        /** Opaque per-process server identifier surfaced to clients and the landing page. */
         serverId?: string;
+        /** Hook invoked around each dispatched request (tracing/metrics/auth enrichment). */
         dispatchHook?: DispatchHook;
+        /** Configuration for externalizing oversized record batches to blob storage. */
         externalLocation?: ExternalLocationConfig;
+        /** Protocol version string reported in the service description. */
         protocolVersion?: string;
         /** Lifecycle hook fired once before the first dispatched request. */
         onServeStart?: ServeStartHook;

@@ -14,6 +14,7 @@ import type { Protocol } from "./protocol.js";
 import { VgiRpcServer } from "./server.js";
 import { TransportKind } from "./types.js";
 
+/** Options for {@link serveStream} — a single RPC session over one stream pair. */
 export interface ServeStreamOptions {
   /** Incoming request bytes — a web `ReadableStream<Uint8Array>` or a Node
    *  `Readable` (e.g. a `Duplex` bridging a MessagePort). */
