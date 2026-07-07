@@ -7,7 +7,7 @@
 PYTHON ?= /Users/rusty/Development/vgi-rpc/.venv/bin/python
 
 # Unit test files (no external dependencies)
-UNIT_TESTS := test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/token.test.ts test/http/sticky.test.ts test/auth.test.ts test/http-auth.test.ts test/bearer.test.ts
+UNIT_TESTS := test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/http/sticky.test.ts test/auth.test.ts test/http-auth.test.ts test/bearer.test.ts
 
 SRC := $(wildcard src/**/*.ts src/*.ts)
 

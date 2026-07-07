@@ -63,6 +63,12 @@ export interface HttpHandlerOptions {
   onServeStart?: ServeStartHook;
   /** Enable HTML landing page at GET {prefix}/. Default: true. */
   enableLandingPage?: boolean;
+  /** VGI landing surface producer. When set, `GET {prefix}/` serves the shared
+   *  vendored `landing.html`, and `GET {prefix}/describe.json` +
+   *  `GET {prefix}/describe/{catalog}/{schema}/{table}.json` are served from the
+   *  worker's catalog introspection (see {@link LandingDescribeProvider}). This
+   *  replaces the generic styled landing page for VGI workers. */
+  landingDescribe?: LandingDescribeProvider;
   /** Enable HTML describe/API reference page at GET {prefix}/describe. Default: true. */
   enableDescribePage?: boolean;
   /** Enable HTML 404 page for unmatched GET routes. Default: true. */
@@ -108,6 +114,30 @@ export interface HttpHandlerOptions {
    *  exposing the registry directly. Production code should hold the
    *  handle returned by a future `createHttpHandlerWithDrainHandle` helper. */
   _onStickyHandle?: (handle: import("./sticky.js").DrainHandle) => void;
+}
+
+/**
+ * Producer for the standardized VGI landing surface (see
+ * `vgi/docs/http-landing-contract.md`). A VGI worker supplies this so the
+ * catalog-agnostic HTTP handler can serve `GET {prefix}/describe.json` and the
+ * lazy per-object column endpoint from the worker's own catalog introspection.
+ *
+ * When set, `GET {prefix}/` serves the shared vendored `landing.html` instead of
+ * the generic styled endpoint page, and the describe JSON routes become active.
+ */
+export interface LandingDescribeProvider {
+  /**
+   * Build the full `describe.json` contract document. The handler passes the
+   * runtime-derived `serverId` and whether OAuth/PKCE is active; the provider
+   * fills in `worker`, `catalogs`, etc. Return value is JSON-serialized as-is.
+   */
+  describe(ctx: { serverId: string; oauth: boolean }): unknown | Promise<unknown>;
+  /**
+   * Lazy per-object columns for
+   * `GET {prefix}/describe/{catalog}/{schema}/{table}.json`. Return `null` when
+   * the object is not found (the handler responds 404).
+   */
+  columns(catalog: string, schema: string, table: string): unknown | null | Promise<unknown | null>;
 }
 
 /** Serializer for stream state objects stored in state tokens. */

@@ -44,6 +44,7 @@ import {
   httpDispatchStreamInit,
   httpDispatchUnary,
 } from "./dispatch.js";
+import { LANDING_HTML_BYTES } from "./landing-html.js";
 import {
   configureOAuthPkce,
   handleBrowserGetRedirect,
@@ -271,23 +272,28 @@ export function createHttpHandler(
   const displayName = options?.protocolName ?? protocol.name;
   const repoUrl = options?.repositoryUrl ?? null;
 
-  // Pre-render HTML pages for zero per-request overhead
-  let landingHtml = enableLandingPage
-    ? buildLandingPage(displayName, serverId, enableDescribePage ? `${prefix}/describe` : null, repoUrl)
-    : null;
-  let describeHtml = enableDescribePage ? buildDescribePage(displayName, serverId, methods, repoUrl) : null;
+  // VGI landing surface: when a worker supplies a describe producer, GET
+  // {prefix}/ serves the shared vendored landing.html (which reads describe.json
+  // and the _vgi_identity cookie itself), and the describe JSON routes below
+  // become active. This replaces the generic styled landing page for VGI
+  // workers. The page renders the signed-in identity pill from the cookie set by
+  // the OAuth callback — no server-side HTML injection is needed.
+  const landingDescribe = options?.landingDescribe ?? null;
+  const oauthActive = pkceConfig != null;
+
+  // Pre-render HTML pages for zero per-request overhead. The generic landing
+  // page is suppressed when the VGI landing surface is active.
+  const genericLandingHtml =
+    enableLandingPage && !landingDescribe
+      ? buildLandingPage(displayName, serverId, enableDescribePage ? `${prefix}/describe` : null, repoUrl)
+      : null;
+  const describeHtml = enableDescribePage ? buildDescribePage(displayName, serverId, methods, repoUrl) : null;
   const notFoundHtml = enableNotFoundPage ? buildNotFoundPage(prefix, displayName) : null;
 
-  // Inject user-info HTML snippet when PKCE is active
-  if (pkceConfig) {
-    const snippet = pkceConfig.userInfoHtml;
-    if (landingHtml) {
-      landingHtml = landingHtml.replace("</body>", `${snippet}\n</body>`);
-    }
-    if (describeHtml) {
-      describeHtml = describeHtml.replace("</body>", `${snippet}\n</body>`);
-    }
-  }
+  // JSON status body served for GET {prefix}/?format=json (and Accept:
+  // application/json) when the VGI landing surface is active. Mirrors Python's
+  // LandingPageResource.
+  const landingStatusBody = JSON.stringify({ status: "ok", server_id: serverId, protocol: "vgi" });
 
   const externalLocation = options?.externalLocation;
   const uploadUrlProvider = options?.uploadUrlProvider;
@@ -539,11 +545,57 @@ export function createHttpHandler(
         }
       }
 
-      // Landing page: GET {prefix}/ or GET {prefix}
-      if (landingHtml && (path === prefix || path === `${prefix}/`)) {
+      // VGI landing surface (GET {prefix}/, describe.json, lazy columns) — active
+      // when a describe producer is supplied. See docs/http-landing-contract.md.
+      if (landingDescribe) {
+        // GET {prefix}/ — shared landing.html for browsers, JSON status for
+        // health checks / ?format=json.
+        if (path === prefix || path === `${prefix}/`) {
+          const accept = request.headers.get("Accept") ?? "";
+          const wantJson =
+            url.searchParams.get("format") === "json" ||
+            (accept.includes("application/json") && !accept.includes("text/html"));
+          if (wantJson) {
+            const headers = new Headers({ "Content-Type": "application/json" });
+            addCorsHeaders(headers);
+            return new Response(landingStatusBody, { status: 200, headers });
+          }
+          const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
+          addCorsHeaders(headers);
+          return new Response(LANDING_HTML_BYTES as unknown as BodyInit, { status: 200, headers });
+        }
+
+        // GET {prefix}/describe.json — the versioned describe contract.
+        if (path === `${prefix}/describe.json`) {
+          const doc = await landingDescribe.describe({ serverId, oauth: oauthActive });
+          const headers = new Headers({ "Content-Type": "application/json" });
+          addCorsHeaders(headers);
+          return new Response(JSON.stringify(doc), { status: 200, headers });
+        }
+
+        // GET {prefix}/describe/{catalog}/{schema}/{table}.json — lazy columns.
+        if (path.startsWith(`${prefix}/describe/`) && path.endsWith(".json")) {
+          const rest = path.slice(`${prefix}/describe/`.length, -".json".length);
+          const parts = rest.split("/");
+          if (parts.length === 3) {
+            const [cat, sch, tbl] = parts.map((p) => decodeURIComponent(p));
+            const cols = await landingDescribe.columns(cat, sch, tbl);
+            const headers = new Headers({ "Content-Type": "application/json" });
+            addCorsHeaders(headers);
+            if (cols == null) {
+              return new Response(JSON.stringify({ error: "object not found" }), { status: 404, headers });
+            }
+            return new Response(JSON.stringify(cols), { status: 200, headers });
+          }
+        }
+      }
+
+      // Generic landing page: GET {prefix}/ or GET {prefix} (only when the VGI
+      // landing surface is not active).
+      if (genericLandingHtml && (path === prefix || path === `${prefix}/`)) {
         const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
         addCorsHeaders(headers);
-        return new Response(landingHtml, { status: 200, headers });
+        return new Response(genericLandingHtml, { status: 200, headers });
       }
 
       // Describe page: GET {prefix}/describe

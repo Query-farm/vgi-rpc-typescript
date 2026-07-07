@@ -45,6 +45,10 @@ export interface TokenExchangeResult {
     token: string;
     maxAge: number;
     refreshToken: string | null;
+    /** The OIDC id_token from the token response, if present. Used to derive the
+     *  JS-readable `_vgi_identity` display cookie regardless of whether the bearer
+     *  is the id_token or an opaque access_token. */
+    idToken: string | null;
 }
 /** Exchange an authorization code for a token via the token endpoint. */
 export declare function exchangeCodeForToken(tokenEndpoint: string, code: string, redirectUri: string, codeVerifier: string, clientId: string, clientSecret?: string, useIdToken?: boolean): Promise<TokenExchangeResult>;
@@ -61,12 +65,20 @@ interface SetCookieOptions {
     httpOnly?: boolean;
     sameSite?: "Strict" | "Lax" | "None";
 }
+/** Best-effort decode of a JWT payload (no signature verification). */
+export declare function decodeJwtPayload(token: string | null | undefined): Record<string, unknown> | null;
+/**
+ * base64url(JSON) of the display-identity claims from an id_token, or null.
+ *
+ * Encodes only `{sub, email, preferred_username, name, picture}` (present ones)
+ * so the shared landing page can render the identity pill without decoding a
+ * bearer token itself. Padding is stripped to match the Python reference.
+ */
+export declare function identityCookieValue(idToken: string | null | undefined): string | null;
 /** Build a Set-Cookie header string. */
 export declare function buildSetCookieHeader(name: string, value: string, options: SetCookieOptions): string;
 /** Render a user-friendly OAuth error page. */
 export declare function buildOAuthErrorPage(message: string, detail: string | null, retryUrl: string): string;
-/** Return HTML snippet (style + div + script) for user info display. */
-export declare function buildUserInfoHtml(prefix: string): string;
 /**
  * Create an authenticate callback that reads a bearer token from a cookie.
  *
@@ -87,7 +99,6 @@ export interface OAuthPkceConfig {
     scope: string;
     allowedReturnOrigins: ReadonlySet<string>;
     cookieAuthenticate: AuthenticateFn;
-    userInfoHtml: string;
 }
 /** Options for configureOAuthPkce. */
 export interface OAuthPkceOptions {

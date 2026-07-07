@@ -10,6 +10,6 @@ export type { CertValidateFn, XfccElement, XfccValidateFn } from "./mtls.js";
 export { mtlsAuthenticate, mtlsAuthenticateFingerprint, mtlsAuthenticateSubject, mtlsAuthenticateXfcc, parseXfcc, } from "./mtls.js";
 export { cookieAuthenticate } from "./oauth-pkce.js";
 export { type UnpackedToken, unpackStateToken } from "./token.js";
-export type { HttpHandlerOptions, StateSerializer } from "./types.js";
+export type { HttpHandlerOptions, LandingDescribeProvider, StateSerializer } from "./types.js";
 export { jsonStateSerializer } from "./types.js";
 //# sourceMappingURL=index.d.ts.map

@@ -7,14 +7,15 @@ import { AuthContext } from "../../src/auth.js";
 import {
   buildOAuthErrorPage,
   buildSetCookieHeader,
-  buildUserInfoHtml,
   cookieAuthenticate,
+  decodeJwtPayload,
   deriveSessionKey,
   generateCodeChallenge,
   generateCodeVerifier,
   generateStateNonce,
   handleEarlyReturnTo,
   handleOAuthLogout,
+  identityCookieValue,
   packOAuthCookie,
   parseCookies,
   resolvePkceScope,
@@ -348,16 +349,56 @@ describe("buildOAuthErrorPage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// User info HTML
+// Identity cookie (_vgi_identity) — display identity for the shared landing page
 // ---------------------------------------------------------------------------
 
-describe("buildUserInfoHtml", () => {
-  test("contains style, div, and script", () => {
-    const html = buildUserInfoHtml("/api");
-    expect(html).toContain("<style>");
-    expect(html).toContain('id="vgi-user-info"');
-    expect(html).toContain("<script>");
-    expect(html).toContain("/api/_oauth/logout");
+/** Build an unsigned JWT with the given payload (header.payload.signature). */
+function makeJwt(payload: Record<string, unknown>): string {
+  const b64 = (obj: unknown) => Buffer.from(JSON.stringify(obj), "utf-8").toString("base64url");
+  return `${b64({ alg: "none", typ: "JWT" })}.${b64(payload)}.`;
+}
+
+describe("decodeJwtPayload", () => {
+  test("decodes a JWT payload without verifying the signature", () => {
+    const jwt = makeJwt({ sub: "u1", email: "a@b.co" });
+    expect(decodeJwtPayload(jwt)).toEqual({ sub: "u1", email: "a@b.co" });
+  });
+
+  test("returns null for null / malformed input", () => {
+    expect(decodeJwtPayload(null)).toBeNull();
+    expect(decodeJwtPayload("")).toBeNull();
+    expect(decodeJwtPayload("not-a-jwt")).toBeNull();
+  });
+});
+
+describe("identityCookieValue", () => {
+  test("encodes only the display-identity claims as base64url(JSON)", () => {
+    const jwt = makeJwt({
+      sub: "u1",
+      email: "a@b.co",
+      preferred_username: "alice",
+      name: "Alice",
+      picture: "https://img/a.png",
+      exp: 9999999999,
+      aud: "ignored",
+    });
+    const cookie = identityCookieValue(jwt);
+    expect(cookie).not.toBeNull();
+    const decoded = JSON.parse(Buffer.from(cookie!, "base64url").toString("utf-8"));
+    expect(decoded).toEqual({
+      sub: "u1",
+      email: "a@b.co",
+      preferred_username: "alice",
+      name: "Alice",
+      picture: "https://img/a.png",
+    });
+    // No padding characters (matches the Python reference).
+    expect(cookie).not.toContain("=");
+  });
+
+  test("returns null when no identity claims are present", () => {
+    expect(identityCookieValue(makeJwt({ exp: 123 }))).toBeNull();
+    expect(identityCookieValue(null)).toBeNull();
   });
 });
 
@@ -379,16 +420,18 @@ describe("handleOAuthLogout", () => {
       scope: "openid email",
       allowedReturnOrigins: new Set<string>(),
       cookieAuthenticate: async () => AuthContext.anonymous(),
-      userInfoHtml: "",
     };
 
     const request = new Request("http://localhost/api/_oauth/logout");
     const response = handleOAuthLogout(request, config);
     expect(response.status).toBe(302);
     expect(response.headers.get("Location")).toBe("/api");
-    const setCookie = response.headers.get("Set-Cookie");
-    expect(setCookie).toContain("_vgi_auth=");
-    expect(setCookie).toContain("Max-Age=0");
+    // Both the auth cookie and the display-identity cookie are cleared.
+    const setCookies = response.headers.getSetCookie();
+    const joined = setCookies.join("\n");
+    expect(joined).toContain("_vgi_auth=");
+    expect(joined).toContain("_vgi_identity=");
+    expect(joined).toContain("Max-Age=0");
   });
 });
 
@@ -409,7 +452,6 @@ describe("handleEarlyReturnTo", () => {
     scope: "openid email",
     allowedReturnOrigins: new Set(["https://cupola.query-farm.services"]),
     cookieAuthenticate: async () => AuthContext.anonymous(),
-    userInfoHtml: "",
   };
 
   test("returns null when no return_to", () => {

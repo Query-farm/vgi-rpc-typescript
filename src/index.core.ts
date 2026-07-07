@@ -59,6 +59,7 @@ export {
   type JwtAuthenticateOptions,
   jsonStateSerializer,
   jwtAuthenticate,
+  type LandingDescribeProvider,
   mtlsAuthenticate,
   mtlsAuthenticateFingerprint,
   mtlsAuthenticateSubject,
@@ -91,8 +92,8 @@ export {
   uint32,
   uint64,
 } from "./schema.js";
+export { type ServeStreamOptions, serveStream } from "./serve-stream.js";
 export { VgiRpcServer } from "./server.js";
-export { serveStream, type ServeStreamOptions } from "./serve-stream.js";
 export {
   type CallContext,
   type CallStatistics,

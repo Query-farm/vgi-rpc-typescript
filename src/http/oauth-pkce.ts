@@ -46,6 +46,13 @@ const timingSafeEqual = (a: any, b: any) => _crypto().timingSafeEqual(a, b);
 
 const SESSION_COOKIE_NAME = "_vgi_oauth_session";
 const AUTH_COOKIE_NAME = "_vgi_auth";
+// JS-readable display identity for the shared VGI landing page. Derived from the
+// OIDC id_token at the callback (display-only; the validated bearer remains the
+// security boundary) so the page shows the signed-in email/name regardless of
+// whether the bearer cookie holds an access or id token. Mirrors the Python
+// reference (vgi_rpc/http/_oauth_pkce.py).
+const IDENTITY_COOKIE_NAME = "_vgi_identity";
+const IDENTITY_CLAIMS = ["sub", "email", "preferred_username", "name", "picture"] as const;
 const SESSION_COOKIE_VERSION = 4;
 const SESSION_MAX_AGE = 600; // 10 minutes
 const AUTH_COOKIE_DEFAULT_MAX_AGE = 3600; // 1 hour fallback
@@ -282,6 +289,10 @@ export interface TokenExchangeResult {
   token: string;
   maxAge: number;
   refreshToken: string | null;
+  /** The OIDC id_token from the token response, if present. Used to derive the
+   *  JS-readable `_vgi_identity` display cookie regardless of whether the bearer
+   *  is the id_token or an opaque access_token. */
+  idToken: string | null;
 }
 
 /** Exchange an authorization code for a token via the token endpoint. */
@@ -323,6 +334,7 @@ export async function exchangeCodeForToken(
   }
 
   const refreshToken: string | null = body.refresh_token ?? null;
+  const idToken: string | null = body.id_token ?? null;
 
   if (useIdToken) {
     const token = body.id_token;
@@ -336,19 +348,19 @@ export async function exchangeCodeForToken(
         const claims = JSON.parse(payloadJson);
         if (claims.exp != null) {
           const maxAge = Math.max(Number(claims.exp) - Math.floor(Date.now() / 1000), 60);
-          return { token, maxAge, refreshToken };
+          return { token, maxAge, refreshToken, idToken };
         }
       }
     } catch {
       // Fall through to default
     }
-    return { token, maxAge: AUTH_COOKIE_DEFAULT_MAX_AGE, refreshToken };
+    return { token, maxAge: AUTH_COOKIE_DEFAULT_MAX_AGE, refreshToken, idToken };
   }
 
   const token = body.access_token;
   if (!token) throw new Error("Token response missing access_token");
   const expiresIn = body.expires_in ?? AUTH_COOKIE_DEFAULT_MAX_AGE;
-  return { token, maxAge: Number(expiresIn), refreshToken };
+  return { token, maxAge: Number(expiresIn), refreshToken, idToken };
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +448,39 @@ interface SetCookieOptions {
   sameSite?: "Strict" | "Lax" | "None";
 }
 
+/** Best-effort decode of a JWT payload (no signature verification). */
+export function decodeJwtPayload(token: string | null | undefined): Record<string, unknown> | null {
+  if (!token) return null;
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return null;
+    const padding = (4 - (parts[1].length % 4)) % 4;
+    const json = Buffer.from(parts[1] + "=".repeat(padding), "base64").toString("utf-8");
+    const claims = JSON.parse(json);
+    return claims && typeof claims === "object" ? (claims as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * base64url(JSON) of the display-identity claims from an id_token, or null.
+ *
+ * Encodes only `{sub, email, preferred_username, name, picture}` (present ones)
+ * so the shared landing page can render the identity pill without decoding a
+ * bearer token itself. Padding is stripped to match the Python reference.
+ */
+export function identityCookieValue(idToken: string | null | undefined): string | null {
+  const claims = decodeJwtPayload(idToken);
+  if (!claims) return null;
+  const ident: Record<string, unknown> = {};
+  for (const key of IDENTITY_CLAIMS) {
+    if (claims[key] != null) ident[key] = claims[key];
+  }
+  if (Object.keys(ident).length === 0) return null;
+  return Buffer.from(JSON.stringify(ident), "utf-8").toString("base64url");
+}
+
 /** Build a Set-Cookie header string. */
 export function buildSetCookieHeader(name: string, value: string, options: SetCookieOptions): string {
   let cookie = `${name}=${value}`;
@@ -483,55 +528,6 @@ ${detailHtml}
 }
 
 // ---------------------------------------------------------------------------
-// User-info JS snippet for landing/describe pages
-// ---------------------------------------------------------------------------
-
-const USER_INFO_STYLE = `#vgi-user-info {
-  position: fixed; top: 12px; right: 16px; z-index: 1000;
-  font-family: 'Inter', system-ui, sans-serif; font-size: 0.85em;
-  display: flex; align-items: center; gap: 8px;
-  background: #fff; border: 1px solid #e0ddd0; border-radius: 20px;
-  padding: 4px 14px 4px 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-}
-#vgi-user-info img {
-  width: 26px; height: 26px; border-radius: 50%;
-}
-#vgi-user-info .email { color: #2c2c1e; font-weight: 500; }
-#vgi-user-info a {
-  color: #6b6b5a; text-decoration: none; margin-left: 4px;
-  font-size: 0.9em;
-}
-#vgi-user-info a:hover { color: #8b0000; }`;
-
-function buildUserInfoScript(cookieName: string, logoutUrl: string): string {
-  return `(function() {
-  var c = document.cookie.match('(^|;)\\\\s*${cookieName}=([^;]+)');
-  if (!c) return;
-  try {
-    var parts = c[2].split('.');
-    var payload = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
-    var el = document.getElementById('vgi-user-info');
-    if (!el) return;
-    var html = '';
-    if (payload.picture) html += '<img src="' + payload.picture + '" alt="">';
-    html += '<span class="email">' + (payload.email || payload.sub || '') + '</span>';
-    html += '<a href="${logoutUrl}">Sign out</a>';
-    el.innerHTML = html;
-  } catch(e) {}
-})();`;
-}
-
-/** Return HTML snippet (style + div + script) for user info display. */
-export function buildUserInfoHtml(prefix: string): string {
-  const logoutUrl = `${prefix}/_oauth/logout`;
-  return (
-    `<style>${USER_INFO_STYLE}</style>\n` +
-    `<div id="vgi-user-info"></div>\n` +
-    `<script>${buildUserInfoScript(AUTH_COOKIE_NAME, logoutUrl)}</script>`
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Cookie authenticate function
 // ---------------------------------------------------------------------------
 
@@ -576,7 +572,6 @@ export interface OAuthPkceConfig {
   scope: string;
   allowedReturnOrigins: ReadonlySet<string>;
   cookieAuthenticate: AuthenticateFn;
-  userInfoHtml: string;
 }
 
 /** Options for configureOAuthPkce. */
@@ -632,7 +627,6 @@ export function configureOAuthPkce(opts: OAuthPkceOptions, innerAuth: Authentica
     scope: opts.scope ?? "openid email",
     allowedReturnOrigins: opts.allowedReturnOrigins ?? DEFAULT_ALLOWED_RETURN_ORIGINS,
     cookieAuthenticate: cookieAuthenticate(innerAuth),
-    userInfoHtml: buildUserInfoHtml(opts.prefix),
   };
 }
 
@@ -889,13 +883,31 @@ export async function handleOAuthCallback(request: Request, config: OAuthPkceCon
     sameSite: "Lax",
   });
 
-  // Response with two Set-Cookie headers
+  // Response with the auth cookie + a cleared session cookie.
   const headers = new Headers();
   headers.set("Location", originalUrl);
   headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
   headers.set("Content-Type", "text/html; charset=utf-8");
   headers.append("Set-Cookie", authCookie);
   headers.append("Set-Cookie", clearSessionCookie);
+
+  // Display-identity cookie for the shared landing page (JS-readable). Derived
+  // from the id_token so the page shows email/name even when the bearer is an
+  // access token that carries no profile claims. Best-effort — skipped when no
+  // id_token / decodable claims are available.
+  const identity = identityCookieValue(result.idToken ?? (config.useIdToken ? result.token : null));
+  if (identity !== null) {
+    headers.append(
+      "Set-Cookie",
+      buildSetCookieHeader(IDENTITY_COOKIE_NAME, identity, {
+        maxAge: result.maxAge,
+        path: cookiePath,
+        secure: config.secureCookie,
+        httpOnly: false,
+        sameSite: "Lax",
+      }),
+    );
+  }
 
   return new Response(null, { status: 302, headers });
 }
@@ -913,13 +925,19 @@ export function handleOAuthLogout(_request: Request, config: OAuthPkceConfig): R
     secure: config.secureCookie,
     httpOnly: false,
   });
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: config.prefix || "/",
-      "Set-Cookie": clearAuthCookie,
-    },
+  // Also clear the JS-readable display-identity cookie so the landing page's
+  // signed-in pill disappears immediately.
+  const clearIdentityCookie = buildSetCookieHeader(IDENTITY_COOKIE_NAME, "", {
+    maxAge: 0,
+    path: cookiePath,
+    secure: config.secureCookie,
+    httpOnly: false,
   });
+  const headers = new Headers();
+  headers.set("Location", config.prefix || "/");
+  headers.append("Set-Cookie", clearAuthCookie);
+  headers.append("Set-Cookie", clearIdentityCookie);
+  return new Response(null, { status: 302, headers });
 }
 
 // ---------------------------------------------------------------------------
