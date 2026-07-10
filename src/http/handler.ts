@@ -28,6 +28,7 @@ import {
   arrowResponse,
   ECHO_HEADER_PREFIX,
   HttpRpcError,
+  MAX_UPLOAD_URL_COUNT,
   readRequestFromBody as readRequestFromBodyImported,
   SESSION_ACCEPT_HEADER,
   SESSION_CLOSE_HEADER,
@@ -37,6 +38,8 @@ import {
   STICKY_ECHO_HEADERS_HEADER,
   STICKY_ENABLED_HEADER,
   serializeIpcStream,
+  UPLOAD_URL_METHOD,
+  UPLOAD_URL_RESPONSE_SCHEMA,
 } from "./common.js";
 import {
   httpDispatchDescribe,
@@ -299,15 +302,6 @@ export function createHttpHandler(
   const uploadUrlProvider = options?.uploadUrlProvider;
   const maxUploadBytes = options?.maxUploadBytes;
 
-  // Pre-built response schema for the synthetic __upload_url__ endpoint.
-  const UPLOAD_URL_RESPONSE_SCHEMA = makeSchema([
-    field("upload_url", utf8(), false),
-    field("download_url", utf8(), false),
-    field("expires_at", timestampMicro("UTC"), false),
-  ]);
-  const UPLOAD_URL_METHOD = "__upload_url__";
-  const MAX_UPLOAD_URL_COUNT = 100;
-
   // -------- Sticky session machinery --------
   const stickyEnabled = options?.enableSticky === true;
   const stickyDefaultTtl = options?.stickyDefaultTtl ?? 300;
@@ -465,10 +459,18 @@ export function createHttpHandler(
 
     // Health endpoint — exempt from authentication so orchestrators / load
     // balancers can probe even when every RPC endpoint requires auth.
-    if (healthBody !== null && request.method === "GET" && path === healthPath) {
+    //
+    // HEAD is answered alongside GET: /health is the mandatory capability-
+    // discovery endpoint and the C++ client probes it with HEAD. Without a HEAD
+    // responder the probe 405s and discovery silently degrades to defaults.
+    if (healthBody !== null && (request.method === "GET" || request.method === "HEAD") && path === healthPath) {
       const headers = new Headers({ "Content-Type": "application/json" });
       addCorsHeaders(headers);
       addCapabilityHeaders(headers);
+      if (request.method === "HEAD") {
+        headers.set("Content-Length", String(new TextEncoder().encode(healthBody).byteLength));
+        return new Response(null, { status: 200, headers });
+      }
       return new Response(healthBody, { status: 200, headers });
     }
 

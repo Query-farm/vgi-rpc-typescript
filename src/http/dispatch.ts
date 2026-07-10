@@ -283,6 +283,7 @@ export async function httpDispatchStreamInit(
       ctx,
       parsed.requestId,
       headerBytes,
+      reqBatch.metadata ?? undefined,
     );
   } else {
     // Exchange: serialize state into signed token, return zero-row batch with token
@@ -387,7 +388,19 @@ export async function httpDispatchStreamExchange(
   if (effectiveProducer) {
     // Producer continuation — produce more data inline.
     // For exchange-registered methods, falls back to exchangeFn with tick batches.
-    return produceStreamResponse(method, state, outputSchema, inputSchema, ctx, null, null);
+    // The continuation request's metadata reaches the first tick of this turn,
+    // which is how DuckDB's between-tick dynamic-filter updates
+    // (`vgi_pushdown_filters`) arrive over HTTP.
+    return produceStreamResponse(
+      method,
+      state,
+      outputSchema,
+      inputSchema,
+      ctx,
+      null,
+      null,
+      reqBatch.metadata ?? undefined,
+    );
   } else {
     // Exchange path — also handles exchange-registered methods acting as
     // producers (__isProducer=true). Use producer mode on the OutputCollector
@@ -511,7 +524,18 @@ export async function httpDispatchStreamExchange(
   }
 }
 
-/** Run the producer loop and build the response. */
+/**
+ * Run the producer loop and build the response.
+ *
+ * `requestMetadata` is the inbound request batch's custom_metadata. It is
+ * attached to the **first** tick batch only, so an exchange-registered method
+ * acting as a producer sees, on its first `process()`, whatever the client
+ * stamped on this turn's request — the same place the subprocess transport
+ * delivers it. VGI's conditional-revalidation validators
+ * (`vgi.cache.if_none_match` / `if_modified_since`) ride there: over HTTP the
+ * first producer turn folds into the /init POST, so there is no earlier tick to
+ * carry them. Later ticks in this turn are synthetic and carry no metadata.
+ */
 async function produceStreamResponse(
   method: MethodDefinition,
   state: any,
@@ -520,6 +544,7 @@ async function produceStreamResponse(
   ctx: DispatchContext,
   requestId: string | null,
   headerBytes: Uint8Array | null,
+  requestMetadata?: Map<string, string>,
 ): Promise<Response> {
   const allBatches: VgiBatch[] = [];
   // Producer wire cap: prefer the legacy stream-only soft cap when set
@@ -537,6 +562,8 @@ async function produceStreamResponse(
   /** Set when the external cap is breached; the loop replaces the partial
    *  stream with an EXCEPTION batch and breaks. */
   let externalOvershoot: Error | undefined;
+  /** Only the first tick of this turn carries the request's metadata. */
+  let firstTick = true;
 
   while (true) {
     // Snapshot per-iteration budgets so the worker can size its emit.
@@ -570,9 +597,10 @@ async function produceStreamResponse(
         // method which is registered as exchange but may produce based on
         // the __isProducer state flag). Call exchangeFn with an empty tick
         // batch, matching how the subprocess transport dispatches these.
-        const tickBatch = buildEmptyBatch(inputSchema);
+        const tickBatch = buildEmptyBatch(inputSchema, firstTick ? requestMetadata : undefined);
         await method.exchangeFn!(state, tickBatch, out);
       }
+      firstTick = false;
     } catch (error: any) {
       if (process.env.VGI_DISPATCH_DEBUG)
         console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));

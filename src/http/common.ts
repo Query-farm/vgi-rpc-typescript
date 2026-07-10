@@ -4,15 +4,70 @@
 import {
   conformBatchToSchema,
   deserializeBatch,
+  field,
+  int64,
+  schema as makeSchema,
   serializeBatches,
+  timestampMicro,
+  utf8,
   type VgiBatch,
   type VgiSchema,
 } from "../arrow/index.js";
 import { RPC_ERROR_HEADER } from "../constants.js";
 import type { CookieSpec } from "../types.js";
+import { gzipDecompress } from "../util/gzip.js";
+import { zstdDecompress } from "../util/zstd.js";
 
 /** MIME type for Arrow IPC stream request and response bodies. */
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
+
+// --- The `__upload_url__` wire contract ------------------------------------
+// Public so an intermediary that terminates or serves the upload-URL flow
+// doesn't have to copy the method name and schemas.
+
+/** Synthetic method name for the pre-signed upload-URL endpoint. */
+export const UPLOAD_URL_METHOD = "__upload_url__";
+
+/** Server-side ceiling on `count` in one `__upload_url__` request. */
+export const MAX_UPLOAD_URL_COUNT = 100;
+
+/** Request schema for `__upload_url__`: how many URL pairs to vend. */
+export const UPLOAD_URL_PARAMS_SCHEMA: VgiSchema = makeSchema([field("count", int64(), true)]);
+
+/** Response schema for `__upload_url__`. */
+export const UPLOAD_URL_RESPONSE_SCHEMA: VgiSchema = makeSchema([
+  field("upload_url", utf8(), false),
+  field("download_url", utf8(), false),
+  field("expires_at", timestampMicro("UTC"), false),
+]);
+
+/**
+ * Decode an HTTP body per its `Content-Encoding`, or return it unchanged.
+ *
+ * Handles the codings vgi-rpc speaks (`zstd`, `gzip`); the header may list
+ * several applied in order, which are decoded in reverse. Unknown / `identity`
+ * codings are left as-is. Intended for an intermediary (proxy, gateway) that
+ * must read a compressed request or response body to inspect or rewrite it.
+ */
+export async function decodeContentEncoding(
+  data: Uint8Array,
+  contentEncoding: string | null | undefined,
+  maxOutputSize?: number,
+): Promise<Uint8Array> {
+  if (!contentEncoding) return data;
+  const codings = contentEncoding
+    .split(",")
+    .map((c) => c.trim().toLowerCase())
+    .filter((c) => c.length > 0)
+    .reverse();
+  let result = data;
+  for (const coding of codings) {
+    if (coding === "zstd") result = await zstdDecompress(result, maxOutputSize);
+    else if (coding === "gzip") result = await gzipDecompress(result, maxOutputSize);
+    // identity / unknown coding — leave as-is
+  }
+  return result;
+}
 
 // Sticky session header conventions (HTTP-only). Mirrors Python's
 // `vgi_rpc.http._common`. Headers — not cookies — so multiple concurrent
