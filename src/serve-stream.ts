@@ -12,6 +12,7 @@ import type { Socket } from "node:net";
 
 import type { Protocol } from "./protocol.js";
 import { VgiRpcServer } from "./server.js";
+import type { ByteSink } from "./wire/writer.js";
 import { TransportKind } from "./types.js";
 
 /** Options for {@link serveStream} — a single RPC session over one stream pair. */
@@ -21,7 +22,7 @@ export interface ServeStreamOptions {
   readable: ReadableStream<Uint8Array> | NodeJS.ReadableStream;
   /** Outgoing response sink — a stdout-like fd number, or a `net.Socket` /
    *  structurally-compatible `Duplex`. Omit for the stdout fd. */
-  writable?: number | Socket;
+  writable?: number | Socket | ByteSink;
   /** Passed through to the `VgiRpcServer` constructor (describe, hooks, …). */
   serverOptions?: ConstructorParameters<typeof VgiRpcServer>[1];
   /** Reported to the `on_serve_start` hook. Defaults to `PIPE`. */

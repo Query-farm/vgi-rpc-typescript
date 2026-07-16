@@ -26,7 +26,7 @@ import {
 import { IpcStreamReader } from "./wire/reader.js";
 import { applyDefaults, parseRequest } from "./wire/request.js";
 import { buildErrorBatch } from "./wire/response.js";
-import { IpcStreamWriter } from "./wire/writer.js";
+import { IpcStreamWriter, type ByteSink } from "./wire/writer.js";
 
 const EMPTY_SCHEMA = makeSchema([]);
 
@@ -199,7 +199,7 @@ export class VgiRpcServer {
    */
   async serveConnection(
     readable: ReadableStream<Uint8Array> | NodeJS.ReadableStream,
-    writable?: number | import("node:net").Socket,
+    writable?: number | import("node:net").Socket | ByteSink,
     transportKind: TransportKind = TransportKind.PIPE,
   ): Promise<void> {
     const reader = await IpcStreamReader.create(readable);

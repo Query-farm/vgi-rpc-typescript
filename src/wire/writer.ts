@@ -109,7 +109,18 @@ async function socketWriteAll(socket: Socket, data: Uint8Array): Promise<void> {
   });
 }
 
-type WriterTarget = { kind: "fd"; fd: number } | { kind: "socket"; socket: Socket };
+/**
+ * A browser/worker-friendly byte sink: `write` receives each fully-serialized
+ * chunk of response bytes (a schema msg, a batch, or the EOS marker) and must
+ * deliver them in order. Used by the in-browser SAB (`worker:`) transport, which
+ * has no Node fd/Socket — the sink writes into the worker→client ring.
+ */
+export type ByteSink = { write: (bytes: Uint8Array) => void | Promise<void> };
+
+type WriterTarget =
+  | { kind: "fd"; fd: number }
+  | { kind: "socket"; socket: Socket }
+  | { kind: "sink"; sink: ByteSink };
 
 /**
  * Writes sequential IPC streams to either an fd (stdio subprocess transport)
@@ -128,11 +139,15 @@ export class IpcStreamWriter {
    * (AF_UNIX transport). The default targets stdout for legacy stdio servers
    * that didn't pass an fd.
    */
-  constructor(fdOrSocket: number | Socket = STDOUT_FD) {
-    if (typeof fdOrSocket === "number") {
-      this.target = { kind: "fd", fd: fdOrSocket };
+  constructor(fdOrSocketOrSink: number | Socket | ByteSink = STDOUT_FD) {
+    if (typeof fdOrSocketOrSink === "number") {
+      this.target = { kind: "fd", fd: fdOrSocketOrSink };
+    } else if (typeof (fdOrSocketOrSink as ByteSink).write === "function" && !("writable" in fdOrSocketOrSink)) {
+      // A plain byte sink (browser/worker SAB) — has write() but is not a Node Socket
+      // (Sockets have a `writable` boolean property).
+      this.target = { kind: "sink", sink: fdOrSocketOrSink as ByteSink };
     } else {
-      this.target = { kind: "socket", socket: fdOrSocket };
+      this.target = { kind: "socket", socket: fdOrSocketOrSink as Socket };
     }
   }
 
@@ -150,6 +165,8 @@ export class IpcStreamWriter {
     const bytes = serializeBatches(schema, batches);
     if (this.target.kind === "fd") {
       writeAll(this.target.fd, bytes);
+    } else if (this.target.kind === "sink") {
+      await this.target.sink.write(bytes);
     } else {
       await socketWriteAll(this.target.socket, bytes);
     }
@@ -217,6 +234,9 @@ export class IncrementalStream {
       if (this.target.kind === "fd") {
         writeAll(this.target.fd, bytes);
         return;
+      }
+      if (this.target.kind === "sink") {
+        return this.target.sink.write(bytes);
       }
       return socketWriteAll(this.target.socket, bytes);
     });
