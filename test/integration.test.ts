@@ -66,7 +66,7 @@ describe("integration: describe", () => {
     expect(exitCode).toBe(0);
     const data = JSON.parse(stdout);
     expect(data.protocol_name).toBe("Calculator");
-    expect(data.describe_version).toBe("2");
+    expect(data.describe_version).toBe("4");
     expect(data.methods.add).toBeTruthy();
     expect(data.methods.multiply).toBeTruthy();
     expect(data.methods.divide).toBeTruthy();
