@@ -21,6 +21,7 @@
 import {
   deserializeBatch,
   emptyBatchWithMetadata,
+  schema as makeSchema,
   singleRowBatchWithMetadata,
   type VgiBatch,
   type VgiSchema,
@@ -81,15 +82,17 @@ export function writeRequest(
  * Build a complete IPC stream carrying a single error batch.
  *
  * This is the wire shape an intermediary returns to deny or abort a call
- * in-band — the client decodes it back into a thrown error.
+ * in-band — the client decodes it back into a thrown error. `schema` defaults
+ * to an empty schema, matching Python's `build_error_stream`.
  */
 export function buildErrorStream(
   error: Error,
-  schema: VgiSchema,
+  schema?: VgiSchema,
   serverId = "",
   requestId: string | null = null,
 ): Uint8Array {
-  return serializeIpcStream(schema, [buildErrorBatch(schema, error, serverId, requestId)]);
+  const streamSchema = schema ?? makeSchema([]);
+  return serializeIpcStream(streamSchema, [buildErrorBatch(streamSchema, error, serverId, requestId)]);
 }
 
 /**

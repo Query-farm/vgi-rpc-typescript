@@ -4,8 +4,8 @@
 // The public intermediary surface (`vgi_rpc.wire` in Python).
 
 import { describe, expect, it } from "bun:test";
-import { binary, field, int64, schema as makeSchema, utf8 } from "../src/arrow/index.js";
-import { LOG_LEVEL_KEY, PROTOCOL_VERSION_KEY, STATE_KEY } from "../src/constants.js";
+import { binary, deserializeBatch, field, int64, schema as makeSchema, utf8 } from "../src/arrow/index.js";
+import { LOG_LEVEL_KEY, LOG_MESSAGE_KEY, PROTOCOL_VERSION_KEY, STATE_KEY } from "../src/constants.js";
 import { serializeIpcStream } from "../src/http/common.js";
 import {
   buildErrorStream,
@@ -49,6 +49,14 @@ describe("wire.buildErrorStream", () => {
     expect(await findProtocolVersion(body)).toBeNull();
     expect(await findStateToken(body)).toBeNull();
     expect(body.byteLength).toBeGreaterThan(0);
+  });
+
+  it("defaults to an empty schema when none is supplied", () => {
+    const body = buildErrorStream(new Error("boom"));
+    const batch = deserializeBatch(body);
+    expect(batch.schema.fields.length).toBe(0);
+    expect(batch.metadata?.get(LOG_LEVEL_KEY)).toBe("EXCEPTION");
+    expect(batch.metadata?.get(LOG_MESSAGE_KEY)).toContain("boom");
   });
 });
 
