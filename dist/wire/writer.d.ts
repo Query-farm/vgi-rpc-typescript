@@ -7,6 +7,7 @@ import type { VgiBatch, VgiSchema } from "../arrow/index.js";
  * has no Node fd/Socket — the sink writes into the worker→client ring.
  */
 export type ByteSink = {
+    /** Deliver one fully-serialized chunk of response bytes, in order. */
     write: (bytes: Uint8Array) => void | Promise<void>;
 };
 type WriterTarget = {

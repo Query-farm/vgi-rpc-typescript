@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import type { RecordBatch, Schema } from "@query-farm/apache-arrow";
+import { type RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
@@ -38,12 +38,38 @@ export interface RpcClient {
   close(): void;
 }
 
+/** An HTTP-connected RPC client: {@link RpcClient} plus the HTTP-only continuation-resume surface. */
+export interface HttpRpcClient extends RpcClient {
+  /** Open a streaming method, returning an {@link HttpStreamSession} for exchange or producer iteration. */
+  stream(method: string, params?: Record<string, any>): Promise<HttpStreamSession>;
+  /**
+   * Resume a producer stream from a continuation `token` without re-binding.
+   *
+   * A continuation request (`POST /{method}/exchange` carrying only the
+   * `STATE_KEY` token) is fully self-describing: the server recovers the
+   * producer state, schemas, and function identity from the signed token
+   * alone, so no bind/init round-trip is needed. This is the cheap path for a
+   * stateless relay that holds a per-batch token (see
+   * {@link HttpStreamSession.nextWithToken}) and resumes on any
+   * connection/node — unlike `stream(...)` which would produce and discard a
+   * fresh first turn before seeking.
+   *
+   * The returned session is positioned at `token`; the first `nextWithToken()`
+   * (or iteration) issues the continuation. `outputSchema` is unused on the
+   * producer-continuation path (each response's IPC stream carries its own
+   * schema) and defaults to the empty schema.
+   *
+   * Mirrors Python's `_HttpProxy.resume_stream`.
+   */
+  resumeStream(method: string, token: string, outputSchema?: Schema): Promise<HttpStreamSession>;
+}
+
 /**
  * Connect to a vgi-rpc server over HTTP. The returned client lazily introspects
  * the server (caching `__describe__`) on the first call and transparently handles
  * zstd compression, authorization, and 413 request externalization.
  */
-export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcClient {
+export function httpConnect(baseUrl: string, options?: HttpConnectOptions): HttpRpcClient {
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
   const onLog = options?.onLog;
   const compressionLevel = options?.compressionLevel;
@@ -384,6 +410,30 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): RpcC
         pendingBatches,
         finished,
         header,
+        compressionLevel,
+        compressFn,
+        decompressFn,
+        authorization,
+        externalConfig,
+        postFn: postWithExternalization,
+      });
+    },
+
+    async resumeStream(method: string, token: string, outputSchema?: Schema): Promise<HttpStreamSession> {
+      // No bind/init round-trip: the continuation token alone identifies the
+      // stream. ensureCompression is memoized and only probes when a
+      // compressionLevel was requested and no call has run yet.
+      await ensureCompression();
+      return new HttpStreamSession({
+        baseUrl,
+        prefix,
+        method,
+        stateToken: token,
+        outputSchema: outputSchema ?? new Schema([]),
+        onLog,
+        pendingBatches: [],
+        finished: false,
+        header: null,
         compressionLevel,
         compressFn,
         decompressFn,

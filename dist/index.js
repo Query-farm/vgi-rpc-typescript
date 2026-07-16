@@ -936,6 +936,9 @@ class AuthContext {
     }
   }
 }
+// src/client/connect.ts
+import { Schema as Schema3 } from "@query-farm/apache-arrow";
+
 // src/constants.ts
 var RPC_METHOD_KEY = "vgi_rpc.method";
 var LOG_LEVEL_KEY = "vgi_rpc.log_level";
@@ -2105,6 +2108,62 @@ class HttpStreamSession {
         break;
     }
   }
+  async nextWithToken() {
+    const multi = "nextWithToken requires one data batch per response; the upstream " + "worker buffered multiple (configured max_response_bytes?)";
+    while (this._pendingBatches.length > 0) {
+      let batch = this._pendingBatches.shift();
+      if (batch.numRows === 0) {
+        if (isExternalLocationBatch(batch)) {
+          batch = await resolveExternalLocation(batch, this._externalConfig);
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
+        throw new Error(multi);
+      }
+      return { rows: extractBatchRows(batch), token: this._stateToken };
+    }
+    if (this._finished || this._stateToken === null) {
+      this._finished = true;
+      return null;
+    }
+    const responseBody = await this._sendContinuation(this._stateToken);
+    const { batches } = await readResponseBatches(responseBody);
+    let dataRows = null;
+    let nextToken = null;
+    for (let batch of batches) {
+      if (batch.numRows === 0) {
+        const token = batch.metadata?.get(STATE_KEY);
+        if (token) {
+          nextToken = token;
+          continue;
+        }
+        if (isExternalLocationBatch(batch)) {
+          batch = await resolveExternalLocation(batch, this._externalConfig);
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (dataRows !== null) {
+        throw new Error(multi);
+      }
+      dataRows = extractBatchRows(batch);
+    }
+    this._stateToken = nextToken;
+    if (dataRows === null) {
+      this._finished = true;
+      return null;
+    }
+    return { rows: dataRows, token: nextToken };
+  }
+  seekToToken(token) {
+    this._pendingBatches = [];
+    this._stateToken = token;
+    this._finished = false;
+  }
   async _sendContinuation(token) {
     const emptySchema = new Schema([]);
     const metadata = new Map;
@@ -2500,6 +2559,26 @@ function httpConnect(baseUrl, options) {
         postFn: postWithExternalization
       });
     },
+    async resumeStream(method, token, outputSchema) {
+      await ensureCompression();
+      return new HttpStreamSession({
+        baseUrl,
+        prefix,
+        method,
+        stateToken: token,
+        outputSchema: outputSchema ?? new Schema3([]),
+        onLog,
+        pendingBatches: [],
+        finished: false,
+        header: null,
+        compressionLevel,
+        compressFn,
+        decompressFn,
+        authorization,
+        externalConfig,
+        postFn: postWithExternalization
+      });
+    },
     async describe() {
       await ensureCompression();
       return httpIntrospect(baseUrl, {
@@ -2628,7 +2707,7 @@ import {
   makeData as makeData2,
   RecordBatch as RecordBatch2,
   RecordBatchStreamWriter as RecordBatchStreamWriter2,
-  Schema as Schema3,
+  Schema as Schema4,
   Struct as Struct2,
   vectorFromArray as vectorFromArray2
 } from "@query-farm/apache-arrow";
@@ -2747,7 +2826,7 @@ class PipeStreamSession {
         const arrowType = inferArrowType(sample);
         return new Field3(key, arrowType, true);
       });
-      inputSchema = new Schema3(fields);
+      inputSchema = new Schema4(fields);
       if (this._inputSchema) {
         const cached = this._inputSchema;
         if (cached.fields.length !== inputSchema.fields.length || cached.fields.some((f, i) => f.name !== inputSchema.fields[i].name)) {
@@ -2804,7 +2883,7 @@ class PipeStreamSession {
     if (this._closed)
       return;
     try {
-      const tickSchema = new Schema3([]);
+      const tickSchema = new Schema4([]);
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
       const structType = new Struct2(tickSchema.fields);
       const tickData = makeData2({
@@ -2845,7 +2924,7 @@ class PipeStreamSession {
       this._inputWriter.close();
       this._inputWriter = null;
     } else {
-      const emptySchema = new Schema3([]);
+      const emptySchema = new Schema4([]);
       const ipc = serializeIpcStream(emptySchema, []);
       this._writeFn(ipc);
     }
@@ -2911,7 +2990,7 @@ function pipeConnect(readable, writable, options) {
       return methodCache;
     await acquireBusy();
     try {
-      const emptySchema = new Schema3([]);
+      const emptySchema = new Schema4([]);
       const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
       writeFn(body);
       const r = await ensureReader();
@@ -3012,7 +3091,7 @@ function pipeConnect(readable, writable, options) {
       } catch (e) {
         try {
           const r = await ensureReader();
-          const emptySchema = new Schema3([]);
+          const emptySchema = new Schema4([]);
           const ipc = serializeIpcStream(emptySchema, []);
           writeFn(ipc);
           const outStream = await r.readStream();
@@ -8846,7 +8925,8 @@ function writeRequest(methodName, paramsSchema, params, protocolVersion) {
   return buildRequestIpc(paramsSchema, params, methodName, { protocolVersion });
 }
 function buildErrorStream(error, schema2, serverId = "", requestId = null) {
-  return serializeIpcStream(schema2, [buildErrorBatch(schema2, error, serverId, requestId)]);
+  const streamSchema = schema2 ?? schema([]);
+  return serializeIpcStream(streamSchema, [buildErrorBatch(streamSchema, error, serverId, requestId)]);
 }
 function findStateToken(data) {
   return findBatchMetadataValue(data, STATE_KEY);
@@ -9003,4 +9083,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=85531258E103CA9964756E2164756E21
+//# debugId=4F31D1406CC004B264756E2164756E21

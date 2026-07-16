@@ -20,6 +20,21 @@ type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
 export type PostFn = (url: string, body: Uint8Array) => Promise<Response>;
 
 /**
+ * One producer batch's rows paired with the continuation token that resumes
+ * the stream AFTER that batch. Returned by {@link HttpStreamSession.nextWithToken}.
+ */
+export interface RowsWithToken {
+  /** The data batch's rows. */
+  rows: Record<string, any>[];
+  /**
+   * The resume token continuing the stream after this batch — the worker's
+   * own serialized producer state — or `null` when the producer emitted this
+   * batch as its final turn (no further continuation).
+   */
+  token: string | null;
+}
+
+/**
  * {@link StreamSession} implementation for the HTTP transport. Stream state is
  * carried statelessly across requests via an HMAC state token: each
  * {@link HttpStreamSession.exchange} or producer-continuation POST sends the
@@ -287,6 +302,105 @@ export class HttpStreamSession implements StreamSession {
 
       if (!gotContinuation) break;
     }
+  }
+
+  /**
+   * Read one producer batch and surface the worker's continuation token.
+   *
+   * Reads exactly one data batch and returns it paired with the resume token
+   * that continues the stream AFTER that batch — the worker's own serialized
+   * producer state. A fresh session positioned at that token (see
+   * {@link HttpStreamSession.seekToToken} / the client's `resumeStream`)
+   * resumes on any node, which is the basis for stateless, load-balanced
+   * relays that must not pin a scan to one process.
+   *
+   * Returns `null` at end-of-stream. Requires per-batch continuation tokens
+   * (the default server behaviour — i.e. the worker is not configured with
+   * `max_response_bytes`); throws if a single response carries more than one
+   * data batch (coarser-than-batch resume is not representable here).
+   *
+   * Drives the same wire protocol as async iteration but yields one
+   * `{ rows, token }` per call instead of auto-following the token. Do not
+   * interleave with iteration/`exchange` on the same session.
+   *
+   * Mirrors Python's `HttpStreamSession.next_with_token`.
+   */
+  async nextWithToken(): Promise<RowsWithToken | null> {
+    const multi =
+      "nextWithToken requires one data batch per response; the upstream " +
+      "worker buffered multiple (configured max_response_bytes?)";
+
+    // Init may have preloaded data batches; their resume point is the
+    // current state token. Zero-row log/error batches deferred from init are
+    // dispatched in order (an EXCEPTION batch throws, like iteration would).
+    while (this._pendingBatches.length > 0) {
+      let batch = this._pendingBatches.shift()!;
+      if (batch.numRows === 0) {
+        if (isExternalLocationBatch(batch)) {
+          batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
+        throw new Error(multi);
+      }
+      return { rows: extractBatchRows(batch), token: this._stateToken };
+    }
+
+    if (this._finished || this._stateToken === null) {
+      this._finished = true;
+      return null;
+    }
+
+    const responseBody = await this._sendContinuation(this._stateToken);
+    const { batches } = await readResponseBatches(responseBody);
+
+    let dataRows: Record<string, any>[] | null = null;
+    let nextToken: string | null = null;
+    for (let batch of batches) {
+      if (batch.numRows === 0) {
+        // Continuation token (zero-row batch with STATE_KEY).
+        const token = batch.metadata?.get(STATE_KEY);
+        if (token) {
+          nextToken = token;
+          continue;
+        }
+        if (isExternalLocationBatch(batch)) {
+          batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (dataRows !== null) {
+        throw new Error(multi);
+      }
+      dataRows = extractBatchRows(batch);
+    }
+
+    this._stateToken = nextToken;
+    if (dataRows === null) {
+      // No data this turn -> the producer finished (out.finish(), no token).
+      this._finished = true;
+      return null;
+    }
+    return { rows: dataRows, token: nextToken };
+  }
+
+  /**
+   * Reposition a freshly-initialised session to resume from `token`.
+   *
+   * Discards any init-preloaded batches and points the session at the given
+   * continuation token (as returned by {@link HttpStreamSession.nextWithToken}),
+   * so the next `nextWithToken()` continues from exactly there. Used to resume
+   * a scan on a new process/node. Mirrors Python's `seek_to_token`.
+   */
+  seekToToken(token: string): void {
+    this._pendingBatches = [];
+    this._stateToken = token;
+    this._finished = false;
   }
 
   private async _sendContinuation(token: string): Promise<Uint8Array> {

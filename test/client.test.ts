@@ -1355,3 +1355,120 @@ if (hasPython) {
     { supportsZeroRowExchange: false, supportsServerSideDefaults: false },
   );
 }
+
+// ---------------------------------------------------------------------------
+// HTTP continuation resume (nextWithToken / seekToToken / resumeStream) —
+// mirrors Python's HttpStreamSession.next_with_token / seek_to_token and
+// _HttpProxy.resume_stream. HTTP-only: the token-based resume surface has no
+// pipe/subprocess analog (those transports hold the stream open).
+// ---------------------------------------------------------------------------
+
+function defineResumeStreamTests(label: string, spawnFn: () => Subprocess) {
+  describe(`HTTP stream resume [${label}]`, () => {
+    let proc: Subprocess;
+    let baseUrl: string;
+
+    beforeAll(async () => {
+      proc = spawnFn();
+      baseUrl = await startServer(proc);
+    });
+
+    afterAll(() => {
+      proc?.kill();
+    });
+
+    it("nextWithToken walks a producer one batch at a time", async () => {
+      const client = httpConnect(baseUrl);
+      const session = await client.stream("produce_n", { count: 3 });
+      const indexes: number[] = [];
+      const tokens: (string | null)[] = [];
+      while (true) {
+        const next = await session.nextWithToken();
+        if (next === null) break;
+        expect(next.rows.length).toBe(1);
+        indexes.push(next.rows[0].index);
+        tokens.push(next.token);
+      }
+      expect(indexes).toEqual([0, 1, 2]);
+      // Every batch but possibly the last carries a resume token.
+      for (const token of tokens.slice(0, -1)) expect(token).toBeTruthy();
+      // End-of-stream is sticky.
+      expect(await session.nextWithToken()).toBeNull();
+      client.close();
+    });
+
+    it("resumeStream continues from a captured token on a fresh client", async () => {
+      const client = httpConnect(baseUrl);
+      const session = await client.stream("produce_n", { count: 5 });
+      const first = await session.nextWithToken();
+      const second = await session.nextWithToken();
+      expect(first!.rows[0].index).toBe(0);
+      expect(second!.rows[0].index).toBe(1);
+      expect(second!.token).toBeTruthy();
+
+      // A brand-new client resumes after batch 2 from the token alone — no
+      // bind/init round-trip.
+      const client2 = httpConnect(baseUrl);
+      const resumed = await client2.resumeStream("produce_n", second!.token!);
+      const rest: number[] = [];
+      while (true) {
+        const next = await resumed.nextWithToken();
+        if (next === null) break;
+        rest.push(next.rows[0].index);
+      }
+      expect(rest).toEqual([2, 3, 4]);
+      client2.close();
+      client.close();
+    });
+
+    it("a resumed session supports plain iteration", async () => {
+      const client = httpConnect(baseUrl);
+      const session = await client.stream("produce_n", { count: 4 });
+      const first = await session.nextWithToken();
+      expect(first!.rows[0].index).toBe(0);
+
+      const resumed = await client.resumeStream("produce_n", first!.token!);
+      const rest: number[] = [];
+      for await (const rows of resumed) rest.push(rows[0].index);
+      expect(rest).toEqual([1, 2, 3]);
+      client.close();
+    });
+
+    it("seekToToken repositions a fresh session, discarding preloaded batches", async () => {
+      const client = httpConnect(baseUrl);
+      const session = await client.stream("produce_n", { count: 4 });
+      await session.nextWithToken();
+      const second = await session.nextWithToken();
+      expect(second!.token).toBeTruthy();
+
+      // A second init preloads batch 0; seeking discards it and resumes
+      // after batch 2 (the expensive produce-and-discard path).
+      const session2 = await client.stream("produce_n", { count: 4 });
+      session2.seekToToken(second!.token!);
+      const rest: number[] = [];
+      while (true) {
+        const next = await session2.nextWithToken();
+        if (next === null) break;
+        rest.push(next.rows[0].index);
+      }
+      expect(rest).toEqual([2, 3]);
+      client.close();
+    });
+  });
+}
+
+defineResumeStreamTests("bun-http", () =>
+  Bun.spawn(["bun", "run", "examples/conformance-http.ts"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  }),
+);
+
+if (hasPython) {
+  defineResumeStreamTests("python-http", () =>
+    Bun.spawn(PYTHON_HTTP_SERVER, {
+      stdout: "pipe",
+      stderr: "pipe",
+    }),
+  );
+}
