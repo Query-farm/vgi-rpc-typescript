@@ -98,7 +98,6 @@ export {
   uint64,
 } from "./schema.js";
 export { type ServeStreamOptions, serveStream } from "./serve-stream.js";
-export type { ByteSink } from "./wire/writer.js";
 export { VgiRpcServer } from "./server.js";
 export {
   type CallContext,
@@ -130,3 +129,4 @@ export {
   writeRequest,
   writeUnaryResult,
 } from "./wire/public.js";
+export type { ByteSink } from "./wire/writer.js";

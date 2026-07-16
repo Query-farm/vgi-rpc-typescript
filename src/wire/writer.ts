@@ -115,12 +115,12 @@ async function socketWriteAll(socket: Socket, data: Uint8Array): Promise<void> {
  * deliver them in order. Used by the in-browser SAB (`worker:`) transport, which
  * has no Node fd/Socket — the sink writes into the worker→client ring.
  */
-export type ByteSink = { write: (bytes: Uint8Array) => void | Promise<void> };
+export type ByteSink = {
+  /** Deliver one fully-serialized chunk of response bytes, in order. */
+  write: (bytes: Uint8Array) => void | Promise<void>;
+};
 
-type WriterTarget =
-  | { kind: "fd"; fd: number }
-  | { kind: "socket"; socket: Socket }
-  | { kind: "sink"; sink: ByteSink };
+type WriterTarget = { kind: "fd"; fd: number } | { kind: "socket"; socket: Socket } | { kind: "sink"; sink: ByteSink };
 
 /**
  * Writes sequential IPC streams to either an fd (stdio subprocess transport)

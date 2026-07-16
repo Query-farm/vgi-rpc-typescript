@@ -12,8 +12,8 @@ import type { Socket } from "node:net";
 
 import type { Protocol } from "./protocol.js";
 import { VgiRpcServer } from "./server.js";
+import type { TransportKind } from "./types.js";
 import type { ByteSink } from "./wire/writer.js";
-import { TransportKind } from "./types.js";
 
 /** Options for {@link serveStream} — a single RPC session over one stream pair. */
 export interface ServeStreamOptions {

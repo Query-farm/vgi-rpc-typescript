@@ -26,7 +26,7 @@ import {
 import { IpcStreamReader } from "./wire/reader.js";
 import { applyDefaults, parseRequest } from "./wire/request.js";
 import { buildErrorBatch } from "./wire/response.js";
-import { IpcStreamWriter, type ByteSink } from "./wire/writer.js";
+import { type ByteSink, IpcStreamWriter } from "./wire/writer.js";
 
 const EMPTY_SCHEMA = makeSchema([]);
 
