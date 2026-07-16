@@ -1,11 +1,23 @@
 import type { Socket } from "node:net";
 import type { VgiBatch, VgiSchema } from "../arrow/index.js";
+/**
+ * A browser/worker-friendly byte sink: `write` receives each fully-serialized
+ * chunk of response bytes (a schema msg, a batch, or the EOS marker) and must
+ * deliver them in order. Used by the in-browser SAB (`worker:`) transport, which
+ * has no Node fd/Socket — the sink writes into the worker→client ring.
+ */
+export type ByteSink = {
+    write: (bytes: Uint8Array) => void | Promise<void>;
+};
 type WriterTarget = {
     kind: "fd";
     fd: number;
 } | {
     kind: "socket";
     socket: Socket;
+} | {
+    kind: "sink";
+    sink: ByteSink;
 };
 /**
  * Writes sequential IPC streams to either an fd (stdio subprocess transport)
@@ -23,7 +35,7 @@ export declare class IpcStreamWriter {
      * (AF_UNIX transport). The default targets stdout for legacy stdio servers
      * that didn't pass an fd.
      */
-    constructor(fdOrSocket?: number | Socket);
+    constructor(fdOrSocketOrSink?: number | Socket | ByteSink);
     /**
      * Write a complete IPC stream with the given schema and batches.
      * Creates schema message, writes all batches (with their metadata), writes EOS.

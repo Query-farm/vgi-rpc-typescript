@@ -2,6 +2,23 @@ import { type VgiBatch, type VgiSchema } from "../arrow/index.js";
 import type { CookieSpec } from "../types.js";
 /** MIME type for Arrow IPC stream request and response bodies. */
 export declare const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
+/** Synthetic method name for the pre-signed upload-URL endpoint. */
+export declare const UPLOAD_URL_METHOD = "__upload_url__";
+/** Server-side ceiling on `count` in one `__upload_url__` request. */
+export declare const MAX_UPLOAD_URL_COUNT = 100;
+/** Request schema for `__upload_url__`: how many URL pairs to vend. */
+export declare const UPLOAD_URL_PARAMS_SCHEMA: VgiSchema;
+/** Response schema for `__upload_url__`. */
+export declare const UPLOAD_URL_RESPONSE_SCHEMA: VgiSchema;
+/**
+ * Decode an HTTP body per its `Content-Encoding`, or return it unchanged.
+ *
+ * Handles the codings vgi-rpc speaks (`zstd`, `gzip`); the header may list
+ * several applied in order, which are decoded in reverse. Unknown / `identity`
+ * codings are left as-is. Intended for an intermediary (proxy, gateway) that
+ * must read a compressed request or response body to inspect or rewrite it.
+ */
+export declare function decodeContentEncoding(data: Uint8Array, contentEncoding: string | null | undefined, maxOutputSize?: number): Promise<Uint8Array>;
 export declare const SESSION_HEADER = "VGI-Session";
 export declare const SESSION_ACCEPT_HEADER = "VGI-Session-Accept";
 export declare const SESSION_CLOSE_HEADER = "VGI-Session-Close";

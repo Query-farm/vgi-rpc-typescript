@@ -1,6 +1,7 @@
 import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
 import { type DispatchHook, type ServeStartHook, TransportKind } from "./types.js";
+import { type ByteSink } from "./wire/writer.js";
 /**
  * RPC server that reads Arrow IPC requests from stdin and writes responses to stdout.
  * Supports unary and streaming (producer/exchange) methods.
@@ -61,7 +62,7 @@ export declare class VgiRpcServer {
      *   `net.Socket` / structurally-compatible `Duplex`. Omit for the stdout fd.
      * @param transportKind reported to the `on_serve_start` hook (default `PIPE`).
      */
-    serveConnection(readable: ReadableStream<Uint8Array> | NodeJS.ReadableStream, writable?: number | import("node:net").Socket, transportKind?: TransportKind): Promise<void>;
+    serveConnection(readable: ReadableStream<Uint8Array> | NodeJS.ReadableStream, writable?: number | import("node:net").Socket | ByteSink, transportKind?: TransportKind): Promise<void>;
     private serveOne;
 }
 //# sourceMappingURL=server.d.ts.map
