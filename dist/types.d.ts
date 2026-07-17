@@ -356,6 +356,9 @@ export declare class OutputCollector implements CallContext {
     /** Batches emitted so far this call — the single data batch plus any log
      *  batches, in emission order. Consumed by the dispatch layer. */
     get batches(): EmittedBatch[];
+    /** Index of the data batch within {@link batches}, or null if none was
+     *  emitted this call. Log batches never occupy this slot. */
+    get dataBatchIdx(): number | null;
     /** Emit a pre-built batch as the data batch for this call. */
     emit(batch: VgiBatch, metadata?: Map<string, string>): void;
     /** Emit a data batch from column arrays keyed by field name. Int64 Number values are coerced to BigInt. */

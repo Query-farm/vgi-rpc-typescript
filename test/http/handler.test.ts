@@ -117,6 +117,19 @@ function makeTestProtocol(): Protocol {
     },
   });
 
+  // Emits a 0-row data batch with per-emit metadata every round — the shape
+  // of a conditional-revalidation "not modified" reply.
+  protocol.exchange<Record<string, never>>("empty_reply", {
+    params: {},
+    inputSchema: { value: float },
+    outputSchema: { value: float },
+    init: () => ({}),
+    exchange: (_state, _input, out) => {
+      const emptyBatch = recordBatchFromArrays({ value: [] }, new Schema([Field.new("value", new Float64())]));
+      out.emit(emptyBatch as any, new Map([["vgi.cache.status", "not_modified"]]));
+    },
+  });
+
   return protocol;
 }
 
@@ -463,6 +476,42 @@ describe("HTTP Handler", () => {
     expect(exchangeBatches[0].getChildAt(0)?.get(0)).toBe(50);
     expect(exchangeBatches[0].numRows).toBe(1);
     // Token is in the data batch's metadata
+    expect(exchangeBatches[0].metadata?.get(STATE_KEY)).toBeDefined();
+  });
+
+  test("exchange 0-row data batch keeps emit metadata and token", async () => {
+    const initBody = buildRequestIpc(new Schema([]), {}, "empty_reply");
+    const initRes = await handler(
+      new Request(`${BASE}/vgi/empty_reply/init`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body: initBody,
+      }),
+    );
+    expect(initRes.status).toBe(200);
+    const { batches: initBatches } = await readResponseBatches(initRes);
+    const stateToken = initBatches[0].metadata?.get(STATE_KEY);
+    expect(stateToken).toBeDefined();
+
+    const inputSchema = new Schema([new Field("value", new Float64(), false)]);
+    const exchangeMeta = new Map<string, string>();
+    exchangeMeta.set(STATE_KEY, stateToken!);
+    const exchangeBody = buildRequestIpc(inputSchema, { value: [5] }, "empty_reply", exchangeMeta);
+
+    const exchangeRes = await handler(
+      new Request(`${BASE}/vgi/empty_reply/exchange`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body: exchangeBody,
+      }),
+    );
+    expect(exchangeRes.status).toBe(200);
+    const { batches: exchangeBatches } = await readResponseBatches(exchangeRes);
+    // Exactly one batch: the 0-row data batch itself carries the per-emit
+    // metadata AND the continuation token (no bare batch + safety-net pair).
+    expect(exchangeBatches.length).toBe(1);
+    expect(exchangeBatches[0].numRows).toBe(0);
+    expect(exchangeBatches[0].metadata?.get("vgi.cache.status")).toBe("not_modified");
     expect(exchangeBatches[0].metadata?.get(STATE_KEY)).toBeDefined();
   });
 

@@ -3547,6 +3547,9 @@ class OutputCollector {
   get batches() {
     return this._batches;
   }
+  get dataBatchIdx() {
+    return this._dataBatchIdx;
+  }
   emit(batchOrColumns, metadata) {
     let batch;
     if (isBatch(batchOrColumns)) {
@@ -4850,9 +4853,9 @@ async function httpDispatchStreamExchange(method, body, ctx) {
       const schemaBytes = serializeSchema2(outputSchema);
       const inputSchemaBytes = serializeSchema2(inputSchema);
       const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.tokenKey, ctx.authContext?.principal);
-      for (const emitted of out.batches) {
+      for (const [idx, emitted] of out.batches.entries()) {
         const batch = emitted.batch;
-        if (batch.numRows > 0) {
+        if (idx === out.dataBatchIdx) {
           const mergedMeta = new Map(batch.metadata ?? []);
           if (emitted.metadata)
             for (const [k, v] of emitted.metadata)
@@ -9083,4 +9086,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=4F31D1406CC004B264756E2164756E21
+//# debugId=1E2FD8C8117E8BB664756E2164756E21

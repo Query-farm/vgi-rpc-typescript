@@ -494,6 +494,12 @@ export class OutputCollector implements CallContext {
     return this._batches;
   }
 
+  /** Index of the data batch within {@link batches}, or null if none was
+   *  emitted this call. Log batches never occupy this slot. */
+  get dataBatchIdx(): number | null {
+    return this._dataBatchIdx;
+  }
+
   /** Emit a pre-built batch as the data batch for this call. */
   emit(batch: VgiBatch, metadata?: Map<string, string>): void;
   /** Emit a data batch from column arrays keyed by field name. Int64 Number values are coerced to BigInt. */

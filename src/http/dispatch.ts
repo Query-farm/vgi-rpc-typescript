@@ -487,11 +487,15 @@ export async function httpDispatchStreamExchange(
       const inputSchemaBytes = serializeSchema(inputSchema);
       const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.tokenKey, ctx.authContext?.principal);
 
-      for (const emitted of out.batches) {
+      for (const [idx, emitted] of out.batches.entries()) {
         const batch = emitted.batch;
-        if (batch.numRows > 0) {
+        // The data batch carries the continuation token and its per-emit
+        // metadata (vgi_batch_index, vgi.cache.*, …) regardless of row count —
+        // a 0-row reply (e.g. revalidation not_modified) still needs both.
+        // Log batches pass through untouched (mirrors Python's
+        // merge_data_metadata, which only targets the data batch).
+        if (idx === out.dataBatchIdx) {
           const mergedMeta = new Map<string, string>(batch.metadata ?? []);
-          // Fold in per-emit metadata (vgi_batch_index, vgi_partition_values#b64).
           if (emitted.metadata) for (const [k, v] of emitted.metadata) mergedMeta.set(k, v);
           mergedMeta.set(STATE_KEY, token);
           batches.push(withBatchMetadata(batch, mergedMeta));
