@@ -20,7 +20,7 @@ jobs:
           # producing a dist that fails to load. 1.3.5 builds a correct bundle.
           bun-version: 1.3.5
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
