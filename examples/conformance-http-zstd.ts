@@ -3,8 +3,12 @@
 
 import { createHttpHandler } from "../src/http/index.js";
 /**
- * HTTP conformance server with zstd response compression enabled.
- * Prints PORT:<n> on stdout so test fixtures can discover the port.
+ * HTTP conformance server pinned to a non-default zstd level.
+ *
+ * Response compression is on by default now (level 1), so this worker is no
+ * longer the only compressing fixture — it exists to prove an explicitly
+ * configured level still round-trips. Prints PORT:<n> on stdout so test
+ * fixtures can discover the port.
  *
  * Run: bun run examples/conformance-http-zstd.ts
  */

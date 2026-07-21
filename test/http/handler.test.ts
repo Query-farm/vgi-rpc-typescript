@@ -332,7 +332,8 @@ describe("HTTP Handler", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect(res.headers.get("Access-Control-Expose-Headers")).toBe(
       "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, " +
-        "VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled",
+        "VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled, " +
+        "VGI-Supported-Encodings",
     );
   });
 
@@ -350,7 +351,8 @@ describe("HTTP Handler", () => {
     expect(res.headers.get("Access-Control-Allow-Headers")).toBe("Content-Type, Authorization");
     expect(res.headers.get("Access-Control-Expose-Headers")).toBe(
       "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, " +
-        "VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled",
+        "VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled, " +
+        "VGI-Supported-Encodings",
     );
   });
 

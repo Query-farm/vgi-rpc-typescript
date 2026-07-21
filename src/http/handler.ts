@@ -24,6 +24,17 @@ import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
 import { chainAuthenticate } from "./bearer.js";
 import {
+  COMPRESSION_ENCODINGS,
+  CONTENT_ENCODING_HEADER,
+  type CompressionEncoding,
+  DEFAULT_COMPRESSION_LEVEL,
+  type NegotiatedEncoding,
+  pickResponseEncoding,
+  SUPPORTED_ENCODINGS_HEADER,
+  VGI_ACCEPT_ENCODING_HEADER,
+  VGI_CONTENT_ENCODING_HEADER,
+} from "./codec.js";
+import {
   ARROW_CONTENT_TYPE,
   arrowResponse,
   ECHO_HEADER_PREFIX,
@@ -230,7 +241,14 @@ export function createHttpHandler(
     );
   }
 
-  const compressionLevel = options?.compressionLevel;
+  // Response compression is ON by default at zstd level 1 (see
+  // DEFAULT_COMPRESSION_LEVEL for why level 1 and not 3). `undefined` means
+  // "not configured" and takes the default; an explicit `null` is the caller
+  // deliberately turning compression off, which must stay reachable — it is
+  // the only way to get the present-but-empty `VGI-Supported-Encodings`
+  // advertisement that the cross-language conformance suite pins down.
+  const compressionLevel =
+    options?.compressionLevel === undefined ? DEFAULT_COMPRESSION_LEVEL : options.compressionLevel;
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
   const dispatchHook = options?.dispatchHook;
 
@@ -319,26 +337,57 @@ export function createHttpHandler(
     options._onStickyHandle(makeDrainHandle(sessionRegistry, stopReaper ?? undefined));
   }
 
-  // Encodings the server can produce on the response side. Mirrors
-  // Python's `VGI-Supported-Encodings` header from `_codec.py`.
+  // Encodings the server can produce on the response side.
   // `compressionLevel` gates response compression overall; zstd is only
-  // advertised when the runtime can actually encode it (Bun, Node ≥22.15,
+  // available when the runtime can actually encode it (Bun, Node ≥22.15,
   // Deno ≥2.6.9 — workerd lacks an encoder). gzip is always available via
   // Web `CompressionStream`.
-  const supportedResponseEncodings: string[] = [];
   const zstdResponseAvailable = compressionLevel != null && isZstdCompressAvailable();
-  if (zstdResponseAvailable) {
-    supportedResponseEncodings.push("zstd");
+
+  /**
+   * Can the server emit this codec right now? Both conditions must hold:
+   * response compression is enabled (`compressionLevel != null` — true unless
+   * the caller passed an explicit `null`) and the runtime has an encoder.
+   * `zstdResponseAvailable` memoises `isZstdCompressAvailable()` so the
+   * negotiation walk doesn't re-probe `node:zlib` per request.
+   *
+   * This is the single source of truth: both the negotiation walk and the
+   * advertised `VGI-Supported-Encodings` list derive from it, so the two
+   * cannot drift.
+   */
+  function canProduceEncoding(encoding: CompressionEncoding): boolean {
+    if (compressionLevel == null) return false;
+    return encoding === "zstd" ? zstdResponseAvailable : true;
   }
-  if (compressionLevel != null) {
-    supportedResponseEncodings.push("gzip");
+
+  /**
+   * Can the server *decode* this codec on a request body? Both are always
+   * decodable here, independent of `compressionLevel`: gzip via Web
+   * `DecompressionStream`, zstd via the native decoder or the `fzstd`
+   * pure-JS fallback (which is why workerd can decode zstd it cannot encode).
+   */
+  function canDecodeEncoding(_encoding: CompressionEncoding): boolean {
+    return true;
   }
+
+  // What this server speaks in *both* directions, in server-preference order:
+  // the intersection of decodable-on-request and producible-on-response,
+  // `identity` excluded (always available, carries no information). A stock
+  // server therefore advertises `zstd, gzip` on Bun / Node ≥22.15 / Deno
+  // ≥2.6.9; on workerd and older Node zstd decodes but cannot be *encoded*,
+  // so it drops out and only `gzip` is advertised. The list is derived from
+  // the runtime predicate, never a fixed string. Only an explicit
+  // `compressionLevel: null` empties it.
+  const supportedEncodings: CompressionEncoding[] = COMPRESSION_ENCODINGS.filter(
+    (e) => canDecodeEncoding(e) && canProduceEncoding(e),
+  );
 
   /** Append capability headers (advertised on every response when configured). */
   function addCapabilityHeaders(headers: Headers, isOptions = false): void {
-    if (supportedResponseEncodings.length) {
-      headers.set("VGI-Supported-Encodings", supportedResponseEncodings.join(", "));
-    }
+    // Always emitted, even empty: present-but-empty means "I speak no
+    // compression", which a client must be able to tell apart from an absent
+    // header (legacy server — assume zstd).
+    headers.set(SUPPORTED_ENCODINGS_HEADER, supportedEncodings.join(", "));
     if (maxRequestBytes != null) {
       headers.set("VGI-Max-Request-Bytes", String(maxRequestBytes));
     }
@@ -399,7 +448,7 @@ export function createHttpHandler(
       );
       headers.set(
         "Access-Control-Expose-Headers",
-        `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}, VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled`,
+        `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}, VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled, ${SUPPORTED_ENCODINGS_HEADER}`,
       );
       if (isOptions && corsMaxAge != null) {
         headers.set("Access-Control-Max-Age", String(corsMaxAge));
@@ -407,21 +456,29 @@ export function createHttpHandler(
     }
   }
 
-  async function compressIfAccepted(
-    response: Response,
-    clientAcceptsZstd: boolean,
-    clientAcceptsGzip: boolean,
-  ): Promise<Response> {
+  /** Negotiate the response codec from the request's two accept headers. */
+  function negotiateResponseEncoding(request: Request): NegotiatedEncoding {
+    return pickResponseEncoding(
+      request.headers.get("Accept-Encoding"),
+      request.headers.get(VGI_ACCEPT_ENCODING_HEADER),
+      canProduceEncoding,
+    );
+  }
+
+  async function compressIfAccepted(response: Response, negotiated: NegotiatedEncoding): Promise<Response> {
     if (compressionLevel == null) return response;
-    // Honour client preference: zstd preferred over gzip when the runtime
-    // can actually produce zstd. Fall through to gzip otherwise.
-    const codec = clientAcceptsZstd && zstdResponseAvailable ? "zstd" : clientAcceptsGzip ? "gzip" : null;
+    const { codec, usedCustom } = negotiated;
     if (!codec) return response;
     const responseBody = new Uint8Array(await response.arrayBuffer());
     const compressed =
       codec === "zstd" ? await zstdCompress(responseBody, compressionLevel) : await gzipCompress(responseBody);
     const headers = new Headers(response.headers);
-    headers.set("Content-Encoding", codec);
+    // A client that could only state its preference through
+    // X-VGI-Accept-Encoding (a browser `fetch()`, which cannot set
+    // Accept-Encoding) is one whose fetch/proxy layer would transparently
+    // decode — or mangle — a standard Content-Encoding. Stamp the VGI header
+    // instead so the response doesn't claim standard encoding.
+    headers.set(usedCustom ? VGI_CONTENT_ENCODING_HEADER : CONTENT_ENCODING_HEADER, codec);
     return new Response(compressed as unknown as BodyInit, {
       status: response.status,
       headers,
@@ -502,20 +559,12 @@ export function createHttpHandler(
       addCorsHeaders(headers, true, request.headers.get("Access-Control-Request-Headers"));
       addCapabilityHeaders(headers, true);
       // Always answer OPTIONS so capability discovery via OPTIONS /health (or
-      // any other path) works even when CORS isn't enabled.  Falls back to
-      // 405 only if no capability/CORS configuration exists.
-      if (
-        corsOrigins ||
-        maxRequestBytes != null ||
-        maxResponseBytes != null ||
-        maxExternalizedResponseBytes != null ||
-        uploadUrlProvider ||
-        stickyEnabled ||
-        path === `${prefix}/__capabilities__`
-      ) {
-        return new Response(null, { status: 204, headers });
-      }
-      return new Response(null, { status: 405 });
+      // any other path) works even when CORS isn't enabled. There is no
+      // configuration under which we have nothing to advertise: every server
+      // emits `VGI-Supported-Encodings` (present-but-empty when it speaks no
+      // codec) and `VGI-Externalization-Enabled`, so the former 405
+      // fallback would have hidden real capability state from the probe.
+      return new Response(null, { status: 204, headers });
     }
 
     // HTML pages for GET requests
@@ -715,10 +764,10 @@ export function createHttpHandler(
     }
 
     // Hoisted ahead of sticky resolution so the SessionLost path's
-    // `compressIfAccepted` call can see them.
-    const acceptEncodingEarly = (request.headers.get("Accept-Encoding") ?? "").toLowerCase();
-    const clientAcceptsZstdEarly = acceptEncodingEarly.includes("zstd");
-    const clientAcceptsGzipEarly = acceptEncodingEarly.includes("gzip");
+    // `compressIfAccepted` call can see it. Honours the client's stated
+    // order across `X-VGI-Accept-Encoding` + `Accept-Encoding`; see
+    // `./codec.ts`.
+    const responseEncoding = negotiateResponseEncoding(request);
 
     // -------- Sticky session resolution --------
     // Mirrors `_StickyMiddleware.process_request` in Python: read
@@ -753,13 +802,13 @@ export function createHttpHandler(
           const e = err instanceof Error ? err : new Error(String(err));
           const r = makeErrorResponse(e, 500);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, clientAcceptsZstdEarly, clientAcceptsGzipEarly);
+          return compressIfAccepted(r, responseEncoding);
         }
         const entry = sessionRegistry.get(opened.sessionId, principalKey);
         if (!entry) {
           const r = makeErrorResponse(new SessionLostError("session not found, expired, or principal mismatch"), 500);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, clientAcceptsZstdEarly, clientAcceptsGzipEarly);
+          return compressIfAccepted(r, responseEncoding);
         }
         stickyLockRelease = await entry.lock.acquire();
         resumeState = entry.state;
@@ -822,9 +871,6 @@ export function createHttpHandler(
         return new Response("Request body too large", { status: 413 });
       }
     }
-
-    const clientAcceptsZstd = clientAcceptsZstdEarly;
-    const clientAcceptsGzip = clientAcceptsGzipEarly;
 
     // Read body, decompressing if needed
     let body = new Uint8Array(await request.arrayBuffer());
@@ -895,16 +941,16 @@ export function createHttpHandler(
         const response = arrowResponse(responseBody);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(response, responseEncoding);
       } catch (error: any) {
         if (error instanceof HttpRpcError) {
           const r = makeErrorResponse(error, error.statusCode, UPLOAD_URL_RESPONSE_SCHEMA);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
+          return compressIfAccepted(r, responseEncoding);
         }
         const r = makeErrorResponse(error, 500, UPLOAD_URL_RESPONSE_SCHEMA);
         addCapabilityHeaders(r.headers);
-        return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(r, responseEncoding);
       }
     }
 
@@ -918,9 +964,9 @@ export function createHttpHandler(
           protocol.protocolVersion || undefined,
         );
         addCorsHeaders(response.headers);
-        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(response, responseEncoding);
       } catch (error: any) {
-        return compressIfAccepted(makeErrorResponse(error, 500), clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(makeErrorResponse(error, 500), responseEncoding);
       }
     }
 
@@ -951,7 +997,7 @@ export function createHttpHandler(
       const err = new MethodNotImplementedError(
         `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
       );
-      return compressIfAccepted(makeErrorResponse(err, 404), clientAcceptsZstd, clientAcceptsGzip);
+      return compressIfAccepted(makeErrorResponse(err, 404), responseEncoding);
     }
 
     // Application-protocol-version gate (HTTP dispatch path). Fires only
@@ -983,7 +1029,7 @@ export function createHttpHandler(
         const response = arrowResponse(errBody, 400);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(response, responseEncoding);
       }
     }
 
@@ -1058,19 +1104,19 @@ export function createHttpHandler(
       addCorsHeaders(response.headers);
       addCapabilityHeaders(response.headers);
       applyStickyResponseHeaders(response.headers, stickySink);
-      return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+      return compressIfAccepted(response, responseEncoding);
     } catch (error: any) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
       if (error instanceof HttpRpcError) {
         const r = makeErrorResponse(error, error.statusCode);
         addCapabilityHeaders(r.headers);
         applyStickyResponseHeaders(r.headers, stickySink);
-        return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(r, responseEncoding);
       }
       const r = makeErrorResponse(error, 500);
       addCapabilityHeaders(r.headers);
       applyStickyResponseHeaders(r.headers, stickySink);
-      return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
+      return compressIfAccepted(r, responseEncoding);
     } finally {
       // Surface sticky lifecycle on the access log.
       if (stickySink) {

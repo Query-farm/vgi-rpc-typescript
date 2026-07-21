@@ -5,7 +5,11 @@
  * HTTP conformance server for Node.js — serves the conformance protocol over HTTP.
  * Prints PORT:<n> on stdout so test fixtures can discover the port.
  *
- * Set VGI_COMPRESSION_LEVEL=3 to enable zstd response compression.
+ * Response compression follows the library default (ON, zstd level 1 — or
+ * gzip alone on Node < 22.15, which has no zstd encoder).
+ * VGI_COMPRESSION_LEVEL=3 pins a different level; VGI_COMPRESSION_LEVEL=off
+ * disables it, which is what makes the present-but-empty
+ * `VGI-Supported-Encodings` advertisement reachable.
  *
  * Run: npx tsx examples/conformance-http-node.ts
  */
@@ -13,14 +17,18 @@ import { createServer, type IncomingMessage } from "node:http";
 import { createHttpHandler } from "../src/http/index.js";
 import { protocol } from "./conformance-protocol.js";
 
-const compressionLevel = process.env.VGI_COMPRESSION_LEVEL
-  ? parseInt(process.env.VGI_COMPRESSION_LEVEL, 10)
-  : undefined;
+const rawLevel = process.env.VGI_COMPRESSION_LEVEL;
+// undefined => leave the option unset so the library default applies.
+const compressionLevel: number | null | undefined = !rawLevel
+  ? undefined
+  : rawLevel === "off" || rawLevel === "none"
+    ? null
+    : parseInt(rawLevel, 10);
 
 const handler = createHttpHandler(protocol, {
   serverId: compressionLevel ? "conformance-node-zstd" : "conformance-node",
   protocolName: "ConformanceService",
-  compressionLevel,
+  ...(compressionLevel !== undefined ? { compressionLevel } : {}),
   maxStreamResponseBytes: 1,
 });
 

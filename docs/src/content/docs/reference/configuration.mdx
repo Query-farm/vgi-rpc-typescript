@@ -145,10 +145,14 @@ CORS allowed origins. When set, `Access-Control-Allow-Origin`, `Access-Control-A
 
 #### `compressionLevel`
 
-- **Type:** `number`
-- **Default:** `undefined` (disabled)
+- **Type:** `number | null`
+- **Default:** `1` (response compression **enabled**)
 
-zstd compression level (1–22) for responses. If set, responses are compressed when the client sends `Accept-Encoding: zstd`.
+zstd compression level (1–22) for responses. Responses are compressed by default: zstd where the runtime has an encoder (Bun, Node ≥ 22.15, Deno ≥ 2.6.9), gzip elsewhere (workerd, older Node). The level applies to zstd only — the Web `CompressionStream` gzip encoder exposes no level.
+
+Level 1 rather than 3 because on Arrow IPC bodies it measured 4.7x faster *and* smaller; see the [Compression guide](/guides/compression/).
+
+Set to `null` to disable response compression entirely: `VGI-Supported-Encodings` then goes out present-but-empty and bodies travel uncompressed however the client asks.
 
 ### Authentication & OAuth
 

@@ -81,7 +81,7 @@ const handler = createHttpHandler(protocol, {
   maxDecompressedRequestBytes: 160_000_000, // cap on decompressed request size (zstd-bomb defense)
   maxResponseBytes: 5_000_000,       // response body cap (hard for unary/exchange, soft for producer)
   maxExternalizedResponseBytes: 50_000_000, // cap on externalized payload bytes per response
-  compressionLevel: 3,              // enable response compression (gzip/zstd) at this level
+  compressionLevel: 1,              // zstd level for responses (default: 1; null disables)
   authenticate: myAuthFn,            // authentication callback (see Authentication)
   enableSticky: true,                // opt-in sticky sessions
 });
@@ -100,7 +100,7 @@ Key options:
 | `maxDecompressedRequestBytes` | Cap on post-decompression request size (zstd/gzip bomb defense). Defaults to `maxRequestBytes * 16` when that is set. |
 | `maxResponseBytes` | Response body cap. Hard for unary/exchange, soft for producer (overshoot mints a continuation token). |
 | `maxExternalizedResponseBytes` | Hard cap on bytes uploaded to external storage during one response. |
-| `compressionLevel` | Enables response compression (gzip/zstd) at this level. |
+| `compressionLevel` | zstd level for response compression. Default `1` (compression is **on** by default); `null` disables it. |
 | `authenticate` | Per-request authentication callback. |
 | `enableSticky` | Opt-in sticky sessions. See [Sticky Sessions](/guides/sticky-sessions/). |
 | `externalLocation` / `uploadUrlProvider` / `maxUploadBytes` | Large-payload externalization. See [Large Payloads](/guides/large-payloads/). |
@@ -114,7 +114,7 @@ See [Configuration](/reference/configuration/) for full details on each option.
 
 The handler transparently decompresses request bodies sent with `Content-Encoding: zstd` or `gzip`. `maxDecompressedRequestBytes` caps the decompressed size to defend against decompression bombs (a tiny compressed frame inflating to hundreds of MB).
 
-When `compressionLevel` is set, responses are compressed (zstd preferred when the runtime can encode it, otherwise gzip) according to the client's `Accept-Encoding`. The server advertises what it can produce via `VGI-Supported-Encodings`.
+Responses are compressed by default at zstd level 1 (gzip on runtimes without a zstd encoder), following the client's stated codec preference across `X-VGI-Accept-Encoding` and `Accept-Encoding`. The server advertises what it can produce via `VGI-Supported-Encodings`. Pass `compressionLevel: null` to turn response compression off.
 
 See the [Compression guide](/guides/compression/) for details.
 

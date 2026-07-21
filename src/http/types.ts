@@ -48,9 +48,21 @@ export interface HttpHandlerOptions {
   serverId?: string;
   /** Custom state serializer for stream state objects. Default: JSON with BigInt support. */
   stateSerializer?: StateSerializer;
-  /** zstd compression level for responses (1-22). If set, responses are
-   *  compressed when the client sends Accept-Encoding: zstd. */
-  compressionLevel?: number;
+  /** zstd compression level for responses (1-22).
+   *
+   *  **Defaults to 1 — response compression is on.** Responses are compressed
+   *  with the codec the client asked for (see the Compression guide); the
+   *  level applies to zstd only, since the Web `CompressionStream` gzip
+   *  encoder exposes no level.
+   *
+   *  Level 1 rather than 3 because on Arrow IPC bodies it is not a speed/size
+   *  tradeoff — on an 8.41 MB body level 1 measured 4.7x faster *and* produced
+   *  a smaller result. Every VGI SDK defaults to the same level.
+   *
+   *  Set to `null` to disable response compression entirely: no codec is
+   *  advertised (`VGI-Supported-Encodings` goes out present-but-empty) and
+   *  bodies travel uncompressed however the client asks. */
+  compressionLevel?: number | null;
   /** Optional authentication callback. Called for each request before dispatch. */
   authenticate?: AuthenticateFn;
   /** Optional RFC 9728 OAuth Protected Resource Metadata. Served at well-known endpoint. */

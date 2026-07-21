@@ -109,6 +109,23 @@ def conformance_http_port(ts_http_port: int) -> int:
 
 
 @pytest.fixture(scope="session")
+def ts_http_no_compression_port() -> Iterator[int]:
+    """Bun conformance HTTP server with response compression explicitly OFF.
+
+    Response compression is on by default (zstd level 1), so every other HTTP
+    fixture now advertises a non-empty ``VGI-Supported-Encodings``.  The
+    present-but-empty advertisement — positively stating "I speak no
+    compression", as distinct from an absent header meaning "legacy server,
+    assume zstd" — is only reachable through an explicit
+    ``compressionLevel: null``, which ``--response-compression off`` passes.
+    """
+    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--response-compression", "off"])
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def conformance_http_auth_port() -> Iterator[int]:
     """Bun conformance HTTP server with reject-all authenticate, for TestHealth."""
     proc, port = _start_http_server(BUN_HTTP_AUTH_WORKER)
@@ -490,3 +507,65 @@ _FLECHETTE_PIPE_STREAM_XFAIL_CLASSES = {
 
 # Hook lives in conftest.py (next to this file) — pytest does not pick up
 # `pytest_collection_modifyitems` defined inside a test module.
+
+
+class TestResponseCompressionDisabled:
+    """The explicitly-disabled compression path, kept alive after the default flip.
+
+    Response compression now defaults to ON (zstd level 1), so the upstream
+    ``TestHttpCompressionNegotiationConformance`` suite — which runs against
+    ``conformance_http_port`` — takes its compressing branches and *skips*
+    ``test_empty_advertisement_means_never_compressed``.  These two cases pin
+    the other branch against a worker started with ``--response-compression
+    off``, so turning compression off stays a supported, tested configuration
+    rather than an accident of the old default.
+
+    Deliberately self-contained (no import from the upstream suite) so it runs
+    against any released ``vgi-rpc``.
+    """
+
+    # Large and highly compressible: nothing about the payload should stop a
+    # compressing server, so an uncompressed answer is the server's own choice.
+    PAYLOAD = "conformance-compression-probe " * 4096
+
+    def test_advertisement_is_present_but_empty(self, ts_http_no_compression_port: int) -> None:
+        import httpx
+
+        resp = httpx.options(f"http://127.0.0.1:{ts_http_no_compression_port}/health", timeout=5.0)
+        raw = resp.headers.get("VGI-Supported-Encodings")
+        # Absent would mean "legacy server, assume zstd" — the opposite claim.
+        assert raw is not None, "header must be present, not omitted"
+        assert [t for t in raw.split(",") if t.strip()] == []
+
+    def test_never_compresses_however_asked(self, ts_http_no_compression_port: int) -> None:
+        from io import BytesIO
+
+        import httpx
+        from vgi_rpc.conformance import ConformanceService
+        from vgi_rpc.http._common import _ARROW_CONTENT_TYPE
+        from vgi_rpc.rpc import rpc_methods
+        from vgi_rpc.rpc._wire import _write_request
+
+        info = rpc_methods(ConformanceService)["echo_string"]
+        version = vars(ConformanceService).get("protocol_version")
+        buf = BytesIO()
+        _write_request(
+            buf,
+            "echo_string",
+            info.params_schema,
+            {"value": self.PAYLOAD},
+            protocol_version=version if isinstance(version, str) else None,
+        )
+        resp = httpx.post(
+            f"http://127.0.0.1:{ts_http_no_compression_port}/echo_string",
+            content=buf.getvalue(),
+            headers={
+                "Content-Type": _ARROW_CONTENT_TYPE,
+                "Accept-Encoding": "zstd, gzip",
+                "X-VGI-Accept-Encoding": "zstd, gzip",
+            },
+            timeout=30.0,
+        )
+        assert resp.status_code == 200, f"{resp.status_code}: {resp.content[:200]!r}"
+        assert resp.headers.get("Content-Encoding") is None
+        assert resp.headers.get("X-VGI-Content-Encoding") is None

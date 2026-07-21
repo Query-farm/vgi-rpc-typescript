@@ -7,6 +7,11 @@
  *
  * Set VGI_OTEL_FILE to a file path to enable OTel span export.
  *
+ * Response compression follows the library default (ON, zstd level 1).
+ * Pass `--response-compression off` for the explicitly-disabled variant that
+ * advertises a present-but-empty `VGI-Supported-Encodings`, or
+ * `--response-compression <n>` to pin a different zstd level.
+ *
  * Run: bun run examples/conformance-http.ts
  */
 import type { ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider } from "../src/external.js";
@@ -28,9 +33,17 @@ let compression: ExternalLocationConfig["compression"] | undefined;
 let strictMode = false;
 let maxResponseBytesArg: number | undefined;
 let maxExternalizedResponseBytesArg: number | undefined;
+// `undefined` keeps the library default (response compression ON at zstd
+// level 1); `--response-compression off` passes an explicit `null`, the only
+// way to reach the present-but-empty `VGI-Supported-Encodings` advertisement
+// that `TestHttpCompressionNegotiationConformance` pins down.
+let responseCompressionLevel: number | null | undefined;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
-  if (a === "--fake-storage" && i + 1 < args.length) {
+  if (a === "--response-compression" && i + 1 < args.length) {
+    const v = args[++i];
+    responseCompressionLevel = v === "off" || v === "none" ? null : Number.parseInt(v, 10);
+  } else if (a === "--fake-storage" && i + 1 < args.length) {
     fakeStorageUrl = args[++i];
   } else if (a === "--externalize-threshold" && i + 1 < args.length) {
     externalizeThreshold = Number.parseInt(args[++i], 10);
@@ -171,6 +184,10 @@ const handler = createHttpHandler(protocol, {
   _onStickyHandle: (h) => {
     stickyDrainHandle = h;
   },
+  // Omitted unless --response-compression was passed, so the plain worker
+  // runs on the library default (zstd level 1, gzip fallback on runtimes
+  // without a zstd encoder).
+  ...(responseCompressionLevel !== undefined ? { compressionLevel: responseCompressionLevel } : {}),
   // Bound per-response size so infinite producers (e.g. ``cancellable_producer``)
   // return promptly and the client can follow continuation tokens or cancel
   // mid-stream. Any positive value works; 1 byte forces a continuation after
