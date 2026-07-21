@@ -46,17 +46,27 @@ function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?:
 function writeAll(fd: number, data: Uint8Array): void {
   const writeSync = _loadWriteSync();
   let offset = 0;
+  let spins = 0;
   while (offset < data.length) {
     try {
       const written = writeSync(fd, data, offset, data.length - offset);
       if (written <= 0) throw new Error(`writeSync returned ${written}`);
       offset += written;
+      spins = 0;
     } catch (e: any) {
       if (e.code === "EAGAIN") {
-        // A non-blocking pipe — unexpected for stdio, but handle defensively.
-        // Yielding is not possible from a synchronous function; busy-wait
-        // briefly. AF_UNIX sockets must NOT use this path.
+        // Non-blocking pipe backpressure. The stdio path has a single peer (the
+        // engine), which drains the pipe within microseconds in lockstep, so
+        // spin-retry rather than sleep: a 1ms `Atomics.wait` here is ~1000x too
+        // coarse and *dominated* large-batch write time — a 4KB-row passthru
+        // spent ~13s of a 15s run asleep in this branch, i.e. the whole TS
+        // "wire tax" was this sleep. Spinning is safe here because there are no
+        // other connections to starve (unlike the AF_UNIX socketWriteAll path,
+        // which correctly awaits 'drain'). Fall back to a brief sleep only if
+        // the peer looks genuinely stalled, so a hung reader can't pin a core.
+        if (++spins < 8192) continue;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        spins = 0;
         continue;
       }
       throw e;
@@ -192,12 +202,10 @@ export class IpcStreamWriter {
  *
  * The encoder is obtained from the Arrow facade, so this file no longer
  * imports arrow-js directly — keeping arrow-js out of the flechette
- * (workerd/browser) bundle. The flechette encoder throws on construction;
- * the stdio exchange protocol is lockstep (the client reads each response
- * batch before sending the next input) which needs an incremental writer
- * flechette doesn't provide. workerd/browser deployments use HTTP (no
- * stdio), so the flechette path is never reached there; `flechette-pipe`
- * conformance is xfailed for streams.
+ * (workerd/browser) bundle. Both backends now provide an incremental encoder
+ * (the flechette one carves per-message frames out of its one-shot stream
+ * encoder), so the stdio lockstep exchange works on flechette as well as
+ * arrow-js.
  */
 export class IncrementalStream {
   private readonly encoder: IncrementalEncoder;

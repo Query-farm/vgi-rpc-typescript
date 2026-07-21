@@ -46,7 +46,7 @@ import type {
   VgiField,
   VgiSchema,
 } from "../types.js";
-import { readFirstRecordBatchMeta } from "./message-meta.js";
+import { readFirstRecordBatchMeta, splitIpcMessages } from "./message-meta.js";
 import { toFlechetteType } from "./normalize-type.js";
 
 export const backend: VgiBackendInfo = { name: "flechette", opaquePassthrough: false };
@@ -397,18 +397,61 @@ export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBat
   return rebuilt as unknown as VgiBatch;
 }
 
+// End-of-stream marker: continuation (0xFFFFFFFF) + zero metadata length.
+const IPC_EOS = new Uint8Array(new Int32Array([-1, 0]).buffer);
+
 /**
- * Not supported on flechette: the lockstep stdio exchange protocol needs an
- * incremental IPC writer (emit each batch's framing bytes before reading
- * the next input), and flechette only exposes a one-shot table encoder.
- * The flechette backend is selected for workerd / browser / worker, which
- * are HTTP-only (no stdio), so this factory is never reached there. The
- * stdio server requires the arrow-js backend.
+ * Incremental IPC encoder for the flechette backend.
+ *
+ * flechette only exposes a one-shot stream encoder (`tableToIPC(x, { format:
+ * "stream" })` emits a complete `[schema][dict…][recordbatch][EOS]` stream), but
+ * the lockstep stdio protocol needs the messages emitted piecemeal: the schema
+ * preamble once, then each batch's `[dict…][recordbatch]` body, then a single
+ * EOS. We reconstruct that by serializing each part as a full stream and slicing
+ * out the message frames we want (via `splitIpcMessages`, which parses the Arrow
+ * Message envelopes rather than assuming byte lengths):
+ *
+ *   start()      → nothing; the schema is carried by the first batch (below).
+ *   writeBatch() → the first call emits `[schema][dict…][recordbatch]`; later
+ *                  calls emit `[dict…][recordbatch]` (schema dropped).
+ *   finish()     → the shared EOS marker (or a schema-only stream when no batch
+ *                  was written, so an empty result still yields a valid stream).
+ *
+ * Why the schema is deferred to the first batch rather than serialized up front:
+ * flechette assigns dictionary ids per serialization, and `serializeSchema`'s
+ * empty-column path declares dictionary fields differently from a populated
+ * batch — which desyncs the reader for dictionary-encoded columns. Two populated
+ * batches of the same schema *do* share a byte-identical schema message, so
+ * taking the schema from the first real batch keeps it consistent with every
+ * batch's dictionary ids. Emitting each batch's dictionaries in full is a valid
+ * Arrow *stream* dictionary replacement (isDelta=false), which the reader
+ * accepts, so dictionary columns round-trip correctly.
  */
-export function createIncrementalEncoder(_s: VgiSchema): IncrementalEncoder {
-  throw new Error(
-    "Incremental IPC streaming (stdio producer/exchange) is not supported on the flechette " +
-      "Arrow backend. Use the arrow-js backend for the stdio transport, or the HTTP transport " +
-      "on workerd/browser builds.",
-  );
+export function createIncrementalEncoder(s: VgiSchema): IncrementalEncoder {
+  let schemaEmitted = false;
+  return {
+    start: () => new Uint8Array(0),
+    writeBatch(batch: VgiBatch): Uint8Array {
+      const full = serializeBatch(batch); // [schema][dict…][recordbatch][EOS]
+      const spans = splitIpcMessages(full); // excludes the trailing EOS
+      const bodyEnd = spans.length ? spans[spans.length - 1].frameEnd : full.length;
+      if (!schemaEmitted) {
+        schemaEmitted = true;
+        // First batch carries the schema: [schema][dict…][recordbatch].
+        return full.subarray(0, bodyEnd);
+      }
+      // Later batches: drop the leading Schema message, keep [dict…][recordbatch].
+      let start = -1;
+      for (const m of spans) {
+        if (m.headerType !== 1) {
+          start = m.frameStart;
+          break;
+        }
+      }
+      return start < 0 ? new Uint8Array(0) : full.subarray(start, bodyEnd);
+    },
+    // A result with no batches still needs a schema on the wire; serializeSchema
+    // produces a complete schema-only stream ([schema][EOS]).
+    finish: () => (schemaEmitted ? IPC_EOS : serializeSchema(s)),
+  };
 }

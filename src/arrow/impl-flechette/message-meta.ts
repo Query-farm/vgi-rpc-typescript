@@ -172,3 +172,48 @@ export function readFirstRecordBatchMeta(
   }
   return null;
 }
+
+/** Byte span of one on-wire IPC message (framing + metadata + body). */
+export interface IpcMessageSpan {
+  /** Header type — 1 Schema, 2 DictionaryBatch, 3 RecordBatch. */
+  headerType: number;
+  /** Offset of the message's continuation marker in the stream. */
+  frameStart: number;
+  /** Offset just past the message's (padded) body. */
+  frameEnd: number;
+}
+
+/**
+ * Split an Arrow IPC *stream* into its constituent message frames, stopping at
+ * the end-of-stream marker. Each span covers the whole on-wire message
+ * (continuation marker + metadata length + padded metadata + padded body).
+ *
+ * Used by the flechette incremental encoder to carve a one-shot
+ * `tableToIPC(..., { format: "stream" })` output — a complete
+ * `[schema][dict…][recordbatch][EOS]` stream — into the schema preamble and the
+ * per-batch `[dict…][recordbatch]` body that the lockstep stdio protocol emits
+ * separately.
+ */
+export function splitIpcMessages(stream: Uint8Array): IpcMessageSpan[] {
+  const spans: IpcMessageSpan[] = [];
+  let pos = 0;
+  while (pos + 4 <= stream.length) {
+    const frameStart = pos;
+    let metaLen = readI32LE(stream, pos);
+    pos += 4;
+    if (metaLen === -1) {
+      // Continuation-marker form (post-Arrow 0.15): the real length follows.
+      if (pos + 4 > stream.length) break;
+      metaLen = readI32LE(stream, pos);
+      pos += 4;
+    }
+    if (metaLen === 0) break; // EOS
+    if (pos + metaLen > stream.length) break;
+    const head = stream.subarray(pos, pos + metaLen);
+    pos += metaLen;
+    const parsed = readMessageEnvelope(head);
+    pos += parsed.bodyLength; // bodyLength is the padded on-wire body length
+    spans.push({ headerType: parsed.headerType, frameStart, frameEnd: pos });
+  }
+  return spans;
+}
