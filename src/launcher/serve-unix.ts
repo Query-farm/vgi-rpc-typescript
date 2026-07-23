@@ -38,7 +38,7 @@ import {
 import { IpcStreamReader } from "../wire/reader.js";
 import { applyDefaults, parseRequest } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
-import { assertStreamingBackendSupported, IpcStreamWriter } from "../wire/writer.js";
+import { IpcStreamWriter } from "../wire/writer.js";
 
 const EMPTY_SCHEMA = makeSchema([]);
 
@@ -95,8 +95,6 @@ export interface ServeUnixHandle {
  * Each connection gets its own dispatch loop and shares the protocol.
  */
 export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): Promise<ServeUnixHandle> {
-  // Fail before serving: flechette cannot drive the lockstep stream encoder.
-  assertStreamingBackendSupported();
   const sockPath = path.resolve(options.unixPath);
   const idleTimeoutS = options.idleTimeout ?? 300;
   const startupGraceS = options.startupGraceSeconds ?? 5;
