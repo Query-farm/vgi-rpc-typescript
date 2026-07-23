@@ -45,7 +45,7 @@ import {
 import { IpcStreamReader } from "../wire/reader.js";
 import { applyDefaults, parseRequest } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
-import { IpcStreamWriter } from "../wire/writer.js";
+import { assertStreamingBackendSupported, IpcStreamWriter } from "../wire/writer.js";
 
 const EMPTY_SCHEMA = makeSchema([]);
 
@@ -113,6 +113,8 @@ export interface ServeTcpHandle {
  * networks.
  */
 export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}): Promise<ServeTcpHandle> {
+  // Fail before serving: flechette cannot drive the lockstep stream encoder.
+  assertStreamingBackendSupported();
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 0;
   const idleTimeoutS = options.idleTimeout ?? 300;

@@ -3,7 +3,46 @@
 
 import type { Socket } from "node:net";
 import type { IncrementalEncoder, VgiBatch, VgiSchema } from "../arrow/index.js";
-import { createIncrementalEncoder, serializeBatches } from "../arrow/index.js";
+import { backend, createIncrementalEncoder, serializeBatches } from "../arrow/index.js";
+
+/**
+ * Refuse the flechette Arrow backend on VGI's streaming transports (stdio,
+ * AF_UNIX launcher, TCP). HTTP encodes whole blobs via `tablesToIPC` and is
+ * unaffected — flechette is fully supported there, which is what it is for.
+ *
+ * The incremental encoder carves per-message frames out of flechette's one-shot
+ * stream encoder, and that only works if every batch encodes to a frame
+ * sequence it can slice. It does not:
+ *
+ *   * An empty table encodes to `[Schema]` with no RecordBatch message, so the
+ *     slice is empty and a lockstep reader waits for a batch forever.
+ *     flechette's `batchMetadata` option synthesises the missing batch, but
+ *   * that option's assembly path throws on a `tableFromIPC`-derived
+ *     passthrough ("undefined is not an object (evaluating 'b.buffer')") —
+ *     precisely the shape every table-in-out exchange hands back — and a failed
+ *     attempt leaves the table unusable for a retry.
+ *
+ * Every combination of those two either drops batch metadata (losing
+ * result-cache directives and state tokens), throws, or hangs. Measured on
+ * vgi-typescript's integration suite: 23 of 295 files fail on the launcher
+ * transport under flechette, all of them table-in-out / exchange, against 0 on
+ * arrow-js. The fix belongs in flechette's `assembleRecordBatch`, not in a
+ * heuristic in `serializeBatch`.
+ *
+ * Called from the serve entry points so a worker refuses to start rather than
+ * failing mid-stream, where the client only sees a truncated schema message.
+ */
+export function assertStreamingBackendSupported(): void {
+  if (backend.name !== "flechette") return;
+  throw new Error(
+    "The flechette Arrow backend does not support VGI's streaming transports " +
+      "(stdio / AF_UNIX launcher / TCP): its IPC encoder cannot frame every " +
+      "batch shape the lockstep exchange produces, which drops per-batch " +
+      "metadata, throws on table-in-out passthroughs, or stalls the stream. " +
+      "Use the HTTP transport with flechette, or run the streaming transports " +
+      "on arrow-js (unset VGI_BUN_CONDITIONS / the `flechette` import condition).",
+  );
+}
 
 const STDOUT_FD = 1;
 
@@ -206,10 +245,9 @@ export class IpcStreamWriter {
  *
  * The encoder is obtained from the Arrow facade, so this file no longer
  * imports arrow-js directly — keeping arrow-js out of the flechette
- * (workerd/browser) bundle. Both backends now provide an incremental encoder
- * (the flechette one carves per-message frames out of its one-shot stream
- * encoder), so the stdio lockstep exchange works on flechette as well as
- * arrow-js.
+ * (workerd/browser) bundle.
+ *
+ * Streaming transports are arrow-js only; see the guard in the constructor.
  */
 export class IncrementalStream {
   private readonly encoder: IncrementalEncoder;
@@ -221,6 +259,7 @@ export class IncrementalStream {
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(target: WriterTarget, schema: VgiSchema) {
+    assertStreamingBackendSupported();
     this.target = target;
     this.encoder = createIncrementalEncoder(schema);
     // Schema bytes — synchronous on the fd path, queued on the socket path.

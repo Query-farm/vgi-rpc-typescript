@@ -14,6 +14,7 @@ import type { Protocol } from "./protocol.js";
 import { VgiRpcServer } from "./server.js";
 import type { TransportKind } from "./types.js";
 import type { ByteSink } from "./wire/writer.js";
+import { assertStreamingBackendSupported } from "./wire/writer.js";
 
 /** Options for {@link serveStream} — a single RPC session over one stream pair. */
 export interface ServeStreamOptions {
@@ -35,6 +36,8 @@ export interface ServeStreamOptions {
  * clean EOF; rejects on a real protocol/transport error.
  */
 export async function serveStream(protocol: Protocol, options: ServeStreamOptions): Promise<void> {
+  // Fail before serving: flechette cannot drive the lockstep stream encoder.
+  assertStreamingBackendSupported();
   const server = new VgiRpcServer(protocol, options.serverOptions);
   await server.serveConnection(options.readable, options.writable, options.transportKind);
 }
