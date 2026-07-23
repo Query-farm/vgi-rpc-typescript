@@ -18,23 +18,56 @@ import {
 } from "../constants.js";
 
 /**
+ * Names of the Int64 fields in a schema, computed once per schema object.
+ * `VgiSchema` is treated as immutable everywhere, so identity-keying is safe.
+ */
+const _int64FieldsCache = new WeakMap<VgiSchema, readonly string[]>();
+function int64FieldNames(schema: VgiSchema): readonly string[] {
+  let names = _int64FieldsCache.get(schema);
+  if (names === undefined) {
+    const out: string[] = [];
+    for (const f of schema.fields) {
+      if (isInt(f.type) && (f.type as any).bitWidth === 64) out.push(f.name);
+    }
+    names = out;
+    _int64FieldsCache.set(schema, names);
+  }
+  return names;
+}
+
+/**
  * Coerce values for Int64 schema fields from Number to BigInt.
- * Handles both single values and arrays. Returns a new record with coerced values.
+ * Handles both single values and arrays. Returns a new record with coerced
+ * values, or the original record untouched when no coercion is needed.
  */
 export function coerceInt64(schema: VgiSchema, values: Record<string, any>): Record<string, any> {
-  const result: Record<string, any> = { ...values };
-  for (const f of schema.fields) {
-    const val = result[f.name];
+  const int64Fields = int64FieldNames(schema);
+  if (int64Fields.length === 0) return values;
+
+  let result: Record<string, any> | null = null;
+  for (const name of int64Fields) {
+    const val = values[name];
     if (val === undefined) continue;
-    if (!isInt(f.type) || (f.type as any).bitWidth !== 64) continue;
 
     if (Array.isArray(val)) {
-      result[f.name] = val.map((v: any) => (typeof v === "number" ? BigInt(v) : v));
+      // Clone lazily and only map when a Number element is actually present.
+      let mapped: any[] | null = null;
+      for (let i = 0; i < val.length; i++) {
+        if (typeof val[i] === "number") {
+          if (mapped === null) mapped = val.slice();
+          mapped[i] = BigInt(val[i]);
+        }
+      }
+      if (mapped !== null) {
+        result ??= { ...values };
+        result[name] = mapped;
+      }
     } else if (typeof val === "number") {
-      result[f.name] = BigInt(val);
+      result ??= { ...values };
+      result[name] = BigInt(val);
     }
   }
-  return result;
+  return result ?? values;
 }
 
 /**

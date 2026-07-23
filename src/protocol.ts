@@ -168,4 +168,15 @@ export class Protocol {
   getMethods(): Map<string, MethodDefinition> {
     return new Map(this._methods);
   }
+
+  /** Look up a single method without copying the whole map — for the
+   *  per-request dispatch path. Callers must not mutate the returned value. */
+  getMethod(name: string): MethodDefinition | undefined {
+    return this._methods.get(name);
+  }
+
+  /** Registered method names, sorted — for diagnostics/error messages only. */
+  methodNames(): string[] {
+    return [...this._methods.keys()].sort();
+  }
 }

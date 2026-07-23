@@ -165,6 +165,13 @@ export function createIncrementalEncoder(s: VgiSchema): IncrementalEncoder {
   writer.reset(undefined, s as unknown as A_Schema);
   const drain = (): Uint8Array => {
     const values = (writer as any)._sink._values as Uint8Array[];
+    // Common case: the encoder buffered exactly one chunk for this batch —
+    // hand it straight through instead of copying it into a fresh buffer.
+    if (values.length === 1) {
+      const only = values[0];
+      values.length = 0;
+      return only;
+    }
     const total = values.reduce((n, c) => n + c.length, 0);
     const out = new Uint8Array(total);
     let off = 0;
@@ -401,15 +408,25 @@ export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBat
     }
   }
 
+  let mutated = false;
   const children = s.fields.map((f, i) => {
     const srcChild = a.data.children[i];
     const srcType = srcChild.type;
     const dstType = f.type;
 
+    // Already the exact schema type object (batches this process built from
+    // `schema` hit this for every column) — no clone, no rebuild needed.
+    if (srcType === dstType) return srcChild;
+
     if (!_needsValueCast(srcType, dstType)) {
+      // Same logical type but a different type object (e.g. a generic `Float`
+      // from a foreign IPC round-trip vs the schema's `Float64`). Swap the
+      // type via clone so the writer doesn't silently drop the batch.
+      mutated = true;
       return srcChild.clone(dstType);
     }
     if (_isNumeric(srcType) && _isNumeric(dstType)) {
+      mutated = true;
       const col = a.getChildAt(i)!;
       const values: number[] = [];
       for (let r = 0; r < a.numRows; r++) {
@@ -418,8 +435,13 @@ export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBat
       }
       return a_vectorFromArray(values, dstType).data[0];
     }
+    mutated = true;
     return srcChild.clone(dstType);
   });
+
+  // Every column already carried the schema's exact type — the batch is
+  // conformant as-is, so avoid the struct/makeData/RecordBatch rebuild.
+  if (!mutated) return batch;
 
   const structType = new A_Struct(s.fields);
   const data = a_makeData({

@@ -7,6 +7,10 @@ import { createIncrementalEncoder, serializeBatches } from "../arrow/index.js";
 
 const STDOUT_FD = 1;
 
+// Shared resolved promise returned by the synchronous fd write path so we
+// don't allocate a fresh Promise per emitted batch.
+const RESOLVED: Promise<void> = Promise.resolve();
+
 // Resolve node:fs via indirect-string require so esbuild/wrangler don't
 // statically pull node:fs into the bundle. Workers (Cloudflare workerd) never
 // instantiate IpcStreamWriter (no stdio transport on workers), so the
@@ -238,15 +242,20 @@ export class IncrementalStream {
   }
 
   private enqueue(bytes: Uint8Array): Promise<void> {
+    // Fast path: the fd target's write is fully synchronous and a stream's
+    // target kind is fixed for its lifetime, so nothing is ever async-in-flight
+    // ahead of us. Write inline and skip the promise-chain + microtask hop —
+    // this runs once per emitted batch on the stdio producer path.
+    const target = this.target;
+    if (target.kind === "fd") {
+      writeAll(target.fd, bytes);
+      return RESOLVED;
+    }
     const next = this.writeChain.then(() => {
-      if (this.target.kind === "fd") {
-        writeAll(this.target.fd, bytes);
-        return;
+      if (target.kind === "sink") {
+        return target.sink.write(bytes);
       }
-      if (this.target.kind === "sink") {
-        return this.target.sink.write(bytes);
-      }
-      return socketWriteAll(this.target.socket, bytes);
+      return socketWriteAll(target.socket, bytes);
     });
     // Swallow rejections on the chain so a single failure doesn't poison
     // every subsequent enqueue with an unhandled rejection. The returned

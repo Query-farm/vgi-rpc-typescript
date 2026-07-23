@@ -6,6 +6,11 @@ import { REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } 
 import { RpcError, VersionError } from "../errors.js";
 import { isOpaquePassthroughType } from "./opaque.js";
 
+// Safe-integer bounds as BigInt, hoisted so per-field parsing doesn't
+// re-allocate them on every bigint-valued parameter of every request.
+const MIN_SAFE_BIG = BigInt(Number.MIN_SAFE_INTEGER);
+const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
+
 export interface ParsedRequest {
   methodName: string;
   requestVersion: string;
@@ -108,7 +113,7 @@ export function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest 
     // make the builder apply a `*scale` multiplication (Decimal) or
     // `* 10^unit` (Time/Timestamp), corrupting the value.
     if (typeof value === "bigint" && !isOpaquePassthroughType(field.type)) {
-      if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      if (value >= MIN_SAFE_BIG && value <= MAX_SAFE_BIG) {
         value = Number(value);
       }
     }

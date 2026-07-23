@@ -275,10 +275,9 @@ export class VgiRpcServer {
     }
 
     // Look up method
-    const methods = this.protocol.getMethods();
-    const method = methods.get(methodName);
+    const method = this.protocol.getMethod(methodName);
     if (!method) {
-      const available = [...methods.keys()].sort();
+      const available = this.protocol.methodNames();
       const err = new MethodNotImplementedError(
         `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
       );
@@ -307,11 +306,15 @@ export class VgiRpcServer {
     const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
 
     // Capture self-contained IPC bytes of the request batch for the access log.
+    // Only pay the full IPC re-encode when a hook will actually read them — the
+    // default (no dispatchHook) path skips it entirely.
     let requestData: Uint8Array | undefined;
-    try {
-      requestData = serializeBatch(batch as any);
-    } catch {
-      // best-effort; observability must not fail dispatch
+    if (this.dispatchHook) {
+      try {
+        requestData = serializeBatch(batch as any);
+      } catch {
+        // best-effort; observability must not fail dispatch
+      }
     }
 
     let streamId: string | undefined;

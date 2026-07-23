@@ -157,13 +157,17 @@ export function deserializeBatch(bytes: Uint8Array): VgiBatch {
   const meta = needRowsFallback ? readFirstRecordBatchMeta(bytes) : null;
   const wantRows = meta !== null && meta.numRows > 0;
   if (!wantRows && !wantMeta) return table as VgiBatch;
-  return new Proxy(table, {
-    get(target, prop, receiver) {
-      if (wantRows && prop === "numRows") return meta!.numRows;
-      if (wantMeta && prop === "metadata") return recordMd;
-      return Reflect.get(target, prop, receiver);
-    },
-  }) as unknown as VgiBatch;
+  // Assign the two overrides directly rather than wrapping in a Proxy: a Proxy
+  // routes every downstream property access (`.schema`, `.getChildAt(i)`, …) on
+  // the request batch through a trap + Reflect.get, defeating V8's inline
+  // caches across the entire request-parsing loop. `metadata` is non-shadowing
+  // on flechette's Table (same as attachBatchMetadata); `numRows` is a real
+  // property, so override it via defineProperty.
+  if (wantMeta) table.metadata = recordMd;
+  if (wantRows) {
+    Object.defineProperty(table, "numRows", { value: meta!.numRows, configurable: true, enumerable: true });
+  }
+  return table as VgiBatch;
 }
 
 // ----- Construction --------------------------------------------------------

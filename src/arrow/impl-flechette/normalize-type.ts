@@ -44,6 +44,12 @@ function fField(f: any): any {
   return f_field(f.name, toFlechetteType(f.type), f.nullable ?? true, f.metadata ?? null);
 }
 
+// Memoize by input-type object identity. Type objects come from registered
+// schemas and are immutable, and the flechette-native result is itself an
+// immutable value type used read-only — so caching lets every batch reuse one
+// rebuilt type (and its nested children) instead of re-deriving the tree.
+const _flechetteTypeCache = new WeakMap<object, any>();
+
 /**
  * Rebuild `type` as a flechette-native DataType. Idempotent for types that are
  * already native (reconstructed from the same structural props). Unknown
@@ -51,6 +57,14 @@ function fField(f: any): any {
  */
 export function toFlechetteType(type: any): any {
   if (type == null) return nullType();
+  const cached = _flechetteTypeCache.get(type);
+  if (cached !== undefined) return cached;
+  const built = _buildFlechetteType(type);
+  _flechetteTypeCache.set(type, built);
+  return built;
+}
+
+function _buildFlechetteType(type: any): any {
   switch (type.typeId) {
     case Type.Null:
       return nullType();
