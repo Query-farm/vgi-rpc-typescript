@@ -139,7 +139,33 @@ export function deserializeSchema(bytes: Uint8Array): VgiSchema {
 }
 
 export function serializeBatch(batch: VgiBatch): Uint8Array {
-  return tableToIPC(batch as any, { format: "stream" }) as Uint8Array;
+  // VgiBatch is structurally a flechette Table at this point.
+  const t = batch as any;
+  // Two things `tableToIPC` will not do on its own, and arrow-js's
+  // `_writeRecordBatch` always does:
+  //
+  //  1. Emit a RecordBatch message when the table has no column data to walk.
+  //     flechette derives its record batches from `columns[0].data`, so a
+  //     zero-FIELD table (a legal vgi-rpc shape — `aggregate_update`'s ack,
+  //     cancel signals, state-token carriers) encodes as schema + EOS with no
+  //     batch at all. The C++ client reads that as "RPC returned an empty
+  //     response" and fails the query.
+  //  2. Pick up per-batch `custom_metadata`. `withBatchMetadata` pins the map
+  //     on `_vgiRecordMetadata`, but only the `batchMetadata` encode option
+  //     puts it on the wire — so cache/state metadata was being dropped on
+  //     serialize even though it read back correctly in-process.
+  //
+  // (2) bites hardest through `createIncrementalEncoder` below, which builds
+  // every stdio/launcher frame by slicing this function's output: the one-shot
+  // HTTP path serializes whole blobs and was unaffected, so result-cache
+  // directives went missing on stdio only.
+  //
+  // Passing a one-entry positional `batchMetadata` covers both: it synthesises
+  // the missing empty batch and attaches the map when there is one. Tables
+  // that already have batches and no metadata are unaffected.
+  const md: Map<string, string> | undefined = t._vgiRecordMetadata ?? t.metadata;
+  const batchMetadata = [md && md.size > 0 ? md : undefined];
+  return tableToIPC(t, { format: "stream", batchMetadata } as any) as Uint8Array;
 }
 
 export function deserializeBatch(bytes: Uint8Array): VgiBatch {

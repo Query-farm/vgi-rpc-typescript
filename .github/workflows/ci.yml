@@ -35,7 +35,15 @@ jobs:
         run: bun install && bun run postinstall
 
       - name: Run unit tests
-        run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts
+        run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts
+
+      # Batch metadata is encoded differently per backend, and the bug this
+      # guards against was flechette-only: its encoder needs an explicit
+      # `batchMetadata` option, so the map was dropped on serialize while
+      # arrow-js carried it natively. Running the guard on arrow-js alone would
+      # not have caught it.
+      - name: Run batch-metadata guard (flechette backend)
+        run: bun --conditions=flechette test test/batch-metadata.test.ts
 
       - name: Run client tests (bun transports only)
         run: timeout 120 bun test test/client.test.ts
