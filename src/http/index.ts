@@ -5,6 +5,19 @@ export type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 export { oauthResourceMetadataToJson } from "./auth.js";
 export type { BearerValidateFn } from "./bearer.js";
 export { bearerAuthenticate, bearerAuthenticateStatic, chainAuthenticate } from "./bearer.js";
+export type { ProofConfig, ProofMode, ProofSecret } from "./proof.js";
+export {
+  canonicalString,
+  deriveProofSecret,
+  mintProof,
+  NonceCache,
+  parseProofSecrets,
+  PROOF_HEADER,
+  PROOF_REQUIRED_HEADER,
+  ProofError,
+  requireProxyProof,
+  verifyProof,
+} from "./proof.js";
 export {
   ARROW_CONTENT_TYPE,
   decodeContentEncoding,

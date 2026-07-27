@@ -21,6 +21,7 @@ BUN_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance.ts")]
 BUN_HTTP_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http.ts")]
 BUN_HTTP_ZSTD_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-zstd.ts")]
 BUN_HTTP_AUTH_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-auth.ts")]
+BUN_HTTP_PROOF_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-proof.ts")]
 # Flechette variants — same source, different Arrow backend via Node's
 # conditional resolution (workerd → impl-flechette, default → impl-arrowjs).
 # Bun resolves the `imports` map in package.json by `--conditions`.
@@ -138,6 +139,41 @@ def conformance_http_auth_port() -> Iterator[int]:
     yield port
     proc.terminate()
     proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def proof_worker_factory() -> Iterator[Callable[..., Any]]:
+    """Spawn Bun workers gated on proxy proof, for the shared TestProxyProof group.
+
+    The shared suite owns the matrix; this only has to know how to start one
+    worker for a given configuration.
+    """
+    from vgi_rpc.conformance.proof_harness import ProofWorker, ProofWorkerConfig
+
+    @contextlib.contextmanager
+    def spawn(config: ProofWorkerConfig) -> Iterator[ProofWorker]:
+        cmd = [
+            *BUN_HTTP_PROOF_WORKER,
+            "--proof-mode",
+            config.mode,
+            "--proof-origin-id",
+            config.origin_id,
+            "--proof-secrets",
+            config.secrets,
+            "--proof-skew",
+            str(config.skew_seconds),
+        ]
+        if not config.replay_cache:
+            cmd.append("--proof-no-replay-cache")
+        proc, port = _start_http_server(cmd)
+        try:
+            # The Bun proof worker mounts under /vgi, mirroring the other ports.
+            yield ProofWorker(port=port, prefix="/vgi", config=config)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    yield spawn
 
 
 @pytest.fixture(scope="session")

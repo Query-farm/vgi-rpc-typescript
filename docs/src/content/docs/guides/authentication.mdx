@@ -87,6 +87,57 @@ const auth = jwtAuthenticate({
 
 When `audience` is an array, each value is tried in order until one validates — useful when a single endpoint accepts tokens minted for several audiences.
 
+## Proxy proof
+
+Proxy proof lets a worker refuse any request that did not arrive through a trusted proxy. The
+proxy mints a per-request HMAC-SHA256 over a timestamp, a fresh nonce and the worker's own
+identifier, keyed by a secret shared only with that worker.
+
+Unlike a forwarded assertion about what happened at a TLS terminator, a proof cannot be produced
+by someone who merely reaches the worker directly — without the secret there is nothing to replay.
+
+Built on WebCrypto rather than `node:crypto`, so it works on workerd and in browsers as well as
+Node and Bun.
+
+```ts
+import { parseProofSecrets, requireProxyProof } from "@query-farm/vgi-rpc/http";
+
+const authenticate = requireProxyProof(
+  {
+    mode: "require",
+    originId: "worker-a",
+    secrets: parseProofSecrets(`prod-use1:${hexSecret}`),
+  },
+  existingAuthenticate, // optional — omit for proof-only
+);
+
+const handler = createHttpHandler(protocol, { authenticate });
+```
+
+:::caution
+This composes as an **AND**, not an alternative. Do **not** pass the gate to `chainAuthenticate` —
+chaining is first-return-wins, so any later credential would bypass it. Pass your existing
+authenticator as the second argument instead.
+:::
+
+| option | type | default | description |
+|---|---|---|---|
+| `mode` | `"off" \| "allow" \| "require"` | — | `allow` verifies and records without denying; the rollout lever |
+| `originId` | `string` | — | This worker's identifier; folded into every MAC but never transmitted |
+| `secrets` | `Record<string, ProofSecret>` | — | Key id → secret and label |
+| `skewSeconds` | `number` | `30` | Half-width of the timestamp acceptance window |
+| `replayCapacity` | `number` | `100000` | Hard bound on the nonce cache |
+| `replayCache` | `boolean` | `true` | Whether replayed nonces are rejected |
+
+`kid` doubles as the calling proxy's label, so `ctx.claims.vgi_proxy_proof.proxy` records *which*
+proxy served each request. The label comes from the secret that verified, never from the
+transmitted field — a caller can claim any `kid` but cannot produce its MAC.
+
+`OPTIONS`, `/.well-known/` and `{prefix}/health` stay reachable without a proof in every mode, so
+load-balancer probes keep working.
+
+The normative cross-language contract is `docs/proxy-proof-spec.md` in the vgi-rpc repository.
+
 ## Mutual TLS (mTLS)
 
 For proxy-terminated mTLS connections where the reverse proxy forwards client certificate information in HTTP headers. Two approaches are supported:
