@@ -35,7 +35,7 @@ jobs:
         run: bun install && bun run postinstall
 
       - name: Run unit tests
-        run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts
+        run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts
 
       # Batch metadata is encoded differently per backend, and the bug this
       # guards against was flechette-only: its encoder needs an explicit
