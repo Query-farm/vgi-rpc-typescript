@@ -190,7 +190,7 @@ jobs:
         run: bun install && bun run postinstall
 
       - name: Install Python dependencies
-        run: pip install "vgi-rpc[http,cli,external]>=0.19.0" pytest
+        run: pip install "vgi-rpc[http,cli,external]>=0.28.2" pytest
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v
