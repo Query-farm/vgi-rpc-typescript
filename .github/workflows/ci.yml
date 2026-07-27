@@ -190,7 +190,14 @@ jobs:
         run: bun install && bun run postinstall
 
       - name: Install Python dependencies
-        run: pip install "vgi-rpc[http,cli,external]>=0.28.2" pytest
+        # Keep this floor at the release carrying the newest conformance group
+        # this port implements. A floor that trails the suite resolves an older
+        # vgi-rpc where the new group is *absent rather than skipped*, so CI
+        # goes green having never run it. This run got 0.28.3 only by luck of
+        # timing — the Rust port's identical floor resolved 0.28.2 eighty
+        # seconds after 0.28.3 published, before PyPI's index reached pip.
+        # 0.28.3: TestProxyProof capability-header cases.
+        run: pip install "vgi-rpc[http,cli,external]>=0.28.3" pytest
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v
