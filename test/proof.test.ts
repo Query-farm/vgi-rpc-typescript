@@ -7,10 +7,10 @@ import {
   deriveProofSecret,
   mintProof,
   NonceCache,
-  parseProofSecrets,
   PROOF_HEADER,
-  ProofError,
   type ProofConfig,
+  ProofError,
+  parseProofSecrets,
   requireProxyProof,
   verifyProof,
 } from "../src/http/proof.js";

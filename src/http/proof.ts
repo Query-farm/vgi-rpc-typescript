@@ -125,11 +125,7 @@ function concatNulSeparated(parts: string[]): Uint8Array {
  * A worker is configured with its derived secret only, never the base key —
  * otherwise it could mint proofs its siblings would accept.
  */
-export async function deriveProofSecret(
-  baseKey: Uint8Array,
-  proxyId: string,
-  originId: string,
-): Promise<Uint8Array> {
+export async function deriveProofSecret(baseKey: Uint8Array, proxyId: string, originId: string): Promise<Uint8Array> {
   if (baseKey.length !== SECRET_LEN) {
     throw new Error(`base key must be exactly ${SECRET_LEN} bytes, got ${baseKey.length}`);
   }
@@ -191,13 +187,7 @@ export async function verifyProof(
   const parts = token.split(".");
   if (parts.length !== 5) throw new ProofError("malformed", `expected 5 fields, got ${parts.length}`);
   const [version, kid, tsRaw, nonce, macB64] = parts;
-  if (
-    version !== VERSION ||
-    !KID_RE.test(kid) ||
-    !TS_RE.test(tsRaw) ||
-    !NONCE_RE.test(nonce) ||
-    !MAC_RE.test(macB64)
-  ) {
+  if (version !== VERSION || !KID_RE.test(kid) || !TS_RE.test(tsRaw) || !NONCE_RE.test(nonce) || !MAC_RE.test(macB64)) {
     throw new ProofError("malformed", "field shape");
   }
 
@@ -310,8 +300,7 @@ export function requireProxyProof(cfg: ProofConfig, inner?: AuthenticateFn): Aut
   const skew = cfg.skewSeconds ?? 30;
   if (skew <= 0) throw new Error(`skewSeconds must be positive, got ${skew}`);
 
-  const cache =
-    cfg.replayCache === false ? null : new NonceCache(skew, cfg.replayCapacity ?? DEFAULT_REPLAY_CAPACITY);
+  const cache = cfg.replayCache === false ? null : new NonceCache(skew, cfg.replayCapacity ?? DEFAULT_REPLAY_CAPACITY);
   const required = cfg.mode === "require";
   const clock = cfg.now ?? (() => Math.floor(Date.now() / 1000));
 

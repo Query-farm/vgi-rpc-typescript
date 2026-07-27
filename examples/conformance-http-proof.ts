@@ -20,8 +20,7 @@
  *
  * Run: bun run examples/conformance-http-proof.ts --proof-secrets k:$(...)
  */
-import { createHttpHandler, parseProofSecrets, requireProxyProof } from "../src/http/index.js";
-import type { ProofMode } from "../src/http/index.js";
+import { createHttpHandler, type ProofMode, parseProofSecrets, requireProxyProof } from "../src/http/index.js";
 import { protocol } from "./conformance-protocol.js";
 
 const args = process.argv.slice(2);
