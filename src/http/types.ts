@@ -65,6 +65,14 @@ export interface HttpHandlerOptions {
   compressionLevel?: number | null;
   /** Optional authentication callback. Called for each request before dispatch. */
   authenticate?: AuthenticateFn;
+  /** Advertise `VGI-Proxy-Proof-Required: true` on every response, so a proxy
+   *  or operator can confirm this worker rejects unproofed requests.
+   *
+   *  Advertisement only — it enforces nothing. Set it alongside a
+   *  `requireProxyProof` gate built with `mode: "require"`; that gate arrives
+   *  as an opaque {@link AuthenticateFn} the handler cannot introspect, so the
+   *  posture has to be stated. Default: false. */
+  proxyProofRequired?: boolean;
   /** Optional RFC 9728 OAuth Protected Resource Metadata. Served at well-known endpoint. */
   oauthResourceMetadata?: OAuthResourceMetadata;
   /** Optional dispatch hook for observability (tracing, metrics). */

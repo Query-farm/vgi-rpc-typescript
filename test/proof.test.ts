@@ -2,18 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, test } from "bun:test";
+import { createHttpHandler } from "../src/http/handler.js";
 import {
   canonicalString,
   deriveProofSecret,
   mintProof,
   NonceCache,
   PROOF_HEADER,
+  PROOF_REQUIRED_HEADER,
   type ProofConfig,
   ProofError,
   parseProofSecrets,
   requireProxyProof,
   verifyProof,
 } from "../src/http/proof.js";
+import { Protocol } from "../src/protocol.js";
+import { str } from "../src/schema.js";
 import { hmacSha256 } from "../src/util/web-crypto.js";
 
 // Golden vectors from the Python reference implementation. Verifying these is
@@ -219,6 +223,40 @@ describe("gate", () => {
     const err = await gate(req()).catch((e) => e);
     expect(err).toBeInstanceOf(ProofError);
     expect(err.name).toBe("Error");
+  });
+});
+
+describe("capability advertisement", () => {
+  // The gate reaches the handler as an opaque authenticate callback, so the
+  // handler cannot derive the posture — an operator that forgets to declare it
+  // ships an enforcing worker that looks unenforced, and the reverse mistake
+  // (advertising in `allow`) tells a proxy the hop is protected when it is not.
+  function health(proxyProofRequired: boolean): Promise<Response> {
+    const p = new Protocol("proof-capability");
+    p.unary("echo", {
+      params: { message: str },
+      result: { message: str },
+      handler: async (params) => ({ message: params.message }),
+    });
+    const handler = createHttpHandler(p, { proxyProofRequired, corsOrigins: "*" });
+    return handler(new Request("http://localhost/health", { method: "GET" }));
+  }
+
+  test("require mode advertises the header", async () => {
+    const resp = await health(true);
+    expect(resp.headers.get(PROOF_REQUIRED_HEADER)).toBe("true");
+  });
+
+  test("allow and off modes do not advertise it", async () => {
+    // Both postures leave the option unset — `allow` never denies and `off`
+    // installs no gate at all, so neither may claim enforcement.
+    const resp = await health(false);
+    expect(resp.headers.get(PROOF_REQUIRED_HEADER)).toBeNull();
+  });
+
+  test("the advertisement is CORS-exposed only when emitted", async () => {
+    expect((await health(true)).headers.get("Access-Control-Expose-Headers")).toContain(PROOF_REQUIRED_HEADER);
+    expect((await health(false)).headers.get("Access-Control-Expose-Headers")).not.toContain(PROOF_REQUIRED_HEADER);
   });
 });
 

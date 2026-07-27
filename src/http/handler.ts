@@ -70,6 +70,7 @@ import {
   resolvePkceScope,
 } from "./oauth-pkce.js";
 import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
+import { PROOF_REQUIRED_HEADER } from "./proof.js";
 import {
   makeDrainHandle,
   openSessionToken,
@@ -320,6 +321,10 @@ export function createHttpHandler(
   const uploadUrlProvider = options?.uploadUrlProvider;
   const maxUploadBytes = options?.maxUploadBytes;
 
+  // Advertisement only: the proof gate is an opaque authenticate callback, so
+  // the handler cannot tell `require` from `allow` and the operator states it.
+  const proxyProofRequired = options?.proxyProofRequired === true;
+
   // -------- Sticky session machinery --------
   const stickyEnabled = options?.enableSticky === true;
   const stickyDefaultTtl = options?.stickyDefaultTtl ?? 300;
@@ -406,6 +411,11 @@ export function createHttpHandler(
         headers.set("VGI-Max-Upload-Bytes", String(maxUploadBytes));
       }
     }
+    // Emitted only in `require` mode — `allow` never denies, so advertising
+    // there would tell a proxy the hop is enforced when it is not.
+    if (proxyProofRequired) {
+      headers.set(PROOF_REQUIRED_HEADER, "true");
+    }
     if (stickyEnabled) {
       headers.set(STICKY_ENABLED_HEADER, "true");
       headers.set(STICKY_DEFAULT_TTL_HEADER, String(Math.floor(stickyDefaultTtl)));
@@ -434,6 +444,12 @@ export function createHttpHandler(
     kind: transportKind,
   };
 
+  // Built once: a browser client can only read a capability header it is
+  // exposed, so the proof advertisement joins the list when it is emitted.
+  const corsExposeHeaders =
+    `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}, VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled, ${SUPPORTED_ENCODINGS_HEADER}` +
+    (proxyProofRequired ? `, ${PROOF_REQUIRED_HEADER}` : "");
+
   function addCorsHeaders(headers: Headers, isOptions = false, requestedHeaders?: string | null): void {
     if (corsOrigins) {
       headers.set("Access-Control-Allow-Origin", corsOrigins);
@@ -446,10 +462,7 @@ export function createHttpHandler(
         "Access-Control-Allow-Headers",
         requestedHeaders && requestedHeaders.length > 0 ? requestedHeaders : "Content-Type, Authorization",
       );
-      headers.set(
-        "Access-Control-Expose-Headers",
-        `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}, VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled, ${SUPPORTED_ENCODINGS_HEADER}`,
-      );
+      headers.set("Access-Control-Expose-Headers", corsExposeHeaders);
       if (isOptions && corsMaxAge != null) {
         headers.set("Access-Control-Max-Age", String(corsMaxAge));
       }

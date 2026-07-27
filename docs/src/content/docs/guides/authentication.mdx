@@ -111,7 +111,7 @@ const authenticate = requireProxyProof(
   existingAuthenticate, // optional — omit for proof-only
 );
 
-const handler = createHttpHandler(protocol, { authenticate });
+const handler = createHttpHandler(protocol, { authenticate, proxyProofRequired: true });
 ```
 
 :::caution
@@ -135,6 +135,18 @@ transmitted field — a caller can claim any `kid` but cannot produce its MAC.
 
 `OPTIONS`, `/.well-known/` and `{prefix}/health` stay reachable without a proof in every mode, so
 load-balancer probes keep working.
+
+### Advertising the posture
+
+`proxyProofRequired: true` makes the handler emit `VGI-Proxy-Proof-Required: true` on every
+response, including `GET {prefix}/health`, and adds it to `Access-Control-Expose-Headers`. It is
+advertisement only — it enforces nothing, and the gate above is what denies.
+
+Set it only with `mode: "require"`. `allow` never denies, so advertising there would tell a proxy
+the hop is protected when it is not. The declaration is manual because the gate reaches the handler
+as an opaque `AuthenticateFn`, which the handler cannot introspect for its mode; without the header
+a proxy has no way to distinguish an enforcing worker from one that silently ignores the header —
+exactly the misconfiguration that turns the feature into a no-op.
 
 The normative cross-language contract is `docs/proxy-proof-spec.md` in the vgi-rpc repository.
 

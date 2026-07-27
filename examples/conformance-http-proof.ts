@@ -67,6 +67,8 @@ const handler = createHttpHandler(protocol, {
   protocolName: "ConformanceService",
   prefix: "/vgi",
   authenticate,
+  // The gate is opaque to the handler, so the posture is declared alongside it.
+  proxyProofRequired: mode === "require",
 });
 
 const server = Bun.serve({ port, fetch: handler });

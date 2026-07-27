@@ -163,6 +163,13 @@ Set to `null` to disable response compression entirely: `VGI-Supported-Encodings
 
 Optional authentication callback. Called for each request before dispatch.
 
+#### `proxyProofRequired`
+
+- **Type:** `boolean`
+- **Default:** `false`
+
+Advertise `VGI-Proxy-Proof-Required: true` on every response, so a proxy or operator can confirm this worker rejects unproofed requests. Advertisement only — it enforces nothing. Set it alongside a `requireProxyProof` gate built with `mode: "require"`; that gate arrives as an opaque `AuthenticateFn` the handler cannot introspect, so the posture has to be stated. See [Proxy proof](/guides/authentication/#proxy-proof).
+
 #### `oauthResourceMetadata`
 
 - **Type:** `OAuthResourceMetadata`

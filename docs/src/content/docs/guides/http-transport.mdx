@@ -102,6 +102,7 @@ Key options:
 | `maxExternalizedResponseBytes` | Hard cap on bytes uploaded to external storage during one response. |
 | `compressionLevel` | zstd level for response compression. Default `1` (compression is **on** by default); `null` disables it. |
 | `authenticate` | Per-request authentication callback. |
+| `proxyProofRequired` | Advertise `VGI-Proxy-Proof-Required: true` (advertisement only). See [Authentication](/guides/authentication/#proxy-proof). |
 | `enableSticky` | Opt-in sticky sessions. See [Sticky Sessions](/guides/sticky-sessions/). |
 | `externalLocation` / `uploadUrlProvider` / `maxUploadBytes` | Large-payload externalization. See [Large Payloads](/guides/large-payloads/). |
 | `dispatchHook` / `onServeStart` | Observability / lifecycle hooks. |
