@@ -14,10 +14,21 @@
  *
  * Run: bun run examples/conformance-http.ts
  */
+import { AuthContext } from "../src/auth.js";
 import type { ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider } from "../src/external.js";
+import type { AuthenticateFn } from "../src/http/auth.js";
 import { createHttpHandler } from "../src/http/index.js";
 import type { DispatchHook } from "../src/types.js";
 import { protocol } from "./conformance-protocol.js";
+
+/** Decode a hex string into bytes — used only for the `--token-key` fixture flag. */
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
 
 const otelFile = process.env.VGI_OTEL_FILE;
 
@@ -38,9 +49,24 @@ let maxExternalizedResponseBytesArg: number | undefined;
 // way to reach the present-but-empty `VGI-Supported-Encodings` advertisement
 // that `TestHttpCompressionNegotiationConformance` pins down.
 let responseCompressionLevel: number | null | undefined;
+// Sticky failure-path fixture knobs — see the reference repo's
+// docs/sticky-sessions-spec.md §9.1. Each backs one TestSticky case that
+// cannot run against the plain worker.
+let serverIdArg: string | undefined;
+let tokenKeyHex: string | undefined;
+let stickyTtlArg: number | undefined;
+let stickyAuth = false;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
-  if (a === "--response-compression" && i + 1 < args.length) {
+  if (a === "--server-id" && i + 1 < args.length) {
+    serverIdArg = args[++i];
+  } else if (a === "--token-key" && i + 1 < args.length) {
+    tokenKeyHex = args[++i];
+  } else if (a === "--sticky-ttl" && i + 1 < args.length) {
+    stickyTtlArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--sticky-auth") {
+    stickyAuth = true;
+  } else if (a === "--response-compression" && i + 1 < args.length) {
     const v = args[++i];
     responseCompressionLevel = v === "off" || v === "none" ? null : Number.parseInt(v, 10);
   } else if (a === "--fake-storage" && i + 1 < args.length) {
@@ -175,11 +201,31 @@ if (otelFile) {
 // without sending SIGTERM mid-fixture.
 let stickyDrainHandle: import("../src/http/sticky.js").DrainHandle | null = null;
 
+/**
+ * Resolve the principal named in `X-Conformance-Principal`, or stay anonymous.
+ *
+ * Backs `TestSticky::test_cross_principal_replay_rejected`, which needs one
+ * worker reachable as two identities so it can open a session as one and replay
+ * the token as the other. Naming yourself in a header is obviously not
+ * authentication — it is the cheapest thing every port can implement
+ * identically, and the test only needs the identities to be distinguishable.
+ *
+ * Requests without the header stay anonymous rather than being rejected: the
+ * conformance suite probes `/health` and the capability endpoint before it
+ * authenticates anything.
+ */
+const principalHeaderAuth: AuthenticateFn = (request: Request) => {
+  const principal = request.headers.get("X-Conformance-Principal");
+  return principal ? new AuthContext("conformance", true, principal) : AuthContext.anonymous();
+};
+
 const handler = createHttpHandler(protocol, {
-  serverId: "conformance-http",
+  serverId: serverIdArg ?? "conformance-http",
   protocolName: "ConformanceService",
   enableSticky: true,
-  stickyDefaultTtl: 300,
+  stickyDefaultTtl: stickyTtlArg ?? 300,
+  ...(tokenKeyHex ? { tokenKey: hexToBytes(tokenKeyHex) } : {}),
+  ...(stickyAuth ? { authenticate: principalHeaderAuth } : {}),
   stickyEchoHeaders: { "x-vgi-conformance-echo": "conformance-fixed-marker" },
   _onStickyHandle: (h) => {
     stickyDrainHandle = h;
