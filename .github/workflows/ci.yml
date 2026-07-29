@@ -197,7 +197,9 @@ jobs:
         # timing — the Rust port's identical floor resolved 0.28.2 eighty
         # seconds after 0.28.3 published, before PyPI's index reached pip.
         # 0.28.3: TestProxyProof capability-header cases.
-        run: pip install "vgi-rpc[http,cli,external]>=0.28.3" pytest
+        # 0.29.0: TestSticky failure-path fixtures (expiry, wrong worker,
+        #   cross-principal replay) — required now, not skippable.
+        run: pip install "vgi-rpc[http,cli,external]>=0.29.0" pytest
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v
