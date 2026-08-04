@@ -766,20 +766,149 @@ function base64(bytes) {
 function roundTo2(f) {
   return Math.round(f * 100) / 100;
 }
+var _ENCODER = new TextEncoder;
+function utf8Length(value) {
+  return _ENCODER.encode(value).byteLength;
+}
+var REDACTED = "[redacted]";
+var CLAIM_REDACT_RE = /password|token|secret|key|authorization|email|phone|address|birthdate|gender|^name$|given_name|family_name|middle_name|nickname|preferred_username|picture|profile|website/i;
+function redactClaims(claims) {
+  const out = {};
+  for (const [k, v] of Object.entries(claims)) {
+    out[k] = CLAIM_REDACT_RE.test(k) ? REDACTED : v;
+  }
+  return out;
+}
+function noRedaction(claims) {
+  return { ...claims };
+}
+var TRACE_ID_RE = /^[0-9a-f]{32}$/;
+var SPAN_ID_RE = /^[0-9a-f]{16}$/;
+var _OTEL_MOD = "@opentelemetry/api";
+var _otelTrace = null;
+function otelTraceContext() {
+  if (_otelTrace === null) {
+    _otelTrace = false;
+    try {
+      const req = import.meta.require ?? globalThis.require ?? null;
+      if (req)
+        _otelTrace = req(_OTEL_MOD)?.trace ?? false;
+    } catch {
+      _otelTrace = false;
+    }
+  }
+  if (!_otelTrace)
+    return null;
+  try {
+    const ctx = _otelTrace.getActiveSpan()?.spanContext();
+    if (!ctx)
+      return null;
+    const traceId = String(ctx.traceId ?? "");
+    const spanId = String(ctx.spanId ?? "");
+    if (!TRACE_ID_RE.test(traceId) || !SPAN_ID_RE.test(spanId))
+      return null;
+    if (/^0+$/.test(traceId) || /^0+$/.test(spanId))
+      return null;
+    return { traceId, spanId };
+  } catch {
+    return null;
+  }
+}
+function fnv1a32(text) {
+  let hash = 2166136261;
+  for (let i = 0;i < text.length; i++) {
+    hash ^= text.charCodeAt(i) & 255;
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+class AccessLogSampler {
+  rate;
+  threshold;
+  constructor(rate) {
+    this.rate = rate;
+    if (!(typeof rate === "number" && Number.isFinite(rate) && rate >= 0 && rate <= 1)) {
+      throw new RangeError(`access-log sample rate must be between 0.0 and 1.0, got ${rate}`);
+    }
+    this.threshold = rate * 4294967295;
+  }
+  keep(record, key) {
+    if (this.rate >= 1)
+      return true;
+    if (record.status === "error")
+      return true;
+    if (fnv1a32(key) > this.threshold)
+      return false;
+    record.sample_rate = this.rate;
+    return true;
+  }
+}
+
+class AsyncRecordQueue {
+  capacity;
+  writeRecord;
+  queue = [];
+  dropped = 0;
+  scheduled = false;
+  constructor(capacity, writeRecord) {
+    this.capacity = capacity;
+    this.writeRecord = writeRecord;
+  }
+  enqueue(record) {
+    if (this.queue.length >= this.capacity) {
+      this.dropped++;
+      return;
+    }
+    if (this.dropped) {
+      record.dropped_records = this.dropped;
+      this.dropped = 0;
+    }
+    this.queue.push(record);
+    if (!this.scheduled) {
+      this.scheduled = true;
+      setTimeout(() => {
+        this.scheduled = false;
+        this.flush();
+      }, 0);
+    }
+  }
+  flush() {
+    while (this.queue.length > 0) {
+      const record = this.queue.shift();
+      this.writeRecord(record);
+    }
+  }
+  get droppedCount() {
+    return this.dropped;
+  }
+}
 
 class AccessLogHook {
   sink;
   serverVersion;
   level;
+  maxRecordBytes;
+  sampler;
+  traceContext;
+  redactor;
+  queue;
   constructor(sink, options = {}) {
     this.sink = sink;
-    if (typeof options === "string") {
-      this.serverVersion = options;
-      this.level = "INFO";
-    } else {
-      this.serverVersion = options.serverVersion ?? "";
-      this.level = options.level ?? "INFO";
-    }
+    const opts = typeof options === "string" ? { serverVersion: options } : options;
+    this.serverVersion = opts.serverVersion ?? "";
+    this.level = opts.level ?? "INFO";
+    this.maxRecordBytes = opts.maxRecordBytes ?? 1048576;
+    this.sampler = new AccessLogSampler(opts.sampleRate ?? 1);
+    this.traceContext = opts.traceContext ?? otelTraceContext;
+    this.redactor = opts.redactor ?? redactClaims;
+    this.queue = opts.async ? new AsyncRecordQueue(opts.queueSize ?? 1e4, (rec) => this.write(rec)) : null;
+  }
+  flush() {
+    this.queue?.flush();
+  }
+  get droppedRecords() {
+    return this.queue?.droppedCount ?? 0;
   }
   onDispatchStart(_info) {
     const token = { startNs: process.hrtime.bigint() };
@@ -818,13 +947,18 @@ class AccessLogHook {
       rec.protocol_version = info.protocolVersion;
     if (info.requestId)
       rec.request_id = info.requestId;
+    const trace = this.currentTrace();
+    if (trace) {
+      rec.trace_id = trace.traceId;
+      rec.span_id = trace.spanId;
+    }
     if (info.requestData && info.requestData.length > 0) {
       const encoded = base64(info.requestData);
       if (this.level === "DEBUG") {
         rec.request_data = encoded;
       } else {
         rec.original_request_bytes = encoded.length;
-        rec.truncated = true;
+        rec.truncated = "payload_omitted";
       }
     }
     if (info.methodType === "stream") {
@@ -832,6 +966,15 @@ class AccessLogHook {
     }
     if (info.cancelled)
       rec.cancelled = true;
+    if (info.claims && Object.keys(info.claims).length > 0) {
+      const claims = this.redact(info.claims);
+      if (Object.keys(claims).length > 0)
+        rec.claims = claims;
+    }
+    if (info.requestBytes !== undefined)
+      rec.request_bytes = info.requestBytes;
+    if (info.externalizedBytes)
+      rec.externalized_bytes = info.externalizedBytes;
     if (stats.inputBatches + stats.outputBatches + stats.inputRows + stats.outputRows + stats.inputBytes + stats.outputBytes !== 0) {
       rec.input_batches = stats.inputBatches;
       rec.output_batches = stats.outputBatches;
@@ -840,10 +983,96 @@ class AccessLogHook {
       rec.input_bytes = stats.inputBytes;
       rec.output_bytes = stats.outputBytes;
     }
+    const sampleKey = info.streamId || info.requestId || `${rec.timestamp}:${info.method}`;
+    if (info.deferral) {
+      info.deferral.defer((responseBytes) => {
+        if (responseBytes !== undefined)
+          rec.response_bytes = responseBytes;
+        this.emit(rec, sampleKey);
+      });
+      return;
+    }
+    this.emit(rec, sampleKey);
+  }
+  redact(claims) {
     try {
-      this.sink.write(`${JSON.stringify(rec)}
+      return this.redactor(claims);
+    } catch (err) {
+      console.warn("vgi-rpc access log: claim redactor threw; dropping claims from the record", err);
+      return {};
+    }
+  }
+  currentTrace() {
+    try {
+      return this.traceContext();
+    } catch {
+      return null;
+    }
+  }
+  emit(rec, sampleKey) {
+    if (!this.sampler.keep(rec, sampleKey))
+      return;
+    if (this.queue) {
+      this.queue.enqueue(rec);
+      return;
+    }
+    this.write(rec);
+  }
+  write(rec) {
+    try {
+      this.sink.write(`${this.format(rec)}
 `);
     } catch {}
+  }
+  format(rec) {
+    let line = JSON.stringify(rec);
+    if (this.maxRecordBytes <= 0 || utf8Length(line) <= this.maxRecordBytes)
+      return line;
+    const requestData = rec.request_data;
+    if (typeof requestData === "string") {
+      rec.original_request_bytes = requestData.length;
+      delete rec.request_data;
+      rec.truncated = true;
+      line = JSON.stringify(rec);
+      if (utf8Length(line) <= this.maxRecordBytes)
+        return line;
+    }
+    if (rec.claims !== undefined) {
+      rec.claims = {};
+      rec.truncated = true;
+      line = JSON.stringify(rec);
+      if (utf8Length(line) <= this.maxRecordBytes)
+        return line;
+    }
+    const sentinel = {
+      timestamp: rec.timestamp,
+      level: "INFO",
+      logger: "vgi_rpc.access",
+      message: "record_too_large",
+      server_id: rec.server_id ?? "",
+      protocol: rec.protocol ?? "",
+      protocol_hash: rec.protocol_hash ?? "",
+      method: rec.method ?? "",
+      method_type: rec.method_type ?? "unary",
+      principal: rec.principal ?? "",
+      auth_domain: rec.auth_domain ?? "",
+      authenticated: rec.authenticated ?? false,
+      remote_addr: rec.remote_addr ?? "",
+      duration_ms: rec.duration_ms ?? 0,
+      status: rec.status ?? "ok",
+      error_type: rec.error_type ?? "",
+      truncated: "record_too_large"
+    };
+    if (rec.method_type === "stream" && typeof rec.stream_id === "string")
+      sentinel.stream_id = rec.stream_id;
+    if (sentinel.status === "error") {
+      sentinel.error_message = typeof rec.error_message === "string" && rec.error_message ? rec.error_message : "record_too_large";
+    }
+    if (typeof rec.dropped_records === "number")
+      sentinel.dropped_records = rec.dropped_records;
+    if (typeof rec.sample_rate === "number")
+      sentinel.sample_rate = rec.sample_rate;
+    return JSON.stringify(sentinel);
   }
 }
 // src/errors.ts
@@ -955,6 +1184,7 @@ var DESCRIBE_VERSION = "4";
 var PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
 var DESCRIBE_METHOD_NAME = "__describe__";
 var STATE_KEY = "vgi_rpc.stream_state#b64";
+var CALL_STATE_KEY = "vgi_rpc.call_state#b64";
 var CANCEL_KEY = "vgi_rpc.cancel";
 var LOCATION_KEY = "vgi_rpc.location";
 var LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
@@ -1050,6 +1280,11 @@ function createIncrementalEncoder(s) {
   writer.reset(undefined, s);
   const drain = () => {
     const values = writer._sink._values;
+    if (values.length === 1) {
+      const only = values[0];
+      values.length = 0;
+      return only;
+    }
     const total = values.reduce((n, c) => n + c.length, 0);
     const out = new Uint8Array(total);
     let off = 0;
@@ -1188,14 +1423,19 @@ function conformBatchToSchema(batch, schema2) {
       throw new TypeError(`Field name mismatch at index ${i}: expected '${s.fields[i].name}', got '${a.schema.fields[i].name}'`);
     }
   }
+  let mutated = false;
   const children = s.fields.map((f, i) => {
     const srcChild = a.data.children[i];
     const srcType = srcChild.type;
     const dstType = f.type;
+    if (srcType === dstType)
+      return srcChild;
     if (!_needsValueCast(srcType, dstType)) {
+      mutated = true;
       return srcChild.clone(dstType);
     }
     if (_isNumeric(srcType) && _isNumeric(dstType)) {
+      mutated = true;
       const col = a.getChildAt(i);
       const values = [];
       for (let r = 0;r < a.numRows; r++) {
@@ -1204,8 +1444,11 @@ function conformBatchToSchema(batch, schema2) {
       }
       return a_vectorFromArray(values, dstType).data[0];
     }
+    mutated = true;
     return srcChild.clone(dstType);
   });
+  if (!mutated)
+    return batch;
   const structType = new A_Struct(s.fields);
   const data = a_makeData({
     type: structType,
@@ -1262,21 +1505,48 @@ function isBatch(x) {
 init_zstd();
 
 // src/wire/response.ts
+var _int64FieldsCache = new WeakMap;
+function int64FieldNames(schema2) {
+  let names = _int64FieldsCache.get(schema2);
+  if (names === undefined) {
+    const out = [];
+    for (const f of schema2.fields) {
+      if (isInt(f.type) && f.type.bitWidth === 64)
+        out.push(f.name);
+    }
+    names = out;
+    _int64FieldsCache.set(schema2, names);
+  }
+  return names;
+}
 function coerceInt64(schema2, values) {
-  const result = { ...values };
-  for (const f of schema2.fields) {
-    const val = result[f.name];
+  const int64Fields = int64FieldNames(schema2);
+  if (int64Fields.length === 0)
+    return values;
+  let result = null;
+  for (const name of int64Fields) {
+    const val = values[name];
     if (val === undefined)
       continue;
-    if (!isInt(f.type) || f.type.bitWidth !== 64)
-      continue;
     if (Array.isArray(val)) {
-      result[f.name] = val.map((v) => typeof v === "number" ? BigInt(v) : v);
+      let mapped = null;
+      for (let i = 0;i < val.length; i++) {
+        if (typeof val[i] === "number") {
+          if (mapped === null)
+            mapped = val.slice();
+          mapped[i] = BigInt(val[i]);
+        }
+      }
+      if (mapped !== null) {
+        result ??= { ...values };
+        result[name] = mapped;
+      }
     } else if (typeof val === "number") {
-      result[f.name] = BigInt(val);
+      result ??= { ...values };
+      result[name] = BigInt(val);
     }
   }
-  return result;
+  return result ?? values;
 }
 function buildResultBatch(schema2, values, serverId, requestId) {
   const metadata = new Map;
@@ -1375,7 +1645,7 @@ function serializeBatchToIpc(batch) {
 function batchByteSize(batch) {
   return serializeBatch(batch).byteLength;
 }
-async function maybeExternalizeBatch(batch, config) {
+async function maybeExternalizeBatch(batch, config, onUpload) {
   if (!config?.storage)
     return batch;
   if (batch.numRows === 0)
@@ -1390,6 +1660,7 @@ async function maybeExternalizeBatch(batch, config) {
     ipcData = await zstdCompress(ipcData, config.compression.level ?? 3);
     contentEncoding = "zstd";
   }
+  onUpload?.(ipcData.byteLength);
   const url = await config.storage.upload(ipcData, contentEncoding);
   return makeExternalLocationBatch(batch.schema, url, checksum);
 }
@@ -1907,11 +2178,29 @@ async function httpIntrospect(baseUrl, options) {
 
 // src/client/stream.ts
 import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
+function packResumeToken(cursor, callToken) {
+  return callToken === null ? cursor : `${cursor.length}:${cursor}${callToken}`;
+}
+function unpackResumeToken(token) {
+  const sep = token.indexOf(":");
+  if (sep < 0)
+    return { cursor: token, callToken: null };
+  const cursorLen = Number(token.slice(0, sep));
+  if (!Number.isInteger(cursorLen) || cursorLen < 0)
+    return { cursor: token, callToken: null };
+  const rest = token.slice(sep + 1);
+  if (cursorLen > rest.length)
+    return { cursor: token, callToken: null };
+  const call = rest.slice(cursorLen);
+  return { cursor: rest.slice(0, cursorLen), callToken: call === "" ? null : call };
+}
+
 class HttpStreamSession {
   _baseUrl;
   _prefix;
   _method;
   _stateToken;
+  _callStateToken;
   _outputSchema;
   _inputSchema;
   _onLog;
@@ -1929,6 +2218,7 @@ class HttpStreamSession {
     this._prefix = opts.prefix;
     this._method = opts.method;
     this._stateToken = opts.stateToken;
+    this._callStateToken = opts.callStateToken ?? null;
     this._outputSchema = opts.outputSchema;
     this._inputSchema = opts.inputSchema;
     this._onLog = opts.onLog;
@@ -1953,6 +2243,17 @@ class HttpStreamSession {
   }
   get header() {
     return this._header;
+  }
+  _tokenMetadata(token) {
+    const metadata = new Map;
+    metadata.set(STATE_KEY, token);
+    if (this._callStateToken !== null) {
+      metadata.set(CALL_STATE_KEY, this._callStateToken);
+    }
+    return metadata;
+  }
+  _resumeToken() {
+    return this._stateToken === null ? null : packResumeToken(this._stateToken, this._callStateToken);
   }
   _buildHeaders() {
     const headers = {
@@ -1989,9 +2290,7 @@ class HttpStreamSession {
     if (input.length === 0) {
       const zeroSchema = this._inputSchema ?? this._outputSchema;
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
-      const metadata2 = new Map;
-      metadata2.set(STATE_KEY, this._stateToken);
-      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, metadata2);
+      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
       return this._doExchange(zeroSchema, [batchWithMeta]);
     }
     const keys = Object.keys(input[0]);
@@ -2019,9 +2318,7 @@ class HttpStreamSession {
       children,
       nullCount: 0
     });
-    const metadata = new Map;
-    metadata.set(STATE_KEY, this._stateToken);
-    const batch = new RecordBatch(inputSchema, data, metadata);
+    const batch = new RecordBatch(inputSchema, data, this._tokenMetadata(this._stateToken));
     return this._doExchange(inputSchema, [batch]);
   }
   async _doExchange(schema2, batches) {
@@ -2123,7 +2420,7 @@ class HttpStreamSession {
       if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
         throw new Error(multi);
       }
-      return { rows: extractBatchRows(batch), token: this._stateToken };
+      return { rows: extractBatchRows(batch), token: this._resumeToken() };
     }
     if (this._finished || this._stateToken === null) {
       this._finished = true;
@@ -2157,17 +2454,18 @@ class HttpStreamSession {
       this._finished = true;
       return null;
     }
-    return { rows: dataRows, token: nextToken };
+    return { rows: dataRows, token: this._resumeToken() };
   }
   seekToToken(token) {
+    const { cursor, callToken } = unpackResumeToken(token);
     this._pendingBatches = [];
-    this._stateToken = token;
+    this._stateToken = cursor;
+    this._callStateToken = callToken;
     this._finished = false;
   }
   async _sendContinuation(token) {
     const emptySchema = new Schema([]);
-    const metadata = new Map;
-    metadata.set(STATE_KEY, token);
+    const metadata = this._tokenMetadata(token);
     const structType = new Struct(emptySchema.fields);
     const data = makeData({
       type: structType,
@@ -2451,6 +2749,7 @@ function httpConnect(baseUrl, options) {
       const responseBody = await readResponse(resp);
       let header = null;
       let stateToken = null;
+      let callStateToken = null;
       const pendingBatches = [];
       let finished = false;
       let streamSchema = null;
@@ -2480,6 +2779,7 @@ function httpConnect(baseUrl, options) {
               const token = batch.metadata?.get(STATE_KEY);
               if (token) {
                 stateToken = token;
+                callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
                 continue;
               }
               const level = batch.metadata?.get(LOG_LEVEL_KEY);
@@ -2514,6 +2814,7 @@ function httpConnect(baseUrl, options) {
             const token = batch.metadata?.get(STATE_KEY);
             if (token) {
               stateToken = token;
+              callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
               continue;
             }
             const level = batch.metadata?.get(LOG_LEVEL_KEY);
@@ -2545,6 +2846,7 @@ function httpConnect(baseUrl, options) {
         prefix,
         method,
         stateToken,
+        callStateToken,
         outputSchema,
         inputSchema: info.inputSchema,
         onLog,
@@ -2561,11 +2863,13 @@ function httpConnect(baseUrl, options) {
     },
     async resumeStream(method, token, outputSchema) {
       await ensureCompression();
+      const { cursor, callToken } = unpackResumeToken(token);
       return new HttpStreamSession({
         baseUrl,
         prefix,
         method,
-        stateToken: token,
+        stateToken: cursor,
+        callStateToken: callToken,
         outputSchema: outputSchema ?? new Schema3([]),
         onLog,
         pendingBatches: [],
@@ -3250,13 +3554,77 @@ async function sha256Hex2(data) {
   return s;
 }
 
+// src/http/unauthorized.ts
+var AUTH_REASON_HEADER = "VGI-Auth-Reason";
+var AUTH_PROXY_REQUIRED_HEADER = "VGI-Auth-Proxy-Required";
+var AuthReason = {
+  MissingCredential: "missing_credential",
+  InvalidCredential: "invalid_credential",
+  ExpiredCredential: "expired_credential",
+  InsufficientScope: "insufficient_scope",
+  ProxyRequired: "proxy_required",
+  Unauthorized: "unauthorized"
+};
+var AUTH_REASONS = new Set(Object.values(AuthReason));
+var AUTH_REASON_PROPERTY = "vgiAuthReason";
+
+class AuthFailure extends Error {
+  reason;
+  detail;
+  vgiAuthReason;
+  constructor(reason, detail = "") {
+    super(detail || reason);
+    this.name = "AuthFailure";
+    this.reason = reason;
+    this.detail = detail;
+    this.vgiAuthReason = reason;
+  }
+}
+
+class AuthUnavailableError extends Error {
+  retryAfter;
+  detail;
+  constructor(detail = "", retryAfter = 5) {
+    super(detail || "authentication service unavailable");
+    this.name = "AuthUnavailableError";
+    this.detail = detail;
+    this.retryAfter = retryAfter;
+  }
+}
+function classifyAuthFailure(err2) {
+  const declared = err2?.[AUTH_REASON_PROPERTY];
+  const message = err2 instanceof Error ? err2.message : "";
+  if (typeof declared === "string" && AUTH_REASONS.has(declared)) {
+    return { reason: declared, detail: err2 instanceof AuthFailure ? err2.detail : message };
+  }
+  if (err2 instanceof Error && err2.name === "PermissionError") {
+    return { reason: AuthReason.InsufficientScope, detail: message };
+  }
+  return { reason: AuthReason.Unauthorized, detail: message };
+}
+function buildProxyHint(headers) {
+  const names = [...new Set(headers)];
+  if (names.length === 0)
+    return "";
+  return `This service only accepts requests that arrive through its configured reverse proxy, ` + `which must set the ${names.join(", ")} header(s). A rejection here is at least as likely ` + `to be a proxy misconfiguration as a bad credential — check that the proxy is forwarding ` + `them before re-issuing credentials.`;
+}
+function unauthorizedEnvelope(reason, detail, proxyHint = "") {
+  const payload = { error: "unauthorized", reason, detail };
+  if (proxyHint)
+    payload.proxy_hint = proxyHint;
+  return JSON.stringify(payload);
+}
+
 // src/http/bearer.ts
 function bearerAuthenticate(options) {
   const { validate } = options;
   return async function authenticate(request) {
     const authHeader = request.headers.get("Authorization") ?? "";
+    if (!authHeader) {
+      throw new AuthFailure(AuthReason.MissingCredential, "Missing Authorization header");
+    }
     if (!authHeader.startsWith("Bearer ")) {
-      throw new Error("Missing or invalid Authorization header");
+      throw new AuthFailure(AuthReason.InvalidCredential, "Authorization header is not a Bearer credential");
     }
     const token = authHeader.slice(7);
     return validate(token);
@@ -3273,12 +3641,22 @@ function bearerAuthenticateStatic(options) {
       if (safeEqual(token, key))
         return ctx;
     }
-    throw new Error("Unknown bearer token");
+    throw new AuthFailure(AuthReason.InvalidCredential, "Unknown bearer token");
   }
   return bearerAuthenticate({ validate });
 }
 function isCredentialError(err2) {
+  if (err2 instanceof AuthUnavailableError)
+    return false;
+  if (err2 instanceof AuthFailure)
+    return true;
   return err2 instanceof Error && err2.constructor === Error && err2.name !== "PermissionError";
+}
+function combineReasons(codes) {
+  if (codes.length === 0)
+    return AuthReason.Unauthorized;
+  const substantive = codes.find((code) => code !== AuthReason.MissingCredential);
+  return substantive ?? AuthReason.MissingCredential;
 }
 function chainAuthenticate(...authenticators) {
   if (authenticators.length === 0) {
@@ -3286,18 +3664,20 @@ function chainAuthenticate(...authenticators) {
   }
   return async function authenticate(request) {
     let lastError = null;
+    const codes = [];
     for (const authFn of authenticators) {
       try {
         return await authFn(request);
       } catch (err2) {
         if (isCredentialError(err2)) {
           lastError = err2;
+          codes.push(err2 instanceof AuthFailure ? err2.reason : AuthReason.Unauthorized);
           continue;
         }
         throw err2;
       }
     }
-    const error = new Error("No authenticator accepted the request");
+    const error = new AuthFailure(combineReasons(codes), "No authenticator accepted the request");
     if (lastError)
       error.cause = lastError;
     throw error;
@@ -3597,6 +3977,8 @@ function isOpaquePassthroughType(type) {
 }
 
 // src/wire/request.ts
+var MIN_SAFE_BIG = BigInt(Number.MIN_SAFE_INTEGER);
+var MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
 function parseRequest(schema2, batch) {
   const metadata = batch.metadata ?? new Map;
   const methodName = metadata.get(RPC_METHOD_KEY);
@@ -3630,7 +4012,7 @@ function parseRequest(schema2, batch) {
       } catch {}
     }
     if (typeof value === "bigint" && !isOpaquePassthroughType(field2.type)) {
-      if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      if (value >= MIN_SAFE_BIG && value <= MAX_SAFE_BIG) {
         value = Number(value);
       }
     }
@@ -3655,6 +4037,51 @@ function applyDefaults(params, defaults) {
   }
   return params;
 }
+
+// src/http/codec.ts
+var DEFAULT_COMPRESSION_LEVEL = 1;
+var COMPRESSION_ENCODINGS = ["zstd", "gzip"];
+var IDENTITY_ENCODING = "identity";
+var KNOWN_ENCODINGS = [...COMPRESSION_ENCODINGS, IDENTITY_ENCODING];
+function parseEncodingList(headerValue) {
+  if (!headerValue)
+    return [];
+  const out = [];
+  const seen = new Set;
+  for (const raw of headerValue.split(",")) {
+    let token = raw.trim().toLowerCase();
+    if (!token)
+      continue;
+    const semi = token.indexOf(";");
+    if (semi >= 0)
+      token = token.slice(0, semi).trim();
+    if (!KNOWN_ENCODINGS.includes(token))
+      continue;
+    if (seen.has(token))
+      continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+function pickResponseEncoding(standardHeader, customHeader, canProduce) {
+  const standard = parseEncodingList(standardHeader);
+  const custom = parseEncodingList(customHeader);
+  const merged = [...custom, ...standard.filter((e) => !custom.includes(e))];
+  for (const enc of merged) {
+    if (enc === IDENTITY_ENCODING) {
+      return { codec: null, usedCustom: false };
+    }
+    if (canProduce(enc)) {
+      return { codec: enc, usedCustom: custom.includes(enc) && !standard.includes(enc) };
+    }
+  }
+  return { codec: null, usedCustom: custom.length > 0 };
+}
+var CONTENT_ENCODING_HEADER = "Content-Encoding";
+var VGI_CONTENT_ENCODING_HEADER = "X-VGI-Content-Encoding";
+var VGI_ACCEPT_ENCODING_HEADER = "X-VGI-Accept-Encoding";
+var SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings";
 
 // node_modules/@noble/ciphers/utils.js
 /*! noble-ciphers - MIT License (c) 2023 Paul Miller (paulmillr.com) */
@@ -4466,18 +4893,27 @@ function openBytes(envelope, key, opts) {
 
 // src/http/token.ts
 var _UTF8 = new TextEncoder;
-var TOKEN_VERSION = 4;
+var TOKEN_VERSION = 5;
+var CALL_TOKEN_VERSION = 1;
+var CALL_ID_LEN = 16;
 var AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\x00");
+var CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v1\x00");
 function computeAad(principal) {
+  return aadWith(AAD_PREFIX, principal);
+}
+function computeCallAad(principal) {
+  return aadWith(CALL_AAD_PREFIX, principal);
+}
+function aadWith(prefix, principal) {
   if (!principal) {
     const tail2 = _UTF8.encode("\x00anonymous");
-    return concatBytes2(AAD_PREFIX, tail2);
+    return concatBytes2(prefix, tail2);
   }
   const pBytes = _UTF8.encode(principal);
   const tail = new Uint8Array(1 + pBytes.length);
   tail[0] = 1;
   tail.set(pBytes, 1);
-  return concatBytes2(AAD_PREFIX, tail);
+  return concatBytes2(prefix, tail);
 }
 function bytesToBase64(bytes) {
   let s = "";
@@ -4517,21 +4953,36 @@ function concatBytes2(...parts) {
   }
   return out;
 }
-function packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, principal, createdAt) {
+function packStateToken(stateBytes, callId, tokenKey, principal, createdAt) {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
   const now = createdAt ?? Math.floor(Date.now() / 1000);
-  const plaintextLen = 8 + 4 + stateBytes.length + 4 + schemaBytes.length + 4 + inputSchemaBytes.length;
-  const plaintext = new Uint8Array(plaintextLen);
+  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 4 + stateBytes.length);
   const view = new DataView(plaintext.buffer);
   let offset = 0;
   writeU64LE(view, offset, BigInt(now));
   offset += 8;
+  plaintext.set(callId, offset);
+  offset += CALL_ID_LEN;
   writeU32LE(view, offset, stateBytes.length);
   offset += 4;
   plaintext.set(stateBytes, offset);
-  offset += stateBytes.length;
+  const wire = sealBytes(plaintext, tokenKey, { aad: computeAad(principal), version: TOKEN_VERSION });
+  return bytesToBase64(wire);
+}
+function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principal, createdAt) {
+  if (tokenKey.length !== 32) {
+    throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
+  }
+  const now = createdAt ?? Math.floor(Date.now() / 1000);
+  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 4 + schemaBytes.length + 4 + inputSchemaBytes.length);
+  const view = new DataView(plaintext.buffer);
+  let offset = 0;
+  writeU64LE(view, offset, BigInt(now));
+  offset += 8;
+  plaintext.set(callId, offset);
+  offset += CALL_ID_LEN;
   writeU32LE(view, offset, schemaBytes.length);
   offset += 4;
   plaintext.set(schemaBytes, offset);
@@ -4539,7 +4990,10 @@ function packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, pri
   writeU32LE(view, offset, inputSchemaBytes.length);
   offset += 4;
   plaintext.set(inputSchemaBytes, offset);
-  const wire = sealBytes(plaintext, tokenKey, { aad: computeAad(principal), version: TOKEN_VERSION });
+  const wire = sealBytes(plaintext, tokenKey, {
+    aad: computeCallAad(principal),
+    version: CALL_TOKEN_VERSION
+  });
   return bytesToBase64(wire);
 }
 function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal) {
@@ -4561,7 +5015,7 @@ function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal) {
     }
     throw err2;
   }
-  if (plaintext.length < 8) {
+  if (plaintext.length < 8 + CALL_ID_LEN) {
     throw new Error("State token truncated");
   }
   const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
@@ -4579,13 +5033,53 @@ function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal) {
       throw new Error("State token expired");
     }
   }
+  const callId = copyAligned(offset, CALL_ID_LEN);
+  offset += CALL_ID_LEN;
   const stateLen = readU32LE(view, offset);
   offset += 4;
   if (offset + stateLen > plaintext.length) {
     throw new Error("State token truncated (state)");
   }
   const stateBytes = copyAligned(offset, stateLen);
-  offset += stateLen;
+  return { stateBytes, callId, createdAt };
+}
+function unpackCallToken(token, tokenKey, principal, tokenTtl = 0) {
+  const raw = base64ToBytes(token);
+  if (raw.length >= 1 && raw[0] !== CALL_TOKEN_VERSION) {
+    throw new Error(`Unsupported call token version ${raw[0]}`);
+  }
+  let plaintext;
+  try {
+    plaintext = openBytes(raw, tokenKey, {
+      aad: computeCallAad(principal),
+      version: CALL_TOKEN_VERSION
+    });
+  } catch (err2) {
+    if (err2 instanceof Error && /decrypt|auth|tag/i.test(err2.message)) {
+      throw new Error("State token signature verification failed");
+    }
+    throw err2;
+  }
+  if (plaintext.length < 8 + CALL_ID_LEN) {
+    throw new Error("State token truncated");
+  }
+  const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
+  const copyAligned = (start, len) => {
+    const out = new Uint8Array(len);
+    out.set(plaintext.subarray(start, start + len));
+    return out;
+  };
+  let offset = 0;
+  const createdAt = Number(readU64LE(view, offset));
+  offset += 8;
+  if (tokenTtl > 0) {
+    const now = Math.floor(Date.now() / 1000);
+    if (now - createdAt > tokenTtl) {
+      throw new Error("State token expired");
+    }
+  }
+  const callId = copyAligned(offset, CALL_ID_LEN);
+  offset += CALL_ID_LEN;
   const schemaLen = readU32LE(view, offset);
   offset += 4;
   if (offset + schemaLen > plaintext.length) {
@@ -4599,14 +5093,81 @@ function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal) {
     throw new Error("State token truncated (input schema)");
   }
   const inputSchemaBytes = copyAligned(offset, inputSchemaLen);
-  return { stateBytes, schemaBytes, inputSchemaBytes, createdAt };
+  return { callId, call: { schemaBytes, inputSchemaBytes } };
 }
 
 // src/http/dispatch.ts
+var CALL_STATE_CACHE_ENTRIES = 4096;
+var callStates = new Map;
+function callCacheKey(callId, principal) {
+  let hex = "";
+  for (const b of callId)
+    hex += b.toString(16).padStart(2, "0");
+  return `${hex}\x00${principal ?? ""}`;
+}
+function cacheEntriesFor(ctx) {
+  return ctx.callStateCacheEntries ?? CALL_STATE_CACHE_ENTRIES;
+}
+function cacheCall(callId, ctx, call) {
+  const limit = cacheEntriesFor(ctx);
+  if (limit <= 0)
+    return;
+  if (callStates.size >= limit) {
+    callStates.clear();
+  }
+  const ttl = ctx.tokenTtl;
+  callStates.set(callCacheKey(callId, ctx.authContext?.principal), {
+    expiresAt: Math.floor(Date.now() / 1000) + (ttl > 0 ? ttl : 3600),
+    call
+  });
+}
+function newCallId() {
+  const id = new Uint8Array(CALL_ID_LEN);
+  crypto.getRandomValues(id);
+  return id;
+}
+function resolveCall(callId, callTokenB64, ctx) {
+  const principal = ctx.authContext?.principal;
+  const key = callCacheKey(callId, principal);
+  const hit = cacheEntriesFor(ctx) > 0 ? callStates.get(key) : undefined;
+  if (hit) {
+    if (Math.floor(Date.now() / 1000) <= hit.expiresAt)
+      return hit.call;
+    callStates.delete(key);
+  }
+  if (!callTokenB64) {
+    throw new HttpRpcError("Missing call token in exchange request", 400);
+  }
+  const { callId: tokenCallId, call } = unpackCallToken(callTokenB64, ctx.tokenKey, principal, ctx.tokenTtl);
+  if (tokenCallId.length !== callId.length || !tokenCallId.every((b, i) => b === callId[i])) {
+    throw new HttpRpcError("Invalid state token: Malformed state token", 400);
+  }
+  cacheCall(callId, ctx, call);
+  return call;
+}
+function mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx) {
+  const callId = newCallId();
+  const principal = ctx.authContext?.principal;
+  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal);
+  cacheCall(callId, ctx, { schemaBytes, inputSchemaBytes });
+  return {
+    callId,
+    token: packStateToken(stateBytes, callId, ctx.tokenKey, principal),
+    callToken
+  };
+}
 async function deserializeSchema3(bytes) {
   return deserializeSchema(bytes);
 }
 var EMPTY_SCHEMA = schema([]);
+function countExternalized(ctx) {
+  const egress = ctx.egress;
+  if (!egress)
+    return;
+  return (bytes) => {
+    egress.externalizedBytes += bytes;
+  };
+}
 function predictExternalizeBytes(batch, config) {
   if (!config?.storage)
     return 0;
@@ -4669,7 +5230,7 @@ async function httpDispatchUnary(method, body, ctx) {
         appendCookieHeaders(response2.headers, out.drainResponseCookies());
         return response2;
       }
-      resultBatch = await maybeExternalizeBatch(resultBatch, ctx.externalLocation);
+      resultBatch = await maybeExternalizeBatch(resultBatch, ctx.externalLocation, countExternalized(ctx));
     }
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
     const body2 = serializeIpcStream(schema2, batches);
@@ -4734,14 +5295,21 @@ async function httpDispatchStreamInit(method, body, ctx) {
     }
   }
   if (effectiveProducer) {
-    return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes, reqBatch.metadata ?? undefined);
+    const initCallId = newCallId();
+    const initCallToken = packCallToken(initCallId, serializeSchema2(resolvedOutputSchema), serializeSchema2(resolvedInputSchema), ctx.tokenKey, ctx.authContext?.principal);
+    cacheCall(initCallId, ctx, {
+      schemaBytes: serializeSchema2(resolvedOutputSchema),
+      inputSchemaBytes: serializeSchema2(resolvedInputSchema)
+    });
+    return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes, { callId: initCallId, callToken: initCallToken }, reqBatch.metadata ?? undefined);
   } else {
     const stateBytes = ctx.stateSerializer.serialize(state);
     const schemaBytes = serializeSchema2(resolvedOutputSchema);
     const inputSchemaBytes = serializeSchema2(resolvedInputSchema);
-    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.tokenKey, ctx.authContext?.principal);
+    const { token, callToken } = mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx);
     const tokenMeta = new Map;
     tokenMeta.set(STATE_KEY, token);
+    tokenMeta.set(CALL_STATE_KEY, callToken);
     const tokenBatch = buildEmptyBatch(resolvedOutputSchema, tokenMeta);
     const tokenStreamBytes = serializeIpcStream(resolvedOutputSchema, [tokenBatch]);
     let responseBody;
@@ -4767,6 +5335,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
   } catch (error) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
+  const resolvedCall = resolveCall(unpacked.callId, reqBatch.metadata?.get(CALL_STATE_KEY), ctx);
   let state;
   try {
     state = ctx.stateSerializer.deserialize(unpacked.stateBytes);
@@ -4775,14 +5344,14 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     throw new HttpRpcError(`State deserialization failed: ${error.message}`, 500);
   }
   let outputSchema;
-  if (unpacked.schemaBytes.length > 0) {
-    outputSchema = await deserializeSchema3(unpacked.schemaBytes);
+  if (resolvedCall.schemaBytes.length > 0) {
+    outputSchema = await deserializeSchema3(resolvedCall.schemaBytes);
   } else {
     outputSchema = state?.__outputSchema ?? method.outputSchema;
   }
   let inputSchema;
-  if (unpacked.inputSchemaBytes.length > 0) {
-    inputSchema = await deserializeSchema3(unpacked.inputSchemaBytes);
+  if (resolvedCall.inputSchemaBytes.length > 0) {
+    inputSchema = await deserializeSchema3(resolvedCall.inputSchemaBytes);
   } else {
     inputSchema = state?.__inputSchema ?? method.inputSchema ?? EMPTY_SCHEMA;
   }
@@ -4800,7 +5369,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     return arrowResponse(serializeIpcStream(outputSchema, []));
   }
   if (effectiveProducer) {
-    return produceStreamResponse(method, state, outputSchema, inputSchema, ctx, null, null, reqBatch.metadata ?? undefined);
+    return produceStreamResponse(method, state, outputSchema, inputSchema, ctx, null, null, { callId: unpacked.callId, callToken: null }, reqBatch.metadata ?? undefined);
   } else {
     const externalizationEnabled = !!ctx.externalLocation?.storage;
     const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
@@ -4850,9 +5419,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
       }
     } else {
       const stateBytes = ctx.stateSerializer.serialize(state);
-      const schemaBytes = serializeSchema2(outputSchema);
-      const inputSchemaBytes = serializeSchema2(inputSchema);
-      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.tokenKey, ctx.authContext?.principal);
+      const token = packStateToken(stateBytes, unpacked.callId, ctx.tokenKey, ctx.authContext?.principal);
       for (const [idx, emitted] of out.batches.entries()) {
         const batch = emitted.batch;
         if (idx === out.dataBatchIdx) {
@@ -4881,7 +5448,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     return arrowResponse(body2);
   }
 }
-async function produceStreamResponse(method, state, outputSchema, inputSchema, ctx, requestId, headerBytes, requestMetadata) {
+async function produceStreamResponse(method, state, outputSchema, inputSchema, ctx, requestId, headerBytes, call, requestMetadata) {
   const allBatches = [];
   const maxBytes = ctx.maxStreamResponseBytes ?? ctx.maxResponseBytes;
   const maxExternalBytes = ctx.maxExternalizedResponseBytes;
@@ -4928,7 +5495,7 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
           break;
         }
         if (predicted > 0) {
-          batch = await maybeExternalizeBatch(batch, ctx.externalLocation);
+          batch = await maybeExternalizeBatch(batch, ctx.externalLocation, countExternalized(ctx));
           cumulativeExternalBytes += predicted;
         }
       }
@@ -4964,11 +5531,11 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
     }
     if (maxBytes != null && estimatedBytes >= maxBytes) {
       const stateBytes = ctx.stateSerializer.serialize(state);
-      const schemaBytes = serializeSchema2(outputSchema);
-      const inputSchemaBytes = serializeSchema2(inputSchema);
-      const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, ctx.tokenKey, ctx.authContext?.principal);
+      const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
       const tokenMeta = new Map;
       tokenMeta.set(STATE_KEY, token);
+      if (call.callToken)
+        tokenMeta.set(CALL_STATE_KEY, call.callToken);
       allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));
       break;
     }
@@ -4996,6 +5563,123 @@ function concatBytes3(...arrays) {
     offset += arr.length;
   }
   return result;
+}
+
+// src/http/introspect.ts
+var INTROSPECT_ENDPOINT = "/__introspect_token__";
+var INTROSPECT_ENABLED_HEADER = "VGI-Token-Introspection";
+var JWS_SHAPED = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
+var MAX_BODY_BYTES = 8192;
+var MAX_TOKEN_CHARS = 4096;
+var DEFAULT_INTROSPECT_TTL_SECONDS = 300;
+async function tokenDigest(token) {
+  return sha256Hex2(new TextEncoder().encode(token));
+}
+
+class RateLimiter {
+  perWindow;
+  windowMs;
+  counts = new Map;
+  windowStart = 0;
+  constructor(perWindow, windowMs = 1000) {
+    this.perWindow = perWindow;
+    this.windowMs = windowMs;
+  }
+  allow(key, now = Date.now()) {
+    if (now - this.windowStart >= this.windowMs) {
+      this.counts.clear();
+      this.windowStart = now;
+    }
+    const count = this.counts.get(key) ?? 0;
+    if (count >= this.perWindow)
+      return false;
+    this.counts.set(key, count + 1);
+    return true;
+  }
+}
+function createIntrospector(options) {
+  const principals = new Set([...options.principals ?? []].filter((p) => p));
+  if (principals.size === 0) {
+    throw new Error("introspectPrincipals must name at least one principal. Introspection is a " + "distinct capability from authentication: allowing any authenticated caller " + "lets any user resolve any other user's credential to its owner.");
+  }
+  const ttlSeconds = options.ttlSeconds ?? DEFAULT_INTROSPECT_TTL_SECONDS;
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
+    throw new Error("introspectTtlSeconds must be a finite, positive number of seconds");
+  }
+  const limiter = new RateLimiter(options.rateLimit ?? 20);
+  return {
+    handle: (request, auth) => introspect(request, auth, options.resolver, principals, ttlSeconds, limiter)
+  };
+}
+function refuse(status, error, extra) {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    ...extra
+  });
+  return new Response(JSON.stringify({ error }), { status, headers });
+}
+function introspectionDisabledResponse() {
+  return refuse(404, "not_enabled");
+}
+async function readSubjectToken(request) {
+  const declared = request.headers.get("Content-Length");
+  if (declared && Number(declared) > MAX_BODY_BYTES)
+    return null;
+  const raw = new Uint8Array(await request.arrayBuffer());
+  if (raw.byteLength > MAX_BODY_BYTES)
+    return null;
+  let body;
+  try {
+    body = JSON.parse(new TextDecoder().decode(raw));
+  } catch {
+    return null;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    return null;
+  const token = body.token;
+  if (typeof token !== "string" || !token || token.length > MAX_TOKEN_CHARS)
+    return null;
+  return token;
+}
+async function introspect(request, auth, resolver, principals, defaultTtlSeconds, limiter) {
+  const caller = auth?.principal ?? "";
+  if (!auth?.authenticated || !principals.has(caller)) {
+    console.warn("[introspect] refused: caller is not an introspector", { principal: caller });
+    return refuse(403, "not_an_introspector");
+  }
+  if (!limiter.allow(caller)) {
+    console.warn("[introspect] rate limit exceeded", { principal: caller });
+    return refuse(429, "rate_limited", { "Retry-After": "1" });
+  }
+  const token = await readSubjectToken(request);
+  if (token === null) {
+    return refuse(404, "unresolved");
+  }
+  const digest = await tokenDigest(token);
+  if (JWS_SHAPED.test(token)) {
+    console.warn("[introspect] refused: JWS-shaped subject", { principal: caller, tokenDigest: digest });
+    return refuse(404, "unresolved");
+  }
+  const identity = await resolver(token);
+  if (identity == null) {
+    console.info("[introspect] credential did not resolve", { principal: caller, tokenDigest: digest });
+    return refuse(404, "unresolved");
+  }
+  console.info("[introspect] resolved", {
+    principal: caller,
+    tokenDigest: digest,
+    resolvedPrincipal: identity.principal
+  });
+  const body = JSON.stringify({
+    principal: identity.principal,
+    token_name: identity.tokenName ?? "",
+    ttl_seconds: identity.ttlSeconds ?? defaultTtlSeconds
+  });
+  return new Response(body, {
+    status: 200,
+    headers: new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" })
+  });
 }
 
 // src/http/landing-html.ts
@@ -5947,6 +6631,40 @@ function handleEarlyReturnTo(request, config) {
   });
 }
 
+// src/http/proof.ts
+var PROOF_HEADER = "VGI-Proxy-Proof";
+var PROOF_REQUIRED_HEADER = "VGI-Proxy-Proof-Required";
+var _enc = new TextEncoder;
+class NonceCache {
+  ttlSeconds;
+  capacity;
+  entries = new Map;
+  constructor(ttlSeconds, capacity) {
+    this.ttlSeconds = ttlSeconds;
+    this.capacity = capacity;
+  }
+  checkAndAdd(nonce, now) {
+    for (const [key, expires] of this.entries) {
+      if (expires > now)
+        break;
+      this.entries.delete(key);
+    }
+    if (this.entries.has(nonce))
+      return false;
+    while (this.entries.size >= this.capacity) {
+      const oldest = this.entries.keys().next();
+      if (oldest.done)
+        break;
+      this.entries.delete(oldest.value);
+    }
+    this.entries.set(nonce, now + this.ttlSeconds);
+    return true;
+  }
+  get size() {
+    return this.entries.size;
+  }
+}
+
 // src/http/sticky.ts
 var _UTF82 = new TextEncoder;
 var _UTF8DEC = new TextDecoder("utf-8", { fatal: false });
@@ -6282,7 +7000,7 @@ function createHttpHandler(protocol, options) {
 ` + `  Server: ${serverVersion}
 ` + `  Direction: ${direction}`);
   }
-  const compressionLevel = options?.compressionLevel;
+  const compressionLevel = options?.compressionLevel === undefined ? DEFAULT_COMPRESSION_LEVEL : options.compressionLevel;
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
   const dispatchHook = options?.dispatchHook;
   const onServeStart = options?.onServeStart ?? null;
@@ -6324,6 +7042,19 @@ function createHttpHandler(protocol, options) {
   const externalLocation = options?.externalLocation;
   const uploadUrlProvider = options?.uploadUrlProvider;
   const maxUploadBytes = options?.maxUploadBytes;
+  const proxyProofRequired = options?.proxyProofRequired === true;
+  const proxyAuthHeaders = [...proxyProofRequired ? [PROOF_HEADER] : [], ...options?.proxyAuthHeaders ?? []];
+  const proxyHint = buildProxyHint(proxyAuthHeaders);
+  const introspectPath = `${prefix}${INTROSPECT_ENDPOINT}`;
+  const introspector = options?.introspectResolver ? createIntrospector({
+    resolver: options.introspectResolver,
+    principals: options.introspectPrincipals,
+    ttlSeconds: options.introspectTtlSeconds,
+    rateLimit: options.introspectRateLimit
+  }) : null;
+  if (!introspector && options?.introspectPrincipals) {
+    throw new Error("introspectPrincipals was given without introspectResolver; the endpoint stays " + "disabled, so the allowlist would have no effect. Pass both or neither.");
+  }
   const stickyEnabled = options?.enableSticky === true;
   const stickyDefaultTtl = options?.stickyDefaultTtl ?? 300;
   const stickyEchoHeadersArr = stickyEnabled ? Object.entries(options?.stickyEchoHeaders ?? {}) : [];
@@ -6332,18 +7063,18 @@ function createHttpHandler(protocol, options) {
   if (options?._onStickyHandle && sessionRegistry) {
     options._onStickyHandle(makeDrainHandle(sessionRegistry, stopReaper ?? undefined));
   }
-  const supportedResponseEncodings = [];
   const zstdResponseAvailable = compressionLevel != null && isZstdCompressAvailable();
-  if (zstdResponseAvailable) {
-    supportedResponseEncodings.push("zstd");
+  function canProduceEncoding(encoding) {
+    if (compressionLevel == null)
+      return false;
+    return encoding === "zstd" ? zstdResponseAvailable : true;
   }
-  if (compressionLevel != null) {
-    supportedResponseEncodings.push("gzip");
+  function canDecodeEncoding(_encoding) {
+    return true;
   }
+  const supportedEncodings = COMPRESSION_ENCODINGS.filter((e) => canDecodeEncoding(e) && canProduceEncoding(e));
   function addCapabilityHeaders(headers, isOptions = false) {
-    if (supportedResponseEncodings.length) {
-      headers.set("VGI-Supported-Encodings", supportedResponseEncodings.join(", "));
-    }
+    headers.set(SUPPORTED_ENCODINGS_HEADER, supportedEncodings.join(", "));
     if (maxRequestBytes != null) {
       headers.set("VGI-Max-Request-Bytes", String(maxRequestBytes));
     }
@@ -6359,6 +7090,12 @@ function createHttpHandler(protocol, options) {
       if (maxUploadBytes != null) {
         headers.set("VGI-Max-Upload-Bytes", String(maxUploadBytes));
       }
+    }
+    if (proxyProofRequired) {
+      headers.set(PROOF_REQUIRED_HEADER, "true");
+    }
+    if (introspector) {
+      headers.set(INTROSPECT_ENABLED_HEADER, "true");
     }
     if (stickyEnabled) {
       headers.set(STICKY_ENABLED_HEADER, "true");
@@ -6382,33 +7119,80 @@ function createHttpHandler(protocol, options) {
     maxExternalizedResponseBytes,
     stateSerializer,
     externalLocation,
-    kind: transportKind
+    kind: transportKind,
+    callStateCacheEntries: options?.callStateCacheEntries
   };
+  const corsExposeHeaders = [
+    "WWW-Authenticate",
+    "X-Request-ID",
+    VGI_CONTENT_ENCODING_HEADER,
+    RPC_ERROR_HEADER,
+    "VGI-Max-Response-Bytes",
+    "VGI-Max-Externalized-Response-Bytes",
+    "VGI-Externalization-Enabled",
+    SUPPORTED_ENCODINGS_HEADER,
+    ...maxRequestBytes != null ? ["VGI-Max-Request-Bytes"] : [],
+    ...uploadUrlProvider ? ["VGI-Upload-URL-Support", ...maxUploadBytes != null ? ["VGI-Max-Upload-Bytes"] : []] : [],
+    ...proxyProofRequired ? [PROOF_REQUIRED_HEADER] : [],
+    ...introspector ? [INTROSPECT_ENABLED_HEADER] : [],
+    ...stickyEnabled ? [
+      STICKY_ENABLED_HEADER,
+      STICKY_DEFAULT_TTL_HEADER,
+      ...stickyEchoHeadersArr.length > 0 ? [STICKY_ECHO_HEADERS_HEADER] : [],
+      SESSION_HEADER,
+      SESSION_CLOSE_HEADER,
+      ...stickyEchoHeadersArr.map(([name]) => `${ECHO_HEADER_PREFIX}${name}`)
+    ] : [],
+    AUTH_REASON_HEADER,
+    ...proxyHint ? [AUTH_PROXY_REQUIRED_HEADER] : []
+  ].join(", ");
   function addCorsHeaders(headers, isOptions = false, requestedHeaders) {
     if (corsOrigins) {
       headers.set("Access-Control-Allow-Origin", corsOrigins);
       headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
       headers.set("Access-Control-Allow-Headers", requestedHeaders && requestedHeaders.length > 0 ? requestedHeaders : "Content-Type, Authorization");
-      headers.set("Access-Control-Expose-Headers", `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}, VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled`);
+      headers.set("Access-Control-Expose-Headers", corsExposeHeaders);
+      headers.set("Cross-Origin-Resource-Policy", "cross-origin");
       if (isOptions && corsMaxAge != null) {
         headers.set("Access-Control-Max-Age", String(corsMaxAge));
       }
     }
   }
-  async function compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip) {
+  function resolveRoute(path) {
+    if (!path.startsWith(`${prefix}/`))
+      return null;
+    const subPath = path.slice(prefix.length + 1);
+    if (subPath.endsWith("/init"))
+      return { methodName: subPath.slice(0, -5), action: "init" };
+    if (subPath.endsWith("/exchange"))
+      return { methodName: subPath.slice(0, -9), action: "exchange" };
+    return { methodName: subPath, action: "call" };
+  }
+  function negotiateResponseEncoding(request) {
+    return pickResponseEncoding(request.headers.get("Accept-Encoding"), request.headers.get(VGI_ACCEPT_ENCODING_HEADER), canProduceEncoding);
+  }
+  async function compressIfAccepted(response, negotiated) {
     if (compressionLevel == null)
       return response;
-    const codec = clientAcceptsZstd && zstdResponseAvailable ? "zstd" : clientAcceptsGzip ? "gzip" : null;
+    const { codec, usedCustom } = negotiated;
     if (!codec)
       return response;
     const responseBody = new Uint8Array(await response.arrayBuffer());
     const compressed = codec === "zstd" ? await zstdCompress(responseBody, compressionLevel) : await gzipCompress(responseBody);
     const headers = new Headers(response.headers);
-    headers.set("Content-Encoding", codec);
+    headers.set(usedCustom ? VGI_CONTENT_ENCODING_HEADER : CONTENT_ENCODING_HEADER, codec);
     return new Response(compressed, {
       status: response.status,
       headers
     });
+  }
+  function unauthorizedResponse(reason, detail, headers) {
+    headers.set("Content-Type", "application/json");
+    headers.set(AUTH_REASON_HEADER, reason);
+    if (proxyHint)
+      headers.set(AUTH_PROXY_REQUIRED_HEADER, "true");
+    headers.set("Cache-Control", "no-store");
+    return new Response(unauthorizedEnvelope(reason, detail, proxyHint), { status: 401, headers });
   }
   function makeErrorResponse(error, statusCode, schema2 = EMPTY_SCHEMA2) {
     const errBatch = buildErrorBatch(schema2, error, serverId, null);
@@ -6420,7 +7204,7 @@ function createHttpHandler(protocol, options) {
   const enableHealthEndpoint = options?.enableHealthEndpoint ?? true;
   const healthPath = `${prefix}/health`;
   const healthBody = enableHealthEndpoint ? JSON.stringify({ status: "ok", server_id: serverId, protocol: displayName }) : null;
-  return async function handler(request) {
+  const dispatchRequest = async function handler(request, deferral, egress) {
     const url = new URL(request.url);
     const path = url.pathname;
     if (pkceConfig && path === `${prefix}/_oauth/token` && (request.method === "POST" || request.method === "OPTIONS")) {
@@ -6457,10 +7241,7 @@ function createHttpHandler(protocol, options) {
       const headers = new Headers;
       addCorsHeaders(headers, true, request.headers.get("Access-Control-Request-Headers"));
       addCapabilityHeaders(headers, true);
-      if (corsOrigins || maxRequestBytes != null || maxResponseBytes != null || maxExternalizedResponseBytes != null || uploadUrlProvider || stickyEnabled || path === `${prefix}/__capabilities__`) {
-        return new Response(null, { status: 204, headers });
-      }
-      return new Response(null, { status: 405 });
+      return new Response(null, { status: 204, headers });
     }
     if (request.method === "GET") {
       if (pkceConfig) {
@@ -6579,12 +7360,26 @@ function createHttpHandler(protocol, options) {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
-    const ctx = { ...baseCtx, cookies: parseRequestCookies(request) };
+    if (!introspector && path === introspectPath) {
+      const response = introspectionDisabledResponse();
+      addCorsHeaders(response.headers);
+      return response;
+    }
+    const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress };
     if (authenticate) {
       try {
         ctx.authContext = await authenticate(request);
       } catch (error) {
-        const headers = new Headers({ "Content-Type": "text/plain" });
+        if (error instanceof AuthUnavailableError) {
+          const headers2 = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
+          addCorsHeaders(headers2);
+          headers2.set("Retry-After", String(error.retryAfter));
+          return new Response(JSON.stringify({ error: "authentication_unavailable", detail: error.detail }), {
+            status: 503,
+            headers: headers2
+          });
+        }
+        const headers = new Headers;
         addCorsHeaders(headers);
         if (oauthMetadata) {
           const metadataUrl = new URL(request.url);
@@ -6592,12 +7387,17 @@ function createHttpHandler(protocol, options) {
           metadataUrl.search = "";
           headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString(), oauthMetadata.clientId, oauthMetadata.clientSecret, oauthMetadata.useIdTokenAsBearer, oauthMetadata.deviceCodeClientId, oauthMetadata.deviceCodeClientSecret));
         }
-        return new Response(error.message || "Unauthorized", { status: 401, headers });
+        const { reason, detail } = classifyAuthFailure(error);
+        return unauthorizedResponse(reason, detail, headers);
       }
     }
-    const acceptEncodingEarly = (request.headers.get("Accept-Encoding") ?? "").toLowerCase();
-    const clientAcceptsZstdEarly = acceptEncodingEarly.includes("zstd");
-    const clientAcceptsGzipEarly = acceptEncodingEarly.includes("gzip");
+    if (introspector && path === introspectPath) {
+      const response = await introspector.handle(request, ctx.authContext);
+      addCorsHeaders(response.headers);
+      addCapabilityHeaders(response.headers);
+      return response;
+    }
+    const responseEncoding = negotiateResponseEncoding(request);
     let stickyLockRelease = null;
     let stickySink = null;
     if (stickyEnabled && sessionRegistry) {
@@ -6620,13 +7420,13 @@ function createHttpHandler(protocol, options) {
           const e = err2 instanceof Error ? err2 : new Error(String(err2));
           const r = makeErrorResponse(e, 500);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, clientAcceptsZstdEarly, clientAcceptsGzipEarly);
+          return compressIfAccepted(r, responseEncoding);
         }
         const entry = sessionRegistry.get(opened.sessionId, principalKey);
         if (!entry) {
           const r = makeErrorResponse(new SessionLostError("session not found, expired, or principal mismatch"), 500);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, clientAcceptsZstdEarly, clientAcceptsGzipEarly);
+          return compressIfAccepted(r, responseEncoding);
         }
         stickyLockRelease = await entry.lock.acquire();
         resumeState = entry.state;
@@ -6666,6 +7466,22 @@ function createHttpHandler(protocol, options) {
       stickySink = sink;
       ctx.stickyContext = sink;
     }
+    const specialPost = path === `${prefix}/${UPLOAD_URL_METHOD}/init` || path === `${prefix}/${DESCRIBE_METHOD_NAME}`;
+    const route = specialPost ? null : resolveRoute(path);
+    if (!specialPost) {
+      if (!route) {
+        if (stickyLockRelease)
+          stickyLockRelease();
+        return new Response("Not Found", { status: 404 });
+      }
+      if (!methods.has(route.methodName)) {
+        if (stickyLockRelease)
+          stickyLockRelease();
+        const available = [...methods.keys()].sort();
+        const err2 = new MethodNotImplementedError(`Unknown method: '${route.methodName}'. Available methods: [${available.join(", ")}]`);
+        return compressIfAccepted(makeErrorResponse(err2, 404), responseEncoding);
+      }
+    }
     const contentType = request.headers.get("Content-Type");
     if (!contentType || !contentType.includes(ARROW_CONTENT_TYPE)) {
       if (stickyLockRelease)
@@ -6679,9 +7495,8 @@ function createHttpHandler(protocol, options) {
         return new Response("Request body too large", { status: 413 });
       }
     }
-    const clientAcceptsZstd = clientAcceptsZstdEarly;
-    const clientAcceptsGzip = clientAcceptsGzipEarly;
     let body = new Uint8Array(await request.arrayBuffer());
+    const requestWireBytes = body.byteLength;
     if (maxRequestBytes != null && !exemptFromMaxBytes && body.byteLength > maxRequestBytes) {
       return new Response("Request body too large", { status: 413 });
     }
@@ -6733,49 +7548,29 @@ function createHttpHandler(protocol, options) {
         const response = arrowResponse(responseBody);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(response, responseEncoding);
       } catch (error) {
         if (error instanceof HttpRpcError) {
           const r2 = makeErrorResponse(error, error.statusCode, UPLOAD_URL_RESPONSE_SCHEMA);
           addCapabilityHeaders(r2.headers);
-          return compressIfAccepted(r2, clientAcceptsZstd, clientAcceptsGzip);
+          return compressIfAccepted(r2, responseEncoding);
         }
         const r = makeErrorResponse(error, 500, UPLOAD_URL_RESPONSE_SCHEMA);
         addCapabilityHeaders(r.headers);
-        return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(r, responseEncoding);
       }
     }
     if (path === `${prefix}/${DESCRIBE_METHOD_NAME}`) {
       try {
         const response = await httpDispatchDescribe(protocol.name, methods, serverId, protocol.protocolVersion || undefined);
         addCorsHeaders(response.headers);
-        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(response, responseEncoding);
       } catch (error) {
-        return compressIfAccepted(makeErrorResponse(error, 500), clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(makeErrorResponse(error, 500), responseEncoding);
       }
     }
-    if (!path.startsWith(`${prefix}/`)) {
-      return new Response("Not Found", { status: 404 });
-    }
-    const subPath = path.slice(prefix.length + 1);
-    let methodName;
-    let action;
-    if (subPath.endsWith("/init")) {
-      methodName = subPath.slice(0, -5);
-      action = "init";
-    } else if (subPath.endsWith("/exchange")) {
-      methodName = subPath.slice(0, -9);
-      action = "exchange";
-    } else {
-      methodName = subPath;
-      action = "call";
-    }
+    const { methodName, action } = route;
     const method = methods.get(methodName);
-    if (!method) {
-      const available = [...methods.keys()].sort();
-      const err2 = new MethodNotImplementedError(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
-      return compressIfAccepted(makeErrorResponse(err2, 404), clientAcceptsZstd, clientAcceptsGzip);
-    }
     if (protocol.protocolVersionParts !== null && methodName !== DESCRIBE_METHOD_NAME && action !== "exchange") {
       try {
         let reqMeta;
@@ -6791,7 +7586,7 @@ function createHttpHandler(protocol, options) {
         const response = arrowResponse(errBody, 400);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(response, responseEncoding);
       }
     }
     await notifyTransport(transportKind);
@@ -6810,7 +7605,10 @@ function createHttpHandler(protocol, options) {
       principal: auth?.principal ?? "",
       authDomain: auth?.domain ?? "",
       authenticated: auth?.authenticated ?? false,
-      requestData: action === "call" ? body : undefined
+      requestData: action === "call" ? body : undefined,
+      claims: auth?.claims,
+      requestBytes: requestWireBytes,
+      deferral
     };
     const stats = {
       inputBatches: 0,
@@ -6847,25 +7645,27 @@ function createHttpHandler(protocol, options) {
       addCorsHeaders(response.headers);
       addCapabilityHeaders(response.headers);
       applyStickyResponseHeaders(response.headers, stickySink);
-      return compressIfAccepted(response, clientAcceptsZstd, clientAcceptsGzip);
+      return compressIfAccepted(response, responseEncoding);
     } catch (error) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
       if (error instanceof HttpRpcError) {
         const r2 = makeErrorResponse(error, error.statusCode);
         addCapabilityHeaders(r2.headers);
         applyStickyResponseHeaders(r2.headers, stickySink);
-        return compressIfAccepted(r2, clientAcceptsZstd, clientAcceptsGzip);
+        return compressIfAccepted(r2, responseEncoding);
       }
       const r = makeErrorResponse(error, 500);
       addCapabilityHeaders(r.headers);
       applyStickyResponseHeaders(r.headers, stickySink);
-      return compressIfAccepted(r, clientAcceptsZstd, clientAcceptsGzip);
+      return compressIfAccepted(r, responseEncoding);
     } finally {
       if (stickySink) {
         if (stickySink.sessionId)
           info.sessionId = stickySink.sessionId;
         info.sessionAction = stickySink.action;
       }
+      if (egress?.externalizedBytes)
+        info.externalizedBytes = egress.externalizedBytes;
       dispatchHook?.onDispatchEnd(hookToken, info, stats, dispatchError);
       if (stickyLockRelease) {
         try {
@@ -6875,6 +7675,40 @@ function createHttpHandler(protocol, options) {
       }
     }
   };
+  if (!dispatchHook)
+    return dispatchRequest;
+  return async function handler(request) {
+    const pending = [];
+    const deferral = { defer: (emit) => pending.push(emit) };
+    const egress = { externalizedBytes: 0 };
+    let response = await dispatchRequest(request, deferral, egress);
+    if (pending.length === 0)
+      return response;
+    let responseBytes;
+    try {
+      const measured = await finalBodyBytes(response);
+      responseBytes = measured.size;
+      response = measured.response;
+    } catch {}
+    for (const emit of pending)
+      emit(responseBytes);
+    return response;
+  };
+  async function finalBodyBytes(response) {
+    const declared = response.headers.get("Content-Length");
+    if (declared !== null) {
+      const n = Number(declared);
+      if (Number.isFinite(n) && n >= 0)
+        return { size: n, response };
+    }
+    if (response.body === null)
+      return { size: 0, response };
+    const body = new Uint8Array(await response.arrayBuffer());
+    return {
+      size: body.byteLength,
+      response: new Response(body, { status: response.status, headers: response.headers })
+    };
+  }
   function applyStickyResponseHeaders(headers, sink) {
     if (!sink)
       return;
@@ -8447,6 +9281,12 @@ class Protocol {
   getMethods() {
     return new Map(this._methods);
   }
+  getMethod(name) {
+    return this._methods.get(name);
+  }
+  methodNames() {
+    return [...this._methods.keys()].sort();
+  }
 }
 // src/dispatch/stream.ts
 var EMPTY_SCHEMA4 = schema([]);
@@ -8569,6 +9409,7 @@ async function dispatchUnary(method, params, writer, serverId, requestId, extern
 
 // src/wire/writer.ts
 var STDOUT_FD = 1;
+var RESOLVED = Promise.resolve();
 var _NODE_FS_MOD2 = "node:fs";
 var _writeSync = null;
 function _loadWriteSync2() {
@@ -8585,15 +9426,20 @@ function _loadWriteSync2() {
 function writeAll(fd, data) {
   const writeSync = _loadWriteSync2();
   let offset = 0;
+  let spins = 0;
   while (offset < data.length) {
     try {
       const written = writeSync(fd, data, offset, data.length - offset);
       if (written <= 0)
         throw new Error(`writeSync returned ${written}`);
       offset += written;
+      spins = 0;
     } catch (e) {
       if (e.code === "EAGAIN") {
+        if (++spins < 8192)
+          continue;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        spins = 0;
         continue;
       }
       throw e;
@@ -8679,15 +9525,16 @@ class IncrementalStream {
     return this.enqueue(this.encoder.finish());
   }
   enqueue(bytes2) {
+    const target = this.target;
+    if (target.kind === "fd") {
+      writeAll(target.fd, bytes2);
+      return RESOLVED;
+    }
     const next = this.writeChain.then(() => {
-      if (this.target.kind === "fd") {
-        writeAll(this.target.fd, bytes2);
-        return;
+      if (target.kind === "sink") {
+        return target.sink.write(bytes2);
       }
-      if (this.target.kind === "sink") {
-        return this.target.sink.write(bytes2);
-      }
-      return socketWriteAll(this.target.socket, bytes2);
+      return socketWriteAll(target.socket, bytes2);
     });
     this.writeChain = next.catch(() => {
       return;
@@ -8832,10 +9679,9 @@ class VgiRpcServer {
       await writer.writeStream(batch2.schema, [batch2]);
       return;
     }
-    const methods = this.protocol.getMethods();
-    const method = methods.get(methodName);
+    const method = this.protocol.getMethod(methodName);
     if (!method) {
-      const available = [...methods.keys()].sort();
+      const available = this.protocol.methodNames();
       const err2 = new MethodNotImplementedError(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
       const errBatch = buildErrorBatch(EMPTY_SCHEMA5, err2, this.serverId, requestId);
       await writer.writeStream(EMPTY_SCHEMA5, [errBatch]);
@@ -8854,9 +9700,11 @@ class VgiRpcServer {
     }
     const methodType = method.type === "unary" /* UNARY */ ? "unary" : "stream";
     let requestData;
-    try {
-      requestData = serializeBatch(batch);
-    } catch {}
+    if (this.dispatchHook) {
+      try {
+        requestData = serializeBatch(batch);
+      } catch {}
+    }
     let streamId;
     if (methodType === "stream") {
       streamId = randomStreamId();
@@ -8987,6 +9835,7 @@ export {
   uint322 as uint32,
   uint162 as uint16,
   tryAcquireLock,
+  tokenDigest,
   toSchema,
   tcpConnect,
   subprocessConnect,
@@ -8997,6 +9846,7 @@ export {
   serveTcp,
   serveStream,
   resolveExternalLocation,
+  redactClaims,
   readUnaryResult,
   readRequest,
   probeSocket,
@@ -9009,7 +9859,9 @@ export {
   parseDescribeResponse,
   parseClientSecret,
   parseClientId,
+  otelTraceContext,
   oauthResourceMetadataToJson,
+  noRedaction,
   mtlsAuthenticateXfcc,
   mtlsAuthenticateSubject,
   mtlsAuthenticateFingerprint,
@@ -9038,6 +9890,7 @@ export {
   fetchOAuthMetadata,
   defaultStateDir,
   decodeContentEncoding,
+  createIntrospector,
   createHttpHandler,
   chainAuthenticate,
   bytes,
@@ -9062,6 +9915,7 @@ export {
   REQUEST_VERSION_KEY,
   REQUEST_VERSION,
   REQUEST_ID_KEY,
+  REDACTED,
   Protocol,
   PipeStreamSession,
   PROTOCOL_NAME_KEY,
@@ -9072,6 +9926,8 @@ export {
   LOG_MESSAGE_KEY,
   LOG_LEVEL_KEY,
   LOG_EXTRA_KEY,
+  INTROSPECT_ENDPOINT,
+  INTROSPECT_ENABLED_HEADER,
   HttpStreamSession,
   FdSink,
   ERROR_KIND_SESSION_LOST,
@@ -9081,9 +9937,16 @@ export {
   DESCRIBE_VERSION_KEY,
   DESCRIBE_VERSION,
   DESCRIBE_METHOD_NAME,
+  DEFAULT_INTROSPECT_TTL_SECONDS,
+  AuthUnavailableError,
+  AuthReason,
+  AuthFailure,
   AuthContext,
+  AccessLogSampler,
   AccessLogHook,
+  AUTH_REASON_HEADER,
+  AUTH_PROXY_REQUIRED_HEADER,
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=1E2FD8C8117E8BB664756E2164756E21
+//# debugId=6D2E537E13773DEC64756E2164756E21

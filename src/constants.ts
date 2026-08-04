@@ -43,6 +43,16 @@ export const DESCRIBE_METHOD_NAME = "__describe__";
 
 /** Batch-metadata key carrying the base64-encoded stream continuation/state token. */
 export const STATE_KEY = "vgi_rpc.stream_state#b64";
+/**
+ * The stream's *call state* — the half of a stream's state fixed for the life
+ * of the call (the init request, the resolved schemas). A server that splits
+ * its stream state mints this once on `/init` and never re-issues it; only
+ * {@link STATE_KEY}, the cursor, comes back per turn. A client must echo it on
+ * every subsequent request: the server may resolve it from a cache while one
+ * is warm, but a continuation landing on a process that never saw the `/init`
+ * has only the client's copy to work from.
+ */
+export const CALL_STATE_KEY = "vgi_rpc.call_state#b64";
 export const CANCEL_KEY = "vgi_rpc.cancel";
 
 export const LOCATION_KEY = "vgi_rpc.location";

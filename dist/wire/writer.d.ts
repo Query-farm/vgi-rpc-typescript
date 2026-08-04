@@ -59,12 +59,10 @@ export declare class IpcStreamWriter {
  *
  * The encoder is obtained from the Arrow facade, so this file no longer
  * imports arrow-js directly — keeping arrow-js out of the flechette
- * (workerd/browser) bundle. The flechette encoder throws on construction;
- * the stdio exchange protocol is lockstep (the client reads each response
- * batch before sending the next input) which needs an incremental writer
- * flechette doesn't provide. workerd/browser deployments use HTTP (no
- * stdio), so the flechette path is never reached there; `flechette-pipe`
- * conformance is xfailed for streams.
+ * (workerd/browser) bundle. Both backends now provide an incremental encoder
+ * (the flechette one carves per-message frames out of its one-shot stream
+ * encoder), so the stdio lockstep exchange works on flechette as well as
+ * arrow-js.
  */
 export declare class IncrementalStream {
     private readonly encoder;

@@ -7,7 +7,20 @@
 // AF_UNIX launcher (node-only) is added on top of this in `./index.ts` for the
 // node/bun barrel; CF builds get this core without it.
 
-export { AccessLogHook, type AccessLogSink, FdSink } from "./access-log.js";
+export {
+  AccessLogHook,
+  type AccessLogOptions,
+  AccessLogSampler,
+  type AccessLogSink,
+  type ClaimRedactor,
+  FdSink,
+  noRedaction,
+  otelTraceContext,
+  REDACTED,
+  redactClaims,
+  type TraceContext,
+  type TraceContextResolver,
+} from "./access-log.js";
 export { AuthContext } from "./auth.js";
 export * from "./client/index.js";
 export {
@@ -48,15 +61,25 @@ export {
 } from "./external.js";
 export {
   ARROW_CONTENT_TYPE,
+  AUTH_PROXY_REQUIRED_HEADER,
+  AUTH_REASON_HEADER,
   type AuthenticateFn,
+  AuthFailure,
+  AuthReason,
+  AuthUnavailableError,
   type BearerValidateFn,
   bearerAuthenticate,
   bearerAuthenticateStatic,
   type CertValidateFn,
   chainAuthenticate,
   createHttpHandler,
+  createIntrospector,
+  DEFAULT_INTROSPECT_TTL_SECONDS,
   decodeContentEncoding,
   type HttpHandlerOptions,
+  INTROSPECT_ENABLED_HEADER,
+  INTROSPECT_ENDPOINT,
+  type Introspector,
   type JwtAuthenticateOptions,
   jsonStateSerializer,
   jwtAuthenticate,
@@ -70,6 +93,9 @@ export {
   oauthResourceMetadataToJson,
   parseXfcc,
   type StateSerializer,
+  type TokenIdentity,
+  type TokenResolver,
+  tokenDigest,
   type UnpackedToken,
   UPLOAD_URL_METHOD,
   UPLOAD_URL_PARAMS_SCHEMA,
@@ -100,6 +126,7 @@ export {
 export { type ServeStreamOptions, serveStream } from "./serve-stream.js";
 export { VgiRpcServer } from "./server.js";
 export {
+  type AccessLogDeferral,
   type CallContext,
   type CallStatistics,
   type DispatchHook,

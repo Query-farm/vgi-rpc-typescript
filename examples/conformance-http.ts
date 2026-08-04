@@ -12,13 +12,27 @@
  * advertises a present-but-empty `VGI-Supported-Encodings`, or
  * `--response-compression <n>` to pin a different zstd level.
  *
+ * Pass `--no-call-state-cache` for the cold-cache variant, which forces every
+ * stream continuation to re-open the call token the client echoed.
+ *
+ * Pass `--cors-origin <origin>` for the browser-facing variant `TestCors`
+ * drives. CORS is strictly opt-in, so the plain worker keeps answering
+ * preflights with no `Access-Control-Allow-Origin` for `TestCorsOffMode`.
+ *
+ * Pass `--introspect` for the token-introspection variant `TestTokenIntrospection`
+ * drives. Also opt-in, so the plain worker keeps answering `404 not_enabled` for
+ * `TestTokenIntrospectionOffMode`.
+ *
  * Run: bun run examples/conformance-http.ts
  */
+import { openSync } from "node:fs";
+import { AccessLogHook, FdSink } from "../src/access-log.js";
 import { AuthContext } from "../src/auth.js";
 import type { ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider } from "../src/external.js";
 import type { AuthenticateFn } from "../src/http/auth.js";
 import { createHttpHandler } from "../src/http/index.js";
-import type { DispatchHook } from "../src/types.js";
+import type { TokenIdentity } from "../src/http/introspect.js";
+import type { DispatchHook, HookToken } from "../src/types.js";
 import { protocol } from "./conformance-protocol.js";
 
 /** Decode a hex string into bytes — used only for the `--token-key` fixture flag. */
@@ -56,6 +70,24 @@ let serverIdArg: string | undefined;
 let tokenKeyHex: string | undefined;
 let stickyTtlArg: number | undefined;
 let stickyAuth = false;
+// Backs TestColdCallStateCache: with the resolved-call cache off, every
+// continuation takes the miss path, so a client that forgets to echo its call
+// token fails deterministically instead of only on a cold worker.
+let callStateCacheEntries: number | undefined;
+// Backs TestCors. Left unset the handler emits no CORS headers at all, which
+// is what TestCorsOffMode asserts against the plain worker.
+let corsOrigin: string | undefined;
+// Backs TestTokenIntrospection. Left off the endpoint stays disabled and
+// answers a definitive 404, which is what TestTokenIntrospectionOffMode
+// asserts against the plain worker.
+let introspect = false;
+// Access-log fixture flags, mirroring the Python reference's CLI. The sample
+// rate is validated when the hook is built — i.e. at startup, so `100` meaning
+// "100%" is a launch failure rather than a deployment that silently logs
+// everything.
+let accessLogPath: string | undefined;
+let accessLogSample = 1;
+let accessLogAsync = false;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--server-id" && i + 1 < args.length) {
@@ -66,6 +98,12 @@ for (let i = 0; i < args.length; i++) {
     stickyTtlArg = Number.parseInt(args[++i], 10);
   } else if (a === "--sticky-auth") {
     stickyAuth = true;
+  } else if (a === "--no-call-state-cache") {
+    callStateCacheEntries = 0;
+  } else if (a === "--cors-origin" && i + 1 < args.length) {
+    corsOrigin = args[++i];
+  } else if (a === "--introspect") {
+    introspect = true;
   } else if (a === "--response-compression" && i + 1 < args.length) {
     const v = args[++i];
     responseCompressionLevel = v === "off" || v === "none" ? null : Number.parseInt(v, 10);
@@ -84,6 +122,12 @@ for (let i = 0; i < args.length; i++) {
     maxResponseBytesArg = Number.parseInt(args[++i], 10);
   } else if (a === "--max-externalized-response-bytes" && i + 1 < args.length) {
     maxExternalizedResponseBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--access-log" && i + 1 < args.length) {
+    accessLogPath = args[++i];
+  } else if (a === "--access-log-sample" && i + 1 < args.length) {
+    accessLogSample = Number.parseFloat(args[++i]);
+  } else if (a === "--access-log-async") {
+    accessLogAsync = true;
   }
 }
 // Strict-cap mode: tight body + external caps so the http_response_cap.*
@@ -193,6 +237,31 @@ if (otelFile) {
   };
 }
 
+if (accessLogPath) {
+  const accessHook = new AccessLogHook(new FdSink(openSync(accessLogPath, "a")), {
+    serverVersion: "vgi-rpc-typescript-conformance",
+    sampleRate: accessLogSample,
+    async: accessLogAsync,
+  });
+  const otelHook = dispatchHook;
+  // Both hooks want the dispatch boundary; fan out rather than making the
+  // operator choose between tracing and an audit trail.
+  dispatchHook = otelHook
+    ? {
+        onDispatchStart: (info) => [otelHook.onDispatchStart(info), accessHook.onDispatchStart(info)],
+        onDispatchEnd: (token, info, stats, error) => {
+          const [otelToken, accessToken] = token as [HookToken, HookToken];
+          otelHook.onDispatchEnd(otelToken, info, stats, error);
+          accessHook.onDispatchEnd(accessToken, info, stats, error);
+        },
+      }
+    : accessHook;
+  // Queued records are only durable once drained; flush on the way out.
+  if (accessLogAsync) {
+    process.on("exit", () => accessHook.flush());
+  }
+}
+
 // Sticky-session fixture wiring — TestSticky in vgi_rpc.conformance is
 // capability-gated on `VGI-Sticky-Enabled: true`, so the conformance
 // worker enables sticky by default with a fixed marker echo header. A
@@ -219,13 +288,44 @@ const principalHeaderAuth: AuthenticateFn = (request: Request) => {
   return principal ? new AuthContext("conformance", true, principal) : AuthContext.anonymous();
 };
 
+// ---------------------------------------------------------------------------
+// Token-introspection fixture wiring
+// ---------------------------------------------------------------------------
+
+/** Fixed conformance values a runner supplying `conformance_http_introspect_port`
+ *  MUST configure: the shared tests post the subject credential and assert the
+ *  principal, so these are part of the fixture's contract, not decoration. */
+const CONFORMANCE_INTROSPECTOR = "conformance-introspector";
+const CONFORMANCE_SUBJECT_TOKEN = "conformance-opaque-subject-token";
+const CONFORMANCE_SUBJECT_PRINCIPAL = "subject@conformance.example";
+const CONFORMANCE_SUBJECT_TOKEN_NAME = "conformance-subject";
+/** A JWS-shaped credential the resolver *would* resolve. Deliberately
+ *  resolvable: if the fixture only offered an unknown JWS, a port with no shape
+ *  guard would reject it as unknown and pass the test for the wrong reason.
+ *  Made resolvable, the guard becomes observable — a port that fails to reject
+ *  JWS shapes answers 200 and fails. */
+const CONFORMANCE_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl";
+
+/** Resolve the one fixed subject credential the shared tests post. */
+function conformanceResolver(token: string): TokenIdentity | null {
+  if (token === CONFORMANCE_SUBJECT_TOKEN || token === CONFORMANCE_JWS_TRAP_TOKEN) {
+    return { principal: CONFORMANCE_SUBJECT_PRINCIPAL, tokenName: CONFORMANCE_SUBJECT_TOKEN_NAME, ttlSeconds: 300 };
+  }
+  return null;
+}
+
 const handler = createHttpHandler(protocol, {
   serverId: serverIdArg ?? "conformance-http",
   protocolName: "ConformanceService",
   enableSticky: true,
   stickyDefaultTtl: stickyTtlArg ?? 300,
   ...(tokenKeyHex ? { tokenKey: hexToBytes(tokenKeyHex) } : {}),
-  ...(stickyAuth ? { authenticate: principalHeaderAuth } : {}),
+  ...(callStateCacheEntries !== undefined ? { callStateCacheEntries } : {}),
+  // `--introspect` implies principal-header auth so the introspector allowlist
+  // has something to check.
+  ...(stickyAuth || introspect ? { authenticate: principalHeaderAuth } : {}),
+  ...(corsOrigin ? { corsOrigins: corsOrigin } : {}),
+  ...(introspect ? { introspectResolver: conformanceResolver, introspectPrincipals: [CONFORMANCE_INTROSPECTOR] } : {}),
   stickyEchoHeaders: { "x-vgi-conformance-echo": "conformance-fixed-marker" },
   _onStickyHandle: (h) => {
     stickyDrainHandle = h;

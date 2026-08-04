@@ -58,7 +58,12 @@ export declare function makeExternalLocationBatch(schema: VgiSchema, url: string
  * Maybe externalize a batch if it exceeds the threshold.
  * Returns the original batch unchanged if below threshold or no config.
  */
-export declare function maybeExternalizeBatch(batch: VgiBatch, config?: ExternalLocationConfig | null): Promise<VgiBatch>;
+export declare function maybeExternalizeBatch(batch: VgiBatch, config?: ExternalLocationConfig | null, 
+/** Called with the number of bytes actually uploaded. Counted here rather
+ *  than at the call sites: this is the one function every externalised
+ *  payload passes through, so the total cannot drift from reality by
+ *  someone adding a new upload path. */
+onUpload?: (bytes: number) => void): Promise<VgiBatch>;
 /**
  * Resolve an external pointer batch by fetching the data from the URL.
  * Returns the original batch unchanged if not a pointer or no config.

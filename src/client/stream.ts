@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
-import { STATE_KEY } from "../constants.js";
+import { CALL_STATE_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
@@ -30,8 +30,46 @@ export interface RowsWithToken {
    * The resume token continuing the stream after this batch — the worker's
    * own serialized producer state — or `null` when the producer emitted this
    * batch as its final turn (no further continuation).
+   *
+   * Since a stream's state may travel as two tokens (call + cursor), this is
+   * the *pair*, packed into one opaque string by {@link packResumeToken}.
+   * Treat it as unstructured text; only {@link HttpStreamSession.seekToToken}
+   * and the client's `resumeStream` need to know its shape.
    */
   token: string | null;
+}
+
+/**
+ * Pack a stream's cursor and call tokens into one opaque resume blob.
+ *
+ * Both halves have to travel: a node resuming from this token may have no
+ * cached knowledge of the stream, and the server never re-issues the call
+ * token.
+ *
+ * Layout is `<cursorLen>:<cursor><call>`, and a stream with no call token
+ * packs to the bare cursor. Both tokens are base64, whose alphabet contains
+ * no `:`, so a bare cursor can never be mistaken for a packed pair — which is
+ * what keeps tokens minted before the split readable.
+ */
+export function packResumeToken(cursor: string, callToken: string | null): string {
+  return callToken === null ? cursor : `${cursor.length}:${cursor}${callToken}`;
+}
+
+/**
+ * Unpack a blob produced by {@link packResumeToken}.
+ *
+ * A blob with no length prefix is a bare cursor — either from a server that
+ * does not split its stream state, or from a client predating the split.
+ */
+export function unpackResumeToken(token: string): { cursor: string; callToken: string | null } {
+  const sep = token.indexOf(":");
+  if (sep < 0) return { cursor: token, callToken: null };
+  const cursorLen = Number(token.slice(0, sep));
+  if (!Number.isInteger(cursorLen) || cursorLen < 0) return { cursor: token, callToken: null };
+  const rest = token.slice(sep + 1);
+  if (cursorLen > rest.length) return { cursor: token, callToken: null };
+  const call = rest.slice(cursorLen);
+  return { cursor: rest.slice(0, cursorLen), callToken: call === "" ? null : call };
 }
 
 /**
@@ -45,6 +83,12 @@ export class HttpStreamSession implements StreamSession {
   private _prefix: string;
   private _method: string;
   private _stateToken: string | null;
+  /**
+   * The stream's call token: handed over once by `/init` and echoed on every
+   * subsequent request. The server never re-issues it, so this is the only
+   * copy once the init response is parsed.
+   */
+  private _callStateToken: string | null;
   private _outputSchema: Schema;
   private _inputSchema?: Schema;
   private _onLog?: (msg: LogMessage) => void;
@@ -63,6 +107,7 @@ export class HttpStreamSession implements StreamSession {
     prefix: string;
     method: string;
     stateToken: string | null;
+    callStateToken?: string | null;
     outputSchema: Schema;
     inputSchema?: Schema;
     onLog?: (msg: LogMessage) => void;
@@ -80,6 +125,7 @@ export class HttpStreamSession implements StreamSession {
     this._prefix = opts.prefix;
     this._method = opts.method;
     this._stateToken = opts.stateToken;
+    this._callStateToken = opts.callStateToken ?? null;
     this._outputSchema = opts.outputSchema;
     this._inputSchema = opts.inputSchema;
     this._onLog = opts.onLog;
@@ -106,6 +152,28 @@ export class HttpStreamSession implements StreamSession {
   /** The stream's one-time header row, or `null` if the method declares no header. */
   get header(): Record<string, any> | null {
     return this._header;
+  }
+
+  /**
+   * Build request metadata carrying the cursor token and the call token.
+   *
+   * The call token is echoed on every request because the server does not
+   * re-issue it; a request that omitted it would still succeed while the
+   * server's call-state cache is warm and fail once it is not — exactly the
+   * kind of load-dependent bug worth designing out.
+   */
+  private _tokenMetadata(token: string): Map<string, string> {
+    const metadata = new Map<string, string>();
+    metadata.set(STATE_KEY, token);
+    if (this._callStateToken !== null) {
+      metadata.set(CALL_STATE_KEY, this._callStateToken);
+    }
+    return metadata;
+  }
+
+  /** Encode this session's current position as one opaque resume blob. */
+  private _resumeToken(): string | null {
+    return this._stateToken === null ? null : packResumeToken(this._stateToken, this._callStateToken);
   }
 
   private _buildHeaders(): Record<string, string> {
@@ -157,9 +225,7 @@ export class HttpStreamSession implements StreamSession {
       // outputSchema so the server sees the correct column names.
       const zeroSchema = this._inputSchema ?? this._outputSchema;
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
-      const metadata = new Map<string, string>();
-      metadata.set(STATE_KEY, this._stateToken);
-      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, metadata);
+      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
       return this._doExchange(zeroSchema, [batchWithMeta]);
     }
 
@@ -193,9 +259,7 @@ export class HttpStreamSession implements StreamSession {
       nullCount: 0,
     });
 
-    const metadata = new Map<string, string>();
-    metadata.set(STATE_KEY, this._stateToken);
-    const batch = new RecordBatch(inputSchema, data, metadata);
+    const batch = new RecordBatch(inputSchema, data, this._tokenMetadata(this._stateToken));
 
     return this._doExchange(inputSchema, [batch]);
   }
@@ -346,7 +410,7 @@ export class HttpStreamSession implements StreamSession {
       if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
         throw new Error(multi);
       }
-      return { rows: extractBatchRows(batch), token: this._stateToken };
+      return { rows: extractBatchRows(batch), token: this._resumeToken() };
     }
 
     if (this._finished || this._stateToken === null) {
@@ -386,27 +450,30 @@ export class HttpStreamSession implements StreamSession {
       this._finished = true;
       return null;
     }
-    return { rows: dataRows, token: nextToken };
+    return { rows: dataRows, token: this._resumeToken() };
   }
 
   /**
    * Reposition a freshly-initialised session to resume from `token`.
    *
    * Discards any init-preloaded batches and points the session at the given
-   * continuation token (as returned by {@link HttpStreamSession.nextWithToken}),
-   * so the next `nextWithToken()` continues from exactly there. Used to resume
-   * a scan on a new process/node. Mirrors Python's `seek_to_token`.
+   * resume token (as returned by {@link HttpStreamSession.nextWithToken}), so
+   * the next `nextWithToken()` continues from exactly there. Used to resume a
+   * scan on a new process/node — which is why the call token travels inside
+   * the blob too: that node may never have seen this stream's `/init`.
+   * Mirrors Python's `seek_to_token`.
    */
   seekToToken(token: string): void {
+    const { cursor, callToken } = unpackResumeToken(token);
     this._pendingBatches = [];
-    this._stateToken = token;
+    this._stateToken = cursor;
+    this._callStateToken = callToken;
     this._finished = false;
   }
 
   private async _sendContinuation(token: string): Promise<Uint8Array> {
     const emptySchema = new Schema([]);
-    const metadata = new Map<string, string>();
-    metadata.set(STATE_KEY, token);
+    const metadata = this._tokenMetadata(token);
 
     const structType = new Struct(emptySchema.fields);
     const data = makeData({

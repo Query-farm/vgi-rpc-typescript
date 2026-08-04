@@ -4,6 +4,7 @@
 import type { ExternalLocationConfig, UploadUrlProvider } from "../external.js";
 import type { DispatchHook, ServeStartHook } from "../types.js";
 import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
+import type { TokenResolver } from "./introspect.js";
 
 /** Configuration options for createHttpHandler(). */
 export interface HttpHandlerOptions {
@@ -73,6 +74,22 @@ export interface HttpHandlerOptions {
    *  as an opaque {@link AuthenticateFn} the handler cannot introspect, so the
    *  posture has to be stated. Default: false. */
   proxyProofRequired?: boolean;
+  /** Proxy-injected headers this service's authentication depends on, for a
+   *  custom {@link AuthenticateFn} the handler cannot introspect.
+   *
+   *  Declaring them turns on the 401 proxy note of `docs/unauthorized-spec.md`
+   *  §5: `VGI-Auth-Proxy-Required: true` plus a `proxy_hint` explaining that a
+   *  rejection here is at least as likely to be a proxy that is not forwarding
+   *  the header as a bad credential — the failure mode that otherwise looks
+   *  exactly like a rotated credential. A `requireProxyProof` gate declared
+   *  through {@link proxyProofRequired} contributes its own header, so this is
+   *  only needed on top of that. */
+  proxyAuthHeaders?: readonly string[];
+  /** Size of the per-process cache of resolved stream calls. The cache is a
+   *  pure accelerator — a miss reopens the call token the client echoed — so
+   *  `0` disables it and forces every continuation onto the miss path, which
+   *  is what the cold-cache conformance group runs against. Default: 4096. */
+  callStateCacheEntries?: number;
   /** Optional RFC 9728 OAuth Protected Resource Metadata. Served at well-known endpoint. */
   oauthResourceMetadata?: OAuthResourceMetadata;
   /** Optional dispatch hook for observability (tracing, metrics). */
@@ -128,6 +145,33 @@ export interface HttpHandlerOptions {
    *  them on every subsequent request in the session — used for
    *  client-driven routing (e.g. `fly-force-instance-id` on Fly.io). */
   stickyEchoHeaders?: Record<string, string>;
+  /** Enables `POST {prefix}/__introspect_token__`, which resolves an opaque
+   *  bearer credential to a principal for a reverse proxy that must know the
+   *  caller's identity before it can authorize.
+   *
+   *  Omitted (the default) leaves the endpoint **disabled** — it answers a
+   *  definitive `404 {"error": "not_enabled"}` and holds no resolver — so no
+   *  worker grows a credential-to-identity oracle by upgrading a dependency.
+   *
+   *  The callable returns a `TokenIdentity` or `null`, and throws
+   *  `AuthUnavailableError` when the answer is not knowable, which a caller
+   *  must retry rather than cache. It never returns claims; see
+   *  `src/http/introspect.ts` for why. */
+  introspectResolver?: TokenResolver;
+  /** Principals permitted to introspect. Required whenever
+   *  {@link introspectResolver} is set, with **no permissive default**:
+   *  authentication and introspection are different capabilities, and a
+   *  deployment where any valid credential may introspect lets any user
+   *  resolve any other user's credential to its owner. */
+  introspectPrincipals?: Iterable<string>;
+  /** Cache window advertised as `ttl_seconds` when a resolved `TokenIdentity`
+   *  names none. Default: 300. */
+  introspectTtlSeconds?: number;
+  /** Introspection requests allowed per caller per second (default 20). Bounds,
+   *  rather than closes, the oracle an allowlisted-but-compromised caller still
+   *  has. */
+  introspectRateLimit?: number;
+
   /** Internal — invoked once at handler creation with a {@link DrainHandle}
    *  when sticky is enabled. Conformance fixtures use this to wire up the
    *  test-only `/__test_drain__` admin endpoint without the library

@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, test } from "bun:test";
-import { packStateToken, unpackStateToken } from "../../src/http/token.js";
+import { packCallToken, packStateToken, unpackCallToken, unpackStateToken } from "../../src/http/token.js";
 import { jsonStateSerializer } from "../../src/http/types.js";
 import { randomBytes } from "../../src/util/web-crypto.js";
 
 describe("State Token", () => {
   const tokenKey = randomBytes(32);
+  const CALL_ID = new Uint8Array(16).fill(7);
   const ANON = "";
 
   test("pack and unpack round-trips correctly", () => {
@@ -15,24 +16,40 @@ describe("State Token", () => {
     const schemaBytes = new Uint8Array([1, 2, 3, 4]);
     const inputSchemaBytes = new Uint8Array([5, 6, 7]);
 
-    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, ANON);
+    const token = packStateToken(stateBytes, CALL_ID, tokenKey, ANON);
     expect(typeof token).toBe("string");
 
     const unpacked = unpackStateToken(token, tokenKey, 3600, ANON);
     expect(new TextDecoder().decode(unpacked.stateBytes)).toBe('{"count":5}');
-    expect(Array.from(unpacked.schemaBytes)).toEqual([1, 2, 3, 4]);
-    expect(Array.from(unpacked.inputSchemaBytes)).toEqual([5, 6, 7]);
+    expect(Array.from(unpacked.callId)).toEqual(Array.from(CALL_ID));
     expect(unpacked.createdAt).toBeGreaterThan(0);
+
+    // The schemas ride the call token now, not the cursor.
+    const callToken = packCallToken(CALL_ID, schemaBytes, inputSchemaBytes, tokenKey, ANON);
+    const { callId, call } = unpackCallToken(callToken, tokenKey, ANON, 3600);
+    expect(Array.from(callId)).toEqual(Array.from(CALL_ID));
+    expect(Array.from(call.schemaBytes)).toEqual([1, 2, 3, 4]);
+    expect(Array.from(call.inputSchemaBytes)).toEqual([5, 6, 7]);
+  });
+
+  test("a call token cannot be presented as a cursor, or vice versa", () => {
+    // The two AADs carry different version-tagged prefixes, so a swap fails
+    // the AEAD tag check rather than decoding into a payload the reader
+    // would misinterpret.
+    const cursor = packStateToken(new Uint8Array([1]), CALL_ID, tokenKey, ANON);
+    const call = packCallToken(CALL_ID, new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    expect(() => unpackStateToken(call, tokenKey, 3600, ANON)).toThrow();
+    expect(() => unpackCallToken(cursor, tokenKey, ANON, 3600)).toThrow();
   });
 
   test("decryption fails with wrong key", () => {
-    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    const token = packStateToken(new Uint8Array([1]), CALL_ID, tokenKey, ANON);
     const wrongKey = randomBytes(32);
     expect(() => unpackStateToken(token, wrongKey, 3600, ANON)).toThrow("signature verification failed");
   });
 
   test("detects tampered ciphertext", () => {
-    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    const token = packStateToken(new Uint8Array([1]), CALL_ID, tokenKey, ANON);
 
     const bin = atob(token);
     const buf = new Uint8Array(bin.length);
@@ -49,7 +66,7 @@ describe("State Token", () => {
   });
 
   test("detects tampered nonce", () => {
-    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    const token = packStateToken(new Uint8Array([1]), CALL_ID, tokenKey, ANON);
     const bin = atob(token);
     const buf = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
@@ -63,7 +80,7 @@ describe("State Token", () => {
   });
 
   test("rejects unknown token version", () => {
-    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    const token = packStateToken(new Uint8Array([1]), CALL_ID, tokenKey, ANON);
     const bin = atob(token);
     const buf = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
@@ -83,14 +100,7 @@ describe("State Token", () => {
   test("TTL expiration", () => {
     // Created 2 hours ago
     const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
-    const token = packStateToken(
-      new Uint8Array([1]),
-      new Uint8Array([2]),
-      new Uint8Array([3]),
-      tokenKey,
-      ANON,
-      twoHoursAgo,
-    );
+    const token = packStateToken(new Uint8Array([1]), CALL_ID, tokenKey, ANON, twoHoursAgo);
 
     // 1-hour TTL should reject it
     expect(() => unpackStateToken(token, tokenKey, 3600, ANON)).toThrow("State token expired");
@@ -107,10 +117,8 @@ describe("State Token", () => {
 
   test("handles empty state", () => {
     const stateBytes = new Uint8Array(0);
-    const schemaBytes = new Uint8Array([1, 2]);
-    const inputSchemaBytes = new Uint8Array([3, 4]);
 
-    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, ANON);
+    const token = packStateToken(stateBytes, CALL_ID, tokenKey, ANON);
     const unpacked = unpackStateToken(token, tokenKey, 3600, ANON);
     expect(unpacked.stateBytes.length).toBe(0);
   });
@@ -126,10 +134,8 @@ describe("State Token", () => {
 
   test("token sealed for one principal cannot be opened by another", () => {
     const stateBytes = new TextEncoder().encode("{}");
-    const schemaBytes = new Uint8Array([1]);
-    const inputSchemaBytes = new Uint8Array([2]);
 
-    const aliceToken = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, "alice");
+    const aliceToken = packStateToken(stateBytes, CALL_ID, tokenKey, "alice");
 
     // Alice can open her own token.
     expect(() => unpackStateToken(aliceToken, tokenKey, 3600, "alice")).not.toThrow();
@@ -140,7 +146,7 @@ describe("State Token", () => {
   });
 
   test("anonymous token cannot be opened by a named principal", () => {
-    const token = packStateToken(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    const token = packStateToken(new Uint8Array([1]), CALL_ID, tokenKey, ANON);
     expect(() => unpackStateToken(token, tokenKey, 3600, "alice")).toThrow("signature verification failed");
   });
 
@@ -149,11 +155,14 @@ describe("State Token", () => {
     const schemaBytes = randomBytes(500);
     const inputSchemaBytes = randomBytes(500);
 
-    const token = packStateToken(stateBytes, schemaBytes, inputSchemaBytes, tokenKey, ANON);
+    const token = packStateToken(stateBytes, CALL_ID, tokenKey, ANON);
     const unpacked = unpackStateToken(token, tokenKey, 3600, ANON);
     const equal = (x: Uint8Array, y: Uint8Array) => x.length === y.length && x.every((v, i) => v === y[i]);
     expect(equal(unpacked.stateBytes, stateBytes)).toBe(true);
-    expect(equal(unpacked.schemaBytes, schemaBytes)).toBe(true);
-    expect(equal(unpacked.inputSchemaBytes, inputSchemaBytes)).toBe(true);
+
+    const callToken = packCallToken(CALL_ID, schemaBytes, inputSchemaBytes, tokenKey, ANON);
+    const { call } = unpackCallToken(callToken, tokenKey, ANON, 3600);
+    expect(equal(call.schemaBytes, schemaBytes)).toBe(true);
+    expect(equal(call.inputSchemaBytes, inputSchemaBytes)).toBe(true);
   });
 });

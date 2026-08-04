@@ -333,7 +333,7 @@ describe("HTTP Handler", () => {
     expect(res.headers.get("Access-Control-Expose-Headers")).toBe(
       "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, " +
         "VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled, " +
-        "VGI-Supported-Encodings",
+        "VGI-Supported-Encodings, VGI-Auth-Reason",
     );
   });
 
@@ -352,7 +352,7 @@ describe("HTTP Handler", () => {
     expect(res.headers.get("Access-Control-Expose-Headers")).toBe(
       "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, " +
         "VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled, " +
-        "VGI-Supported-Encodings",
+        "VGI-Supported-Encodings, VGI-Auth-Reason",
     );
   });
 
@@ -408,6 +408,136 @@ describe("HTTP Handler", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("Access-Control-Max-Age")).toBeNull();
+  });
+
+  test("CORS is off unless configured", async () => {
+    const plain = createHttpHandler(makeTestProtocol(), { prefix: "/vgi", serverId: "cors-off" });
+
+    const preflight = await plain(
+      new Request(`${BASE}/vgi/add`, {
+        method: "OPTIONS",
+        headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" },
+      }),
+    );
+    // OPTIONS still answers — it doubles as capability discovery — but grants
+    // no origin.
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(preflight.headers.get("Access-Control-Expose-Headers")).toBeNull();
+
+    const paramSchema = new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]);
+    const actual = await plain(
+      new Request(`${BASE}/vgi/add`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE, Origin: "https://evil.example" },
+        body: buildRequestIpc(paramSchema, { a: [1], b: [2] }, "add"),
+      }),
+    );
+    expect(actual.status).toBe(200);
+    expect(actual.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  test("CORS preflight echoes the requested headers", async () => {
+    const handlerWithCors = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      corsOrigins: "https://conformance.example",
+    });
+
+    // A browser only sends the headers the preflight permits; refusing
+    // VGI-Session silently disables sticky, refusing VGI-Proxy-Proof takes out
+    // every call behind a proof gate.
+    const requested = "content-type, x-vgi-accept-encoding, vgi-session, vgi-session-accept, vgi-proxy-proof";
+    const res = await handlerWithCors(
+      new Request(`${BASE}/vgi/add`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://conformance.example",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": requested,
+        },
+      }),
+    );
+
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://conformance.example");
+    expect(res.headers.get("Access-Control-Allow-Methods")).toContain("POST");
+    expect(res.headers.get("Access-Control-Allow-Headers")).toBe(requested);
+  });
+
+  test("CORS exposes the sticky session headers when sticky is on", async () => {
+    const handlerWithCors = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      corsOrigins: "*",
+      enableSticky: true,
+      stickyEchoHeaders: { "fly-force-instance-id": "abc" },
+    });
+
+    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    const exposed = res.headers.get("Access-Control-Expose-Headers") ?? "";
+
+    for (const name of [
+      "VGI-Sticky-Enabled",
+      "VGI-Sticky-Default-TTL",
+      "VGI-Sticky-Echo-Headers",
+      "VGI-Session",
+      "VGI-Session-Close",
+      "VGI-Echo-fly-force-instance-id",
+    ]) {
+      expect(exposed).toContain(name);
+    }
+  });
+
+  test("CORS exposes the upload capability headers when uploads are on", async () => {
+    const handlerWithCors = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      corsOrigins: "*",
+      maxRequestBytes: 4096,
+      maxUploadBytes: 1024,
+      uploadUrlProvider: {
+        generateUploadUrl: () => ({ uploadUrl: "http://x/put", url: "http://x/get" }),
+      },
+    });
+
+    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    const exposed = res.headers.get("Access-Control-Expose-Headers") ?? "";
+
+    expect(exposed).toContain("VGI-Max-Request-Bytes");
+    expect(exposed).toContain("VGI-Upload-URL-Support");
+    expect(exposed).toContain("VGI-Max-Upload-Bytes");
+  });
+
+  test("every advertised capability header is exposed", async () => {
+    // Mirrors the cross-language TestCors assertion: a capability header the
+    // server advertises but does not expose is invisible to a browser and to
+    // every other test here, which drives the handler ignoring CORS entirely.
+    const handlerWithCors = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      corsOrigins: "*",
+      maxRequestBytes: 4096,
+      maxResponseBytes: 8192,
+      maxExternalizedResponseBytes: 8192,
+      maxUploadBytes: 1024,
+      uploadUrlProvider: {
+        generateUploadUrl: () => ({ uploadUrl: "http://x/put", url: "http://x/get" }),
+      },
+      proxyProofRequired: true,
+      proxyAuthHeaders: ["X-Forwarded-Access-Token"],
+      enableSticky: true,
+      stickyEchoHeaders: { "fly-force-instance-id": "abc" },
+    });
+
+    const res = await handlerWithCors(new Request(`${BASE}/vgi/health`, { method: "OPTIONS" }));
+    const exposed = new Set(
+      (res.headers.get("Access-Control-Expose-Headers") ?? "").split(",").map((h) => h.trim().toLowerCase()),
+    );
+
+    const advertised = [...res.headers.keys()].filter((n) => n.startsWith("vgi-") || n.startsWith("x-vgi-"));
+    expect(advertised.length).toBeGreaterThan(0);
+    for (const name of advertised) {
+      expect(exposed).toContain(name);
+    }
+    // Rides error responses rather than being advertised, so the loop above
+    // would not catch it.
+    expect(exposed).toContain("x-vgi-rpc-error");
   });
 
   // -- Producer stream --

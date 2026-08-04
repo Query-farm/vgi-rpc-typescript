@@ -15,7 +15,14 @@ import { DESCRIBE_METHOD_NAME, PROTOCOL_HASH_KEY, PROTOCOL_VERSION_KEY, RPC_ERRO
 import { buildDescribeBatch } from "../dispatch/describe.js";
 import { MethodNotImplementedError, ProtocolVersionError, parseProtocolVersion, SessionLostError } from "../errors.js";
 import type { Protocol } from "../protocol.js";
-import { type CallStatistics, type DispatchInfo, MethodType, type ServeStartHook, TransportKind } from "../types.js";
+import {
+  type AccessLogDeferral,
+  type CallStatistics,
+  type DispatchInfo,
+  MethodType,
+  type ServeStartHook,
+  TransportKind,
+} from "../types.js";
 import { gzipCompress, gzipDecompress } from "../util/gzip.js";
 import { randomBytes } from "../util/web-crypto.js";
 import { isZstdCompressAvailable, zstdCompress, zstdDecompress } from "../util/zstd.js";
@@ -58,6 +65,12 @@ import {
   httpDispatchStreamInit,
   httpDispatchUnary,
 } from "./dispatch.js";
+import {
+  createIntrospector,
+  INTROSPECT_ENABLED_HEADER,
+  INTROSPECT_ENDPOINT,
+  introspectionDisabledResponse,
+} from "./introspect.js";
 import { LANDING_HTML_BYTES } from "./landing-html.js";
 import {
   configureOAuthPkce,
@@ -70,7 +83,7 @@ import {
   resolvePkceScope,
 } from "./oauth-pkce.js";
 import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
-import { PROOF_REQUIRED_HEADER } from "./proof.js";
+import { PROOF_HEADER, PROOF_REQUIRED_HEADER } from "./proof.js";
 import {
   makeDrainHandle,
   openSessionToken,
@@ -83,6 +96,15 @@ import {
 } from "./sticky.js";
 import { computeAad } from "./token.js";
 import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
+import {
+  AUTH_PROXY_REQUIRED_HEADER,
+  AUTH_REASON_HEADER,
+  type AuthReason,
+  AuthUnavailableError,
+  buildProxyHint,
+  classifyAuthFailure,
+  unauthorizedEnvelope,
+} from "./unauthorized.js";
 
 const EMPTY_SCHEMA: VgiSchema = makeSchema([]);
 
@@ -325,6 +347,37 @@ export function createHttpHandler(
   // the handler cannot tell `require` from `allow` and the operator states it.
   const proxyProofRequired = options?.proxyProofRequired === true;
 
+  // The proxy-injected headers this service's authentication depends on, and
+  // the operator-facing note derived from them. Both are fixed at
+  // construction: the note describes a static property of the deployment, not
+  // what failed on a given request, so every 401 carries the identical text
+  // and it discloses nothing about which stage rejected an attempt (see
+  // `./unauthorized.ts`). A proof gate contributes only in `require` mode —
+  // in `allow` mode an absent proof never denies, so the note would misdirect.
+  const proxyAuthHeaders = [...(proxyProofRequired ? [PROOF_HEADER] : []), ...(options?.proxyAuthHeaders ?? [])];
+  const proxyHint = buildProxyHint(proxyAuthHeaders);
+
+  // -------- Token introspection --------
+  // Validated here, before any request exists, so a misconfiguration fails at
+  // construction rather than at the first proxy preflight. Absent a resolver
+  // the endpoint holds nothing and looks nothing up — no worker grows a
+  // credential-to-identity oracle by upgrading a dependency.
+  const introspectPath = `${prefix}${INTROSPECT_ENDPOINT}`;
+  const introspector = options?.introspectResolver
+    ? createIntrospector({
+        resolver: options.introspectResolver,
+        principals: options.introspectPrincipals,
+        ttlSeconds: options.introspectTtlSeconds,
+        rateLimit: options.introspectRateLimit,
+      })
+    : null;
+  if (!introspector && options?.introspectPrincipals) {
+    throw new Error(
+      "introspectPrincipals was given without introspectResolver; the endpoint stays " +
+        "disabled, so the allowlist would have no effect. Pass both or neither.",
+    );
+  }
+
   // -------- Sticky session machinery --------
   const stickyEnabled = options?.enableSticky === true;
   const stickyDefaultTtl = options?.stickyDefaultTtl ?? 300;
@@ -416,6 +469,11 @@ export function createHttpHandler(
     if (proxyProofRequired) {
       headers.set(PROOF_REQUIRED_HEADER, "true");
     }
+    // Absent, never "false", when disabled: a proxy preflights this at boot
+    // rather than discovering at first login that the worker cannot answer.
+    if (introspector) {
+      headers.set(INTROSPECT_ENABLED_HEADER, "true");
+    }
     if (stickyEnabled) {
       headers.set(STICKY_ENABLED_HEADER, "true");
       headers.set(STICKY_DEFAULT_TTL_HEADER, String(Math.floor(stickyDefaultTtl)));
@@ -442,13 +500,47 @@ export function createHttpHandler(
     stateSerializer,
     externalLocation,
     kind: transportKind,
+    callStateCacheEntries: options?.callStateCacheEntries,
   };
 
-  // Built once: a browser client can only read a capability header it is
-  // exposed, so the proof advertisement joins the list when it is emitted.
-  const corsExposeHeaders =
-    `WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, ${RPC_ERROR_HEADER}, VGI-Max-Response-Bytes, VGI-Max-Externalized-Response-Bytes, VGI-Externalization-Enabled, ${SUPPORTED_ENCODINGS_HEADER}` +
-    (proxyProofRequired ? `, ${PROOF_REQUIRED_HEADER}` : "");
+  // Built once: a browser hides every response header from JavaScript unless
+  // it is named here, so whatever this configuration *advertises* it must also
+  // expose — each conditional below mirrors the condition on the emission.
+  const corsExposeHeaders = [
+    "WWW-Authenticate",
+    "X-Request-ID",
+    VGI_CONTENT_ENCODING_HEADER,
+    RPC_ERROR_HEADER,
+    "VGI-Max-Response-Bytes",
+    "VGI-Max-Externalized-Response-Bytes",
+    "VGI-Externalization-Enabled",
+    SUPPORTED_ENCODINGS_HEADER,
+    ...(maxRequestBytes != null ? ["VGI-Max-Request-Bytes"] : []),
+    ...(uploadUrlProvider
+      ? ["VGI-Upload-URL-Support", ...(maxUploadBytes != null ? ["VGI-Max-Upload-Bytes"] : [])]
+      : []),
+    ...(proxyProofRequired ? [PROOF_REQUIRED_HEADER] : []),
+    ...(introspector ? [INTROSPECT_ENABLED_HEADER] : []),
+    // Not just the advert: a client that cannot read VGI-Session never learns
+    // the token it is meant to replay, and one that cannot read the
+    // VGI-Echo-<name> values cannot route the rest of the session. Sticky
+    // degrades silently rather than failing, which is the worse failure.
+    ...(stickyEnabled
+      ? [
+          STICKY_ENABLED_HEADER,
+          STICKY_DEFAULT_TTL_HEADER,
+          ...(stickyEchoHeadersArr.length > 0 ? [STICKY_ECHO_HEADERS_HEADER] : []),
+          SESSION_HEADER,
+          SESSION_CLOSE_HEADER,
+          ...stickyEchoHeadersArr.map(([name]) => `${ECHO_HEADER_PREFIX}${name}`),
+        ]
+      : []),
+    // A browser client that cannot read the rejection headers is back to
+    // guessing the reason out of the body, so they are exposed cross-origin —
+    // the proxy note only when this service would ever emit it.
+    AUTH_REASON_HEADER,
+    ...(proxyHint ? [AUTH_PROXY_REQUIRED_HEADER] : []),
+  ].join(", ");
 
   function addCorsHeaders(headers: Headers, isOptions = false, requestedHeaders?: string | null): void {
     if (corsOrigins) {
@@ -463,10 +555,27 @@ export function createHttpHandler(
         requestedHeaders && requestedHeaders.length > 0 ? requestedHeaders : "Content-Type, Authorization",
       );
       headers.set("Access-Control-Expose-Headers", corsExposeHeaders);
+      // A server that has opted into serving cross-origin callers has, by
+      // construction, opted into being embeddable by them: without this a
+      // caller running under COEP require-corp (any cross-origin-isolated
+      // page, e.g. multithreaded WASM) has the response blocked outright.
+      headers.set("Cross-Origin-Resource-Policy", "cross-origin");
       if (isOptions && corsMaxAge != null) {
         headers.set("Access-Control-Max-Age", String(corsMaxAge));
       }
     }
+  }
+
+  /**
+   * Split a POST path into the method it names and the action on it, or `null`
+   * when the path lies outside this worker's prefix.
+   */
+  function resolveRoute(path: string): { methodName: string; action: "call" | "init" | "exchange" } | null {
+    if (!path.startsWith(`${prefix}/`)) return null;
+    const subPath = path.slice(prefix.length + 1);
+    if (subPath.endsWith("/init")) return { methodName: subPath.slice(0, -5), action: "init" };
+    if (subPath.endsWith("/exchange")) return { methodName: subPath.slice(0, -9), action: "exchange" };
+    return { methodName: subPath, action: "call" };
   }
 
   /** Negotiate the response codec from the request's two accept headers. */
@@ -498,6 +607,26 @@ export function createHttpHandler(
     });
   }
 
+  /**
+   * Render the standardized 401 of `docs/unauthorized-spec.md` §4: the reason
+   * header, a no-store cache directive, the proxy note when this service's
+   * authentication depends on a proxy, and the JSON envelope.
+   *
+   * §4.2 lets a service skip the HTML page and always answer with JSON; what
+   * it must never do is answer a non-HTML request with HTML. This port takes
+   * the JSON-only option, so `Accept` does not steer the body — and the reason
+   * header, the part clients actually parse, is set either way.
+   */
+  function unauthorizedResponse(reason: AuthReason, detail: string, headers: Headers): Response {
+    headers.set("Content-Type", "application/json");
+    headers.set(AUTH_REASON_HEADER, reason);
+    if (proxyHint) headers.set(AUTH_PROXY_REQUIRED_HEADER, "true");
+    // A 401 is per-request and flips to 200 on the next attempt with a
+    // credential, so it must never be held by a shared cache.
+    headers.set("Cache-Control", "no-store");
+    return new Response(unauthorizedEnvelope(reason, detail, proxyHint), { status: 401, headers });
+  }
+
   function makeErrorResponse(error: Error, statusCode: number, schema: VgiSchema = EMPTY_SCHEMA): Response {
     const errBatch = buildErrorBatch(schema, error, serverId, null);
     const body = serializeIpcStream(schema, [errBatch]);
@@ -512,7 +641,11 @@ export function createHttpHandler(
     ? JSON.stringify({ status: "ok", server_id: serverId, protocol: displayName })
     : null;
 
-  return async function handler(request: Request): Promise<Response> {
+  const dispatchRequest = async function handler(
+    request: Request,
+    deferral?: AccessLogDeferral,
+    egress?: { externalizedBytes: number },
+  ): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -741,8 +874,18 @@ export function createHttpHandler(
       return new Response("Method Not Allowed", { status: 405 });
     }
 
+    // POST {prefix}/__introspect_token__ on a worker that never enabled it.
+    // Answered ahead of authentication on purpose: "this worker does not do
+    // introspection" is not a secret, and a caller must learn it at preflight
+    // rather than after arranging credentials it will never need.
+    if (!introspector && path === introspectPath) {
+      const response = introspectionDisabledResponse();
+      addCorsHeaders(response.headers);
+      return response;
+    }
+
     // Build per-request dispatch context
-    const ctx = { ...baseCtx, cookies: parseRequestCookies(request) } as typeof baseCtx & {
+    const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress } as typeof baseCtx & {
       authContext?: AuthContext;
       cookies: ReadonlyMap<string, string>;
       stickyContext?: StickySink;
@@ -754,7 +897,20 @@ export function createHttpHandler(
       try {
         ctx.authContext = await authenticate(request);
       } catch (error: any) {
-        const headers = new Headers({ "Content-Type": "text/plain" });
+        // "I could not find out whether the credential is bad" is a different
+        // answer from "the credential is bad", and a caller's negative cache
+        // depends on telling them apart: cache an outage and a worker restart
+        // takes the fleet down for the cache's lifetime.
+        if (error instanceof AuthUnavailableError) {
+          const headers = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
+          addCorsHeaders(headers);
+          headers.set("Retry-After", String(error.retryAfter));
+          return new Response(JSON.stringify({ error: "authentication_unavailable", detail: error.detail }), {
+            status: 503,
+            headers,
+          });
+        }
+        const headers = new Headers();
         addCorsHeaders(headers);
         if (oauthMetadata) {
           const metadataUrl = new URL(request.url);
@@ -772,8 +928,19 @@ export function createHttpHandler(
             ),
           );
         }
-        return new Response(error.message || "Unauthorized", { status: 401, headers });
+        const { reason, detail } = classifyAuthFailure(error);
+        return unauthorizedResponse(reason, detail, headers);
       }
+    }
+
+    // POST {prefix}/__introspect_token__ — JSON in, JSON out, so it sits ahead
+    // of the Arrow media-type gate. It needs the caller's identity (the
+    // allowlist is the whole point) but none of the dispatch machinery below.
+    if (introspector && path === introspectPath) {
+      const response = await introspector.handle(request, ctx.authContext);
+      addCorsHeaders(response.headers);
+      addCapabilityHeaders(response.headers);
+      return response;
     }
 
     // Hoisted ahead of sticky resolution so the SessionLost path's
@@ -866,6 +1033,29 @@ export function createHttpHandler(
       ctx.stickyContext = sink;
     }
 
+    // Route resolution precedes media-type validation, matching the reference
+    // server, where an unmatched path hits the 404 sink before any resource
+    // inspects the body. A path this worker does not serve is a 404 whatever
+    // the body claims to be; answering 415 is what makes a caller that
+    // classifies 401/403/404 as definitive — the classification token
+    // introspection mandates — retry an unrouted path forever.
+    const specialPost = path === `${prefix}/${UPLOAD_URL_METHOD}/init` || path === `${prefix}/${DESCRIBE_METHOD_NAME}`;
+    const route = specialPost ? null : resolveRoute(path);
+    if (!specialPost) {
+      if (!route) {
+        if (stickyLockRelease) stickyLockRelease();
+        return new Response("Not Found", { status: 404 });
+      }
+      if (!methods.has(route.methodName)) {
+        if (stickyLockRelease) stickyLockRelease();
+        const available = [...methods.keys()].sort();
+        const err = new MethodNotImplementedError(
+          `Unknown method: '${route.methodName}'. Available methods: [${available.join(", ")}]`,
+        );
+        return compressIfAccepted(makeErrorResponse(err, 404), responseEncoding);
+      }
+    }
+
     // Validate Content-Type
     const contentType = request.headers.get("Content-Type");
     if (!contentType || !contentType.includes(ARROW_CONTENT_TYPE)) {
@@ -887,6 +1077,11 @@ export function createHttpHandler(
 
     // Read body, decompressing if needed
     let body = new Uint8Array(await request.arrayBuffer());
+    // What the peer actually sent, captured before decompression — the
+    // egress-accounting figure. `input_bytes` on the same record measures the
+    // decoded Arrow buffers instead, and the two differ by whatever the
+    // client's compressor achieved.
+    const requestWireBytes = body.byteLength;
     if (maxRequestBytes != null && !exemptFromMaxBytes && body.byteLength > maxRequestBytes) {
       return new Response("Request body too large", { status: 413 });
     }
@@ -983,35 +1178,9 @@ export function createHttpHandler(
       }
     }
 
-    // Parse method name and sub-path from URL
-    if (!path.startsWith(`${prefix}/`)) {
-      return new Response("Not Found", { status: 404 });
-    }
-
-    const subPath = path.slice(prefix.length + 1);
-    let methodName: string;
-    let action: "call" | "init" | "exchange";
-
-    if (subPath.endsWith("/init")) {
-      methodName = subPath.slice(0, -5);
-      action = "init";
-    } else if (subPath.endsWith("/exchange")) {
-      methodName = subPath.slice(0, -9);
-      action = "exchange";
-    } else {
-      methodName = subPath;
-      action = "call";
-    }
-
-    // Look up method
-    const method = methods.get(methodName);
-    if (!method) {
-      const available = [...methods.keys()].sort();
-      const err = new MethodNotImplementedError(
-        `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
-      );
-      return compressIfAccepted(makeErrorResponse(err, 404), responseEncoding);
-    }
+    // Resolved above, ahead of the media-type gate; both are non-null there.
+    const { methodName, action } = route!;
+    const method = methods.get(methodName)!;
 
     // Application-protocol-version gate (HTTP dispatch path). Fires only
     // when the Protocol declared a `protocolVersion`, on unary calls and
@@ -1070,6 +1239,9 @@ export function createHttpHandler(
       // we already buffered.  Best-effort: the access-log can still emit
       // even if we couldn't capture it.
       requestData: action === "call" ? body : undefined,
+      claims: auth?.claims,
+      requestBytes: requestWireBytes,
+      deferral,
     };
     const stats: CallStatistics = {
       inputBatches: 0,
@@ -1136,6 +1308,7 @@ export function createHttpHandler(
         if (stickySink.sessionId) info.sessionId = stickySink.sessionId;
         info.sessionAction = stickySink.action;
       }
+      if (egress?.externalizedBytes) info.externalizedBytes = egress.externalizedBytes;
       dispatchHook?.onDispatchEnd(hookToken, info, stats, dispatchError);
       // Release the per-session lock if dispatch held it and the handler
       // didn't already release it via close_session.
@@ -1149,6 +1322,54 @@ export function createHttpHandler(
       }
     }
   };
+
+  if (!dispatchHook) return dispatchRequest;
+
+  return async function handler(request: Request): Promise<Response> {
+    // Deferred access-log emission. A record assembled at dispatch time
+    // cannot carry `response_bytes`: compression runs on the way out, below,
+    // so the number a handler could report is the uncompressed one — off by
+    // a factor of ~1000 on a compressible result, and the wrong number for
+    // anything that costs money. So dispatch queues its records here and they
+    // are emitted once the final body exists. A crash in between loses that
+    // request's records; the alternative is a permanently wrong figure.
+    const pending: ((responseBytes: number | undefined) => void)[] = [];
+    const deferral: AccessLogDeferral = { defer: (emit) => pending.push(emit) };
+    const egress = { externalizedBytes: 0 };
+    let response = await dispatchRequest(request, deferral, egress);
+    if (pending.length === 0) return response;
+    let responseBytes: number | undefined;
+    try {
+      const measured = await finalBodyBytes(response);
+      responseBytes = measured.size;
+      response = measured.response;
+    } catch {
+      // Unmeasurable body — the spec says omit the field rather than guess.
+    }
+    for (const emit of pending) emit(responseBytes);
+    return response;
+  };
+
+  /**
+   * Size the response body as it will go on the wire, without consuming it.
+   *
+   * A body already buffered by a runtime that stamped `Content-Length` costs
+   * nothing to measure; otherwise it is read and re-wrapped, which is why
+   * this runs only when a record is actually waiting on the number.
+   */
+  async function finalBodyBytes(response: Response): Promise<{ size: number | undefined; response: Response }> {
+    const declared = response.headers.get("Content-Length");
+    if (declared !== null) {
+      const n = Number(declared);
+      if (Number.isFinite(n) && n >= 0) return { size: n, response };
+    }
+    if (response.body === null) return { size: 0, response };
+    const body = new Uint8Array(await response.arrayBuffer());
+    return {
+      size: body.byteLength,
+      response: new Response(body as unknown as BodyInit, { status: response.status, headers: response.headers }),
+    };
+  }
 
   /** Emit sticky-session response headers based on the sink's per-request state. */
   function applyStickyResponseHeaders(headers: Headers, sink: StickySink | null): void {
