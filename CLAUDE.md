@@ -95,7 +95,7 @@ This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
 
   `response_bytes` cannot be measured at dispatch time — compression runs afterwards — so `createHttpHandler` installs an `AccessLogDeferral` on `DispatchInfo`, and the hook hands its record to it; the handler emits once the final body exists. `request_bytes` is captured before request decompression and `externalized_bytes` at the `maybeExternalizeBatch` choke point. All three are wire/egress figures, unrelated to §4.6's logical `input_bytes`/`output_bytes`.
 
-The conformance worker (`examples/conformance.ts`) accepts `--access-log <path>` anywhere on the CLI.
+The conformance worker (`examples/conformance.ts`) accepts `--access-log <path>` anywhere on the CLI, plus `--access-log-sample R`, `--access-log-async`, and `--access-log-debug`. `examples/conformance-http.ts` takes the same four. `--access-log-debug` raises the hook to DEBUG so records carry `request_data`; at the default INFO the payload is a `payload_omitted` marker and `vgi-rpc-test --require-request-data` fails.
 
 ## CI
 
@@ -103,5 +103,5 @@ GitHub Actions workflow at `.github/workflows/ci.yml`:
 - **lint** job: runs Biome linter/formatter checks
 - **test** job: runs unit tests and client tests (bun transports only)
 - **build** job: runs full build and verifies dist outputs
-- **conformance** job: installs `vgi-rpc[http]` from PyPI, runs conformance + client tests with all transports
+- **conformance** job: installs `vgi-rpc[http,cli,external,conformance]>=0.37.0` from PyPI (the `conformance` extra carries jsonschema, required by the access-log validator), runs conformance + client tests with all transports, and validates the emitted access log via `vgi-rpc-test --access-log ... --require-request-data` (unfiltered, so zero-parameter methods like `void_noop` stay in scope)
 - Dependabot configured for npm and github-actions updates

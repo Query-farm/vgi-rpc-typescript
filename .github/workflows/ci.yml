@@ -199,10 +199,42 @@ jobs:
         # 0.28.3: TestProxyProof capability-header cases.
         # 0.29.0: TestSticky failure-path fixtures (expiry, wrong worker,
         #   cross-principal replay) — required now, not skippable.
-        run: pip install "vgi-rpc[http,cli,external]>=0.30.0" pytest
+        # 0.37.0: vgi-rpc-test --require-request-data, used by the access-log
+        #   conformance step below. Below this floor the flag is unrecognised
+        #   and the step fails on argument parsing rather than on the log.
+        # The `conformance` extra is the only thing that supplies jsonschema,
+        # which vgi_rpc.access_log_conformance imports at module level. That
+        # module is pulled in by a deferred import inside _validate_access_log,
+        # so omitting the extra fails *only* the access-log step below, with an
+        # ImportError that looks nothing like the contract violation it exists
+        # to catch.
+        run: pip install "vgi-rpc[http,cli,external,conformance]>=0.37.0" pytest
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v
+
+      # Access-log conformance was verified by hand until now, and drifted
+      # anyway — four separate manual inspections passed a contract that was
+      # wrong. Validating the emitted records here is the only thing that keeps
+      # the schema honest.
+      #
+      # --access-log-debug is load-bearing: at INFO the worker replaces
+      # `request_data` with a `payload_omitted` marker, and the validator only
+      # checks the field is well-formed *when present*, so an INFO log passes
+      # every request_data rule without ever exercising one.
+      # --require-request-data turns that silent pass into a failure.
+      #
+      # The suite runs unfiltered on purpose. Zero-parameter methods
+      # (`void_noop`) send an empty schema and no row, and a validator that
+      # demands one row unconditionally rejects them — that bug shipped in
+      # 0.36.1. Any --filter added here must keep `void*` in scope.
+      - name: Validate access log against the cross-language schema
+        run: |
+          rm -f /tmp/conformance-access.jsonl
+          timeout 300 vgi-rpc-test \
+            --cmd "bun run examples/conformance.ts --access-log /tmp/conformance-access.jsonl --access-log-debug" \
+            --access-log /tmp/conformance-access.jsonl \
+            --require-request-data
 
       - name: Run HTTP conformance tests
         run: timeout 120 bun test test/http/conformance.test.ts

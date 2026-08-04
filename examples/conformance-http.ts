@@ -88,6 +88,9 @@ let introspect = false;
 let accessLogPath: string | undefined;
 let accessLogSample = 1;
 let accessLogAsync = false;
+// Without this the record's `request_data` is a `payload_omitted` marker, so
+// `vgi-rpc-test --require-request-data` has nothing to validate against.
+let accessLogDebug = false;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--server-id" && i + 1 < args.length) {
@@ -128,6 +131,8 @@ for (let i = 0; i < args.length; i++) {
     accessLogSample = Number.parseFloat(args[++i]);
   } else if (a === "--access-log-async") {
     accessLogAsync = true;
+  } else if (a === "--access-log-debug") {
+    accessLogDebug = true;
   }
 }
 // Strict-cap mode: tight body + external caps so the http_response_cap.*
@@ -242,6 +247,7 @@ if (accessLogPath) {
     serverVersion: "vgi-rpc-typescript-conformance",
     sampleRate: accessLogSample,
     async: accessLogAsync,
+    level: accessLogDebug ? "DEBUG" : "INFO",
   });
   const otelHook = dispatchHook;
   // Both hooks want the dispatch boundary; fan out rather than making the
