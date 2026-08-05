@@ -235,6 +235,45 @@ jobs:
             --cmd "bun run examples/conformance.ts --access-log /tmp/conformance-access.jsonl --access-log-debug" \
             --access-log /tmp/conformance-access.jsonl \
             --require-request-data
+          python conformance/check_access_log_streams.py /tmp/conformance-access.jsonl
+
+      # The step above ran the *pipe* worker, where one dispatch covers a whole
+      # stream. HTTP is where a stream is many requests, so it is the only
+      # transport whose records have to chain — and it was never validated at
+      # all until now. It went unvalidated while emitting 32 zeros as the
+      # stream id of every stream on the server, and no `request_data` on
+      # `/init`: on this very suite `--access-log` reported "PASS: 191 entries
+      # validated" over 113 stream records, none of which named a stream.
+      #
+      # Hence the second checker. `--require-request-data` only inspects unary
+      # records, and `stream_id` passes the schema's hex pattern whatever it
+      # holds, so neither of the tools above can see either bug. A validator
+      # that passes over records that never carried the value it validates is
+      # not evidence, and this is the third time that shape has shipped.
+      - name: Validate the HTTP access log, including stream records
+        run: |
+          rm -f /tmp/conformance-http-access.jsonl
+          bun run examples/conformance-http.ts \
+            --access-log /tmp/conformance-http-access.jsonl --access-log-debug > /tmp/http-access-port.txt &
+          WORKER_PID=$!
+          for i in $(seq 1 30); do
+            PORT=$(grep -o 'PORT:[0-9]*' /tmp/http-access-port.txt | cut -d: -f2 || true)
+            [ -n "$PORT" ] && break
+            sleep 0.5
+          done
+          test -n "$PORT" || { echo "worker did not report a port"; cat /tmp/http-access-port.txt; exit 1; }
+          STATUS=0
+          # `|| STATUS=1` on both so a schema failure and a stream-coverage
+          # failure are each reported, rather than the first aborting under
+          # `bash -e` and hiding the second.
+          timeout 300 vgi-rpc-test \
+            --url "http://127.0.0.1:$PORT" \
+            --access-log /tmp/conformance-http-access.jsonl \
+            --require-request-data || STATUS=1
+          python conformance/check_access_log_streams.py \
+            /tmp/conformance-http-access.jsonl --http --require-continuations || STATUS=1
+          kill $WORKER_PID 2>/dev/null || true
+          exit $STATUS
 
       - name: Run HTTP conformance tests
         run: timeout 120 bun test test/http/conformance.test.ts

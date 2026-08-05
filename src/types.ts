@@ -310,6 +310,9 @@ export interface DispatchInfo {
   authenticated?: boolean;
   /** HTTP transport: remote IP:port. */
   remoteAddr?: string;
+  /** HTTP transport: the status code the response went out with. Absent on
+   *  transports that have no such thing (pipe, Unix socket, TCP). */
+  httpStatus?: number;
   /** Self-contained Arrow IPC stream of the request batch (unary + stream init only). */
   requestData?: Uint8Array;
   /** Stream lifecycle identifier (32-char lowercase hex); empty on unary. */

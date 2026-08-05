@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -174,6 +175,29 @@ def conformance_http_cold_call_cache_port() -> Iterator[int]:
     """
     proc, port = _start_http_server([*BUN_HTTP_WORKER, "--no-call-state-cache"])
     yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[int, Path]]:
+    """Bun conformance HTTP server writing JSONL access records, as ``(port, path)``.
+
+    Backs the shared ``TestRequestId`` correlation case: asserting that the
+    ``X-Request-ID`` on a response equals the ``request_id`` in the record
+    means reading back what the server logged for a request the suite made,
+    which nothing observable on the wire can substitute for.
+
+    Its own process, because the plain worker deliberately runs with no access
+    log at all — that is the configuration every other HTTP group is measured
+    against.
+
+    The fixture name is load-bearing: the shared suite looks it up with
+    ``getfixturevalue`` and skips the correlation case if it is missing.
+    """
+    log_path = tmp_path_factory.mktemp("accesslog") / "conformance.jsonl"
+    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--access-log", str(log_path)])
+    yield port, log_path
     proc.terminate()
     proc.wait(timeout=5)
 

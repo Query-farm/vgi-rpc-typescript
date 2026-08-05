@@ -947,6 +947,8 @@ class AccessLogHook {
       rec.protocol_version = info.protocolVersion;
     if (info.requestId)
       rec.request_id = info.requestId;
+    if (info.httpStatus !== undefined)
+      rec.http_status = info.httpStatus;
     const trace = this.currentTrace();
     if (trace) {
       rec.trace_id = trace.traceId;
@@ -1189,6 +1191,7 @@ var CANCEL_KEY = "vgi_rpc.cancel";
 var LOCATION_KEY = "vgi_rpc.location";
 var LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
 var RPC_ERROR_HEADER = "X-VGI-RPC-Error";
+var REQUEST_ID_HEADER = "X-Request-ID";
 var ERROR_KIND_KEY = "vgi_rpc.error_kind";
 
 // src/arrow/impl-arrowjs/index.ts
@@ -5147,6 +5150,7 @@ function resolveCall(callId, callTokenB64, ctx) {
 }
 function mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx) {
   const callId = newCallId();
+  noteStream(ctx, callId);
   const principal = ctx.authContext?.principal;
   const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal);
   cacheCall(callId, ctx, { schemaBytes, inputSchemaBytes });
@@ -5155,6 +5159,15 @@ function mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx) {
     token: packStateToken(stateBytes, callId, ctx.tokenKey, principal),
     callToken
   };
+}
+function noteStream(ctx, callId) {
+  const observer = ctx.streamObserver;
+  if (!observer)
+    return;
+  let hex = "";
+  for (const b of callId)
+    hex += b.toString(16).padStart(2, "0");
+  observer.streamId = hex;
 }
 async function deserializeSchema3(bytes) {
   return deserializeSchema(bytes);
@@ -5296,6 +5309,7 @@ async function httpDispatchStreamInit(method, body, ctx) {
   }
   if (effectiveProducer) {
     const initCallId = newCallId();
+    noteStream(ctx, initCallId);
     const initCallToken = packCallToken(initCallId, serializeSchema2(resolvedOutputSchema), serializeSchema2(resolvedInputSchema), ctx.tokenKey, ctx.authContext?.principal);
     cacheCall(initCallId, ctx, {
       schemaBytes: serializeSchema2(resolvedOutputSchema),
@@ -5329,12 +5343,15 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     throw new HttpRpcError("Missing state token in exchange request", 400);
   }
   const cancelled = reqBatch.metadata?.get(CANCEL_KEY) != null;
+  if (cancelled && ctx.streamObserver)
+    ctx.streamObserver.cancelled = true;
   let unpacked;
   try {
     unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, ctx.authContext?.principal);
   } catch (error) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
+  noteStream(ctx, unpacked.callId);
   const resolvedCall = resolveCall(unpacked.callId, reqBatch.metadata?.get(CALL_STATE_KEY), ctx);
   let state;
   try {
@@ -7124,7 +7141,7 @@ function createHttpHandler(protocol, options) {
   };
   const corsExposeHeaders = [
     "WWW-Authenticate",
-    "X-Request-ID",
+    REQUEST_ID_HEADER,
     VGI_CONTENT_ENCODING_HEADER,
     RPC_ERROR_HEADER,
     "VGI-Max-Response-Bytes",
@@ -7204,7 +7221,7 @@ function createHttpHandler(protocol, options) {
   const enableHealthEndpoint = options?.enableHealthEndpoint ?? true;
   const healthPath = `${prefix}/health`;
   const healthBody = enableHealthEndpoint ? JSON.stringify({ status: "ok", server_id: serverId, protocol: displayName }) : null;
-  const dispatchRequest = async function handler(request, deferral, egress) {
+  const dispatchRequest = async function handler(request, deferral, egress, requestId = null) {
     const url = new URL(request.url);
     const path = url.pathname;
     if (pkceConfig && path === `${prefix}/_oauth/token` && (request.method === "POST" || request.method === "OPTIONS")) {
@@ -7365,7 +7382,8 @@ function createHttpHandler(protocol, options) {
       addCorsHeaders(response.headers);
       return response;
     }
-    const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress };
+    const streamObserver = {};
+    const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress, streamObserver };
     if (authenticate) {
       try {
         ctx.authContext = await authenticate(request);
@@ -7597,7 +7615,7 @@ function createHttpHandler(protocol, options) {
       method: methodName,
       methodType,
       serverId,
-      requestId: null,
+      requestId,
       protocol: protocol.name,
       protocolHash,
       protocolVersion,
@@ -7605,7 +7623,7 @@ function createHttpHandler(protocol, options) {
       principal: auth?.principal ?? "",
       authDomain: auth?.domain ?? "",
       authenticated: auth?.authenticated ?? false,
-      requestData: action === "call" ? body : undefined,
+      requestData: action === "call" || action === "init" ? body : undefined,
       claims: auth?.claims,
       requestBytes: requestWireBytes,
       deferral
@@ -7645,6 +7663,7 @@ function createHttpHandler(protocol, options) {
       addCorsHeaders(response.headers);
       addCapabilityHeaders(response.headers);
       applyStickyResponseHeaders(response.headers, stickySink);
+      info.httpStatus = response.status;
       return compressIfAccepted(response, responseEncoding);
     } catch (error) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
@@ -7652,11 +7671,13 @@ function createHttpHandler(protocol, options) {
         const r2 = makeErrorResponse(error, error.statusCode);
         addCapabilityHeaders(r2.headers);
         applyStickyResponseHeaders(r2.headers, stickySink);
+        info.httpStatus = r2.status;
         return compressIfAccepted(r2, responseEncoding);
       }
       const r = makeErrorResponse(error, 500);
       addCapabilityHeaders(r.headers);
       applyStickyResponseHeaders(r.headers, stickySink);
+      info.httpStatus = r.status;
       return compressIfAccepted(r, responseEncoding);
     } finally {
       if (stickySink) {
@@ -7664,6 +7685,10 @@ function createHttpHandler(protocol, options) {
           info.sessionId = stickySink.sessionId;
         info.sessionAction = stickySink.action;
       }
+      if (streamObserver.streamId)
+        info.streamId = streamObserver.streamId;
+      if (streamObserver.cancelled)
+        info.cancelled = true;
       if (egress?.externalizedBytes)
         info.externalizedBytes = egress.externalizedBytes;
       dispatchHook?.onDispatchEnd(hookToken, info, stats, dispatchError);
@@ -7675,15 +7700,21 @@ function createHttpHandler(protocol, options) {
       }
     }
   };
-  if (!dispatchHook)
-    return dispatchRequest;
   return async function handler(request) {
+    const requestId = resolveRequestId(request);
+    if (!dispatchHook) {
+      const plain = await dispatchRequest(request, undefined, undefined, requestId);
+      stampRequestId(plain, requestId);
+      return plain;
+    }
     const pending = [];
     const deferral = { defer: (emit) => pending.push(emit) };
     const egress = { externalizedBytes: 0 };
-    let response = await dispatchRequest(request, deferral, egress);
-    if (pending.length === 0)
+    let response = await dispatchRequest(request, deferral, egress, requestId);
+    if (pending.length === 0) {
+      stampRequestId(response, requestId);
       return response;
+    }
     let responseBytes;
     try {
       const measured = await finalBodyBytes(response);
@@ -7692,8 +7723,21 @@ function createHttpHandler(protocol, options) {
     } catch {}
     for (const emit of pending)
       emit(responseBytes);
+    stampRequestId(response, requestId);
     return response;
   };
+  function resolveRequestId(request) {
+    const inbound = request.headers.get(REQUEST_ID_HEADER);
+    const trimmed = inbound?.trim();
+    if (trimmed)
+      return trimmed;
+    return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  }
+  function stampRequestId(response, requestId) {
+    try {
+      response.headers.set(REQUEST_ID_HEADER, requestId);
+    } catch {}
+  }
   async function finalBodyBytes(response) {
     const declared = response.headers.get("Content-Length");
     if (declared !== null) {
@@ -9949,4 +9993,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=6D2E537E13773DEC64756E2164756E21
+//# debugId=6892DDBA67B3533364756E2164756E21

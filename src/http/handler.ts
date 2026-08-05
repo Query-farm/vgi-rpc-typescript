@@ -11,7 +11,13 @@ import {
   type VgiSchema,
 } from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
-import { DESCRIBE_METHOD_NAME, PROTOCOL_HASH_KEY, PROTOCOL_VERSION_KEY, RPC_ERROR_HEADER } from "../constants.js";
+import {
+  DESCRIBE_METHOD_NAME,
+  PROTOCOL_HASH_KEY,
+  PROTOCOL_VERSION_KEY,
+  REQUEST_ID_HEADER,
+  RPC_ERROR_HEADER,
+} from "../constants.js";
 import { buildDescribeBatch } from "../dispatch/describe.js";
 import { MethodNotImplementedError, ProtocolVersionError, parseProtocolVersion, SessionLostError } from "../errors.js";
 import type { Protocol } from "../protocol.js";
@@ -508,7 +514,7 @@ export function createHttpHandler(
   // expose — each conditional below mirrors the condition on the emission.
   const corsExposeHeaders = [
     "WWW-Authenticate",
-    "X-Request-ID",
+    REQUEST_ID_HEADER,
     VGI_CONTENT_ENCODING_HEADER,
     RPC_ERROR_HEADER,
     "VGI-Max-Response-Bytes",
@@ -645,6 +651,7 @@ export function createHttpHandler(
     request: Request,
     deferral?: AccessLogDeferral,
     egress?: { externalizedBytes: number },
+    requestId: string | null = null,
   ): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -884,11 +891,16 @@ export function createHttpHandler(
       return response;
     }
 
-    // Build per-request dispatch context
-    const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress } as typeof baseCtx & {
+    // Build per-request dispatch context. `streamObserver` is where the
+    // dispatcher reports the two stream facts the handler cannot see for
+    // itself — the chain id sealed inside the tokens, and a cancel flag that
+    // rides in request-batch metadata.
+    const streamObserver: { streamId?: string; cancelled?: boolean } = {};
+    const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress, streamObserver } as typeof baseCtx & {
       authContext?: AuthContext;
       cookies: ReadonlyMap<string, string>;
       stickyContext?: StickySink;
+      streamObserver: { streamId?: string; cancelled?: boolean };
     };
 
     // Authentication — run before content-type validation so unauthenticated
@@ -1227,7 +1239,11 @@ export function createHttpHandler(
       method: methodName,
       methodType,
       serverId,
-      requestId: null,
+      // The same value the response carries as `X-Request-ID`. Agreement
+      // between the header and the record is the entire point of the field:
+      // an id on the response that names nothing in the log looks like a
+      // working trail right up to the moment somebody follows it.
+      requestId,
       protocol: protocol.name,
       protocolHash,
       protocolVersion,
@@ -1235,10 +1251,12 @@ export function createHttpHandler(
       principal: auth?.principal ?? "",
       authDomain: auth?.domain ?? "",
       authenticated: auth?.authenticated ?? false,
-      // Self-contained Arrow IPC stream of the request batch — the body
-      // we already buffered.  Best-effort: the access-log can still emit
-      // even if we couldn't capture it.
-      requestData: action === "call" ? body : undefined,
+      // Self-contained Arrow IPC stream of the request batch — the body we
+      // already buffered.  Carried on unary calls *and* stream `/init`, both
+      // of which spec §4.3 requires it on; `/exchange` continuations are the
+      // one shape that must not have it. Best-effort: the access log can
+      // still emit even if we couldn't capture it.
+      requestData: action === "call" || action === "init" ? body : undefined,
       claims: auth?.claims,
       requestBytes: requestWireBytes,
       deferral,
@@ -1289,6 +1307,7 @@ export function createHttpHandler(
       addCorsHeaders(response.headers);
       addCapabilityHeaders(response.headers);
       applyStickyResponseHeaders(response.headers, stickySink);
+      info.httpStatus = response.status;
       return compressIfAccepted(response, responseEncoding);
     } catch (error: any) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
@@ -1296,11 +1315,13 @@ export function createHttpHandler(
         const r = makeErrorResponse(error, error.statusCode);
         addCapabilityHeaders(r.headers);
         applyStickyResponseHeaders(r.headers, stickySink);
+        info.httpStatus = r.status;
         return compressIfAccepted(r, responseEncoding);
       }
       const r = makeErrorResponse(error, 500);
       addCapabilityHeaders(r.headers);
       applyStickyResponseHeaders(r.headers, stickySink);
+      info.httpStatus = r.status;
       return compressIfAccepted(r, responseEncoding);
     } finally {
       // Surface sticky lifecycle on the access log.
@@ -1308,6 +1329,13 @@ export function createHttpHandler(
         if (stickySink.sessionId) info.sessionId = stickySink.sessionId;
         info.sessionAction = stickySink.action;
       }
+      // Stream identity and cancellation, as reported by the dispatcher.
+      // Read here rather than at construction because the dispatcher only
+      // learns them while opening the tokens — a record assembled before the
+      // call ran can name at best a placeholder, which is what this used to
+      // emit: the same 32 zeros for every stream on the server.
+      if (streamObserver.streamId) info.streamId = streamObserver.streamId;
+      if (streamObserver.cancelled) info.cancelled = true;
       if (egress?.externalizedBytes) info.externalizedBytes = egress.externalizedBytes;
       dispatchHook?.onDispatchEnd(hookToken, info, stats, dispatchError);
       // Release the per-session lock if dispatch held it and the handler
@@ -1323,9 +1351,19 @@ export function createHttpHandler(
     }
   };
 
-  if (!dispatchHook) return dispatchRequest;
-
   return async function handler(request: Request): Promise<Response> {
+    // Per-request correlation id, resolved before anything else so every exit
+    // from the handler can carry it. An inbound value is propagated unchanged
+    // — a proxy or client that minted an id needs this worker's records under
+    // the same one, or the two logs cannot be joined at all.
+    const requestId = resolveRequestId(request);
+
+    if (!dispatchHook) {
+      const plain = await dispatchRequest(request, undefined, undefined, requestId);
+      stampRequestId(plain, requestId);
+      return plain;
+    }
+
     // Deferred access-log emission. A record assembled at dispatch time
     // cannot carry `response_bytes`: compression runs on the way out, below,
     // so the number a handler could report is the uncompressed one — off by
@@ -1336,8 +1374,11 @@ export function createHttpHandler(
     const pending: ((responseBytes: number | undefined) => void)[] = [];
     const deferral: AccessLogDeferral = { defer: (emit) => pending.push(emit) };
     const egress = { externalizedBytes: 0 };
-    let response = await dispatchRequest(request, deferral, egress);
-    if (pending.length === 0) return response;
+    let response = await dispatchRequest(request, deferral, egress, requestId);
+    if (pending.length === 0) {
+      stampRequestId(response, requestId);
+      return response;
+    }
     let responseBytes: number | undefined;
     try {
       const measured = await finalBodyBytes(response);
@@ -1347,8 +1388,39 @@ export function createHttpHandler(
       // Unmeasurable body — the spec says omit the field rather than guess.
     }
     for (const emit of pending) emit(responseBytes);
+    stampRequestId(response, requestId);
     return response;
   };
+
+  /**
+   * Echo the caller's `X-Request-ID`, or mint one.
+   *
+   * Minted ids are 16 hex characters, matching the reference implementation's
+   * `_generate_request_id`. Uniqueness is the whole contract: an id shared by
+   * two requests joins records that describe different work, which is worse
+   * than joining nothing.
+   */
+  function resolveRequestId(request: Request): string {
+    const inbound = request.headers.get(REQUEST_ID_HEADER);
+    const trimmed = inbound?.trim();
+    if (trimmed) return trimmed;
+    return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  }
+
+  /**
+   * Put the correlation id on the way out.
+   *
+   * Best-effort by construction: a `Response` handed back by `fetch` (the
+   * OAuth token proxy returns one) carries immutable headers, and failing to
+   * label a proxied response is not a reason to fail the request.
+   */
+  function stampRequestId(response: Response, requestId: string): void {
+    try {
+      response.headers.set(REQUEST_ID_HEADER, requestId);
+    } catch {
+      // immutable headers — nothing to do
+    }
+  }
 
   /**
    * Size the response body as it will go on the wire, without consuming it.

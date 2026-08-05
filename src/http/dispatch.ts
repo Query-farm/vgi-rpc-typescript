@@ -127,6 +127,7 @@ function mintInitTokens(
   ctx: DispatchContext,
 ): { callId: Uint8Array; token: string; callToken: string } {
   const callId = newCallId();
+  noteStream(ctx, callId);
   const principal = ctx.authContext?.principal;
   const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal);
   // Warm the cache with what we already hold, so this stream's first
@@ -137,6 +138,30 @@ function mintInitTokens(
     token: packStateToken(stateBytes, callId, ctx.tokenKey, principal),
     callToken,
   };
+}
+
+/**
+ * Report this turn's stream to the access log.
+ *
+ * The chain identifier is the hex of the stream's `callId` — the random
+ * 16-byte value minted once at `/init` and carried, sealed, in both the call
+ * token and every cursor. Deriving from it rather than minting a second id is
+ * what makes `stream_id` satisfy the property the spec asks for over a
+ * transport with no connection: `/init` and every `/exchange` of one stream
+ * report the same value, and two streams never collide, without a byte of
+ * extra state or a token-format change.
+ *
+ * Disclosing it costs nothing. A callId is only ever *used* after the cursor
+ * carrying it has passed AEAD verification under the server's token key, so
+ * knowing one grants no more than knowing a stream existed — which is
+ * precisely what an access-log record is for.
+ */
+function noteStream(ctx: DispatchContext, callId: Uint8Array): void {
+  const observer = ctx.streamObserver;
+  if (!observer) return;
+  let hex = "";
+  for (const b of callId) hex += b.toString(16).padStart(2, "0");
+  observer.streamId = hex;
 }
 
 import type { StateSerializer } from "./types.js";
@@ -179,6 +204,14 @@ export interface DispatchContext {
    *  `externalized_bytes`. Those bytes never touch the HTTP body — only a
    *  pointer batch does — so nothing measured at the transport can see them. */
   egress?: { externalizedBytes: number };
+  /** Per-request sink for the stream facts only the dispatcher learns.
+   *
+   *  A stream's identity lives inside its tokens, and cancellation is a piece
+   *  of request-batch metadata — neither is visible to the handler that
+   *  assembles the access-log record, which sees only a URL and a body. Both
+   *  are reported here so `stream_id` and `cancelled` describe the stream that
+   *  actually ran instead of a placeholder. Absent on non-HTTP dispatch. */
+  streamObserver?: { streamId?: string; cancelled?: boolean };
 }
 
 /** Tally callback for `maybeExternalizeBatch`, or `undefined` when this
@@ -405,6 +438,7 @@ export async function httpDispatchStreamInit(
     // For exchange-registered methods acting as producers (__isProducer),
     // produceStreamResponse falls back to exchangeFn with tick batches.
     const initCallId = newCallId();
+    noteStream(ctx, initCallId);
     const initCallToken = packCallToken(
       initCallId,
       serializeSchema(resolvedOutputSchema),
@@ -473,6 +507,7 @@ export async function httpDispatchStreamExchange(
   // before conformBatchToSchema so that zero-row empty-schema cancel batches
   // don't fail the cast.
   const cancelled = reqBatch.metadata?.get(CANCEL_KEY) != null;
+  if (cancelled && ctx.streamObserver) ctx.streamObserver.cancelled = true;
 
   // Bind verification to the caller's identity — a token sealed for
   // principal A will fail AEAD decryption when replayed by principal B
@@ -485,6 +520,7 @@ export async function httpDispatchStreamExchange(
   } catch (error: any) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
+  noteStream(ctx, unpacked.callId);
   const resolvedCall = resolveCall(unpacked.callId, reqBatch.metadata?.get(CALL_STATE_KEY), ctx);
 
   let state: any;

@@ -445,6 +445,7 @@ export class AccessLogHook implements DispatchHook {
     if (this.serverVersion) rec.server_version = this.serverVersion;
     if (info.protocolVersion) rec.protocol_version = info.protocolVersion;
     if (info.requestId) rec.request_id = info.requestId;
+    if (info.httpStatus !== undefined) rec.http_status = info.httpStatus;
     // Trace correlation. `request_id` only joins records within this service;
     // these join them to the surrounding distributed trace. Both or neither.
     const trace = this.currentTrace();
@@ -468,6 +469,11 @@ export class AccessLogHook implements DispatchHook {
       }
     }
     if (info.methodType === "stream") {
+      // The schema requires the field on every stream record, including ones
+      // for requests that failed before a stream existed — a mistyped method,
+      // a cursor that would not open. All-zeros is the sentinel for that case
+      // and nothing else: a transport that established a stream reports its
+      // chain id, the same value on `/init` and every continuation.
       rec.stream_id = info.streamId ?? "00000000000000000000000000000000";
     }
     if (info.cancelled) rec.cancelled = true;

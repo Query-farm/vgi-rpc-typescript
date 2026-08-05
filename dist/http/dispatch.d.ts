@@ -37,6 +37,17 @@ export interface DispatchContext {
     egress?: {
         externalizedBytes: number;
     };
+    /** Per-request sink for the stream facts only the dispatcher learns.
+     *
+     *  A stream's identity lives inside its tokens, and cancellation is a piece
+     *  of request-batch metadata — neither is visible to the handler that
+     *  assembles the access-log record, which sees only a URL and a body. Both
+     *  are reported here so `stream_id` and `cancelled` describe the stream that
+     *  actually ran instead of a placeholder. Absent on non-HTTP dispatch. */
+    streamObserver?: {
+        streamId?: string;
+        cancelled?: boolean;
+    };
 }
 /** Dispatch a __describe__ request. */
 export declare function httpDispatchDescribe(protocolName: string, methods: Map<string, MethodDefinition>, serverId: string, protocolVersion?: string): Promise<Response>;
