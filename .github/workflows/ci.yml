@@ -221,6 +221,18 @@ jobs:
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v
 
+      # The runner-driven suite with no access log attached. This is the only
+      # place the `large_payload` group runs: test_ts_conformance.py drives
+      # `_pytest_suite.py`, which carries no such tests, so the category is
+      # reachable only through `vgi-rpc-test`. It became required in vgi-rpc
+      # 0.42.0, and `echo_binary_over_int32_max` is the one test that reaches
+      # the size where a single write(2)/send(2) stops accepting a whole
+      # buffer. On this port it passes by refusing — see the ceiling note in
+      # CLAUDE.md — and the refusal has to stay observable, which it is not
+      # when the worker dies first.
+      - name: Run conformance suite (large payloads included)
+        run: timeout 600 vgi-rpc-test --cmd "bun run examples/conformance.ts"
+
       # Access-log conformance was verified by hand until now, and drifted
       # anyway — four separate manual inspections passed a contract that was
       # wrong. Validating the emitted records here is the only thing that keeps
@@ -232,17 +244,26 @@ jobs:
       # every request_data rule without ever exercising one.
       # --require-request-data turns that silent pass into a failure.
       #
-      # The suite runs unfiltered on purpose. Zero-parameter methods
-      # (`void_noop`) send an empty schema and no row, and a validator that
-      # demands one row unconditionally rejects them — that bug shipped in
-      # 0.36.1. Any --filter added here must keep `void*` in scope.
+      # `large_payload` is excluded here, and only here. At
+      # --access-log-debug every record embeds its whole request payload, so
+      # the >2 GiB test would ask this step to write a multi-gigabyte JSONL
+      # line and then schema-validate it in Python — which killed the worker
+      # outright and failed every test after it with a broken pipe. The group
+      # still runs, unfiltered, in the step above. What this step checks is
+      # the log's *shape*, and an ordinary payload exercises that identically.
+      #
+      # Nothing else is filtered. Zero-parameter methods (`void_noop`) send an
+      # empty schema and no row, and a validator that demands one row
+      # unconditionally rejects them — that bug shipped in 0.36.1. Any
+      # --filter added here must keep `void*` in scope.
       - name: Validate access log against the cross-language schema
         run: |
           rm -f /tmp/conformance-access.jsonl
           timeout 300 vgi-rpc-test \
             --cmd "bun run examples/conformance.ts --access-log /tmp/conformance-access.jsonl --access-log-debug" \
             --access-log /tmp/conformance-access.jsonl \
-            --require-request-data
+            --require-request-data \
+            --filter '!large_payload'
           python conformance/check_access_log_streams.py /tmp/conformance-access.jsonl
 
       # The step above ran the *pipe* worker, where one dispatch covers a whole
@@ -274,10 +295,18 @@ jobs:
           # `|| STATUS=1` on both so a schema failure and a stream-coverage
           # failure are each reported, rather than the first aborting under
           # `bash -e` and hiding the second.
+          # `large_payload` excluded for the same reason as the pipe step
+          # above: at DEBUG the record embeds the payload, and the 4 MiB test
+          # alone overshoots the emitter's per-record cap, so `request_data`
+          # is shed (access-log-spec §5b) and --require-request-data reports
+          # the record as missing it. The >2 GiB test never reaches HTTP —
+          # it is scoped to pipe/unix/tcp — so this is purely about the 4 MiB
+          # one. Both run in the dedicated suite step earlier.
           timeout 300 vgi-rpc-test \
             --url "http://127.0.0.1:$PORT" \
             --access-log /tmp/conformance-http-access.jsonl \
-            --require-request-data || STATUS=1
+            --require-request-data \
+            --filter '!large_payload' || STATUS=1
           python conformance/check_access_log_streams.py \
             /tmp/conformance-http-access.jsonl --http --require-continuations || STATUS=1
           kill $WORKER_PID 2>/dev/null || true
