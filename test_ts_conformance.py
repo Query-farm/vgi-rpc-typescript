@@ -8,8 +8,17 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
+
+# vgi-rpc's `http` extra carries httpx2, not httpx — it has since 0.39. This
+# file only ever got httpx because the old `>=0.37.0` floor happened to
+# resolve 0.38.0, whose extra still named the older package. Raising the floor
+# is what exposed it, so import what the extra actually installs and keep the
+# fallback for anyone with an older vgi-rpc in their environment.
+try:
+    import httpx2 as httpx
+except ModuleNotFoundError:  # pragma: no cover - pre-0.39 environments
+    import httpx
 
 from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.http import http_connect
