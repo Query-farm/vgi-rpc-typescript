@@ -37,6 +37,7 @@ import {
   tablesToIPC,
   tableToIPC,
 } from "@query-farm/flechette";
+import { requireEncodable } from "../limits.js";
 import type {
   IncrementalEncoder,
   VgiBackendInfo,
@@ -243,6 +244,7 @@ export function singleRowBatch(s: VgiSchema, values: Record<string, any>): VgiBa
     if (f.type.typeId === 2 /* Int */ && (f.type as any).bitWidth === 64 && typeof val === "number") {
       val = BigInt(val);
     }
+    requireEncodable(val, f.name);
     cols.push(f_columnFromArray(coerceValuesForType([val], f.type), toFlechetteType(f.type) as any, EXTRACT_OPTS));
   }
   return buildTablePreservingNullable(s, cols);
@@ -253,6 +255,7 @@ export function batchFromColumns(s: VgiSchema, columns: Record<string, any[]>): 
   const cols: Column<any>[] = [];
   for (const f of s.fields) {
     const vals = columns[f.name] ?? new Array(numRows).fill(null);
+    for (const v of vals) requireEncodable(v, f.name);
     cols.push(f_columnFromArray(coerceValuesForType(vals, f.type), toFlechetteType(f.type) as any, EXTRACT_OPTS));
   }
   return buildTablePreservingNullable(s, cols);
@@ -304,6 +307,7 @@ export function singleRowBatchWithMetadata(
     if (f.type.typeId === 2 /* Int */ && (f.type as any).bitWidth === 64 && typeof val === "number") {
       val = BigInt(val);
     }
+    requireEncodable(val, f.name);
     cols[f.name] = f_columnFromArray([val], toFlechetteType(f.type) as any, EXTRACT_OPTS);
   }
   const t = tableFromColumns(cols) as any;

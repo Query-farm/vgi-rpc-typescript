@@ -7,13 +7,15 @@
 // whether or not the per-call sizes are bounded. macOS does not: `read(n)`
 // above 1 GiB throws `ERR_OUT_OF_RANGE` (Node and Bun alike), and `send(2)`
 // above 2 GiB fails with `EINVAL`. The conformance suite's `large_payload`
-// group catches both, but only on a Mac with VGI_RPC_CONFORMANCE_HUGE=1.
+// group catches both, but only on a Mac — the >2 GiB test runs everywhere
+// now, yet only a Mac reaches the sizes where the syscalls actually refuse.
 //
 // So these assert the invariant itself — no single call is ever handed more
 // than the clamp — on payloads small enough to run anywhere in milliseconds.
 
 import { describe, expect, it } from "bun:test";
 import { batchFromColumns, binary, field, schema, serializeBatches } from "../src/arrow/index.js";
+import { MAX_ENCODABLE_BYTES, requireEncodable } from "../src/arrow/limits.js";
 import { clampReads, MAX_READ_CHUNK } from "../src/wire/reader.js";
 import { IpcStreamWriter, MAX_STREAM_CHUNK } from "../src/wire/writer.js";
 
@@ -103,3 +105,45 @@ describe("socket write clamp", () => {
     expect(joined).toEqual(expected);
   });
 });
+
+describe("encodable ceiling", () => {
+  it("accepts the largest payload the Arrow encoders can represent", () => {
+    // 2 GiB - 8 is the last size whose 8-byte-aligned length still fits an
+    // int32. Refusing it would give up a payload that demonstrably works.
+    expect(() => requireEncodable(fakeBuffers(MAX_ENCODABLE_BYTES), "value")).not.toThrow();
+  });
+
+  it("refuses one byte past it, naming the field and the real size", () => {
+    expect(() => requireEncodable(new Uint8Array(0), "value")).not.toThrow();
+    try {
+      requireEncodable(fakeBuffers(MAX_ENCODABLE_BYTES + 1), "result");
+      throw new Error("expected a refusal");
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain("result");
+      expect(msg).toContain(String(MAX_ENCODABLE_BYTES + 1));
+      // The limit belongs to the JS Arrow encoders, and the message has to
+      // say so — a reader who thinks it is a protocol limit goes looking in
+      // the wrong repository.
+      expect(msg).toContain("not vgi-rpc");
+    }
+  });
+
+  it("measures an Arrow Data by its largest buffer, not their sum", () => {
+    // An echo handler returns the decoded `Data` untouched, so the guard sees
+    // a buffer container rather than a JS value. Summing would refuse a
+    // payload of exactly the ceiling on account of its own validity bytes.
+    const atCeiling = {
+      buffers: {
+        0: { byteLength: 64 },
+        1: { byteLength: MAX_ENCODABLE_BYTES },
+      },
+    };
+    expect(() => requireEncodable(atCeiling, "value")).not.toThrow();
+  });
+});
+
+/** A buffer container of a given size, without allocating one. */
+function fakeBuffers(byteLength: number): unknown {
+  return { buffers: { 1: { byteLength } } };
+}

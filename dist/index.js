@@ -1234,6 +1234,33 @@ import {
   RecordBatchReader,
   RecordBatchStreamWriter
 } from "@query-farm/apache-arrow";
+
+// src/arrow/limits.ts
+var MAX_ENCODABLE_BYTES = 2147483640;
+function isBufferBearing(value) {
+  return typeof value === "object" && value !== null && typeof value.buffers === "object";
+}
+function requireEncodable(value, fieldName) {
+  let bytes = -1;
+  if (ArrayBuffer.isView(value)) {
+    bytes = value.byteLength;
+  } else if (value instanceof ArrayBuffer) {
+    bytes = value.byteLength;
+  } else if (isBufferBearing(value)) {
+    for (const buf of Object.values(value.buffers)) {
+      const len = buf?.byteLength;
+      if (typeof len === "number" && len > bytes)
+        bytes = len;
+    }
+  } else if (typeof value === "string") {
+    bytes = value.length;
+  }
+  if (bytes > MAX_ENCODABLE_BYTES) {
+    throw new RangeError(`${fieldName} is ${bytes} bytes; this TypeScript worker can encode at most ${MAX_ENCODABLE_BYTES} ` + `(2 GiB - 8). Both Arrow backends align buffers with (byteLength + 7) & ~7, and the bitwise & ` + `truncates to int32, so a larger value would be sent as a negative bodyLength. The wire and the ` + `protocol carry it fine — the limit is the JavaScript Arrow encoders', not vgi-rpc's.`);
+  }
+}
+
+// src/arrow/impl-arrowjs/index.ts
 var backend = { name: "arrow-js", opaquePassthrough: true };
 var bool = () => new A_Bool;
 var int8 = () => new A_Int8;
@@ -1325,6 +1352,8 @@ function batchFromColumns(s, columns) {
     const vals = columns[f.name];
     if (!vals)
       return a_makeData({ type: f.type, length: numRows, nullCount: numRows });
+    for (const v of vals)
+      requireEncodable(v, f.name);
     return a_vectorFromArray(vals, f.type).data[0];
   });
   const structType = new A_Struct(a.fields);
@@ -1384,6 +1413,7 @@ function singleRowBatchWithMetadata(s, values, metadata) {
   const M = { DataType: A_DataTypeNS, Data: A_Data };
   const children = a.fields.map((f) => {
     const val = values[f.name];
+    requireEncodable(val, f.name);
     if (val instanceof M.Data)
       return val;
     return a_vectorFromArray([val], f.type).data[0];
@@ -10027,4 +10057,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=1B67D8BEA75FD63B64756E2164756E21
+//# debugId=328D82A40FDAD4D564756E2164756E21

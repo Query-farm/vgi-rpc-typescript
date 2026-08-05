@@ -44,6 +44,7 @@ import {
 // Local type-only helpers used by conformBatchToSchema.
 type _NeedsCast = (src: A_DataType, dst: A_DataType) => boolean;
 
+import { requireEncodable } from "../limits.js";
 import type {
   IncrementalEncoder,
   VgiBackendInfo,
@@ -221,6 +222,7 @@ export function singleRowBatch(s: VgiSchema, values: Record<string, any>): VgiBa
     if (f.type.typeId === A_Type.Int && (f.type as any).bitWidth === 64) {
       if (typeof val === "number") val = BigInt(val);
     }
+    requireEncodable(val, f.name);
     return a_vectorFromArray([val], f.type).data[0];
   });
   const structType = new A_Struct(a.fields);
@@ -235,6 +237,7 @@ export function batchFromColumns(s: VgiSchema, columns: Record<string, any[]>): 
   const children = a.fields.map((f) => {
     const vals = columns[f.name];
     if (!vals) return a_makeData({ type: f.type, length: numRows, nullCount: numRows });
+    for (const v of vals) requireEncodable(v, f.name);
     return a_vectorFromArray(vals, f.type).data[0];
   });
   const structType = new A_Struct(a.fields);
@@ -337,6 +340,10 @@ export function singleRowBatchWithMetadata(
   const M = { DataType: A_DataTypeNS, Data: A_Data };
   const children = a.fields.map((f) => {
     const val = values[f.name];
+    // Before the passthrough, not after: an echo-style handler returns the
+    // decoded `Data` untouched, and that is exactly the path a >2 GiB payload
+    // takes. Guarding only the JS-value branch would leave it unchecked.
+    requireEncodable(val, f.name);
     if (val instanceof M.Data) return val;
     return a_vectorFromArray([val], f.type).data[0];
   });
