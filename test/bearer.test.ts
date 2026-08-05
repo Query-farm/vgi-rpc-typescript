@@ -8,6 +8,7 @@ import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../src/con
 import { bearerAuthenticate, bearerAuthenticateStatic, chainAuthenticate } from "../src/http/bearer.js";
 import { ARROW_CONTENT_TYPE } from "../src/http/common.js";
 import { createHttpHandler } from "../src/http/handler.js";
+import { AuthReason } from "../src/http/unauthorized.js";
 import { Protocol } from "../src/protocol.js";
 import { str, toSchema } from "../src/schema.js";
 
@@ -63,7 +64,17 @@ describe("bearerAuthenticate", () => {
 
   it("non-Bearer scheme raises", async () => {
     const authFn = bearerAuthenticate({ validate: () => ALICE });
-    await expect(authFn(makeRequest("Basic dXNlcjpwYXNz"))).rejects.toThrow("Missing");
+    await expect(authFn(makeRequest("Basic dXNlcjpwYXNz"))).rejects.toThrow("not a Bearer credential");
+  });
+
+  it("distinguishes an absent credential from a wrong one", async () => {
+    // "send a credential" and "the credential you sent is not a Bearer one"
+    // are different instructions, so a client can act on the difference.
+    const authFn = bearerAuthenticate({ validate: () => ALICE });
+    await expect(authFn(makeRequest())).rejects.toMatchObject({ reason: AuthReason.MissingCredential });
+    await expect(authFn(makeRequest("Basic dXNlcjpwYXNz"))).rejects.toMatchObject({
+      reason: AuthReason.InvalidCredential,
+    });
   });
 
   it("supports async validate", async () => {

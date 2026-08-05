@@ -101,9 +101,12 @@ describe("HTTP Auth", () => {
       }),
     );
     expect(resp.status).toBe(401);
-    const text = await resp.text();
-    expect(text).toBe("Invalid token");
-    expect(resp.headers.get("Content-Type")).toBe("text/plain");
+    // The standardized envelope of docs/unauthorized-spec.md §4.3 — an
+    // unclassified throw lands on the fallback code, never a guess made by
+    // matching on the message.
+    expect(resp.headers.get("Content-Type")).toBe("application/json");
+    expect(resp.headers.get("VGI-Auth-Reason")).toBe("unauthorized");
+    expect(await resp.json()).toEqual({ error: "unauthorized", reason: "unauthorized", detail: "Invalid token" });
   });
 
   test("well-known endpoint serves RFC 9728 JSON", async () => {

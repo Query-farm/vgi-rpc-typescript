@@ -7,6 +7,18 @@
  *
  * Flags:
  *   --access-log <path>   Append JSONL access-log records to <path>.
+ *   --access-log-sample R Log only fraction R (0.0-1.0) of successful calls.
+ *                         Errors are always logged and every kept record
+ *                         carries `sample_rate`. An out-of-range R fails here,
+ *                         at startup, not at the first request.
+ *   --access-log-async    Drain records through a bounded queue instead of
+ *                         writing them inline. Trades durability for latency.
+ *   --access-log-debug    Emit at DEBUG so records carry `request_data`. At the
+ *                         default INFO the payload is replaced by a
+ *                         `truncated: "payload_omitted"` marker, which leaves
+ *                         every rule governing `request_data` unexercised —
+ *                         `vgi-rpc-test --require-request-data` fails a log
+ *                         that never carries the field.
  *   --tcp [HOST:]PORT     Serve over a raw TCP socket instead of stdin/stdout.
  *                         HOST defaults to 127.0.0.1 (loopback only); PORT may
  *                         be 0 to let the OS auto-select. Prints
@@ -21,10 +33,19 @@ import { protocol } from "./conformance-protocol.js";
 
 const args = process.argv.slice(2);
 let accessLogPath: string | undefined;
+let accessLogSample = 1;
+let accessLogAsync = false;
+let accessLogDebug = false;
 let tcpArg: string | undefined;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--access-log" && i + 1 < args.length) {
     accessLogPath = args[++i];
+  } else if (args[i] === "--access-log-sample" && i + 1 < args.length) {
+    accessLogSample = Number.parseFloat(args[++i]);
+  } else if (args[i] === "--access-log-async") {
+    accessLogAsync = true;
+  } else if (args[i] === "--access-log-debug") {
+    accessLogDebug = true;
   } else if (args[i] === "--tcp" && i + 1 < args.length) {
     tcpArg = args[++i];
   }
@@ -33,7 +54,18 @@ for (let i = 0; i < args.length; i++) {
 let dispatchHook: AccessLogHook | undefined;
 if (accessLogPath) {
   const fd = openSync(accessLogPath, "a");
-  dispatchHook = new AccessLogHook(new FdSink(fd), "vgi-rpc-typescript-conformance");
+  dispatchHook = new AccessLogHook(new FdSink(fd), {
+    serverVersion: "vgi-rpc-typescript-conformance",
+    sampleRate: accessLogSample,
+    async: accessLogAsync,
+    level: accessLogDebug ? "DEBUG" : "INFO",
+  });
+  // Queued records are only durable once drained; a worker that exits with a
+  // full queue would otherwise lose the tail of its own audit trail.
+  if (accessLogAsync) {
+    const hook = dispatchHook;
+    process.on("exit", () => hook.flush());
+  }
 }
 
 if (tcpArg !== undefined) {

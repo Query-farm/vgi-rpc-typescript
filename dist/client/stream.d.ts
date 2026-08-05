@@ -20,9 +20,37 @@ export interface RowsWithToken {
      * The resume token continuing the stream after this batch — the worker's
      * own serialized producer state — or `null` when the producer emitted this
      * batch as its final turn (no further continuation).
+     *
+     * Since a stream's state may travel as two tokens (call + cursor), this is
+     * the *pair*, packed into one opaque string by {@link packResumeToken}.
+     * Treat it as unstructured text; only {@link HttpStreamSession.seekToToken}
+     * and the client's `resumeStream` need to know its shape.
      */
     token: string | null;
 }
+/**
+ * Pack a stream's cursor and call tokens into one opaque resume blob.
+ *
+ * Both halves have to travel: a node resuming from this token may have no
+ * cached knowledge of the stream, and the server never re-issues the call
+ * token.
+ *
+ * Layout is `<cursorLen>:<cursor><call>`, and a stream with no call token
+ * packs to the bare cursor. Both tokens are base64, whose alphabet contains
+ * no `:`, so a bare cursor can never be mistaken for a packed pair — which is
+ * what keeps tokens minted before the split readable.
+ */
+export declare function packResumeToken(cursor: string, callToken: string | null): string;
+/**
+ * Unpack a blob produced by {@link packResumeToken}.
+ *
+ * A blob with no length prefix is a bare cursor — either from a server that
+ * does not split its stream state, or from a client predating the split.
+ */
+export declare function unpackResumeToken(token: string): {
+    cursor: string;
+    callToken: string | null;
+};
 /**
  * {@link StreamSession} implementation for the HTTP transport. Stream state is
  * carried statelessly across requests via an HMAC state token: each
@@ -34,6 +62,12 @@ export declare class HttpStreamSession implements StreamSession {
     private _prefix;
     private _method;
     private _stateToken;
+    /**
+     * The stream's call token: handed over once by `/init` and echoed on every
+     * subsequent request. The server never re-issues it, so this is the only
+     * copy once the init response is parsed.
+     */
+    private _callStateToken;
     private _outputSchema;
     private _inputSchema?;
     private _onLog?;
@@ -51,6 +85,7 @@ export declare class HttpStreamSession implements StreamSession {
         prefix: string;
         method: string;
         stateToken: string | null;
+        callStateToken?: string | null;
         outputSchema: Schema;
         inputSchema?: Schema;
         onLog?: (msg: LogMessage) => void;
@@ -67,6 +102,17 @@ export declare class HttpStreamSession implements StreamSession {
     private _post;
     /** The stream's one-time header row, or `null` if the method declares no header. */
     get header(): Record<string, any> | null;
+    /**
+     * Build request metadata carrying the cursor token and the call token.
+     *
+     * The call token is echoed on every request because the server does not
+     * re-issue it; a request that omitted it would still succeed while the
+     * server's call-state cache is warm and fail once it is not — exactly the
+     * kind of load-dependent bug worth designing out.
+     */
+    private _tokenMetadata;
+    /** Encode this session's current position as one opaque resume blob. */
+    private _resumeToken;
     private _buildHeaders;
     private _prepareBody;
     private _readResponse;
@@ -106,9 +152,11 @@ export declare class HttpStreamSession implements StreamSession {
      * Reposition a freshly-initialised session to resume from `token`.
      *
      * Discards any init-preloaded batches and points the session at the given
-     * continuation token (as returned by {@link HttpStreamSession.nextWithToken}),
-     * so the next `nextWithToken()` continues from exactly there. Used to resume
-     * a scan on a new process/node. Mirrors Python's `seek_to_token`.
+     * resume token (as returned by {@link HttpStreamSession.nextWithToken}), so
+     * the next `nextWithToken()` continues from exactly there. Used to resume a
+     * scan on a new process/node — which is why the call token travels inside
+     * the blob too: that node may never have seen this stream's `/init`.
+     * Mirrors Python's `seek_to_token`.
      */
     seekToToken(token: string): void;
     private _sendContinuation;

@@ -33,11 +33,26 @@ export declare const PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
 export declare const DESCRIBE_METHOD_NAME = "__describe__";
 /** Batch-metadata key carrying the base64-encoded stream continuation/state token. */
 export declare const STATE_KEY = "vgi_rpc.stream_state#b64";
+/**
+ * The stream's *call state* — the half of a stream's state fixed for the life
+ * of the call (the init request, the resolved schemas). A server that splits
+ * its stream state mints this once on `/init` and never re-issues it; only
+ * {@link STATE_KEY}, the cursor, comes back per turn. A client must echo it on
+ * every subsequent request: the server may resolve it from a cache while one
+ * is warm, but a continuation landing on a process that never saw the `/init`
+ * has only the client's copy to work from.
+ */
+export declare const CALL_STATE_KEY = "vgi_rpc.call_state#b64";
 export declare const CANCEL_KEY = "vgi_rpc.cancel";
 export declare const LOCATION_KEY = "vgi_rpc.location";
 export declare const LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
 /** HTTP response header set when an RPC error is returned over the HTTP transport. */
 export declare const RPC_ERROR_HEADER = "X-VGI-RPC-Error";
+/** Per-request correlation header. Read from the request when the caller
+ *  supplies one, minted otherwise, echoed on the response, and written to the
+ *  access log as `request_id` — the same value in all three places, which is
+ *  the only property that makes the field worth anything. */
+export declare const REQUEST_ID_HEADER = "X-Request-ID";
 /** Top-level metadata key on an EXCEPTION batch identifying the error category.
  *  Hoisted by `buildErrorBatch` when the thrown error has a static or instance
  *  `errorKind` property. Mirrors Python's `vgi_rpc.metadata.ERROR_KIND_KEY`. */

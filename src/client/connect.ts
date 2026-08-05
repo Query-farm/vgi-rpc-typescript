@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type RecordBatch, Schema } from "@query-farm/apache-arrow";
-import { LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
+import { CALL_STATE_KEY, LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
@@ -19,7 +19,7 @@ import {
   readResponseBatches,
   readSequentialStreams,
 } from "./ipc.js";
-import { HttpStreamSession } from "./stream.js";
+import { HttpStreamSession, unpackResumeToken } from "./stream.js";
 import type { HttpConnectOptions, StreamSession } from "./types.js";
 import { externalizeRequestBody } from "./uploadUrl.js";
 
@@ -53,6 +53,10 @@ export interface HttpRpcClient extends RpcClient {
    * {@link HttpStreamSession.nextWithToken}) and resumes on any
    * connection/node — unlike `stream(...)` which would produce and discard a
    * fresh first turn before seeking.
+   *
+   * `token` is the opaque blob from {@link HttpStreamSession.nextWithToken},
+   * which packs both the cursor and the call token; the resuming node may
+   * never have seen this stream's `/init`, so it needs both.
    *
    * The returned session is positioned at `token`; the first `nextWithToken()`
    * (or iteration) issues the continuation. `outputSchema` is unused on the
@@ -277,6 +281,9 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): Http
       // Parse the response: may contain header stream + data stream
       let header: Record<string, any> | null = null;
       let stateToken: string | null = null;
+      // Only /init hands over a call token; the client keeps it for the
+      // life of the stream and echoes it on every subsequent request.
+      let callStateToken: string | null = null;
       const pendingBatches: RecordBatch[] = [];
       let finished = false;
       let streamSchema: Schema | null = null;
@@ -315,6 +322,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): Http
               const token = batch.metadata?.get(STATE_KEY);
               if (token) {
                 stateToken = token;
+                callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
                 continue;
               }
               const level = batch.metadata?.get(LOG_LEVEL_KEY);
@@ -358,6 +366,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): Http
             const token = batch.metadata?.get(STATE_KEY);
             if (token) {
               stateToken = token;
+              callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
               continue;
             }
             // Collect EXCEPTION batches for deferred dispatch
@@ -404,6 +413,7 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): Http
         prefix,
         method,
         stateToken,
+        callStateToken,
         outputSchema,
         inputSchema: info.inputSchema,
         onLog,
@@ -424,11 +434,13 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): Http
       // stream. ensureCompression is memoized and only probes when a
       // compressionLevel was requested and no call has run yet.
       await ensureCompression();
+      const { cursor, callToken } = unpackResumeToken(token);
       return new HttpStreamSession({
         baseUrl,
         prefix,
         method,
-        stateToken: token,
+        stateToken: cursor,
+        callStateToken: callToken,
         outputSchema: outputSchema ?? new Schema([]),
         onLog,
         pendingBatches: [],

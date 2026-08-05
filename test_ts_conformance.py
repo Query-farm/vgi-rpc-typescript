@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -136,6 +137,122 @@ def conformance_http_no_compression_port() -> Iterator[int]:
 def conformance_http_auth_port() -> Iterator[int]:
     """Bun conformance HTTP server with reject-all authenticate, for TestHealth."""
     proc, port = _start_http_server(BUN_HTTP_AUTH_WORKER)
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_auth_reason_port() -> Iterator[int]:
+    """Bun HTTP worker that honours ``X-Conformance-Auth-Reason``.
+
+    Backs the shared ``TestUnauthorized`` reason-code tests. Membership in the
+    closed set is not enough on its own — a server answering every 401 with
+    ``unauthorized`` satisfies that. These tests prove the codes are
+    *discriminated*, which is what makes them worth branching on.
+
+    The reject-all worker already reads the header, so it serves double duty;
+    it runs as a second process only because both fixtures are session-scoped.
+    """
+    proc, port = _start_http_server(BUN_HTTP_AUTH_WORKER)
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_cold_call_cache_port() -> Iterator[int]:
+    """Bun conformance HTTP server booted with the call-state cache disabled.
+
+    Backs the shared ``TestColdCallStateCache`` group, which pins the rule that
+    a client echoes the call token on every continuation. With the cache warm
+    the server resolves a call it already saw, so a client that never echoes
+    still works — and only breaks once a continuation lands on a process with
+    no cached entry. Disabling the cache makes every turn take that path.
+
+    The fixture name is load-bearing: the shared suite looks it up with
+    ``getfixturevalue`` and silently skips if it is missing.
+    """
+    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--no-call-state-cache"])
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[int, Path]]:
+    """Bun conformance HTTP server writing JSONL access records, as ``(port, path)``.
+
+    Backs the shared ``TestRequestId`` correlation case: asserting that the
+    ``X-Request-ID`` on a response equals the ``request_id`` in the record
+    means reading back what the server logged for a request the suite made,
+    which nothing observable on the wire can substitute for.
+
+    Its own process, because the plain worker deliberately runs with no access
+    log at all — that is the configuration every other HTTP group is measured
+    against.
+
+    The fixture name is load-bearing: the shared suite looks it up with
+    ``getfixturevalue`` and skips the correlation case if it is missing.
+    """
+    log_path = tmp_path_factory.mktemp("accesslog") / "conformance.jsonl"
+    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--access-log", str(log_path)])
+    yield port, log_path
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_introspect_port() -> Iterator[int]:
+    """Bun conformance HTTP server with token introspection enabled.
+
+    Backs the shared ``TestTokenIntrospection`` group. It needs its own process
+    because the endpoint is absent unless explicitly enabled — which
+    ``TestTokenIntrospectionOffMode`` asserts against the plain worker.
+
+    ``--introspect`` also turns on the ``X-Conformance-Principal`` authenticator,
+    so the introspector allowlist has a caller identity to check. The resolver's
+    fixed constants live in ``examples/conformance-http.ts`` and must match
+    ``_INTROSPECTOR`` / ``_SUBJECT_TOKEN`` / ``_SUBJECT_PRINCIPAL`` /
+    ``_JWS_TRAP_TOKEN`` in the shared suite.
+
+    The fixture name is load-bearing — the suite looks it up with
+    ``getfixturevalue`` and skips the whole group if it is missing.
+    """
+    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--introspect"])
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Bun conformance HTTP server configured to allow the CORS test origin.
+
+    Backs the shared ``TestCors`` group, which checks that a browser client can
+    actually *read* the capability headers this worker advertises. It needs a
+    second process because CORS is strictly opt-in: the plain worker must keep
+    granting no origin at all, which is what ``TestCorsOffMode`` asserts.
+
+    The fixture name is load-bearing — the suite looks it up with
+    ``getfixturevalue`` and skips the whole group if it is missing — and so is
+    the origin, which the suite hardcodes as its ``Origin`` request header.
+
+    Storage mode is deliberate: the derived exposure check can only catch a
+    missing entry for a header the worker actually advertises, so a *plain*
+    worker here would silently skip the conditional half of the capability
+    set -- the size caps and the upload-URL trio -- which are exactly the
+    exposures a port is most likely to miss.
+    """
+    proc, port = _start_http_server(
+        [
+            *BUN_HTTP_WORKER,
+            "--fake-storage",
+            conformance_fake_storage,
+            "--cors-origin",
+            "https://conformance.example",
+        ]
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)

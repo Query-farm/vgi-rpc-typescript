@@ -15,6 +15,9 @@ export interface DispatchContext {
     maxResponseBytes?: number;
     /** Hard cap on bytes uploaded to external storage during one HTTP response. */
     maxExternalizedResponseBytes?: number;
+    /** Entries the resolved-call cache may hold; `0` disables it so every
+     *  continuation re-opens the call token the client echoed. Default 4096. */
+    callStateCacheEntries?: number;
     stateSerializer: StateSerializer;
     authContext?: AuthContext;
     externalLocation?: ExternalLocationConfig;
@@ -28,6 +31,23 @@ export interface DispatchContext {
      *  is enabled and the dispatcher attaches it to the OutputCollector so
      *  `ctx.session` / `ctx.openSession` / `ctx.closeSession` work. */
     stickyContext?: import("../types.js").StickyContext;
+    /** Per-request externalisation tally, surfaced on the access log as
+     *  `externalized_bytes`. Those bytes never touch the HTTP body — only a
+     *  pointer batch does — so nothing measured at the transport can see them. */
+    egress?: {
+        externalizedBytes: number;
+    };
+    /** Per-request sink for the stream facts only the dispatcher learns.
+     *
+     *  A stream's identity lives inside its tokens, and cancellation is a piece
+     *  of request-batch metadata — neither is visible to the handler that
+     *  assembles the access-log record, which sees only a URL and a body. Both
+     *  are reported here so `stream_id` and `cancelled` describe the stream that
+     *  actually ran instead of a placeholder. Absent on non-HTTP dispatch. */
+    streamObserver?: {
+        streamId?: string;
+        cancelled?: boolean;
+    };
 }
 /** Dispatch a __describe__ request. */
 export declare function httpDispatchDescribe(protocolName: string, methods: Map<string, MethodDefinition>, serverId: string, protocolVersion?: string): Promise<Response>;

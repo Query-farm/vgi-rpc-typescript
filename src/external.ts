@@ -142,6 +142,11 @@ function batchByteSize(batch: VgiBatch): number {
 export async function maybeExternalizeBatch(
   batch: VgiBatch,
   config?: ExternalLocationConfig | null,
+  /** Called with the number of bytes actually uploaded. Counted here rather
+   *  than at the call sites: this is the one function every externalised
+   *  payload passes through, so the total cannot drift from reality by
+   *  someone adding a new upload path. */
+  onUpload?: (bytes: number) => void,
 ): Promise<VgiBatch> {
   if (!config?.storage) return batch;
   if (batch.numRows === 0) return batch;
@@ -163,6 +168,7 @@ export async function maybeExternalizeBatch(
   }
 
   // Upload
+  onUpload?.(ipcData.byteLength);
   const url = await config.storage.upload(ipcData, contentEncoding);
 
   // Return pointer batch

@@ -1319,6 +1319,18 @@ const PYTHON_HTTP_SERVER = [
   "from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl; from vgi_rpc.rpc import RpcServer; from vgi_rpc.http import serve_http; serve_http(RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True))",
 ];
 
+// Same reference server, but with the call-state cache disabled. A server
+// that splits stream state into call + cursor tokens may resolve the call
+// from a per-process cache; with that cache warm, a client that never echoes
+// the call token still works, and only breaks once a continuation lands on a
+// process with no cached entry (a restart, an eviction, a load-balanced
+// relay). Booting with the cache off makes every turn take that path.
+const PYTHON_HTTP_COLD_CALL_CACHE_SERVER = [
+  PYTHON,
+  "-c",
+  "from vgi_rpc.conformance import ConformanceService, ConformanceServiceImpl; from vgi_rpc.rpc import RpcServer; from vgi_rpc.http import serve_http; serve_http(RpcServer(ConformanceService, ConformanceServiceImpl(), enable_describe=True), call_state_cache_entries=0)",
+];
+
 const PYTHON_PIPE_SERVER = [
   PYTHON,
   "-c",
@@ -1471,4 +1483,49 @@ if (hasPython) {
       stderr: "pipe",
     }),
   );
+
+  // The same resume surface against a server with no call-state cache, so
+  // every continuation must resolve the call from the token this client
+  // echoed rather than from anything the server remembered.
+  defineResumeStreamTests("python-http-cold-call-cache", () =>
+    Bun.spawn(PYTHON_HTTP_COLD_CALL_CACHE_SERVER, {
+      stdout: "pipe",
+      stderr: "pipe",
+    }),
+  );
+
+  describe("HTTP call token [python-http-cold-call-cache]", () => {
+    let proc: Subprocess;
+    let baseUrl: string;
+
+    beforeAll(async () => {
+      proc = Bun.spawn(PYTHON_HTTP_COLD_CALL_CACHE_SERVER, { stdout: "pipe", stderr: "pipe" });
+      baseUrl = await startServer(proc);
+    });
+
+    afterAll(() => {
+      proc?.kill();
+    });
+
+    it("drains a producer stream with every turn on the cache-miss path", async () => {
+      const client = httpConnect(baseUrl);
+      const session = await client.stream("produce_n", { count: 5 });
+      const indexes: number[] = [];
+      for await (const rows of session) for (const row of rows) indexes.push(row.index);
+      expect(indexes).toEqual([0, 1, 2, 3, 4]);
+      client.close();
+    });
+
+    it("runs successive exchange turns on the cache-miss path", async () => {
+      const client = httpConnect(baseUrl);
+      const session = await client.stream("exchange_accumulate");
+      const sums: number[] = [];
+      for (const value of [1.0, 2.0, 3.0]) {
+        const rows = await session.exchange([{ value }]);
+        sums.push(rows[0].running_sum);
+      }
+      expect(sums).toEqual([1, 3, 6]);
+      client.close();
+    });
+  });
 }

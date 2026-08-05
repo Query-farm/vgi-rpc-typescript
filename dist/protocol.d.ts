@@ -75,5 +75,10 @@ export declare class Protocol {
     /** Snapshot of the registered methods, keyed by method name. Returns a copy,
      *  so mutating it does not affect the protocol. */
     getMethods(): Map<string, MethodDefinition>;
+    /** Look up a single method without copying the whole map — for the
+     *  per-request dispatch path. Callers must not mutate the returned value. */
+    getMethod(name: string): MethodDefinition | undefined;
+    /** Registered method names, sorted — for diagnostics/error messages only. */
+    methodNames(): string[];
 }
 //# sourceMappingURL=protocol.d.ts.map

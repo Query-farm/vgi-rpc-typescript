@@ -219,6 +219,25 @@ export interface MethodDefinition {
     /** Human-readable parameter type names, surfaced via introspection. */
     paramTypes?: Record<string, string>;
 }
+/**
+ * Deferral point for observability records that cannot be completed at
+ * dispatch time.
+ *
+ * The on-wire size of a response is not known when a handler finishes:
+ * compression runs afterwards, on the way out of the transport. A record
+ * emitted at dispatch time could therefore only ever report the uncompressed
+ * body, which is the wrong number for anything that costs money. A transport
+ * that can measure the final body offers one of these; a hook hands its
+ * record over and the transport emits once the bytes exist.
+ *
+ * The cost is that a crash between dispatch and response loses that request's
+ * records. The alternative is a permanently wrong number.
+ */
+export interface AccessLogDeferral {
+    /** Queue `emit`, to be called with the final on-wire response size once the
+     *  body exists — or `undefined` when the size cannot be known. */
+    defer(emit: (responseBytes: number | undefined) => void): void;
+}
 /** Metadata passed to dispatch hooks before and after RPC method execution. */
 export interface DispatchInfo {
     /** RPC method name. */
@@ -246,12 +265,33 @@ export interface DispatchInfo {
     authenticated?: boolean;
     /** HTTP transport: remote IP:port. */
     remoteAddr?: string;
+    /** HTTP transport: the status code the response went out with. Absent on
+     *  transports that have no such thing (pipe, Unix socket, TCP). */
+    httpStatus?: number;
     /** Self-contained Arrow IPC stream of the request batch (unary + stream init only). */
     requestData?: Uint8Array;
     /** Stream lifecycle identifier (32-char lowercase hex); empty on unary. */
     streamId?: string;
     /** True when a stream was cancelled by the client. */
     cancelled?: boolean;
+    /** Verified claims of the authenticated principal. Emitters MUST redact
+     *  these by key before writing them — an access log outlives the token it
+     *  describes. */
+    claims?: Record<string, unknown>;
+    /** On-wire size of the request body as received, **before** decompression:
+     *  what the peer actually sent. Distinct from the logical Arrow byte counts
+     *  in {@link CallStatistics}, which measure what the worker processed and
+     *  routinely differ by orders of magnitude. */
+    requestBytes?: number;
+    /** Bytes uploaded to external storage during this call. These never appear
+     *  in the response body — only a pointer batch does — so they are invisible
+     *  to transport-level accounting and are frequently the largest of the
+     *  three byte figures. */
+    externalizedBytes?: number;
+    /** Where to hand a record that still needs the final on-wire response size.
+     *  Installed by transports that can measure it (HTTP); absent elsewhere, in
+     *  which case a hook emits inline. */
+    deferral?: AccessLogDeferral;
     /** Sticky session ID (24-char hex). Present only when the request was bound
      *  to a sticky session or the method opened/closed one. */
     sessionId?: string;

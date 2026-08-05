@@ -23,6 +23,7 @@
 import { AuthContext } from "../auth.js";
 import { constantTimeEqual, hmacSha256 } from "../util/web-crypto.js";
 import type { AuthenticateFn } from "./auth.js";
+import { AuthReason } from "./unauthorized.js";
 
 /** Header carrying the proof on the wire. */
 export const PROOF_HEADER = "VGI-Proxy-Proof";
@@ -82,6 +83,11 @@ export interface ProofConfig {
 /** A proof rejection carrying its reason code. */
 export class ProofError extends Error {
   readonly reason: string;
+
+  /** Reason code for the standardized 401, set only when the gate denies (see
+   *  {@link requireProxyProof}). Distinct from {@link reason}, which is the
+   *  verifier's internal diagnosis and must never reach a caller. */
+  vgiAuthReason?: AuthReason;
 
   constructor(reason: string, detail?: string) {
     super(detail ?? reason);
@@ -318,7 +324,12 @@ export function requireProxyProof(cfg: ProofConfig, inner?: AuthenticateFn): Aut
       if (required) {
         // Uniform message: the caller controls `kid`, so echoing any detail
         // would reflect attacker-supplied text back to them.
-        throw new ProofError(reason, "proxy proof required");
+        const denial = new ProofError(reason, "proxy proof required");
+        // Every outcome — absent, malformed, unknown key, expired, bad MAC,
+        // replayed — collapses onto the one code, so the 401 cannot be used
+        // to tell which check the caller tripped (proxy-proof spec §6).
+        denial.vgiAuthReason = AuthReason.ProxyRequired;
+        throw denial;
       }
       claims = { verified: "false", proxy: "", kid: "", origin_id: cfg.originId, reason };
     }

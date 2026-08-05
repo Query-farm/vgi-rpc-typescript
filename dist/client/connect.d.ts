@@ -29,6 +29,10 @@ export interface HttpRpcClient extends RpcClient {
      * connection/node — unlike `stream(...)` which would produce and discard a
      * fresh first turn before seeking.
      *
+     * `token` is the opaque blob from {@link HttpStreamSession.nextWithToken},
+     * which packs both the cursor and the call token; the resuming node may
+     * never have seen this stream's `/init`, so it needs both.
+     *
      * The returned session is positioned at `token`; the first `nextWithToken()`
      * (or iteration) issues the continuation. `outputSchema` is unused on the
      * producer-continuation path (each response's IPC stream carries its own

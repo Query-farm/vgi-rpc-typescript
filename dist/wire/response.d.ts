@@ -1,7 +1,8 @@
 import { type VgiBatch, type VgiSchema } from "../arrow/index.js";
 /**
  * Coerce values for Int64 schema fields from Number to BigInt.
- * Handles both single values and arrays. Returns a new record with coerced values.
+ * Handles both single values and arrays. Returns a new record with coerced
+ * values, or the original record untouched when no coercion is needed.
  */
 export declare function coerceInt64(schema: VgiSchema, values: Record<string, any>): Record<string, any>;
 /**
