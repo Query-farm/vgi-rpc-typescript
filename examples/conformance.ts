@@ -24,11 +24,17 @@
  *                         be 0 to let the OS auto-select. Prints
  *                         `TCP:<host>:<port>` once bound, then nothing more on
  *                         stdout. No auth/TLS — trusted networks only.
+ *   --unix <path>         Serve over an AF_UNIX socket instead of stdin/stdout.
+ *                         Prints `UNIX:<path>` once bound. The pipe and socket
+ *                         writers are different code (writeSync vs
+ *                         socket.write + drain), and AF_UNIX is where Bun's
+ *                         large-write behaviour diverges from TCP's, so
+ *                         `vgi-rpc-test --unix` is not redundant with --tcp.
  *
  * Run: bun run examples/conformance.ts
  */
 import { openSync } from "node:fs";
-import { AccessLogHook, FdSink, serveTcp, VgiRpcServer } from "../src/index.js";
+import { AccessLogHook, FdSink, serveTcp, serveUnix, VgiRpcServer } from "../src/index.js";
 import { protocol } from "./conformance-protocol.js";
 
 const args = process.argv.slice(2);
@@ -37,6 +43,7 @@ let accessLogSample = 1;
 let accessLogAsync = false;
 let accessLogDebug = false;
 let tcpArg: string | undefined;
+let unixArg: string | undefined;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--access-log" && i + 1 < args.length) {
     accessLogPath = args[++i];
@@ -48,6 +55,8 @@ for (let i = 0; i < args.length; i++) {
     accessLogDebug = true;
   } else if (args[i] === "--tcp" && i + 1 < args.length) {
     tcpArg = args[++i];
+  } else if (args[i] === "--unix" && i + 1 < args.length) {
+    unixArg = args[++i];
   }
 }
 
@@ -68,7 +77,16 @@ if (accessLogPath) {
   }
 }
 
-if (tcpArg !== undefined) {
+if (unixArg !== undefined) {
+  const handle = await serveUnix(protocol, {
+    unixPath: unixArg,
+    enableDescribe: true,
+    dispatchHook,
+    protocolVersion: protocol.protocolVersion,
+    idleTimeout: 0,
+  });
+  await handle.done;
+} else if (tcpArg !== undefined) {
   // Parse `[HOST:]PORT`, mirroring the Python `--tcp` parsing. Host defaults
   // to loopback. `serveTcp` prints `TCP:<host>:<port>` once bound.
   let host = "127.0.0.1";

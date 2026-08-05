@@ -1,6 +1,24 @@
 import type { Socket } from "node:net";
 import type { VgiBatch, VgiSchema } from "../arrow/index.js";
 /**
+ * Largest byte count handed to a single queueing writer — a Node `Socket`
+ * (unix/tcp) or a Bun `FileSink` (subprocess stdin on the client side).
+ *
+ * Well below `INT_MAX`, and deliberately far smaller than the fd clamp. Two
+ * separate reasons:
+ *
+ * - Above 2 GiB, macOS fails the underlying `send(2)` with `EINVAL` — the
+ *   socket analogue of the pipe's short count, except it surfaces as an
+ *   error rather than as silent truncation. Both writers hit it: measured on
+ *   `net.Socket` (Node and Bun) and on Bun's subprocess-stdin sink.
+ * - Bun degrades badly on large single writes long before that limit. On
+ *   macOS, one `socket.write` of a 100 MB buffer to an AF_UNIX peer moved
+ *   1.1 MB/s; the same bytes in 128 KiB pieces moved 1.7 GB/s, and Node was
+ *   unharmed by the chunking (1.3 GB/s either way). 512 MiB measured
+ *   1662/1744/1449/1041 MB/s at 64/128/256/512 KiB.
+ */
+export declare const MAX_STREAM_CHUNK: number;
+/**
  * A browser/worker-friendly byte sink: `write` receives each fully-serialized
  * chunk of response bytes (a schema msg, a batch, or the EOS marker) and must
  * deliver them in order. Used by the in-browser SAB (`worker:`) transport, which

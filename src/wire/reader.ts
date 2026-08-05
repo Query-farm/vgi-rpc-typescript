@@ -10,6 +10,48 @@ export interface StreamMessage {
 }
 
 /**
+ * Largest byte count asked of a single Node `Readable.read(n)`.
+ *
+ * arrow-js's Node-stream adapter asks for a whole IPC message body in one
+ * call. Both Node and Bun throw `ERR_OUT_OF_RANGE` from `read(n)` once `n`
+ * exceeds their shared 1 GiB `MAX_HWM`, so a record batch with a body over
+ * 1 GiB dies before a single byte is decoded — the read-side twin of the
+ * write clamp in ./writer.ts. The adapter already loops until it has the
+ * bytes it asked for, so answering with less is absorbed; it only ever
+ * mis-handles being answered with *more*.
+ */
+export const MAX_READ_CHUNK = 1 << 26; // 64 MiB
+
+/** True for a Node `Readable`; a web `ReadableStream` has no `pipe`/`read`. */
+function isNodeReadable(input: unknown): boolean {
+  const s = input as { read?: unknown; pipe?: unknown } | null;
+  return typeof s?.read === "function" && typeof s?.pipe === "function";
+}
+
+/**
+ * Wrap a Node `Readable` so `read(n)` never asks for more than
+ * {@link MAX_READ_CHUNK}. Everything else passes through untouched, including
+ * the `read`/`pipe`/`readable` trio arrow-js sniffs to pick this adapter.
+ */
+export function clampReads<T extends object>(stream: T): T {
+  return new Proxy(stream, {
+    get(target, prop) {
+      if (prop === "read") {
+        return (size?: number) =>
+          (target as { read(n?: number): unknown }).read(
+            typeof size === "number" ? Math.min(size, MAX_READ_CHUNK) : size,
+          );
+      }
+      // `target` as the receiver, not the proxy: a getter on a Node stream
+      // runs with `this` bound to the real object, so private fields and
+      // internal state resolve as they would without the wrapper.
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
  * Reads sequential IPC streams from a byte source (e.g., process.stdin).
  * Uses autoDestroy: false + reset/open pattern to read multiple streams
  * from the same underlying byte source.
@@ -25,7 +67,8 @@ export class IpcStreamReader {
   }
 
   static async create(input: ReadableStream<Uint8Array> | NodeJS.ReadableStream): Promise<IpcStreamReader> {
-    const reader = await RecordBatchReader.from(input as any);
+    const source = isNodeReadable(input) ? clampReads(input as object) : input;
+    const reader = await RecordBatchReader.from(source as any);
     await reader.open({ autoDestroy: false });
     if (reader.closed) {
       throw new Error("Input stream closed before first IPC message");

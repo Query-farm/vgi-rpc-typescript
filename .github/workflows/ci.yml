@@ -35,7 +35,7 @@ jobs:
         run: bun install && bun run postinstall
 
       - name: Run unit tests
-        run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts
+        run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/large-payload.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts
 
       # Batch metadata is encoded differently per backend, and the bug this
       # guards against was flechette-only: its encoder needs an explicit
@@ -202,13 +202,21 @@ jobs:
         # 0.37.0: vgi-rpc-test --require-request-data, used by the access-log
         #   conformance step below. Below this floor the flag is unrecognised
         #   and the step fails on argument parsing rather than on the log.
+        # 0.42.0: the large_payload group, with echo_binary_over_int32_max
+        #   ungated — it runs on every invocation below, no env var. Note that
+        #   the *transport* half of what it guards is invisible on this runner:
+        #   Linux caps a single transfer at 0x7ffff000 and returns a short
+        #   count that any correct loop absorbs, so the macOS pipe truncation
+        #   and socket EINVAL only show up when the suite is run on a Mac. What
+        #   this runner does catch is the Arrow encoder half, which is
+        #   platform-independent.
         # The `conformance` extra is the only thing that supplies jsonschema,
         # which vgi_rpc.access_log_conformance imports at module level. That
         # module is pulled in by a deferred import inside _validate_access_log,
         # so omitting the extra fails *only* the access-log step below, with an
         # ImportError that looks nothing like the contract violation it exists
         # to catch.
-        run: pip install "vgi-rpc[http,cli,external,conformance]>=0.37.0" pytest
+        run: pip install "vgi-rpc[http,cli,external,conformance]>=0.42.0" pytest
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v

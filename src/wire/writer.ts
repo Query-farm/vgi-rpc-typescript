@@ -37,6 +37,37 @@ function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?:
 }
 
 /**
+ * Largest byte count handed to a single `fs.writeSync`.
+ *
+ * Both Node and Bun reject a `length` above `INT32_MAX` outright
+ * (`ERR_OUT_OF_RANGE`), and macOS caps what a single `write(2)` on a pipe
+ * will accept at `INT_MAX` anyway. Looping on the returned count is therefore
+ * not sufficient on its own: the call that would have reported the short
+ * count never happens, it throws. Clamping is the other half. `subarray` is
+ * a view, so the only cost of chunking is one extra syscall per gigabyte.
+ */
+const MAX_WRITE_CHUNK = 1 << 30; // 1 GiB
+
+/**
+ * Largest byte count handed to a single queueing writer — a Node `Socket`
+ * (unix/tcp) or a Bun `FileSink` (subprocess stdin on the client side).
+ *
+ * Well below `INT_MAX`, and deliberately far smaller than the fd clamp. Two
+ * separate reasons:
+ *
+ * - Above 2 GiB, macOS fails the underlying `send(2)` with `EINVAL` — the
+ *   socket analogue of the pipe's short count, except it surfaces as an
+ *   error rather than as silent truncation. Both writers hit it: measured on
+ *   `net.Socket` (Node and Bun) and on Bun's subprocess-stdin sink.
+ * - Bun degrades badly on large single writes long before that limit. On
+ *   macOS, one `socket.write` of a 100 MB buffer to an AF_UNIX peer moved
+ *   1.1 MB/s; the same bytes in 128 KiB pieces moved 1.7 GB/s, and Node was
+ *   unharmed by the chunking (1.3 GB/s either way). 512 MiB measured
+ *   1662/1744/1449/1041 MB/s at 64/128/256/512 KiB.
+ */
+export const MAX_STREAM_CHUNK = 128 * 1024;
+
+/**
  * Write all bytes to a file descriptor, looping on partial writes.
  *
  * Stdio path only. The fd here is a pipe (typically stdout) inherited from
@@ -53,7 +84,7 @@ function writeAll(fd: number, data: Uint8Array): void {
   let spins = 0;
   while (offset < data.length) {
     try {
-      const written = writeSync(fd, data, offset, data.length - offset);
+      const written = writeSync(fd, data, offset, Math.min(data.length - offset, MAX_WRITE_CHUNK));
       if (written <= 0) throw new Error(`writeSync returned ${written}`);
       offset += written;
       spins = 0;
@@ -88,10 +119,25 @@ function writeAll(fd: number, data: Uint8Array): void {
  * background. Without this yield, a slow consumer on connection A would
  * freeze every other connection's handler on the shared event loop.
  *
+ * The buffer is offered in {@link MAX_STREAM_CHUNK} pieces rather than whole:
+ * a single `send(2)` over 2 GiB fails with `EINVAL` on macOS, and Bun is
+ * pathologically slow on large single writes well below that.
+ *
  * Resolves cleanly on socket close/error so the caller's try/finally can
  * unwind without dangling listeners.
  */
 async function socketWriteAll(socket: Socket, data: Uint8Array): Promise<void> {
+  // `do`, not `while`: an empty payload still goes through one write so the
+  // closed-socket precondition is checked exactly as it was before chunking.
+  let offset = 0;
+  do {
+    const end = Math.min(offset + MAX_STREAM_CHUNK, data.length);
+    await socketWriteChunk(socket, data.subarray(offset, end));
+    offset = end;
+  } while (offset < data.length);
+}
+
+async function socketWriteChunk(socket: Socket, data: Uint8Array): Promise<void> {
   if (socket.destroyed || socket.writableEnded) {
     throw new Error("socketWriteAll: socket is already closed");
   }

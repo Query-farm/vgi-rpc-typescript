@@ -15,6 +15,7 @@ import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { serializeIpcStream } from "../http/common.js";
 import { IpcStreamReader } from "../wire/reader.js";
+import { MAX_STREAM_CHUNK } from "../wire/writer.js";
 import type { RpcClient } from "./connect.js";
 import { type MethodInfo, parseDescribeResponse, type ServiceDescription } from "./introspect.js";
 import { buildRequestIpc, dispatchLogOrError, extractBatchRows, inferArrowType } from "./ipc.js";
@@ -413,8 +414,19 @@ export function pipeConnect(
   let _drainPromise: Promise<void> | null = null;
   let closed = false;
 
+  // Offer the bytes in MAX_STREAM_CHUNK pieces. Every writable behind this —
+  // Bun's subprocess-stdin FileSink, a `net.Socket` (tcp/unix) — bottoms out
+  // in one `send(2)`, which fails with EINVAL on macOS once a single call
+  // carries more than 2 GiB. `subarray` is a view, so this costs nothing for
+  // the ordinary small request. `do`, not `while`, so a zero-length write
+  // still reaches the writable as it did before.
   const writeFn: WriteFn = (bytes: Uint8Array) => {
-    writable.write(bytes);
+    let offset = 0;
+    do {
+      const end = Math.min(offset + MAX_STREAM_CHUNK, bytes.length);
+      writable.write(bytes.subarray(offset, end));
+      offset = end;
+    } while (offset < bytes.length);
     writable.flush?.();
   };
 

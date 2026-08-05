@@ -1894,6 +1894,22 @@ import {
 
 // src/wire/reader.ts
 import { RecordBatchReader as RecordBatchReader2 } from "@query-farm/apache-arrow";
+var MAX_READ_CHUNK = 1 << 26;
+function isNodeReadable(input) {
+  const s = input;
+  return typeof s?.read === "function" && typeof s?.pipe === "function";
+}
+function clampReads(stream) {
+  return new Proxy(stream, {
+    get(target, prop) {
+      if (prop === "read") {
+        return (size) => target.read(typeof size === "number" ? Math.min(size, MAX_READ_CHUNK) : size);
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
 
 class IpcStreamReader {
   reader;
@@ -1903,7 +1919,8 @@ class IpcStreamReader {
     this.reader = reader;
   }
   static async create(input) {
-    const reader = await RecordBatchReader2.from(input);
+    const source = isNodeReadable(input) ? clampReads(input) : input;
+    const reader = await RecordBatchReader2.from(source);
     await reader.open({ autoDestroy: false });
     if (reader.closed) {
       throw new Error("Input stream closed before first IPC message");
@@ -3018,6 +3035,154 @@ import {
   Struct as Struct2,
   vectorFromArray as vectorFromArray2
 } from "@query-farm/apache-arrow";
+
+// src/wire/writer.ts
+var STDOUT_FD = 1;
+var RESOLVED = Promise.resolve();
+var _NODE_FS_MOD2 = "node:fs";
+var _writeSync = null;
+function _loadWriteSync2() {
+  if (_writeSync)
+    return _writeSync;
+  const req = import.meta.require ?? globalThis.require ?? null;
+  if (!req) {
+    throw new Error("IpcStreamWriter requires Bun or Node.js CJS for sync node:fs.writeSync. " + "Subprocess transport is not available in this runtime.");
+  }
+  const fs = req(_NODE_FS_MOD2);
+  _writeSync = fs.writeSync.bind(fs);
+  return _writeSync;
+}
+var MAX_WRITE_CHUNK = 1 << 30;
+var MAX_STREAM_CHUNK = 128 * 1024;
+function writeAll(fd, data) {
+  const writeSync = _loadWriteSync2();
+  let offset = 0;
+  let spins = 0;
+  while (offset < data.length) {
+    try {
+      const written = writeSync(fd, data, offset, Math.min(data.length - offset, MAX_WRITE_CHUNK));
+      if (written <= 0)
+        throw new Error(`writeSync returned ${written}`);
+      offset += written;
+      spins = 0;
+    } catch (e) {
+      if (e.code === "EAGAIN") {
+        if (++spins < 8192)
+          continue;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        spins = 0;
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+async function socketWriteAll(socket, data) {
+  let offset = 0;
+  do {
+    const end = Math.min(offset + MAX_STREAM_CHUNK, data.length);
+    await socketWriteChunk(socket, data.subarray(offset, end));
+    offset = end;
+  } while (offset < data.length);
+}
+async function socketWriteChunk(socket, data) {
+  if (socket.destroyed || socket.writableEnded) {
+    throw new Error("socketWriteAll: socket is already closed");
+  }
+  const ok = socket.write(data);
+  if (ok)
+    return;
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      socket.off("drain", onDrain);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err2) => {
+      cleanup();
+      reject(err2);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    socket.once("drain", onDrain);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+  });
+}
+
+class IpcStreamWriter {
+  target;
+  constructor(fdOrSocketOrSink = STDOUT_FD) {
+    if (typeof fdOrSocketOrSink === "number") {
+      this.target = { kind: "fd", fd: fdOrSocketOrSink };
+    } else if (typeof fdOrSocketOrSink.write === "function" && !("writable" in fdOrSocketOrSink)) {
+      this.target = { kind: "sink", sink: fdOrSocketOrSink };
+    } else {
+      this.target = { kind: "socket", socket: fdOrSocketOrSink };
+    }
+  }
+  async writeStream(schema2, batches) {
+    const bytes = serializeBatches(schema2, batches);
+    if (this.target.kind === "fd") {
+      writeAll(this.target.fd, bytes);
+    } else if (this.target.kind === "sink") {
+      await this.target.sink.write(bytes);
+    } else {
+      await socketWriteAll(this.target.socket, bytes);
+    }
+  }
+  openStream(schema2) {
+    return new IncrementalStream(this.target, schema2);
+  }
+}
+
+class IncrementalStream {
+  encoder;
+  target;
+  closed = false;
+  writeChain = Promise.resolve();
+  constructor(target, schema2) {
+    this.target = target;
+    this.encoder = createIncrementalEncoder(schema2);
+    this.enqueue(this.encoder.start());
+  }
+  async write(batch) {
+    if (this.closed)
+      throw new Error("Stream already closed");
+    return this.enqueue(this.encoder.writeBatch(batch));
+  }
+  async close() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    return this.enqueue(this.encoder.finish());
+  }
+  enqueue(bytes) {
+    const target = this.target;
+    if (target.kind === "fd") {
+      writeAll(target.fd, bytes);
+      return RESOLVED;
+    }
+    const next = this.writeChain.then(() => {
+      if (target.kind === "sink") {
+        return target.sink.write(bytes);
+      }
+      return socketWriteAll(target.socket, bytes);
+    });
+    this.writeChain = next.catch(() => {
+      return;
+    });
+    return next;
+  }
+}
+
+// src/client/pipe.ts
 class PipeIncrementalWriter {
   writer;
   writeFn;
@@ -3264,7 +3429,12 @@ function pipeConnect(readable, writable, options) {
   let _drainPromise = null;
   let closed = false;
   const writeFn = (bytes) => {
-    writable.write(bytes);
+    let offset = 0;
+    do {
+      const end = Math.min(offset + MAX_STREAM_CHUNK, bytes.length);
+      writable.write(bytes.subarray(offset, end));
+      offset = end;
+    } while (offset < bytes.length);
     writable.flush?.();
   };
   async function ensureReader() {
@@ -9451,142 +9621,6 @@ async function dispatchUnary(method, params, writer, serverId, requestId, extern
   }
 }
 
-// src/wire/writer.ts
-var STDOUT_FD = 1;
-var RESOLVED = Promise.resolve();
-var _NODE_FS_MOD2 = "node:fs";
-var _writeSync = null;
-function _loadWriteSync2() {
-  if (_writeSync)
-    return _writeSync;
-  const req = import.meta.require ?? globalThis.require ?? null;
-  if (!req) {
-    throw new Error("IpcStreamWriter requires Bun or Node.js CJS for sync node:fs.writeSync. " + "Subprocess transport is not available in this runtime.");
-  }
-  const fs = req(_NODE_FS_MOD2);
-  _writeSync = fs.writeSync.bind(fs);
-  return _writeSync;
-}
-function writeAll(fd, data) {
-  const writeSync = _loadWriteSync2();
-  let offset = 0;
-  let spins = 0;
-  while (offset < data.length) {
-    try {
-      const written = writeSync(fd, data, offset, data.length - offset);
-      if (written <= 0)
-        throw new Error(`writeSync returned ${written}`);
-      offset += written;
-      spins = 0;
-    } catch (e) {
-      if (e.code === "EAGAIN") {
-        if (++spins < 8192)
-          continue;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
-        spins = 0;
-        continue;
-      }
-      throw e;
-    }
-  }
-}
-async function socketWriteAll(socket, data) {
-  if (socket.destroyed || socket.writableEnded) {
-    throw new Error("socketWriteAll: socket is already closed");
-  }
-  const ok = socket.write(data);
-  if (ok)
-    return;
-  await new Promise((resolve, reject) => {
-    const cleanup = () => {
-      socket.off("drain", onDrain);
-      socket.off("error", onError);
-      socket.off("close", onClose);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err2) => {
-      cleanup();
-      reject(err2);
-    };
-    const onClose = () => {
-      cleanup();
-      resolve();
-    };
-    socket.once("drain", onDrain);
-    socket.once("error", onError);
-    socket.once("close", onClose);
-  });
-}
-
-class IpcStreamWriter {
-  target;
-  constructor(fdOrSocketOrSink = STDOUT_FD) {
-    if (typeof fdOrSocketOrSink === "number") {
-      this.target = { kind: "fd", fd: fdOrSocketOrSink };
-    } else if (typeof fdOrSocketOrSink.write === "function" && !("writable" in fdOrSocketOrSink)) {
-      this.target = { kind: "sink", sink: fdOrSocketOrSink };
-    } else {
-      this.target = { kind: "socket", socket: fdOrSocketOrSink };
-    }
-  }
-  async writeStream(schema2, batches) {
-    const bytes2 = serializeBatches(schema2, batches);
-    if (this.target.kind === "fd") {
-      writeAll(this.target.fd, bytes2);
-    } else if (this.target.kind === "sink") {
-      await this.target.sink.write(bytes2);
-    } else {
-      await socketWriteAll(this.target.socket, bytes2);
-    }
-  }
-  openStream(schema2) {
-    return new IncrementalStream(this.target, schema2);
-  }
-}
-
-class IncrementalStream {
-  encoder;
-  target;
-  closed = false;
-  writeChain = Promise.resolve();
-  constructor(target, schema2) {
-    this.target = target;
-    this.encoder = createIncrementalEncoder(schema2);
-    this.enqueue(this.encoder.start());
-  }
-  async write(batch) {
-    if (this.closed)
-      throw new Error("Stream already closed");
-    return this.enqueue(this.encoder.writeBatch(batch));
-  }
-  async close() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    return this.enqueue(this.encoder.finish());
-  }
-  enqueue(bytes2) {
-    const target = this.target;
-    if (target.kind === "fd") {
-      writeAll(target.fd, bytes2);
-      return RESOLVED;
-    }
-    const next = this.writeChain.then(() => {
-      if (target.kind === "sink") {
-        return target.sink.write(bytes2);
-      }
-      return socketWriteAll(target.socket, bytes2);
-    });
-    this.writeChain = next.catch(() => {
-      return;
-    });
-    return next;
-  }
-}
-
 // src/server.ts
 var EMPTY_SCHEMA5 = schema([]);
 function randomStreamId() {
@@ -9993,4 +10027,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=6892DDBA67B3533364756E2164756E21
+//# debugId=1B67D8BEA75FD63B64756E2164756E21
