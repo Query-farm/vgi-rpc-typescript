@@ -138,9 +138,14 @@ for (let i = 0; i < args.length; i++) {
 // Strict-cap mode: tight body + external caps so the http_response_cap.*
 // conformance tests can deliberately overshoot. Defaults to 1 MiB matching
 // Python's tests/serve_conformance_http_strict.py.
+// Passing either cap flag on its own also selects the real-byte-cap mode, so a
+// fixture can pin ONE cap tight and leave the other generous — which is what
+// the externalized-cap group needs: with both tight, the body cap fails first
+// and the group proves nothing about the external channel.
 const STRICT_DEFAULT = 1024 * 1024;
-const maxResponseBytes = maxResponseBytesArg ?? (strictMode ? STRICT_DEFAULT : undefined);
-const maxExternalizedResponseBytes = maxExternalizedResponseBytesArg ?? (strictMode ? STRICT_DEFAULT : undefined);
+const capsConfigured = strictMode || maxResponseBytesArg !== undefined || maxExternalizedResponseBytesArg !== undefined;
+const maxResponseBytes = maxResponseBytesArg ?? STRICT_DEFAULT;
+const maxExternalizedResponseBytes = maxExternalizedResponseBytesArg ?? STRICT_DEFAULT;
 // Inline-request cap defaults to the externalize threshold for backward compat
 // with previous worker invocations. The ``externalize-always`` variant passes
 // both flags explicitly so server-side externalization fires on every batch
@@ -346,10 +351,10 @@ const handler = createHttpHandler(protocol, {
   // every produce cycle, matching the Python reference server's default.
   // In strict-cap mode we use a real byte cap instead so the strict-fail
   // tests can deliberately overshoot.
-  ...(strictMode
+  ...(capsConfigured
     ? {
-        maxResponseBytes: maxResponseBytes!,
-        maxExternalizedResponseBytes: maxExternalizedResponseBytes!,
+        maxResponseBytes,
+        maxExternalizedResponseBytes,
       }
     : { maxStreamResponseBytes: 1 }),
   ...(dispatchHook ? { dispatchHook } : {}),

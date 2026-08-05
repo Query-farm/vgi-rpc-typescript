@@ -438,6 +438,40 @@ def conformance_http_strict_cap_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_externalized_cap_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Bun conformance HTTP server whose *external-channel* cap is the one that bites.
+
+    Backs the shared ``TestExternalizedResponseCap`` group.  Two settings make
+    this fixture mean what it says:
+
+    * ``--max-externalized-response-bytes`` is tight (64 KiB), so an
+      externalised response overshoots it.
+    * ``--max-response-bytes`` is deliberately *generous* (8 MiB).  An
+      externalised payload leaves only a pointer batch on the wire, so the body
+      cap must never be what fails here — with both tight the group would pass
+      while proving nothing about the external channel.
+
+    ``--externalize-threshold`` stays at the worker's 4 KiB default so a modest
+    payload still externalises, which is what lets the under-cap control travel
+    the same channel without tripping the cap.
+    """
+    proc, port = _start_http_server(
+        [
+            *BUN_HTTP_WORKER,
+            "--fake-storage",
+            conformance_fake_storage,
+            "--max-externalized-response-bytes",
+            str(64 * 1024),
+            "--max-response-bytes",
+            str(8 * 1024 * 1024),
+        ]
+    )
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def ts_node_http_port() -> Iterator[int]:
     """Start Node.js conformance HTTP server."""
     if not shutil.which("node"):
