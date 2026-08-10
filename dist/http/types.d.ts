@@ -96,12 +96,12 @@ export interface HttpHandlerOptions {
     onServeStart?: ServeStartHook;
     /** Enable HTML landing page at GET {prefix}/. Default: true. */
     enableLandingPage?: boolean;
-    /** VGI landing surface producer. When set, `GET {prefix}/` serves the shared
-     *  vendored `landing.html`, and `GET {prefix}/describe.json` +
-     *  `GET {prefix}/describe/{catalog}/{schema}/{table}.json` are served from the
-     *  worker's catalog introspection (see {@link LandingDescribeProvider}). This
-     *  replaces the generic styled landing page for VGI workers. */
-    landingDescribe?: LandingDescribeProvider;
+    /** Activates the VGI landing surface. When set, `GET {prefix}/` serves the
+     *  shared vendored `landing.html` (plus a JSON status document carrying this
+     *  identity) and `GET {prefix}/vgi-client.js` serves the browser build of the
+     *  VGI client the page reads the catalog with. Replaces the generic styled
+     *  landing page for VGI workers. See {@link LandingInfo}. */
+    landingInfo?: LandingInfo;
     /** Enable HTML describe/API reference page at GET {prefix}/describe. Default: true. */
     enableDescribePage?: boolean;
     /** Enable HTML 404 page for unmatched GET routes. Default: true. */
@@ -174,30 +174,23 @@ export interface HttpHandlerOptions {
     _onStickyHandle?: (handle: import("./sticky.js").DrainHandle) => void;
 }
 /**
- * Producer for the standardized VGI landing surface (see
- * `vgi/docs/http-landing-contract.md`). A VGI worker supplies this so the
- * catalog-agnostic HTTP handler can serve `GET {prefix}/describe.json` and the
- * lazy per-object column endpoint from the worker's own catalog introspection.
+ * Worker identity for the standardized VGI landing surface.
  *
- * When set, `GET {prefix}/` serves the shared vendored `landing.html` instead of
- * the generic styled endpoint page, and the describe JSON routes become active.
+ * The shared `landing.html` reads catalog metadata by speaking the VGI protocol
+ * through the client bundle the worker serves beside it, so nothing about the
+ * catalog belongs here. What the protocol has no method for — which worker this
+ * is, what it is called, what version it runs — rides on the JSON status
+ * document at `GET {prefix}/?format=json`.
  */
-export interface LandingDescribeProvider {
-    /**
-     * Build the full `describe.json` contract document. The handler passes the
-     * runtime-derived `serverId` and whether OAuth/PKCE is active; the provider
-     * fills in `worker`, `catalogs`, etc. Return value is JSON-serialized as-is.
-     */
-    describe(ctx: {
-        serverId: string;
-        oauth: boolean;
-    }): unknown | Promise<unknown>;
-    /**
-     * Lazy per-object columns for
-     * `GET {prefix}/describe/{catalog}/{schema}/{table}.json`. Return `null` when
-     * the object is not found (the handler responds 404).
-     */
-    columns(catalog: string, schema: string, table: string): unknown | null | Promise<unknown | null>;
+export interface LandingInfo {
+    /** Worker name shown as the page heading, e.g. "ishares". */
+    name: string;
+    /** One-line description shown under the heading. */
+    doc?: string;
+    /** Worker version string shown in the footer. */
+    version?: string;
+    /** Override the Cupola base URL the "Explore" links point at. */
+    cupolaBase?: string;
 }
 /** Serializer for stream state objects stored in state tokens. */
 export interface StateSerializer {

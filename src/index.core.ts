@@ -83,7 +83,7 @@ export {
   type JwtAuthenticateOptions,
   jsonStateSerializer,
   jwtAuthenticate,
-  type LandingDescribeProvider,
+  type LandingInfo,
   MAX_UPLOAD_URL_COUNT,
   mtlsAuthenticate,
   mtlsAuthenticateFingerprint,

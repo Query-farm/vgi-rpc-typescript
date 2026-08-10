@@ -47,7 +47,7 @@ export {
   verifyProof,
 } from "./proof.js";
 export { type UnpackedToken, unpackStateToken } from "./token.js";
-export type { HttpHandlerOptions, LandingDescribeProvider, StateSerializer } from "./types.js";
+export type { HttpHandlerOptions, LandingInfo, StateSerializer } from "./types.js";
 export { jsonStateSerializer } from "./types.js";
 export {
   AUTH_PROXY_REQUIRED_HEADER,
