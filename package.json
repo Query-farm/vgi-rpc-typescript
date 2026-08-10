@@ -1,6 +1,6 @@
 {
   "name": "@query-farm/vgi-rpc",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "license": "Apache-2.0",
   "homepage": "https://vgi-rpc-typescript.query.farm",
   "repository": {
@@ -15,9 +15,9 @@
     ".": {
       "workerd": "./src/index.workerd.ts",
       "worker": "./src/index.workerd.ts",
-      "browser": "./src/index.workerd.ts",
       "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
+      "browser": "./dist/browser/index.workerd.js",
       "import": "./dist/index.js"
     },
     "./otel": {
@@ -40,11 +40,13 @@
     "dist",
     "src"
   ],
+  "//imports": "`browser` must resolve to the JS emit under dist/browser, not ./src — the browser export condition serves transpiled JS and a `#vgi-rpc-arrow` specifier inside it is re-resolved with the consumer's conditions, so pointing it at a .ts file would drag TypeScript back into a loader-less bundler. Keep `browser` AFTER `workerd`/`worker`: conditions match in key order and a workerd build sets both, so it must reach flechette first.",
   "imports": {
     "#vgi-rpc-arrow": {
       "flechette": "./src/arrow/impl-flechette/index.ts",
       "workerd": "./src/arrow/impl-flechette/index.ts",
       "worker": "./src/arrow/impl-flechette/index.ts",
+      "browser": "./dist/browser/arrow/impl-arrowjs/index.js",
       "default": "./src/arrow/impl-arrowjs/index.ts"
     }
   },
@@ -90,8 +92,9 @@
   "scripts": {
     "build": "bun run build:types && bun run build:js",
     "build:types": "bunx tsc -p tsconfig.build.json",
-    "build:js": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
-    "postinstall": "cd node_modules/@query-farm/apache-arrow && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.main='src/Arrow.node.ts';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n')\"",
+    "build:js": "bun run build:js:node && bun run build:js:browser",
+    "build:js:node": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
+    "build:js:browser": "bunx tsc -p tsconfig.browser.json",
     "test": "bun test",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

@@ -15,7 +15,6 @@ all: build ## Install deps and build (default)
 
 node_modules: package.json
 	bun install
-	bun run postinstall
 	@touch $@
 
 build: node_modules dist/index.js dist/index.d.ts ## Build JS bundle and type declarations

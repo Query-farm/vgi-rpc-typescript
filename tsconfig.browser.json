@@ -1,0 +1,25 @@
+// Per-module JS emit for the `browser` export condition.
+//
+// Browser bundlers get transpiled JS that MIRRORS the source module graph, one
+// output file per source file. That matters for size: a single pre-bundled file
+// cannot be tree-shaken effectively, and a client-only consumer would drag in
+// the whole server surface (auth, compression, transports). Measured on a
+// VgiClient-only app, the mirrored emit bundles to ~76 KB gzip versus ~367 KB
+// for a monolithic pre-bundle.
+//
+// Why not point `browser` at ./src directly? Webpack's built-in TypeScript
+// support is strip-only, so it rejects `export enum` in src/index.core.ts.
+// Shipping JS keeps webpack (and any loader-less bundler) working.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist/browser",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": true,
+    "emitDeclarationOnly": false,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}

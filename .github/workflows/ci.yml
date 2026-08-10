@@ -17,7 +17,7 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install && bun run postinstall
+        run: bun install
 
       - name: Lint and format check
         run: bunx biome check .
@@ -32,7 +32,7 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install && bun run postinstall
+        run: bun install
 
       - name: Run unit tests
         run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/large-payload.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts
@@ -58,7 +58,7 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install && bun run postinstall
+        run: bun install
 
       - name: Build
         run: bun run build
@@ -82,7 +82,7 @@ jobs:
           node-version: "22"
 
       - name: Install root dependencies
-        run: bun install && bun run postinstall
+        run: bun install
 
       - name: Install docs dependencies
         run: cd docs && npm install
@@ -111,7 +111,7 @@ jobs:
           deno-version: latest
 
       - name: Install dependencies
-        run: bun install && bun run postinstall
+        run: bun install
 
       - name: Build
         run: bun run build
@@ -142,7 +142,7 @@ jobs:
           python-version: "3.14"
 
       - name: Install JS dependencies
-        run: bun install && bun run postinstall
+        run: bun install
 
       - name: Install Python dependencies
         run: pip install jsonschema
@@ -187,7 +187,7 @@ jobs:
           python-version: "3.14"
 
       - name: Install JS dependencies
-        run: bun install && bun run postinstall
+        run: bun install
 
       - name: Install Python dependencies
         # Keep this floor at the release carrying the newest conformance group

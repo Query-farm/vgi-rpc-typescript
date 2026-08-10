@@ -27,7 +27,7 @@ jobs:
       # The generated API reference (starlight-typedoc) resolves the source
       # graph through the root node_modules, so install root deps first.
       - name: Install root dependencies
-        run: bun install && bun run postinstall
+        run: bun install
       - run: npm ci
         working-directory: docs
       - run: npm run build
