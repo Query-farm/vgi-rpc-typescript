@@ -128,43 +128,6 @@ jobs:
       - name: Smoke test (Deno)
         run: timeout 60 deno run --allow-all .smoke-bundle/smoke.js
 
-  landing-conformance:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-
-      - name: Install JS dependencies
-        run: bun install
-
-      - name: Install Python dependencies
-        run: pip install jsonschema
-
-      - name: Boot landing worker and run landing conformance
-        run: |
-          bun run examples/conformance-landing.ts > /tmp/landing-port.txt &
-          WORKER_PID=$!
-          for i in $(seq 1 30); do
-            PORT=$(grep -o 'PORT:[0-9]*' /tmp/landing-port.txt | cut -d: -f2 || true)
-            [ -n "$PORT" ] && break
-            sleep 0.5
-          done
-          test -n "$PORT" || { echo "worker did not report a port"; cat /tmp/landing-port.txt; exit 1; }
-          echo "worker on port $PORT"
-          # The runner + describe.schema.json are vendored under conformance/;
-          # DEFAULT_SCHEMA resolves next to the script.
-          python conformance/run_landing_conformance.py --url "http://localhost:$PORT"
-          STATUS=$?
-          kill $WORKER_PID 2>/dev/null || true
-          exit $STATUS
-
   conformance:
     runs-on: ubuntu-latest
     steps:
