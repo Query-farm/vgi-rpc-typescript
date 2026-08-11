@@ -36,6 +36,24 @@ import {
 } from "./token.js";
 
 /**
+ * Is `VGI_DISPATCH_DEBUG` tracing on?
+ *
+ * Read through `globalThis` because this module also runs on **workerd**,
+ * which has no `process` binding at all. A bare `process.env` here is not a
+ * silent undefined — it is a ReferenceError thrown mid-dispatch. These checks
+ * sit on the exchange path, so it took down every table-in-out and blended
+ * function on Cloudflare Workers while leaving plain table functions (which
+ * never reach this path) working.
+ *
+ * Deliberately a function, not a module-level constant, so toggling the
+ * variable at runtime still works off workerd.
+ */
+function dispatchDebug(): boolean {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return Boolean(env?.VGI_DISPATCH_DEBUG);
+}
+
+/**
  * Bounded, per-process cache of authenticated `callId` -> the stream's fixed
  * half. A pure accelerator: a miss reopens the call token the client echoed,
  * so correctness never depends on a hit. Keyed on the callId recovered from
@@ -550,7 +568,7 @@ export async function httpDispatchStreamExchange(
     inputSchema = state?.__inputSchema ?? method.inputSchema ?? EMPTY_SCHEMA;
   }
   const effectiveProducer = state?.__isProducer ?? isProducer;
-  if (process.env.VGI_DISPATCH_DEBUG)
+  if (dispatchDebug())
     console.error(
       `[httpDispatchStreamExchange] method=${method.name} effectiveProducer=${effectiveProducer} stateKeys=${Object.keys(state || {})}`,
     );
@@ -636,7 +654,7 @@ export async function httpDispatchStreamExchange(
         await method.producerFn!(state, out);
       }
     } catch (error: any) {
-      if (process.env.VGI_DISPATCH_DEBUG)
+      if (dispatchDebug())
         console.error(
           `[httpDispatchStreamExchange] exchange handler error:`,
           error.message,
@@ -796,7 +814,7 @@ async function produceStreamResponse(
       }
       firstTick = false;
     } catch (error: any) {
-      if (process.env.VGI_DISPATCH_DEBUG)
+      if (dispatchDebug())
         console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));
       allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
       producerError = error instanceof Error ? error : new Error(String(error));

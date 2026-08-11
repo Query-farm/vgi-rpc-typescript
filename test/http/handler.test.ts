@@ -691,6 +691,75 @@ describe("HTTP Handler", () => {
 });
 
 // ---------------------------------------------------------------------------
+// workerd has no `process` binding
+// ---------------------------------------------------------------------------
+
+describe("exchange path without a `process` global", () => {
+  const BASE = "http://localhost:9999";
+
+  /** Run `fn` with `globalThis.process` removed, as on workerd.
+   *
+   * The `await` inside the try is load-bearing: dispatch is asynchronous, so a
+   * wrapper that restored `process` the moment `fn()` handed back its promise
+   * would put the global back before the code under test ever read it — and
+   * the test would pass against the exact bug it exists to catch. */
+  async function withoutProcess<T>(fn: () => Promise<T>): Promise<T> {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "process");
+    delete (globalThis as { process?: unknown }).process;
+    try {
+      return await fn();
+    } finally {
+      if (original) Object.defineProperty(globalThis, "process", original);
+    }
+  }
+
+  // A bare `process.env` read on this path is a ReferenceError on workerd, not
+  // an undefined. It took down every table-in-out and blended function on
+  // Cloudflare Workers while plain table functions kept working, because only
+  // these routes reach the exchange dispatcher.
+  test("init + exchange succeed with no `process` binding", async () => {
+    const handler = createHttpHandler(makeTestProtocol(), { prefix: "/vgi", serverId: "test-server" });
+
+    const paramSchema = new Schema([new Field("factor", new Float64(), false)]);
+    const initRes = await withoutProcess(() =>
+      Promise.resolve(
+        handler(
+          new Request(`${BASE}/vgi/scale/init`, {
+            method: "POST",
+            headers: { "Content-Type": ARROW_CONTENT_TYPE },
+            body: buildRequestIpc(paramSchema, { factor: [10] }, "scale"),
+          }),
+        ),
+      ),
+    );
+    expect(initRes.status).toBe(200);
+
+    const { batches: initBatches } = await readResponseBatches(initRes);
+    const stateToken = initBatches[0].metadata?.get(STATE_KEY);
+    expect(stateToken).toBeDefined();
+
+    const inputSchema = new Schema([new Field("value", new Float64(), false)]);
+    const meta = new Map<string, string>();
+    meta.set(STATE_KEY, stateToken!);
+    const exchangeRes = await withoutProcess(() =>
+      Promise.resolve(
+        handler(
+          new Request(`${BASE}/vgi/scale/exchange`, {
+            method: "POST",
+            headers: { "Content-Type": ARROW_CONTENT_TYPE },
+            body: buildRequestIpc(inputSchema, { value: [5] }, "scale", meta),
+          }),
+        ),
+      ),
+    );
+    expect(exchangeRes.status).toBe(200);
+
+    const { batches } = await readResponseBatches(exchangeRes);
+    expect(batches[0].getChildAt(0)?.get(0)).toBe(50);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Response compression on workerd
 // ---------------------------------------------------------------------------
 
