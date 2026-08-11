@@ -30,6 +30,7 @@ import {
   TransportKind,
 } from "../types.js";
 import { gzipCompress, gzipDecompress } from "../util/gzip.js";
+import { isWorkerd } from "../util/runtime.js";
 import { randomBytes } from "../util/web-crypto.js";
 import { isZstdCompressAvailable, zstdCompress, zstdDecompress } from "../util/zstd.js";
 import { parseRequest } from "../wire/request.js";
@@ -279,6 +280,24 @@ export function createHttpHandler(
   // advertisement that the cross-language conformance suite pins down.
   const compressionLevel =
     options?.compressionLevel === undefined ? DEFAULT_COMPRESSION_LEVEL : options.compressionLevel;
+  // Cloudflare gzips a worker response that already carries a standard
+  // `Content-Encoding`, without amending the header — so compressing here and
+  // stamping `Content-Encoding: gzip` ships a *double*-encoded body under a
+  // single header, and a conforming client decodes once, finds gzip bytes
+  // where Arrow IPC should be, and fails. Measured against a deployed worker
+  // over direct HTTPS, not just `wrangler dev` (which does the same).
+  //
+  // The fix is to keep compressing and move the label: `X-VGI-Content-Encoding`
+  // is precisely the "an intermediary will mangle the standard header" escape
+  // hatch already used for the browser path, and the edge leaves a body it
+  // sees as unencoded alone. Compression is worth this trouble — gzip is ~60%
+  // off a catalog response — so this must not degrade to identity.
+  //
+  // Note the codec here is gzip, not zstd: workerd exposes no zstd *encoder*
+  // (`CompressionStream` does gzip/deflate only, and the fzstd fallback is
+  // decompress-only), so `canProduceEncoding` already drops zstd and
+  // `supportedEncodings` advertises gzip alone on this runtime.
+  const stampCustomContentEncoding = isWorkerd();
   const stateSerializer = options?.stateSerializer ?? jsonStateSerializer;
   const dispatchHook = options?.dispatchHook;
 
@@ -616,12 +635,18 @@ export function createHttpHandler(
     const compressed =
       codec === "zstd" ? await zstdCompress(responseBody, compressionLevel) : await gzipCompress(responseBody);
     const headers = new Headers(response.headers);
-    // A client that could only state its preference through
-    // X-VGI-Accept-Encoding (a browser `fetch()`, which cannot set
-    // Accept-Encoding) is one whose fetch/proxy layer would transparently
-    // decode — or mangle — a standard Content-Encoding. Stamp the VGI header
-    // instead so the response doesn't claim standard encoding.
-    headers.set(usedCustom ? VGI_CONTENT_ENCODING_HEADER : CONTENT_ENCODING_HEADER, codec);
+    // Two cases want the VGI header rather than the standard one, both being
+    // "something between us and the client would mangle a standard
+    // Content-Encoding":
+    //  - the client could only state its preference through
+    //    X-VGI-Accept-Encoding (a browser `fetch()`, which cannot set
+    //    Accept-Encoding), so its fetch layer would transparently decode it;
+    //  - we are on workerd, where the edge re-gzips an already-encoded body
+    //    (see `stampCustomContentEncoding`).
+    // Clients resolve X-VGI-Content-Encoding ahead of Content-Encoding, so the
+    // body is decoded exactly once either way.
+    const useCustomHeader = usedCustom || stampCustomContentEncoding;
+    headers.set(useCustomHeader ? VGI_CONTENT_ENCODING_HEADER : CONTENT_ENCODING_HEADER, codec);
     return new Response(compressed as unknown as BodyInit, {
       status: response.status,
       headers,

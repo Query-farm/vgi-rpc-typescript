@@ -23,6 +23,8 @@ import {
 } from "../../src/constants.js";
 import { ARROW_CONTENT_TYPE } from "../../src/http/common.js";
 import { createHttpHandler, float, int32, Protocol, str } from "../../src/index.js";
+import { gzipDecompress } from "../../src/util/gzip.js";
+import { zstdDecompress } from "../../src/util/zstd.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -685,5 +687,114 @@ describe("HTTP Handler", () => {
       token = batches[0].metadata?.get(STATE_KEY) ?? "";
       expect(token).toBeDefined();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Response compression on workerd
+// ---------------------------------------------------------------------------
+
+describe("response compression on workerd", () => {
+  const BASE = "http://localhost:9999";
+
+  /** Build a handler with the runtime pretending to be Cloudflare Workers.
+   *  `isWorkerd()` reads `navigator.userAgent`, and `createHttpHandler` reads
+   *  it once at construction — so the stub has to wrap construction, not just
+   *  the request. */
+  function withNavigatorUserAgent<T>(userAgent: string, fn: () => T): T {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", {
+      value: { userAgent },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      return fn();
+    } finally {
+      if (original) {
+        Object.defineProperty(globalThis, "navigator", original);
+      } else {
+        delete (globalThis as { navigator?: unknown }).navigator;
+      }
+    }
+  }
+
+  const paramSchema = new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]);
+
+  async function callAdd(handler: (req: Request) => Response | Promise<Response>): Promise<Response> {
+    return handler(
+      new Request(`${BASE}/vgi/add`, {
+        method: "POST",
+        headers: {
+          "Content-Type": ARROW_CONTENT_TYPE,
+          // The DuckDB extension's header pair: zstd is offered through both,
+          // so `usedCustom` is false and a non-workerd server would stamp the
+          // standard Content-Encoding.
+          "Accept-Encoding": "deflate, gzip, br, zstd",
+          "X-VGI-Accept-Encoding": "zstd, gzip",
+        },
+        body: buildRequestIpc(paramSchema, { a: [3], b: [4] }, "add"),
+      }),
+    );
+  }
+
+  // The codec is deliberately not pinned: these tests run under Bun, which
+  // *can* encode zstd, so negotiation picks zstd here. Real workerd has no
+  // zstd encoder and lands on gzip. What the workerd branch changes is which
+  // header carries the label, and that is what these assert.
+  async function decodeByHeader(res: Response): Promise<Uint8Array> {
+    const codec = res.headers.get("X-VGI-Content-Encoding");
+    // Checked before decoding: without it a regression that stamps the
+    // standard header instead would decode with the wrong codec and surface
+    // as an async stream error attributed to whichever test runs next.
+    expect(codec).toMatch(/^(zstd|gzip)$/);
+    const wire = new Uint8Array(await res.arrayBuffer());
+    return codec === "zstd" ? zstdDecompress(wire) : gzipDecompress(wire);
+  }
+
+  // Cloudflare re-gzips a response that already carries a standard
+  // Content-Encoding, yielding a double-encoded body under a single header.
+  // Labelling with X-VGI-Content-Encoding keeps the edge's hands off it.
+  test("labels the codec with X-VGI-Content-Encoding, not Content-Encoding", async () => {
+    const handler = withNavigatorUserAgent("Cloudflare-Workers", () =>
+      createHttpHandler(makeTestProtocol(), { prefix: "/vgi", serverId: "test-server" }),
+    );
+
+    const res = await callAdd(handler);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Encoding")).toBeNull();
+    expect(res.headers.get("X-VGI-Content-Encoding")).toMatch(/^(zstd|gzip)$/);
+  });
+
+  // The point of moving the header is to keep compressing — a regression to an
+  // identity body would still decode correctly, so assert the body is encoded.
+  test("still compresses, exactly once, and the body decodes to Arrow IPC", async () => {
+    const handler = withNavigatorUserAgent("Cloudflare-Workers", () =>
+      createHttpHandler(makeTestProtocol(), { prefix: "/vgi", serverId: "test-server" }),
+    );
+
+    const res = await callAdd(handler);
+    const decoded = await decodeByHeader(res.clone());
+
+    // Arrow IPC stream continuation marker. Reaching it after exactly one
+    // decode is the whole point: the double-encoding bug left a second
+    // compressed member here instead.
+    expect(Array.from(decoded.slice(0, 4))).toEqual([0xff, 0xff, 0xff, 0xff]);
+
+    // ...and the wire body really was compressed, not passed through.
+    const wire = new Uint8Array(await res.arrayBuffer());
+    expect(Array.from(wire.slice(0, 4))).not.toEqual([0xff, 0xff, 0xff, 0xff]);
+    expect(wire.byteLength).toBeLessThan(decoded.byteLength);
+  });
+
+  test("off workerd the standard Content-Encoding is still used", async () => {
+    const handler = withNavigatorUserAgent("Bun/1.0.0", () =>
+      createHttpHandler(makeTestProtocol(), { prefix: "/vgi", serverId: "test-server" }),
+    );
+
+    const res = await callAdd(handler);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-VGI-Content-Encoding")).toBeNull();
+    expect(res.headers.get("Content-Encoding")).toBe("zstd");
   });
 });
