@@ -36,6 +36,7 @@ import { parseRequest } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
 import { chainAuthenticate } from "./bearer.js";
+import { CLIENT_BUNDLE_BYTES } from "./client-bundle.js";
 import {
   COMPRESSION_ENCODINGS,
   CONTENT_ENCODING_HEADER,
@@ -78,7 +79,6 @@ import {
   introspectionDisabledResponse,
 } from "./introspect.js";
 import { LANDING_HTML_BYTES } from "./landing-html.js";
-import { CLIENT_BUNDLE_BYTES } from "./client-bundle.js";
 import {
   configureOAuthPkce,
   handleBrowserGetRedirect,
