@@ -11,6 +11,7 @@ import {
   isCapabilitySnapshotFresh,
   parseCapabilitiesFromHeaders,
 } from "./capabilities.js";
+import { decodeResponseBody } from "./decode.js";
 import { httpIntrospect, type MethodInfo, type ServiceDescription } from "./introspect.js";
 import {
   buildRequestIpc,
@@ -188,11 +189,8 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): Http
   }
 
   async function readResponse(resp: Response): Promise<Uint8Array<ArrayBuffer>> {
-    let body = new Uint8Array(await resp.arrayBuffer());
-    if (resp.headers.get("Content-Encoding") === "zstd" && decompressFn) {
-      body = new Uint8Array(await decompressFn(body));
-    }
-    return body;
+    const body = new Uint8Array(await resp.arrayBuffer());
+    return new Uint8Array(await decodeResponseBody(resp.headers, body, decompressFn));
   }
 
   async function ensureMethodCache(): Promise<Map<string, MethodInfo>> {

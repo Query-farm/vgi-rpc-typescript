@@ -6,6 +6,7 @@ import { deserializeSchema as deserializeSchemaImpl } from "#vgi-rpc-arrow";
 import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY, PROTOCOL_VERSION_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
+import { decodeResponseBody } from "./decode.js";
 import { buildRequestIpc, dispatchLogOrError, readResponseBatches } from "./ipc.js";
 import type { LogMessage } from "./types.js";
 
@@ -172,10 +173,8 @@ export async function httpIntrospect(
     throw new RpcError("AuthenticationError", "Authentication required", "");
   }
 
-  let responseBody = new Uint8Array(await response.arrayBuffer());
-  if (response.headers.get("Content-Encoding") === "zstd" && decompressFn) {
-    responseBody = new Uint8Array(await decompressFn(responseBody));
-  }
+  const rawBody = new Uint8Array(await response.arrayBuffer());
+  const responseBody = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn));
   const { batches } = await readResponseBatches(responseBody);
 
   return parseDescribeResponse(batches);

@@ -6,6 +6,7 @@ import { CALL_STATE_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
+import { decodeResponseBody } from "./decode.js";
 import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
 import type { LogMessage, StreamSession } from "./types.js";
 
@@ -200,11 +201,8 @@ export class HttpStreamSession implements StreamSession {
   }
 
   private async _readResponse(resp: Response): Promise<Uint8Array<ArrayBuffer>> {
-    let body = new Uint8Array(await resp.arrayBuffer());
-    if (resp.headers.get("Content-Encoding") === "zstd" && this._decompressFn) {
-      body = new Uint8Array(await this._decompressFn(body));
-    }
-    return body;
+    const body = new Uint8Array(await resp.arrayBuffer());
+    return new Uint8Array(await decodeResponseBody(resp.headers, body, this._decompressFn));
   }
 
   /**
