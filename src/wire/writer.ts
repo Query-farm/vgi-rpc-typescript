@@ -17,18 +17,38 @@ const RESOLVED: Promise<void> = Promise.resolve();
 // runtime-time require("node:fs") is unreachable in those builds.
 //
 // `globalThis.require` is undefined in both Bun ESM and Node ESM, so we try
-// `import.meta.require` (Bun) first, then fall back to globalThis.require
-// (Node CJS). Node ESM consumers must polyfill require if they need the
-// subprocess transport.
+// `import.meta.require` (Bun) first, then `globalThis.require` (Node CJS), and
+// finally `process.getBuiltinModule` — which is how Node ESM reaches a builtin
+// synchronously without an import. Node added it in 22.3 and backported it to
+// 20.16.
+//
+// That last one is why a Node ESM consumer no longer has to polyfill `require`
+// to use the subprocess transport. It used to: the worker started, served
+// bind, and then died on its first write with "requires Bun or Node.js CJS" —
+// far enough in that the failure looked like a protocol bug rather than a
+// missing shim. It is a property read, not an import, so bundlers still cannot
+// see `node:fs` here and workerd builds (which never instantiate this class)
+// are unaffected.
 const _NODE_FS_MOD = "node:fs";
 let _writeSync: ((fd: number, data: Uint8Array, offset?: number, len?: number) => number) | null = null;
 function _loadWriteSync(): (fd: number, data: Uint8Array, offset?: number, len?: number) => number {
   if (_writeSync) return _writeSync;
+  const getBuiltin = (globalThis as any).process?.getBuiltinModule;
+  if (typeof getBuiltin === "function") {
+    const fs = getBuiltin.call((globalThis as any).process, _NODE_FS_MOD);
+    if (fs?.writeSync) {
+      _writeSync = fs.writeSync.bind(fs);
+      return _writeSync!;
+    }
+  }
   const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
     throw new Error(
-      "IpcStreamWriter requires Bun or Node.js CJS for sync node:fs.writeSync. " +
-        "Subprocess transport is not available in this runtime.",
+      "IpcStreamWriter needs synchronous node:fs.writeSync, reached via " +
+        "import.meta.require (Bun), globalThis.require (Node CJS), or " +
+        "process.getBuiltinModule (Node >= 20.16). This runtime offers none of " +
+        "them, so the subprocess transport is unavailable. On an older Node ESM, " +
+        "either upgrade or set globalThis.require = createRequire(import.meta.url).",
     );
   }
   const fs = req(_NODE_FS_MOD);
