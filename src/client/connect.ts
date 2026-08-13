@@ -5,8 +5,8 @@ import { type RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { CALL_STATE_KEY, LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
-import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
+import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import {
   type HttpServerCapabilities,
   isCapabilitySnapshotFresh,
@@ -75,7 +75,15 @@ export interface HttpRpcClient extends RpcClient {
  * the server (caching `__describe__`) on the first call and transparently handles
  * zstd compression, authorization, and 413 request externalization.
  */
-export function httpConnect(baseUrl: string, options?: HttpConnectOptions): HttpRpcClient {
+export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): HttpRpcClient {
+  // Strip trailing slashes from the base URL for the same reason `prefix` does
+  // below: every request path is built as `${baseUrl}${prefix}/${method}`, so a
+  // base that already ends in "/" yields "https://host//method". Servers
+  // predating the path normalization in `createHttpHandler` route that to the
+  // method name "/method" and reject it as unknown — a confusing failure for
+  // what is only a cosmetically different URL. Pasting a URL with a trailing
+  // slash is the normal case, not an edge case.
+  const baseUrl = rawBaseUrl.replace(/\/+$/, "");
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
   const onLog = options?.onLog;
   const compressionLevel = options?.compressionLevel;

@@ -5,8 +5,8 @@ import { Schema as ArrowSchema, type RecordBatch, type Schema } from "@query-far
 import { deserializeSchema as deserializeSchemaImpl } from "#vgi-rpc-arrow";
 import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY, PROTOCOL_VERSION_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
-import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
+import { ARROW_CONTENT_TYPE } from "../http/common.js";
 import { decodeResponseBody } from "./decode.js";
 import { buildRequestIpc, dispatchLogOrError, readResponseBatches } from "./ipc.js";
 import type { LogMessage } from "./types.js";
@@ -135,7 +135,7 @@ export async function parseDescribeResponse(
  * Send a __describe__ request and return a ServiceDescription.
  */
 export async function httpIntrospect(
-  baseUrl: string,
+  rawBaseUrl: string,
   options?: {
     prefix?: string;
     authorization?: string;
@@ -144,6 +144,8 @@ export async function httpIntrospect(
     decompressFn?: (data: Uint8Array) => Promise<Uint8Array>;
   },
 ): Promise<ServiceDescription> {
+  // See httpConnect: a base URL ending in "/" would produce "//__describe__".
+  const baseUrl = rawBaseUrl.replace(/\/+$/, "");
   const prefix = options?.prefix ?? "";
   const emptySchema = new ArrowSchema([]);
   const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);

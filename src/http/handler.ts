@@ -584,6 +584,16 @@ export function createHttpHandler(
   }
 
   /**
+   * Collapse runs of `/` into one. See the call site for why this matters.
+   *
+   * Cheap on the common path: the scan `includes` does is far cheaper than a
+   * regex replace, and virtually every request arrives already normalized.
+   */
+  function normalizePath(pathname: string): string {
+    return pathname.includes("//") ? pathname.replace(/\/{2,}/g, "/") : pathname;
+  }
+
+  /**
    * Split a POST path into the method it names and the action on it, or `null`
    * when the path lies outside this worker's prefix.
    */
@@ -689,7 +699,22 @@ export function createHttpHandler(
     requestId: string | null = null,
   ): Promise<Response> {
     const url = new URL(request.url);
-    const path = url.pathname;
+    // Collapse repeated slashes before anything routes on the path.
+    //
+    // A client that joins a base URL already ending in "/" with "/<method>"
+    // sends "//<method>". With an empty prefix `resolveRoute` then slices
+    // exactly one character off and dispatches the method name "/<method>",
+    // which matches nothing — surfacing as
+    //   Unknown method: '/__describe__'. Available methods: [...]
+    // where every name in that list is unprefixed, so the leading slash is the
+    // whole story. Every other route (health, landing, the client bundle,
+    // .well-known) 404s the same way for the same reason.
+    //
+    // RFC 3986 treats "//a" and "/a" as distinct paths, but no method name here
+    // can contain a slash and no route depends on an empty segment, so
+    // collapsing is safe and matches what ordinary HTTP servers do. Normalizing
+    // once here rather than inside `resolveRoute` keeps every route consistent.
+    const path = normalizePath(url.pathname);
 
     // OAuth token-exchange proxy — exempt from auth (it's the mechanism by
     // which a client *gets* an auth token). Handled before the global OPTIONS
