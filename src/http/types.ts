@@ -100,12 +100,11 @@ export interface HttpHandlerOptions {
   onServeStart?: ServeStartHook;
   /** Enable HTML landing page at GET {prefix}/. Default: true. */
   enableLandingPage?: boolean;
-  /** Activates the VGI landing surface. When set, `GET {prefix}/` serves the
-   *  shared vendored `landing.html` (plus a JSON status document carrying this
-   *  identity) and `GET {prefix}/vgi-client.js` serves the browser build of the
-   *  VGI client the page reads the catalog with. Replaces the generic styled
-   *  landing page for VGI workers. See {@link LandingInfo}. */
-  landingInfo?: LandingInfo;
+  /** Extra GET routes contributed by a layer above this one, consulted after
+   *  authentication and the OAuth browser redirect but before the generic
+   *  landing page and the 404. Return `null` to decline and let normal routing
+   *  continue. See {@link ExtraRouteHandler}. */
+  extraRoutes?: ExtraRouteHandler;
   /** Enable HTML describe/API reference page at GET {prefix}/describe. Default: true. */
   enableDescribePage?: boolean;
   /** Enable HTML 404 page for unmatched GET routes. Default: true. */
@@ -181,24 +180,45 @@ export interface HttpHandlerOptions {
 }
 
 /**
- * Worker identity for the standardized VGI landing surface.
+ * What an {@link ExtraRouteHandler} is told about the request and the server.
  *
- * The shared `landing.html` reads catalog metadata by speaking the VGI protocol
- * through the client bundle the worker serves beside it, so nothing about the
- * catalog belongs here. What the protocol has no method for — which worker this
- * is, what it is called, what version it runs — rides on the JSON status
- * document at `GET {prefix}/?format=json`.
+ * `serverId` and `oauthActive` are handler-internal state a caller cannot
+ * reconstruct from the outside, and a route that reports server identity needs
+ * both. `addCorsHeaders` is passed rather than re-derived so a contributed
+ * route cannot accidentally answer with a different CORS policy than the rest
+ * of the surface.
  */
-export interface LandingInfo {
-  /** Worker name shown as the page heading, e.g. "ishares". */
-  name: string;
-  /** One-line description shown under the heading. */
-  doc?: string;
-  /** Worker version string shown in the footer. */
-  version?: string;
-  /** Override the Cupola base URL the "Explore" links point at. */
-  cupolaBase?: string;
+export interface ExtraRouteContext {
+  /** Parsed request URL. */
+  url: URL;
+  /** The mount prefix, without a trailing slash ("" when mounted at root). */
+  prefix: string;
+  /** Server ID this handler was constructed with. */
+  serverId: string;
+  /** True when the OAuth PKCE browser flow is configured. */
+  oauthActive: boolean;
+  /** Applies this handler's configured CORS policy to a response's headers. */
+  addCorsHeaders: (headers: Headers) => void;
 }
+
+/**
+ * A GET route contributed by a layer built on top of this one.
+ *
+ * This exists so higher layers can own their own pages without this package
+ * having to know what they are. The VGI landing surface lives in
+ * `@query-farm/vgi` and arrives through here: `@query-farm/vgi-rpc` is generic
+ * RPC over Arrow and has no business shipping a page that renders catalogs,
+ * still less a compiled bundle of the client library that depends on it.
+ *
+ * Ordering is the reason this is a hook rather than a wrapper around the
+ * returned handler. Contributed routes run *after* authentication and the
+ * OAuth browser redirect, so a page served here is as protected as the RPC
+ * surface; wrapping from outside would answer before either had a chance.
+ */
+export type ExtraRouteHandler = (
+  request: Request,
+  context: ExtraRouteContext,
+) => Response | null | Promise<Response | null>;
 
 /** Serializer for stream state objects stored in state tokens. */
 export interface StateSerializer {

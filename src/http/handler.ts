@@ -37,7 +37,6 @@ import { parseRequest } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
 import { chainAuthenticate } from "./bearer.js";
-import { CLIENT_BUNDLE_BYTES } from "./client-bundle.js";
 import {
   COMPRESSION_ENCODINGS,
   CONTENT_ENCODING_HEADER,
@@ -79,7 +78,6 @@ import {
   INTROSPECT_ENDPOINT,
   introspectionDisabledResponse,
 } from "./introspect.js";
-import { LANDING_HTML_BYTES } from "./landing-html.js";
 import {
   configureOAuthPkce,
   handleBrowserGetRedirect,
@@ -342,42 +340,21 @@ export function createHttpHandler(
   const displayName = options?.protocolName ?? protocol.name;
   const repoUrl = options?.repositoryUrl ?? null;
 
-  // VGI landing surface: when a worker supplies its identity, GET {prefix}/
-  // serves the shared vendored landing.html and {prefix}/vgi-client.js serves
-  // the browser client build the page reads the catalog with. This replaces the
-  // generic styled landing page for VGI workers. The page renders the signed-in
-  // identity pill from the _vgi_identity cookie set by the OAuth callback — no
-  // server-side HTML injection is needed.
-  // Presence of landingInfo activates the VGI landing surface (shared
-  // landing.html + the client bundle it imports) in place of the generic page.
-  const landingInfo = options?.landingInfo ?? null;
+  // Routes contributed by a layer above this one — see ExtraRouteHandler. The
+  // VGI landing surface arrives this way from `@query-farm/vgi`; it used to be
+  // built in here, which meant this package shipped a page describing catalogs
+  // and a compiled bundle of the client library that depends on it.
+  const extraRoutes = options?.extraRoutes ?? null;
   const oauthActive = pkceConfig != null;
 
-  // Pre-render HTML pages for zero per-request overhead. The generic landing
-  // page is suppressed when the VGI landing surface is active.
-  const genericLandingHtml =
-    enableLandingPage && !landingInfo
-      ? buildLandingPage(displayName, serverId, enableDescribePage ? `${prefix}/describe` : null, repoUrl)
-      : null;
+  // Pre-render HTML pages for zero per-request overhead. A contributed route
+  // that answers GET {prefix}/ takes precedence over the generic page, so both
+  // can be configured without conflicting.
+  const genericLandingHtml = enableLandingPage
+    ? buildLandingPage(displayName, serverId, enableDescribePage ? `${prefix}/describe` : null, repoUrl)
+    : null;
   const describeHtml = enableDescribePage ? buildDescribePage(displayName, serverId, methods, repoUrl) : null;
   const notFoundHtml = enableNotFoundPage ? buildNotFoundPage(prefix, displayName) : null;
-
-  // JSON status body served for GET {prefix}/?format=json (and Accept:
-  // application/json) when the VGI landing surface is active. Mirrors Python's
-  // LandingPageResource.
-  // Worker identity is not catalog data and has no protocol method, so the
-  // page reads it from here.
-  const landingStatusBody = JSON.stringify({
-    status: "ok",
-    server_id: serverId,
-    protocol: "vgi",
-    worker: landingInfo?.name ?? displayName,
-    doc: landingInfo?.doc ?? "",
-    version: landingInfo?.version ?? "",
-    lang: "typescript",
-    oauth: oauthActive,
-    cupola_base: landingInfo?.cupolaBase ?? "https://cupola.query-farm.services",
-  });
 
   const externalLocation = options?.externalLocation;
   const uploadUrlProvider = options?.uploadUrlProvider;
@@ -789,42 +766,25 @@ export function createHttpHandler(
         }
       }
 
-      // VGI landing surface — active when the worker supplies landingInfo.
-      // The page reads catalog metadata by speaking the protocol through the
-      // client bundle served below; there is no worker-side describe document.
-      if (landingInfo) {
-        // GET {prefix}/ — shared landing.html for browsers, JSON status for
-        // health checks / ?format=json (and the page's own identity read).
-        if (path === prefix || path === `${prefix}/`) {
-          const accept = request.headers.get("Accept") ?? "";
-          const wantJson =
-            url.searchParams.get("format") === "json" ||
-            (accept.includes("application/json") && !accept.includes("text/html"));
-          if (wantJson) {
-            const headers = new Headers({ "Content-Type": "application/json" });
-            addCorsHeaders(headers);
-            return new Response(landingStatusBody, { status: 200, headers });
-          }
-          const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
-          addCorsHeaders(headers);
-          return new Response(LANDING_HTML_BYTES as unknown as BodyInit, { status: 200, headers });
-        }
-
-        // GET {prefix}/vgi-client.js — the browser build the page imports.
-        // Served by the worker rather than a CDN: this page is same-origin
-        // with an authenticated worker and carries its session cookie.
-        if (path === `${prefix}/vgi-client.js`) {
-          const headers = new Headers({
-            "Content-Type": "text/javascript; charset=utf-8",
-            "Cache-Control": "public, max-age=3600",
-          });
-          addCorsHeaders(headers);
-          return new Response(CLIENT_BUNDLE_BYTES as unknown as BodyInit, { status: 200, headers });
-        }
+      // Routes contributed from above (e.g. the VGI landing surface). Placed
+      // here deliberately: after the OAuth browser-redirect branch, so a
+      // contributed page carries the same auth exposure as the built-in pages
+      // rather than jumping ahead of that redirect, and before the generic
+      // landing page and the 404, so it can replace either. This is the exact
+      // position the VGI landing block occupied before it moved out.
+      if (extraRoutes) {
+        const contributed = await extraRoutes(request, {
+          url,
+          prefix,
+          serverId,
+          oauthActive,
+          addCorsHeaders,
+        });
+        if (contributed) return contributed;
       }
 
-      // Generic landing page: GET {prefix}/ or GET {prefix} (only when the VGI
-      // landing surface is not active).
+      // Generic landing page: GET {prefix}/ or GET {prefix}, when no
+      // contributed route claimed it.
       if (genericLandingHtml && (path === prefix || path === `${prefix}/`)) {
         const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
         addCorsHeaders(headers);
