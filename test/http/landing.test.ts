@@ -77,6 +77,32 @@ describe("VGI landing surface", () => {
     expect(bundle.headers.get("Content-Type")).toContain("text/javascript");
   });
 
+  // The vendored bundle is built in another repo and copied in, so it can fall
+  // behind this server's wire behaviour without anything here failing to
+  // compile. It did: the bundle predated `X-VGI-Content-Encoding` support by a
+  // day, and on workerd — where the server always stamps that header, because
+  // the Cloudflare edge re-gzips a standard `Content-Encoding` — the landing
+  // page could not decode its own catalog response. Every CF-deployed VGI
+  // worker showed "Could not load worker metadata" and nothing else noticed.
+  //
+  // These assert the bundle understands what this server can emit. They are
+  // string checks on a minified artifact, which is crude, but the alternative
+  // is running a browser against a workerd build in unit tests.
+  test("the vendored client can decode every encoding this server stamps", async () => {
+    const handler = makeHandler();
+    const resp = await handler(new Request("http://localhost/vgi-client.js"));
+    const bundle = await resp.text();
+
+    // The header the server uses whenever a standard Content-Encoding would be
+    // mangled in transit — the browser path and the whole of workerd.
+    expect(bundle).toContain("X-VGI-Content-Encoding");
+    // gzip is the only codec workerd can produce (CompressionStream does
+    // gzip/deflate; there is no zstd encoder there), so a bundle that decodes
+    // zstd alone is useless on Cloudflare.
+    expect(bundle).toContain("DecompressionStream");
+    expect(bundle.toLowerCase()).toContain("gzip");
+  });
+
   // The describe document and its lazy column endpoint are gone: the page
   // reads the catalog over the protocol instead.
   test("the retired describe.json routes are not served", async () => {
