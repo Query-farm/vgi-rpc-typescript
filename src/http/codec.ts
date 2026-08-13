@@ -158,6 +158,25 @@ export const VGI_CONTENT_ENCODING_HEADER = "X-VGI-Content-Encoding";
 export const VGI_ACCEPT_ENCODING_HEADER = "X-VGI-Accept-Encoding";
 
 /**
+ * The response codecs a client can undo, for {@link VGI_ACCEPT_ENCODING_HEADER}.
+ *
+ * gzip is unconditional: `decodeResponseBody` undoes it with the Web
+ * `DecompressionStream` that Bun, Node 18+, Deno and workerd all expose. zstd
+ * rides on an optional dependency, so it is only claimed once that decoder is
+ * actually loaded — advertising it otherwise earns a body the client must then
+ * refuse.
+ *
+ * This belongs on VGI's header rather than `Accept-Encoding`, which is not a
+ * channel a client controls end to end: browsers forbid scripts from setting it,
+ * and a workerd server has it rewritten to a synthetic value before the handler
+ * reads it. A server that can only label its response `X-VGI-Content-Encoding`
+ * needs a signal that actually survives, and this is it.
+ */
+export function clientAcceptEncoding(hasZstdDecoder: boolean): string {
+  return hasZstdDecoder ? "zstd, gzip" : "gzip";
+}
+
+/**
  * Capability header advertising the codecs this server speaks, in server-
  * preference order. The value is the **intersection** of what it can decode
  * on requests and what it can produce on responses — only codecs usable in

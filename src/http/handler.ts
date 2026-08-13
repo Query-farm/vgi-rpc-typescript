@@ -598,7 +598,25 @@ export function createHttpHandler(
   /** Negotiate the response codec from the request's two accept headers. */
   function negotiateResponseEncoding(request: Request): NegotiatedEncoding {
     return pickResponseEncoding(
-      request.headers.get("Accept-Encoding"),
+      // On workerd the runtime rewrites the client's Accept-Encoding before the
+      // worker sees it — measured: `identity`, `deflate` and a wholly absent
+      // header all arrive as `br, gzip`, and a browser's own list arrives
+      // stripped. The header therefore carries nothing about the client, and
+      // `identity` cannot be expressed through it at all.
+      //
+      // That would be harmless if we could answer with a standard
+      // Content-Encoding, which every fetch layer undoes. We cannot: on this
+      // runtime the response can only be labelled X-VGI-Content-Encoding (see
+      // stampCustomContentEncoding), which nothing undoes automatically. So
+      // honouring the fabricated header means compressing for a client that
+      // never asked and may have no idea it must decompress — it then feeds
+      // gzip's magic bytes to the Arrow reader, which reports them as a
+      // 559903-byte metadata length.
+      //
+      // X-VGI-Accept-Encoding is a custom header, so workerd passes it through
+      // untouched; it is the only trustworthy signal here, and requiring it
+      // makes compression opt-in exactly where the label is opt-in too.
+      stampCustomContentEncoding ? null : request.headers.get("Accept-Encoding"),
       request.headers.get(VGI_ACCEPT_ENCODING_HEADER),
       canProduceEncoding,
     );

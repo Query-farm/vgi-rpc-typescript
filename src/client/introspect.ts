@@ -6,6 +6,7 @@ import { deserializeSchema as deserializeSchemaImpl } from "#vgi-rpc-arrow";
 import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY, PROTOCOL_VERSION_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
+import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
 import { decodeResponseBody } from "./decode.js";
 import { buildRequestIpc, dispatchLogOrError, readResponseBatches } from "./ipc.js";
 import type { LogMessage } from "./types.js";
@@ -163,6 +164,8 @@ export async function httpIntrospect(
   if (level != null && decompressFn) {
     headers["Accept-Encoding"] = "zstd";
   }
+  // See connect.ts: states what we can decode, regardless of request compression.
+  headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
 
   const response = await fetch(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
     method: "POST",

@@ -6,6 +6,7 @@ import { CALL_STATE_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
+import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
 import { decodeResponseBody } from "./decode.js";
 import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
 import type { LogMessage, StreamSession } from "./types.js";
@@ -187,6 +188,8 @@ export class HttpStreamSession implements StreamSession {
     if (this._compressionLevel != null && this._decompressFn) {
       headers["Accept-Encoding"] = "zstd";
     }
+    // See connect.ts: states what we can decode, regardless of request compression.
+    headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(this._decompressFn != null);
     if (this._authorization) {
       headers.Authorization = this._authorization;
     }

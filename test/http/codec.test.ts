@@ -23,6 +23,7 @@ import {
   COMPRESSION_ENCODINGS,
   DEFAULT_COMPRESSION_LEVEL,
   type Encoding,
+  clientAcceptEncoding,
   parseEncodingList,
   pickResponseEncoding,
 } from "../../src/http/codec.js";
@@ -403,5 +404,94 @@ describe("HTTP handler response-codec negotiation", () => {
     );
     expect(resp.headers.get("Access-Control-Allow-Headers")).toContain("x-vgi-accept-encoding");
     expect(resp.headers.get("Access-Control-Expose-Headers")).toContain("X-VGI-Content-Encoding");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// workerd: the standard Accept-Encoding is not a client signal
+// ---------------------------------------------------------------------------
+
+/**
+ * On workerd the runtime rewrites the inbound `Accept-Encoding` before the
+ * handler sees it. Measured against `wrangler dev --local`: `identity`,
+ * `deflate` and a wholly absent header all arrive as `br, gzip`, and a
+ * browser's own list arrives stripped entirely.
+ *
+ * That matters here and nowhere else, because a workerd response can only be
+ * labelled `X-VGI-Content-Encoding` — the edge would re-encode a standard
+ * `Content-Encoding` — and nothing in a fetch layer undoes the custom name. So
+ * compressing off the fabricated header hands gzip to a client that never asked
+ * for it and has no reason to decompress; it reads the gzip magic `1f 8b 08 00`
+ * as an Arrow metadata length of 559903 and fails far from the cause. This is
+ * how vgi-open-meteo broke Cupola in production.
+ */
+describe("response encoding on workerd", () => {
+  const realNavigator = globalThis.navigator;
+  // isWorkerd() is read when createHttpHandler is *built*, so the stub has to
+  // be installed before the handler is constructed, not before the request.
+  const asWorkerd = <T>(fn: () => T): T => {
+    Object.defineProperty(globalThis, "navigator", {
+      value: { userAgent: "Cloudflare-Workers" },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      return fn();
+    } finally {
+      Object.defineProperty(globalThis, "navigator", {
+        value: realNavigator,
+        configurable: true,
+        writable: true,
+      });
+    }
+  };
+
+  test("ignores the standard Accept-Encoding and sends the body uncompressed", async () => {
+    const handler = asWorkerd(() =>
+      createHttpHandler(makeProtocol(), { compressionLevel: DEFAULT_COMPRESSION_LEVEL, canProduceEncoding: GZIP_ONLY }),
+    );
+    const resp = await callAdd(handler, { "Accept-Encoding": "br, gzip" });
+    expect(resp.headers.get("X-VGI-Content-Encoding")).toBeNull();
+    expect(resp.headers.get("Content-Encoding")).toBeNull();
+    // Arrow IPC continuation marker: a body the client can read as-is.
+    const head = new Uint8Array(await resp.arrayBuffer()).subarray(0, 4);
+    expect([...head]).toEqual([0xff, 0xff, 0xff, 0xff]);
+  });
+
+  test("still compresses when the client opts in on X-VGI-Accept-Encoding", async () => {
+    const handler = asWorkerd(() =>
+      createHttpHandler(makeProtocol(), { compressionLevel: DEFAULT_COMPRESSION_LEVEL, canProduceEncoding: GZIP_ONLY }),
+    );
+    const resp = await callAdd(handler, { "Accept-Encoding": "br, gzip", "X-VGI-Accept-Encoding": "gzip" });
+    expect(resp.headers.get("X-VGI-Content-Encoding")).toBe("gzip");
+    const body = new Uint8Array(await resp.arrayBuffer());
+    expect([...body.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
+    expect(new Uint8Array(await gzipDecompress(body)).subarray(0, 4)).toEqual(
+      new Uint8Array([0xff, 0xff, 0xff, 0xff]),
+    );
+  });
+
+  // The gate is workerd-specific: everywhere else Accept-Encoding is the real
+  // client's header and the standard Content-Encoding label is safe.
+  test("off workerd, the standard header is still honoured", async () => {
+    const handler = createHttpHandler(makeProtocol(), {
+      compressionLevel: DEFAULT_COMPRESSION_LEVEL,
+      canProduceEncoding: GZIP_ONLY,
+    });
+    const resp = await callAdd(handler, { "Accept-Encoding": "gzip" });
+    expect(resp.headers.get("Content-Encoding")).toBe("gzip");
+    expect(resp.headers.get("X-VGI-Content-Encoding")).toBeNull();
+  });
+});
+
+describe("clientAcceptEncoding", () => {
+  test("always claims gzip, which needs no injected decoder", () => {
+    expect(clientAcceptEncoding(false)).toBe("gzip");
+  });
+
+  // Order is the client's preference and the server walks it as stated, so zstd
+  // must lead when we can actually undo it.
+  test("prefers zstd when a zstd decoder is loaded", () => {
+    expect(clientAcceptEncoding(true)).toBe("zstd, gzip");
   });
 });

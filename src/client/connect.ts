@@ -6,6 +6,7 @@ import { CALL_STATE_KEY, LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
+import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
 import {
   type HttpServerCapabilities,
   isCapabilitySnapshotFresh,
@@ -169,6 +170,11 @@ export function httpConnect(baseUrl: string, options?: HttpConnectOptions): Http
     if (compressionLevel != null && decompressFn) {
       headers["Accept-Encoding"] = "zstd";
     }
+    // Unconditional, and independent of `compressionLevel`: that option governs
+    // whether we compress our *request* bodies, while this states what we can
+    // decode on the way back. A server that cannot trust `Accept-Encoding` (see
+    // clientAcceptEncoding) otherwise has to assume the worst and send identity.
+    headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
     if (authorization) {
       headers.Authorization = authorization;
     }
