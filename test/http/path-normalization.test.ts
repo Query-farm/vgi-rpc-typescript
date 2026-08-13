@@ -111,3 +111,34 @@ describe("client base-URL normalization", () => {
     }
   });
 });
+
+describe("contributed routes see the normalized path", () => {
+  test("ctx.url.pathname is collapsed, and the query string survives", async () => {
+    const protocol = new Protocol("ExtraSvc");
+    protocol.unary("noop", {
+      params: { x: float },
+      result: { y: float },
+      handler: async ({ x }) => ({ y: x }),
+    });
+
+    const seen: string[] = [];
+    const handler = createHttpHandler(protocol, {
+      serverId: "extra-test",
+      extraRoutes: (_req, ctx) => {
+        seen.push(ctx.url.pathname);
+        if (ctx.url.pathname === "/asset.js") {
+          return new Response(`q=${ctx.url.searchParams.get("v") ?? ""}`, { status: 200 });
+        }
+        return null;
+      },
+    });
+
+    // This is the shape that stayed broken after the RPC routes were fixed:
+    // contributed routes match on ctx.url.pathname, not the handler's `path`.
+    const resp = await handler(new Request("http://x//asset.js?v=7"));
+    expect(resp.status).toBe(200);
+    expect(await resp.text()).toBe("q=7");
+    expect(seen).toContain("/asset.js");
+    for (const p of seen) expect(p).not.toContain("//");
+  });
+});

@@ -816,8 +816,16 @@ export function createHttpHandler(
       // landing page and the 404, so it can replace either. This is the exact
       // position the VGI landing block occupied before it moved out.
       if (extraRoutes) {
+        // Hand over a URL whose pathname is already collapsed. Contributed
+        // routes match on `ctx.url.pathname` rather than on the `path` this
+        // handler computed, so without this they would each have to remember to
+        // normalize — and the one in @query-farm/vgi did not, leaving
+        // `GET //vgi-client.js` a 404 after the RPC routes were fixed. Rebuilt
+        // only when it would differ, since this is every non-RPC request.
+        const routeUrl = url.pathname === path ? url : new URL(url.href);
+        if (routeUrl !== url) routeUrl.pathname = path;
         const contributed = await extraRoutes(request, {
-          url,
+          url: routeUrl,
           prefix,
           serverId,
           oauthActive,
