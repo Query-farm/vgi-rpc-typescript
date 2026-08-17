@@ -5953,7 +5953,26 @@ async function introspect(request, auth, resolver, principals, defaultTtlSeconds
     console.warn("[introspect] refused: JWS-shaped subject", { principal: caller, tokenDigest: digest });
     return refuse(404, "unresolved");
   }
-  const identity = await resolver(token);
+  let identity;
+  try {
+    identity = await resolver(token);
+  } catch (err2) {
+    if (!(err2 instanceof AuthUnavailableError)) {
+      throw err2;
+    }
+    console.warn("[introspect] unavailable", {
+      principal: caller,
+      tokenDigest: digest,
+      error: err2.message
+    });
+    return new Response(JSON.stringify({ error: "unavailable" }), {
+      status: 503,
+      headers: new Headers({
+        "Content-Type": "application/json",
+        "Retry-After": String(err2.retryAfter)
+      })
+    });
+  }
   if (identity == null) {
     console.info("[introspect] credential did not resolve", { principal: caller, tokenDigest: digest });
     return refuse(404, "unresolved");
@@ -11039,4 +11058,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=EF6979FA4C7EC70664756E2164756E21
+//# debugId=AA91E89A2C6648A364756E2164756E21

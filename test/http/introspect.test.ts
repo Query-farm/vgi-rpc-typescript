@@ -197,6 +197,39 @@ describe("AuthUnavailableError is not a credential rejection", () => {
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     expect(await res.json()).toEqual({ error: "authentication_unavailable", detail: "token sidecar unreachable" });
   });
+
+  test("a RESOLVER outage is 503 too, not the endpoint's definitive 404", async () => {
+    // The case above covers the `authenticate` path. This one covers the
+    // resolver's, which is where it is easier to get wrong and more expensive:
+    // the endpoint's own "did not resolve" is 404, and 404 is exactly the answer
+    // a caller may negative-cache — so borrowing it for an unreachable backing
+    // store has the caller remember a live credential as bad for the cache's
+    // lifetime. Caught by the cross-language conformance group, which this
+    // implementation failed with a bare 500 (the documented
+    // `AuthUnavailableError` was never caught).
+    const handler = createHttpHandler(makeProtocol(), {
+      prefix: "/vgi",
+      authenticate: principalAuth,
+      introspectResolver: () => {
+        throw new AuthUnavailableError("mapping store unreachable", 9);
+      },
+      introspectPrincipals: [INTROSPECTOR],
+    });
+
+    const res = await handler(introspectRequest(SUBJECT_TOKEN));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("9");
+    expect(await res.text()).not.toContain(SUBJECT_TOKEN);
+  });
+
+  test("a resolver returning null is still the definitive 404", async () => {
+    // The distinction only pays if the ordinary refusal is unchanged.
+    const res = await enabledHandler()(introspectRequest("no-such-credential"));
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "unresolved" });
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
 });
 
 // ---------------------------------------------------------------------------

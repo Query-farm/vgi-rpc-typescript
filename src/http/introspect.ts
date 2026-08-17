@@ -38,6 +38,7 @@
 
 import type { AuthContext } from "../auth.js";
 import { sha256Hex } from "../util/web-crypto.js";
+import { AuthUnavailableError } from "./unauthorized.js";
 
 /** Endpoint path, appended to the handler's prefix. Matches the de-facto
  *  contract the existing proxy client already speaks. */
@@ -292,7 +293,33 @@ async function introspect(
     return refuse(404, "unresolved");
   }
 
-  const identity = await resolver(token);
+  let identity: TokenIdentity | null;
+  try {
+    identity = await resolver(token);
+  } catch (err) {
+    if (!(err instanceof AuthUnavailableError)) {
+      throw err;
+    }
+    // "I could not find out" is not "it did not resolve". Refusing with 404 here
+    // would hand the caller a *definitive* answer for an outage, and a caller
+    // that negative-caches definitive answers — which is the correct thing to do
+    // — would remember an unreachable backing store as a bad credential for the
+    // cache's lifetime. Deliberately not `refuse`: that shape is for definitive
+    // rejections and carries `Cache-Control: no-store`; a transient needs
+    // `Retry-After`.
+    console.warn("[introspect] unavailable", {
+      principal: caller,
+      tokenDigest: digest,
+      error: err.message,
+    });
+    return new Response(JSON.stringify({ error: "unavailable" }), {
+      status: 503,
+      headers: new Headers({
+        "Content-Type": "application/json",
+        "Retry-After": String(err.retryAfter),
+      }),
+    });
+  }
   if (identity == null) {
     console.info("[introspect] credential did not resolve", { principal: caller, tokenDigest: digest });
     return refuse(404, "unresolved");
