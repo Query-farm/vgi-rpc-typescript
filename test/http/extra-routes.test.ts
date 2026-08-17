@@ -14,8 +14,8 @@
 // the 404. Those three are what these tests pin.
 
 import { describe, expect, test } from "bun:test";
-import { AuthFailure, AuthReason, createHttpHandler, Protocol } from "../../src/index.js";
 import type { ExtraRouteContext } from "../../src/index.js";
+import { AuthFailure, AuthReason, createHttpHandler, Protocol } from "../../src/index.js";
 
 function makeProtocol() {
   const protocol = new Protocol("ExtraRouteTest");
@@ -131,9 +131,7 @@ describe("extraRoutes", () => {
     expect(page.status).toBe(200);
 
     // The RPC surface is a different matter, and is gated.
-    const rpc = await contributed(
-      new Request("http://localhost/noop", { method: "POST", body: new Uint8Array() }),
-    );
+    const rpc = await contributed(new Request("http://localhost/noop", { method: "POST", body: new Uint8Array() }));
     expect(rpc.status).toBe(401);
   });
 

@@ -313,7 +313,7 @@ describe("access log trace correlation", () => {
   test("emits trace_id and span_id together as W3C hex", () => {
     const sink = new CaptureSink();
     const hook = new AccessLogHook(sink, {
-      traceContext: () => ({ traceId: "0".repeat(31) + "1", spanId: "0".repeat(15) + "2" }),
+      traceContext: () => ({ traceId: `${"0".repeat(31)}1`, spanId: `${"0".repeat(15)}2` }),
     });
     dispatch(hook, info());
     const rec = sink.last();

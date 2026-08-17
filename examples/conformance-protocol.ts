@@ -24,7 +24,6 @@ import {
   fixedSizeBinary,
   float32 as float32Type,
   float64,
-  int8 as int8Type,
   int16 as int16Type,
   int32 as int32Type,
   int64,
@@ -37,9 +36,6 @@ import {
   timeMicro,
   timestampMicro,
   utf8,
-  type VgiBatch,
-  type VgiField,
-  type VgiSchema,
 } from "../src/arrow/index.js";
 import { Protocol } from "../src/index.js";
 import {

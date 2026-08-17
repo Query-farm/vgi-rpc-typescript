@@ -48,9 +48,9 @@ export {
 } from "./proof.js";
 export { type UnpackedToken, unpackStateToken } from "./token.js";
 export type {
-  HttpHandlerOptions,
   ExtraRouteContext,
   ExtraRouteHandler,
+  HttpHandlerOptions,
   StateSerializer,
 } from "./types.js";
 export { jsonStateSerializer } from "./types.js";

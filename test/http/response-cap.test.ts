@@ -10,7 +10,6 @@
 
 import { describe, expect, test } from "bun:test";
 import {
-  type Field,
   RecordBatch,
   RecordBatchReader,
   RecordBatchStreamWriter,
@@ -23,10 +22,9 @@ import {
   REQUEST_VERSION_KEY,
   RPC_ERROR_HEADER,
   RPC_METHOD_KEY,
-  STATE_KEY,
 } from "../../src/constants.js";
 import type { ExternalLocationConfig, ExternalStorage } from "../../src/external.js";
-import { ARROW_CONTENT_TYPE, bytes, createHttpHandler, int32, Protocol, str } from "../../src/index.js";
+import { ARROW_CONTENT_TYPE, bytes, createHttpHandler, Protocol, str } from "../../src/index.js";
 
 function buildRequestIpc(schema: Schema, values: Record<string, any[]>, methodName: string): Uint8Array {
   const batch = recordBatchFromArrays(values, schema);

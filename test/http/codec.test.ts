@@ -21,9 +21,9 @@ import { RecordBatch, RecordBatchStreamWriter, recordBatchFromArrays, type Schem
 import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
 import {
   COMPRESSION_ENCODINGS,
+  clientAcceptEncoding,
   DEFAULT_COMPRESSION_LEVEL,
   type Encoding,
-  clientAcceptEncoding,
   parseEncodingList,
   pickResponseEncoding,
 } from "../../src/http/codec.js";
@@ -466,9 +466,7 @@ describe("response encoding on workerd", () => {
     expect(resp.headers.get("X-VGI-Content-Encoding")).toBe("gzip");
     const body = new Uint8Array(await resp.arrayBuffer());
     expect([...body.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
-    expect(new Uint8Array(await gzipDecompress(body)).subarray(0, 4)).toEqual(
-      new Uint8Array([0xff, 0xff, 0xff, 0xff]),
-    );
+    expect(new Uint8Array(await gzipDecompress(body)).subarray(0, 4)).toEqual(new Uint8Array([0xff, 0xff, 0xff, 0xff]));
   });
 
   // The gate is workerd-specific: everywhere else Accept-Encoding is the real

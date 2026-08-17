@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { createHttpHandler, Protocol, str } from "../../src/index.js";
 
 function makeProtocol(): Protocol {
@@ -79,7 +79,7 @@ describe("OAuth token proxy", () => {
     restoreFetch = installFetchMock({});
     const handler = makePkceHandler();
     const resp = await handler(
-      new Request(`http://localhost${PREFIX === "" ? "" : "/.well-known/oauth-protected-resource" + PREFIX}`),
+      new Request(`http://localhost${PREFIX === "" ? "" : `/.well-known/oauth-protected-resource${PREFIX}`}`),
     );
     expect(resp.status).toBe(200);
     const json: any = await resp.json();

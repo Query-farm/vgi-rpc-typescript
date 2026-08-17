@@ -1,15 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  batchFromColumns,
-  deserializeBatch,
-  field,
-  schema as makeSchema,
-  timestampMicro,
-  utf8,
-  type VgiSchema,
-} from "../arrow/index.js";
+import { batchFromColumns, deserializeBatch, schema as makeSchema, type VgiSchema } from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
 import {
   DESCRIBE_METHOD_NAME,
@@ -1110,7 +1102,7 @@ export function createHttpHandler(
 
     // Validate Content-Type
     const contentType = request.headers.get("Content-Type");
-    if (!contentType || !contentType.includes(ARROW_CONTENT_TYPE)) {
+    if (!contentType?.includes(ARROW_CONTENT_TYPE)) {
       if (stickyLockRelease) stickyLockRelease();
       return new Response(`Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`, { status: 415 });
     }

@@ -136,7 +136,7 @@ export async function deriveProofSecret(baseKey: Uint8Array, proxyId: string, or
     throw new Error(`base key must be exactly ${SECRET_LEN} bytes, got ${baseKey.length}`);
   }
   if (!ORIGIN_RE.test(proxyId) || !ORIGIN_RE.test(originId)) {
-    throw new Error("proxyId and originId must match " + ORIGIN_RE.source);
+    throw new Error(`proxyId and originId must match ${ORIGIN_RE.source}`);
   }
   // NUL-separated, and neither identifier may contain NUL — so ("a", "b\0c")
   // cannot collide with ("a\0b", "c").

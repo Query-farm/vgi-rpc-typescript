@@ -7768,7 +7768,7 @@ function createHttpHandler(protocol, options) {
       }
     }
     const contentType = request.headers.get("Content-Type");
-    if (!contentType || !contentType.includes(ARROW_CONTENT_TYPE)) {
+    if (!contentType?.includes(ARROW_CONTENT_TYPE)) {
       if (stickyLockRelease)
         stickyLockRelease();
       return new Response(`Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`, { status: 415 });
@@ -11058,4 +11058,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=AA91E89A2C6648A364756E2164756E21
+//# debugId=1B16AFA92D39B00764756E2164756E21

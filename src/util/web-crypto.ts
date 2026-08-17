@@ -41,7 +41,7 @@ function _hmacKeyCacheKey(rawKey: Uint8Array, usage: "sign" | "verify"): string 
   // Cheap stable fingerprint — collisions only matter for the cache hit/miss,
   // not security. Use a string concat of byte values; for typical 32-byte
   // signing keys this is ~70 chars.
-  let s = usage + ":";
+  let s = `${usage}:`;
   for (let i = 0; i < rawKey.length; i++) s += rawKey[i].toString(16);
   return s;
 }

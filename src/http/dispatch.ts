@@ -3,7 +3,6 @@
 
 import {
   conformBatchToSchema,
-  deserializeBatch,
   deserializeSchema as facadeDeserializeSchema,
   schema as makeSchema,
   serializeBatch,

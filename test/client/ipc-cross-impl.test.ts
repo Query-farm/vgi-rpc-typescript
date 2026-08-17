@@ -168,7 +168,14 @@ describe("introspect.deserializeSchema returns impl-native types", () => {
       const got = (re.getChildAt ? re.getChildAt(0) : re.getChild?.("request"))?.get?.(0);
       // This is the regression check: a Uint8Array of length 5, not the
       // 0-byte value the broken cross-impl path used to produce.
-      expect(got?.byteLength).toBe(payload.byteLength);
+      //
+      // The impl name rides in the compared value rather than being dropped:
+      // the loop runs both backends, and "expected 5, received 0" on its own
+      // does not say which one regressed — which is the first thing you need.
+      expect({ impl: name, byteLength: got?.byteLength }).toEqual({
+        impl: name,
+        byteLength: payload.byteLength,
+      });
     }
   });
 });

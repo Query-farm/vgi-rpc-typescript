@@ -213,17 +213,17 @@ async function main(): Promise<void> {
 
     // 5a. Call unary methods
     const addResult = await client.call("add", { a: 2, b: 3 });
-    if (!addResult || addResult.result !== 5) {
+    if (addResult?.result !== 5) {
       throw new Error(`add: expected { result: 5 }, got ${JSON.stringify(addResult)}`);
     }
 
     const greetResult = await client.call("greet", { name: "World" });
-    if (!greetResult || greetResult.greeting !== "Hello, World!") {
+    if (greetResult?.greeting !== "Hello, World!") {
       throw new Error(`greet: expected greeting "Hello, World!", got ${JSON.stringify(greetResult)}`);
     }
 
     const noopResult = await client.call("noop", {});
-    if (!noopResult || noopResult.ok !== true) {
+    if (noopResult?.ok !== true) {
       throw new Error(`noop: expected { ok: true }, got ${JSON.stringify(noopResult)}`);
     }
 
