@@ -30,7 +30,7 @@ import { AccessLogHook, FdSink } from "../src/access-log.js";
 import { AuthContext } from "../src/auth.js";
 import type { ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider } from "../src/external.js";
 import type { AuthenticateFn } from "../src/http/auth.js";
-import { createHttpHandler } from "../src/http/index.js";
+import { AuthUnavailableError, createHttpHandler } from "../src/http/index.js";
 import type { TokenIdentity } from "../src/http/introspect.js";
 import type { DispatchHook, HookToken } from "../src/types.js";
 import { protocol } from "./conformance-protocol.js";
@@ -316,9 +316,23 @@ const CONFORMANCE_SUBJECT_TOKEN_NAME = "conformance-subject";
  *  Made resolvable, the guard becomes observable — a port that fails to reject
  *  JWS shapes answers 200 and fails. */
 const CONFORMANCE_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl";
+/** The credential whose resolution is *unknowable* rather than unknown. The
+ *  shared suite posts it to check that a backing-store outage surfaces as a
+ *  transient 503 and not as the endpoint's own definitive 404 — which a caller
+ *  may negative-cache, so a briefly unreachable store would be remembered as a
+ *  bad credential for the cache's lifetime. */
+const CONFORMANCE_UNAVAILABLE_TOKEN = "conformance-unavailable-token";
 
-/** Resolve the one fixed subject credential the shared tests post. */
+/** Resolve the fixed credentials the shared tests post.
+ *
+ *  Three answers, deliberately: an identity, `null` for "does not resolve", and
+ *  a thrown {@link AuthUnavailableError} for "I could not find out". The third is
+ *  not a flavour of the second — `null` becomes the definitive 404 a caller may
+ *  negative-cache. */
 function conformanceResolver(token: string): TokenIdentity | null {
+  if (token === CONFORMANCE_UNAVAILABLE_TOKEN) {
+    throw new AuthUnavailableError("conformance: mapping store unreachable");
+  }
   if (token === CONFORMANCE_SUBJECT_TOKEN || token === CONFORMANCE_JWS_TRAP_TOKEN) {
     return { principal: CONFORMANCE_SUBJECT_PRINCIPAL, tokenName: CONFORMANCE_SUBJECT_TOKEN_NAME, ttlSeconds: 300 };
   }

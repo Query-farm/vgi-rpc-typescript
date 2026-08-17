@@ -42,7 +42,7 @@ export declare function parseDescribeResponse(batches: RecordBatch[], onLog?: (m
 /**
  * Send a __describe__ request and return a ServiceDescription.
  */
-export declare function httpIntrospect(baseUrl: string, options?: {
+export declare function httpIntrospect(rawBaseUrl: string, options?: {
     prefix?: string;
     authorization?: string;
     compressionLevel?: number;

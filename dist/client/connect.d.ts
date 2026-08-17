@@ -47,5 +47,5 @@ export interface HttpRpcClient extends RpcClient {
  * the server (caching `__describe__`) on the first call and transparently handles
  * zstd compression, authorization, and 413 request externalization.
  */
-export declare function httpConnect(baseUrl: string, options?: HttpConnectOptions): HttpRpcClient;
+export declare function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): HttpRpcClient;
 //# sourceMappingURL=connect.d.ts.map

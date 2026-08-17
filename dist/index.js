@@ -1789,6 +1789,9 @@ function pickResponseEncoding(standardHeader, customHeader, canProduce) {
 var CONTENT_ENCODING_HEADER = "Content-Encoding";
 var VGI_CONTENT_ENCODING_HEADER = "X-VGI-Content-Encoding";
 var VGI_ACCEPT_ENCODING_HEADER = "X-VGI-Accept-Encoding";
+function clientAcceptEncoding(hasZstdDecoder) {
+  return hasZstdDecoder ? "zstd, gzip" : "gzip";
+}
 var SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings";
 
 // src/client/decode.ts
@@ -2009,7 +2012,8 @@ async function parseDescribeResponse(batches, onLog) {
   }
   return { protocolName, protocolVersion, methods };
 }
-async function httpIntrospect(baseUrl, options) {
+async function httpIntrospect(rawBaseUrl, options) {
+  const baseUrl = rawBaseUrl.replace(/\/+$/, "");
   const prefix = options?.prefix ?? "";
   const emptySchema = new ArrowSchema([]);
   const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
@@ -2028,6 +2032,7 @@ async function httpIntrospect(baseUrl, options) {
   if (level != null && decompressFn) {
     headers["Accept-Encoding"] = "zstd";
   }
+  headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
   const response = await fetch(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
     method: "POST",
     headers,
@@ -3025,6 +3030,7 @@ class HttpStreamSession {
     if (this._compressionLevel != null && this._decompressFn) {
       headers["Accept-Encoding"] = "zstd";
     }
+    headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(this._decompressFn != null);
     if (this._authorization) {
       headers.Authorization = this._authorization;
     }
@@ -3340,7 +3346,8 @@ async function externalizeRequestBody(body, opts) {
 }
 
 // src/client/connect.ts
-function httpConnect(baseUrl, options) {
+function httpConnect(rawBaseUrl, options) {
+  const baseUrl = rawBaseUrl.replace(/\/+$/, "");
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
   const onLog = options?.onLog;
   const compressionLevel = options?.compressionLevel;
@@ -3417,6 +3424,7 @@ function httpConnect(baseUrl, options) {
     if (compressionLevel != null && decompressFn) {
       headers["Accept-Encoding"] = "zstd";
     }
+    headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
     if (authorization) {
       headers.Authorization = authorization;
     }
@@ -7431,6 +7439,9 @@ function createHttpHandler(protocol, options) {
       }
     }
   }
+  function normalizePath(pathname) {
+    return pathname.includes("//") ? pathname.replace(/\/{2,}/g, "/") : pathname;
+  }
   function resolveRoute(path) {
     if (!path.startsWith(`${prefix}/`))
       return null;
@@ -7442,7 +7453,7 @@ function createHttpHandler(protocol, options) {
     return { methodName: subPath, action: "call" };
   }
   function negotiateResponseEncoding(request) {
-    return pickResponseEncoding(request.headers.get("Accept-Encoding"), request.headers.get(VGI_ACCEPT_ENCODING_HEADER), canProduceEncoding);
+    return pickResponseEncoding(stampCustomContentEncoding ? null : request.headers.get("Accept-Encoding"), request.headers.get(VGI_ACCEPT_ENCODING_HEADER), canProduceEncoding);
   }
   async function compressIfAccepted(response, negotiated) {
     if (compressionLevel == null)
@@ -7480,7 +7491,7 @@ function createHttpHandler(protocol, options) {
   const healthBody = enableHealthEndpoint ? JSON.stringify({ status: "ok", server_id: serverId, protocol: displayName }) : null;
   const dispatchRequest = async function handler(request, deferral, egress, requestId = null) {
     const url = new URL(request.url);
-    const path = url.pathname;
+    const path = normalizePath(url.pathname);
     if (pkceConfig && path === `${prefix}/_oauth/token` && (request.method === "POST" || request.method === "OPTIONS")) {
       return handleOAuthTokenProxy(request, pkceConfig);
     }
@@ -7539,8 +7550,11 @@ function createHttpHandler(protocol, options) {
         }
       }
       if (extraRoutes) {
+        const routeUrl = url.pathname === path ? url : new URL(url.href);
+        if (routeUrl !== url)
+          routeUrl.pathname = path;
         const contributed = await extraRoutes(request, {
-          url,
+          url: routeUrl,
           prefix,
           serverId,
           oauthActive,
@@ -11025,4 +11039,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=69D479CC9443677764756E2164756E21
+//# debugId=EF6979FA4C7EC70664756E2164756E21
