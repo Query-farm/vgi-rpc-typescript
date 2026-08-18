@@ -24,7 +24,7 @@ import {
   SERVER_ID_KEY,
 } from "../src/constants.js";
 import { RpcError, VersionError } from "../src/errors.js";
-import { applyDefaults, parseRequest } from "../src/wire/request.js";
+import { applyDefaults, parseRequest, validateRequestSchema } from "../src/wire/request.js";
 import { buildErrorBatch, buildResultBatch } from "../src/wire/response.js";
 import { IpcStreamWriter } from "../src/wire/writer.js";
 
@@ -70,6 +70,14 @@ describe("buildErrorBatch", () => {
     expect(extra.exception_type).toBe("Error");
     expect(extra.exception_message).toBe("Something went wrong");
     expect(extra.traceback).toContain("Error: Something went wrong");
+  });
+
+  it("preserves RpcError's protocol exception type", () => {
+    const schema = new Schema([]);
+    const batch = buildErrorBatch(schema, new RpcError("ProtocolError", "bad schema", ""), "srv1", null);
+    expect(batch.metadata.get(LOG_MESSAGE_KEY)).toBe("ProtocolError: bad schema");
+    const extra = JSON.parse(batch.metadata.get("vgi_rpc.log_extra")!);
+    expect(extra.exception_type).toBe("ProtocolError");
   });
 });
 
@@ -124,6 +132,26 @@ describe("parseRequest", () => {
     const batch = new RecordBatch(schema, data, md);
 
     expect(() => parseRequest(schema, batch)).toThrow(VersionError);
+  });
+});
+
+describe("validateRequestSchema", () => {
+  it("accepts the exact registered field contract", () => {
+    const expected = new Schema([new Field("value", new Float64(), true)]);
+    const actual = new Schema([new Field("value", new Float64(), true)]);
+    expect(() => validateRequestSchema(actual, expected, "echo")).not.toThrow();
+  });
+
+  it("rejects name, type, nullability, and field-count mismatches as ProtocolError", () => {
+    const expected = new Schema([new Field("value", new Float64(), false)]);
+    for (const actual of [
+      new Schema([]),
+      new Schema([new Field("other", new Float64(), false)]),
+      new Schema([new Field("value", new Utf8(), false)]),
+      new Schema([new Field("value", new Float64(), true)]),
+    ]) {
+      expect(() => validateRequestSchema(actual, expected, "echo")).toThrow("ProtocolError");
+    }
   });
 });
 

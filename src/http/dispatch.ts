@@ -22,7 +22,7 @@ import {
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector, TransportKind } from "../types.js";
 import { serializeSchema } from "../util/schema.js";
-import { applyDefaults, parseRequest } from "../wire/request.js";
+import { applyDefaults, parseRequest, validateRequestSchema } from "../wire/request.js";
 import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import { appendCookieHeaders, arrowResponse, HttpRpcError, readRequestFromBody, serializeIpcStream } from "./common.js";
 import {
@@ -241,6 +241,40 @@ function countExternalized(ctx: DispatchContext): ((bytes: number) => void) | un
   };
 }
 
+/** Read one inbound request and transparently resolve an external-location
+ * pointer. The pointer's metadata is the request envelope (dispatch metadata
+ * for unary/init, stream tokens for exchange), so it remains authoritative
+ * after the fetched data batch replaces it. */
+async function readInboundRequest(
+  body: Uint8Array,
+  ctx: DispatchContext,
+): Promise<{ schema: VgiSchema; batch: VgiBatch }> {
+  const { schema, batch } = await readRequestFromBody(body);
+  if (!ctx.externalLocation || !isExternalLocationBatch(batch)) return { schema, batch };
+
+  const resolved = await resolveExternalLocation(batch, ctx.externalLocation);
+  const mergedMetadata = new Map<string, string>(resolved.metadata ?? []);
+  for (const [key, value] of batch.metadata ?? []) mergedMetadata.set(key, value);
+  return {
+    schema: resolved.schema,
+    batch: withBatchMetadata(resolved, mergedMetadata),
+  };
+}
+
+/** Request-envelope violations are client errors on HTTP. Keep handler
+ * exceptions as typed RPC errors, but reject malformed metadata and invalid
+ * request row counts before dispatch with the protocol's HTTP 400 surface. */
+function parseHttpRequest(schema: VgiSchema, batch: VgiBatch): ReturnType<typeof parseRequest> {
+  try {
+    return parseRequest(schema, batch);
+  } catch (error) {
+    const message = (error as { errorMessage?: unknown })?.errorMessage;
+    const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
+    httpError.name = error instanceof Error ? error.name : "ProtocolError";
+    throw httpError;
+  }
+}
+
 /** Predict the external upload size if maybeExternalizeBatch ran on this batch
  *  right now. Returns 0 when externalisation would not fire. Mirrors the
  *  threshold logic so a pre-flight check matches the real upload size. */
@@ -285,30 +319,20 @@ export async function httpDispatchUnary(
   ctx: DispatchContext,
 ): Promise<Response> {
   const schema = method.resultSchema;
-  const { schema: reqSchema, batch: reqBatchRaw } = await readRequestFromBody(body);
-
-  // If the client externalized the request payload, fetch the inner batch
-  // and re-attach the outer dispatch metadata (method, version, request id)
-  // before parsing parameters.  Mirrors the Python _read_request stage-1
-  // behaviour in vgi_rpc/rpc/_wire.py.
-  let reqBatch = reqBatchRaw;
-  let effectiveSchema = reqSchema;
-  if (ctx.externalLocation && isExternalLocationBatch(reqBatchRaw)) {
-    const resolved = await resolveExternalLocation(reqBatchRaw, ctx.externalLocation);
-    const mergedMeta = new Map<string, string>(resolved.metadata ?? []);
-    for (const [k, v] of reqBatchRaw.metadata ?? []) {
-      // Outer dispatch metadata wins for vgi_rpc.* keys (the inner batch
-      // shouldn't carry them but if it does, the outer is authoritative).
-      mergedMeta.set(k, v);
-    }
-    reqBatch = withBatchMetadata(resolved, mergedMeta);
-    effectiveSchema = resolved.schema;
-  }
-
-  const parsed = parseRequest(effectiveSchema, reqBatch);
+  const { schema: effectiveSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
+  const parsed = parseHttpRequest(effectiveSchema, reqBatch);
 
   if (parsed.methodName !== method.name) {
     throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
+  }
+
+  try {
+    validateRequestSchema(effectiveSchema, method.paramsSchema, method.name);
+  } catch (error) {
+    const message = (error as { errorMessage?: unknown })?.errorMessage;
+    const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
+    httpError.name = "ProtocolError";
+    throw httpError;
   }
 
   applyDefaults(parsed.params, method.defaults);
@@ -390,11 +414,20 @@ export async function httpDispatchStreamInit(
   const outputSchema = method.outputSchema!;
   const inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
 
-  const { schema: reqSchema, batch: reqBatch } = await readRequestFromBody(body);
-  const parsed = parseRequest(reqSchema, reqBatch);
+  const { schema: reqSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
+  const parsed = parseHttpRequest(reqSchema, reqBatch);
 
   if (parsed.methodName !== method.name) {
     throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
+  }
+
+  try {
+    validateRequestSchema(reqSchema, method.paramsSchema, method.name);
+  } catch (error) {
+    const message = (error as { errorMessage?: unknown })?.errorMessage;
+    const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
+    httpError.name = "ProtocolError";
+    throw httpError;
   }
 
   applyDefaults(parsed.params, method.defaults);
@@ -512,7 +545,7 @@ export async function httpDispatchStreamExchange(
 ): Promise<Response> {
   const isProducer = !!method.producerFn;
 
-  const { batch: reqBatch } = await readRequestFromBody(body);
+  const { batch: reqBatch } = await readInboundRequest(body, ctx);
 
   // Get state token from batch metadata
   const tokenBase64 = reqBatch.metadata?.get(STATE_KEY);

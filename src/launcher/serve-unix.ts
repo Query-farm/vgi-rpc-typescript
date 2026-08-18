@@ -36,7 +36,7 @@ import {
   TransportKind,
 } from "../types.js";
 import { IpcStreamReader } from "../wire/reader.js";
-import { applyDefaults, parseRequest } from "../wire/request.js";
+import { applyDefaults, parseRequest, validateRequestSchema } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { IpcStreamWriter } from "../wire/writer.js";
 
@@ -300,6 +300,14 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
       const err = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
       const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, serverId, requestId);
       await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
+      return;
+    }
+
+    try {
+      validateRequestSchema(schema, method.paramsSchema, methodName);
+    } catch (error) {
+      const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
+      await writer.writeStream(errSchema, [buildErrorBatch(errSchema, error as Error, serverId, requestId)]);
       return;
     }
 

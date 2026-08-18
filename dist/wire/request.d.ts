@@ -8,6 +8,16 @@ export interface ParsedRequest {
     rawMetadata: Map<string, string>;
 }
 /**
+ * Enforce the registered parameter contract before handing values to user code.
+ *
+ * Arrow Schema object identity is not meaningful across an IPC boundary, so
+ * compare the pieces of the field contract explicitly. `DataType#toString()`
+ * is Arrow's canonical, recursive rendering and includes type parameters such
+ * as integer width/sign, timestamp unit/timezone, decimal precision/scale,
+ * and nested child fields.
+ */
+export declare function validateRequestSchema(actual: VgiSchema, expected: VgiSchema, methodName: string): void;
+/**
  * Parse a request from a RecordBatch with metadata.
  * Extracts method name, version, and params from the batch.
  */

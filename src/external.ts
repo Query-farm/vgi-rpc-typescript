@@ -62,9 +62,17 @@ export interface ExternalLocationConfig {
   };
   /** URL validator called before fetching. Throw to reject. Default: HTTPS-only. */
   urlValidator?: ((url: string) => void) | null;
+  /** Maximum compressed/on-wire bytes accepted from one fetch. Default: 256 MiB. */
+  maxFetchBytes?: number;
+  /** Maximum bytes accepted after decompression. Default: 16 * maxFetchBytes. */
+  maxDecompressedBytes?: number;
+  /** Maximum redirects followed while fetching. Each target is revalidated. Default: 5. */
+  maxRedirects?: number;
 }
 
 const DEFAULT_THRESHOLD = 1_048_576; // 1 MB
+const DEFAULT_MAX_FETCH_BYTES = 256 * 1024 * 1024;
+const DEFAULT_MAX_REDIRECTS = 5;
 
 // ---------------------------------------------------------------------------
 // URL validation
@@ -76,6 +84,87 @@ export function httpsOnlyValidator(url: string): void {
   if (parsed.protocol !== "https:") {
     throw new Error(`External location URL must use HTTPS, got "${parsed.protocol}"`);
   }
+}
+
+/** Render a URL for diagnostics without bearer query strings or userinfo. */
+export function redactExternalUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
+function validateFetchConfig(config: ExternalLocationConfig): {
+  maxFetchBytes: number;
+  maxDecompressedBytes: number;
+  maxRedirects: number;
+} {
+  const maxFetchBytes = config.maxFetchBytes ?? DEFAULT_MAX_FETCH_BYTES;
+  const maxDecompressedBytes = config.maxDecompressedBytes ?? Math.min(Number.MAX_SAFE_INTEGER, maxFetchBytes * 16);
+  const maxRedirects = config.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  if (!Number.isSafeInteger(maxFetchBytes) || maxFetchBytes < 0) {
+    throw new Error("maxFetchBytes must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(maxDecompressedBytes) || maxDecompressedBytes < 0) {
+    throw new Error("maxDecompressedBytes must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0) {
+    throw new Error("maxRedirects must be a non-negative safe integer");
+  }
+  return { maxFetchBytes, maxDecompressedBytes, maxRedirects };
+}
+
+async function readResponseBounded(
+  response: Response,
+  maxBytes: number,
+  controller: AbortController,
+): Promise<Uint8Array> {
+  const declared = response.headers.get("Content-Length");
+  if (declared != null) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > maxBytes) {
+      controller.abort();
+      throw new Error(`External location fetch exceeds maxFetchBytes (${length} > ${maxBytes})`);
+    }
+  }
+
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        controller.abort();
+        throw new Error(`External location fetch exceeded maxFetchBytes (${maxBytes} bytes)`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // The stream may already be closed or aborted.
+    }
+    reader.releaseLock();
+  }
+
+  const data = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return data;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,27 +282,62 @@ export async function resolveExternalLocation(
   const url = batch.metadata?.get(LOCATION_KEY);
   if (!url) return batch;
 
-  // Validate URL
+  const { maxFetchBytes, maxDecompressedBytes, maxRedirects } = validateFetchConfig(config);
   const validator = config.urlValidator === null ? undefined : (config.urlValidator ?? httpsOnlyValidator);
-  if (validator) {
-    validator(url);
+  let currentUrl = url;
+  let response: Response | undefined;
+  let controller: AbortController | undefined;
+  for (let redirects = 0; ; redirects++) {
+    if (validator) {
+      try {
+        validator(currentUrl);
+      } catch (error) {
+        const reason = validator === httpsOnlyValidator && error instanceof Error ? `: ${error.message}` : "";
+        throw new Error(`External location URL rejected [url: ${redactExternalUrl(currentUrl)}]${reason}`);
+      }
+    }
+
+    controller = new AbortController();
+    try {
+      response = await fetch(currentUrl, { redirect: "manual", signal: controller.signal });
+    } catch {
+      throw new Error(`External location fetch failed [url: ${redactExternalUrl(currentUrl)}]`);
+    }
+
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    if (redirects >= maxRedirects) {
+      controller.abort();
+      throw new Error(`External location fetch exceeded maxRedirects (${maxRedirects})`);
+    }
+    const location = response.headers.get("Location");
+    if (!location) {
+      controller.abort();
+      throw new Error(`External location redirect had no Location header [url: ${redactExternalUrl(currentUrl)}]`);
+    }
+    try {
+      currentUrl = new URL(location, currentUrl).toString();
+    } catch {
+      controller.abort();
+      throw new Error(`External location redirect target is invalid [url: ${redactExternalUrl(currentUrl)}]`);
+    }
+    controller.abort();
   }
 
-  // Fetch
-  const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`External location fetch failed: ${response.status} ${response.statusText} [url: ${url}]`);
+    throw new Error(
+      `External location fetch failed: ${response.status} ${response.statusText} [url: ${redactExternalUrl(currentUrl)}]`,
+    );
   }
-  let data = new Uint8Array(await response.arrayBuffer());
+  let data = await readResponseBounded(response, maxFetchBytes, controller!);
 
-  // Decompress if needed.  Cap the decompressed size at 16x the
-  // compressed body — generous for typical Arrow IPC zstd ratios but
-  // tight enough that a tiny response cannot inflate to multi-GB.
-  // Mirrors Python's external_fetch.fetch_url.
   const contentEncoding = response.headers.get("Content-Encoding");
   if (contentEncoding === "zstd") {
-    const cap = data.byteLength * 16;
-    data = new Uint8Array(await zstdDecompress(data, cap));
+    data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
+    if (data.byteLength > maxDecompressedBytes) {
+      throw new Error(
+        `External location decompressed body exceeds maxDecompressedBytes (${data.byteLength} > ${maxDecompressedBytes})`,
+      );
+    }
   }
 
   // Verify SHA-256 if present
@@ -221,14 +345,16 @@ export async function resolveExternalLocation(
   if (expectedSha256) {
     const actualSha256 = await sha256Hex(data);
     if (actualSha256 !== expectedSha256) {
-      throw new Error(`SHA-256 checksum mismatch for ${url}: expected ${expectedSha256}, got ${actualSha256}`);
+      throw new Error(
+        `SHA-256 checksum mismatch for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`,
+      );
     }
   }
 
   // Parse IPC stream
   const resolved = deserializeBatch(data);
   if (resolved.numRows === 0 && resolved.schema.fields.length === 0) {
-    throw new Error(`No data batch found in external IPC stream from ${url}`);
+    throw new Error(`No data batch found in external IPC stream from ${redactExternalUrl(currentUrl)}`);
   }
   return resolved;
 }

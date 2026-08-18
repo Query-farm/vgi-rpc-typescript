@@ -21,6 +21,55 @@ export interface ParsedRequest {
 }
 
 /**
+ * Enforce the registered parameter contract before handing values to user code.
+ *
+ * Arrow Schema object identity is not meaningful across an IPC boundary, so
+ * compare the pieces of the field contract explicitly. `DataType#toString()`
+ * is Arrow's canonical, recursive rendering and includes type parameters such
+ * as integer width/sign, timestamp unit/timezone, decimal precision/scale,
+ * and nested child fields.
+ */
+export function validateRequestSchema(actual: VgiSchema, expected: VgiSchema, methodName: string): void {
+  const actualFields = actual.fields;
+  const expectedFields = expected.fields;
+  if (actualFields.length !== expectedFields.length) {
+    throw new RpcError(
+      "ProtocolError",
+      `Parameter schema mismatch for method '${methodName}': expected ${expectedFields.length} fields, got ${actualFields.length}.`,
+      "",
+    );
+  }
+
+  for (let i = 0; i < expectedFields.length; i++) {
+    const got = actualFields[i];
+    const want = expectedFields[i];
+    if (got.name !== want.name) {
+      throw new RpcError(
+        "ProtocolError",
+        `Parameter schema mismatch for method '${methodName}' at field ${i}: expected name '${want.name}', got '${got.name}'.`,
+        "",
+      );
+    }
+    const gotType = String(got.type);
+    const wantType = String(want.type);
+    if (gotType !== wantType) {
+      throw new RpcError(
+        "ProtocolError",
+        `Parameter schema mismatch for method '${methodName}' field '${want.name}': expected type ${wantType}, got ${gotType}.`,
+        "",
+      );
+    }
+    if (got.nullable !== want.nullable) {
+      throw new RpcError(
+        "ProtocolError",
+        `Parameter schema mismatch for method '${methodName}' field '${want.name}': expected nullable=${want.nullable}, got nullable=${got.nullable}.`,
+        "",
+      );
+    }
+  }
+}
+
+/**
  * Parse a request from a RecordBatch with metadata.
  * Extracts method name, version, and params from the batch.
  */

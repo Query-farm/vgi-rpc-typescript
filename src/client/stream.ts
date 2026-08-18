@@ -230,23 +230,27 @@ export class HttpStreamSession implements StreamSession {
       return this._doExchange(zeroSchema, [batchWithMeta]);
     }
 
-    // Infer schema from first row values (input schema may differ from output).
-    const keys = Object.keys(input[0]);
-    const fields = keys.map((key) => {
-      // Find first non-null value to infer type
-      let sample: any;
-      for (const row of input) {
-        if (row[key] != null) {
-          sample = row[key];
-          break;
+    // __describe__ is the contract. Runtime inference cannot represent an
+    // all-null typed column and loses parameters on complex Arrow types. Keep
+    // inference only as a compatibility fallback for peers that omitted the
+    // input schema from their description.
+    let inputSchema = this._inputSchema;
+    if (!inputSchema) {
+      const keys = Object.keys(input[0]);
+      const fields = keys.map((key) => {
+        let sample: any;
+        for (const row of input) {
+          if (row[key] != null) {
+            sample = row[key];
+            break;
+          }
         }
-      }
-      const arrowType = inferArrowType(sample);
-      const nullable = input.some((row) => row[key] == null);
-      return new Field(key, arrowType, nullable);
-    });
-
-    const inputSchema = new Schema(fields);
+        const arrowType = inferArrowType(sample);
+        const nullable = input.some((row) => row[key] == null);
+        return new Field(key, arrowType, nullable);
+      });
+      inputSchema = new Schema(fields);
+    }
     const children = inputSchema.fields.map((f) => {
       const values = input.map((row) => row[f.name]);
       return vectorFromArray(values, f.type).data[0];

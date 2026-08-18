@@ -169,15 +169,21 @@ class FakeStorage implements ExternalStorage, UploadUrlProvider {
     if (!allocResp.ok) {
       throw new Error(`fake-storage /alloc failed: ${allocResp.status}`);
     }
-    const { object_url: objectUrl } = (await allocResp.json()) as { object_url: string };
+    const allocation = (await allocResp.json()) as {
+      object_url: string;
+      upload_url?: string;
+      download_url?: string;
+    };
+    const uploadUrl = allocation.upload_url ?? allocation.object_url;
+    const downloadUrl = allocation.download_url ?? allocation.object_url;
 
     const putHeaders: Record<string, string> = { "Content-Type": "application/octet-stream" };
     if (contentEncoding) putHeaders["Content-Encoding"] = contentEncoding;
-    const putResp = await fetch(objectUrl, { method: "PUT", headers: putHeaders, body: data });
+    const putResp = await fetch(uploadUrl, { method: "PUT", headers: putHeaders, body: data });
     if (!putResp.ok) {
       throw new Error(`fake-storage PUT failed: ${putResp.status}`);
     }
-    return objectUrl;
+    return downloadUrl;
   }
 
   async generateUploadUrl(): Promise<UploadUrl> {
@@ -189,11 +195,14 @@ class FakeStorage implements ExternalStorage, UploadUrlProvider {
     if (!allocResp.ok) {
       throw new Error(`fake-storage /alloc failed: ${allocResp.status}`);
     }
-    const { object_url: objectUrl } = (await allocResp.json()) as { object_url: string };
-    // The fake storage uses the same path for PUT and GET — disambiguates by HTTP method.
+    const allocation = (await allocResp.json()) as {
+      object_url: string;
+      upload_url?: string;
+      download_url?: string;
+    };
     return {
-      uploadUrl: objectUrl,
-      downloadUrl: objectUrl,
+      uploadUrl: allocation.upload_url ?? allocation.object_url,
+      downloadUrl: allocation.download_url ?? allocation.object_url,
       expiresAt: new Date(Date.now() + 3600_000),
     };
   }

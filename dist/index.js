@@ -1238,15 +1238,18 @@ function buildResultBatch(schema2, values, serverId, requestId) {
 function buildErrorBatch(schema2, error, serverId, requestId) {
   const metadata = new Map;
   metadata.set(LOG_LEVEL_KEY, "EXCEPTION");
-  const exceptionType = typeof error.name === "string" && error.name !== "Error" ? error.name : error.constructor.name;
-  metadata.set(LOG_MESSAGE_KEY, `${exceptionType}: ${error.message}`);
+  const rpcErrorType = error.errorType;
+  const exceptionType = typeof rpcErrorType === "string" && rpcErrorType.length > 0 ? rpcErrorType : typeof error.name === "string" && error.name !== "Error" ? error.name : error.constructor.name;
+  const rpcErrorMessage = error.errorMessage;
+  const exceptionMessage = typeof rpcErrorMessage === "string" ? rpcErrorMessage : error.message;
+  metadata.set(LOG_MESSAGE_KEY, `${exceptionType}: ${exceptionMessage}`);
   const errorKind = error.errorKind ?? error.constructor.errorKind;
   if (typeof errorKind === "string" && errorKind.length > 0) {
     metadata.set(ERROR_KIND_KEY, errorKind);
   }
   const extra = {
     exception_type: exceptionType,
-    exception_message: error.message,
+    exception_message: exceptionMessage,
     traceback: error.stack ?? ""
   };
   if (typeof errorKind === "string" && errorKind.length > 0) {
@@ -1280,11 +1283,80 @@ function buildEmptyBatch(schema2, metadata) {
 
 // src/external.ts
 var DEFAULT_THRESHOLD = 1048576;
+var DEFAULT_MAX_FETCH_BYTES = 256 * 1024 * 1024;
+var DEFAULT_MAX_REDIRECTS = 5;
 function httpsOnlyValidator(url) {
   const parsed = new URL(url);
   if (parsed.protocol !== "https:") {
     throw new Error(`External location URL must use HTTPS, got "${parsed.protocol}"`);
   }
+}
+function redactExternalUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return "<invalid-url>";
+  }
+}
+function validateFetchConfig(config) {
+  const maxFetchBytes = config.maxFetchBytes ?? DEFAULT_MAX_FETCH_BYTES;
+  const maxDecompressedBytes = config.maxDecompressedBytes ?? Math.min(Number.MAX_SAFE_INTEGER, maxFetchBytes * 16);
+  const maxRedirects = config.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  if (!Number.isSafeInteger(maxFetchBytes) || maxFetchBytes < 0) {
+    throw new Error("maxFetchBytes must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(maxDecompressedBytes) || maxDecompressedBytes < 0) {
+    throw new Error("maxDecompressedBytes must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0) {
+    throw new Error("maxRedirects must be a non-negative safe integer");
+  }
+  return { maxFetchBytes, maxDecompressedBytes, maxRedirects };
+}
+async function readResponseBounded(response, maxBytes, controller) {
+  const declared = response.headers.get("Content-Length");
+  if (declared != null) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > maxBytes) {
+      controller.abort();
+      throw new Error(`External location fetch exceeds maxFetchBytes (${length} > ${maxBytes})`);
+    }
+  }
+  if (!response.body)
+    return new Uint8Array;
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        controller.abort();
+        throw new Error(`External location fetch exceeded maxFetchBytes (${maxBytes} bytes)`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {}
+    reader.releaseLock();
+  }
+  const data = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return data;
 }
 async function sha256Hex(data) {
   const buf = new ArrayBuffer(data.byteLength);
@@ -1341,30 +1413,66 @@ async function resolveExternalLocation(batch, config) {
   const url = batch.metadata?.get(LOCATION_KEY);
   if (!url)
     return batch;
+  const { maxFetchBytes, maxDecompressedBytes, maxRedirects } = validateFetchConfig(config);
   const validator = config.urlValidator === null ? undefined : config.urlValidator ?? httpsOnlyValidator;
-  if (validator) {
-    validator(url);
+  let currentUrl = url;
+  let response;
+  let controller;
+  for (let redirects = 0;; redirects++) {
+    if (validator) {
+      try {
+        validator(currentUrl);
+      } catch (error) {
+        const reason = validator === httpsOnlyValidator && error instanceof Error ? `: ${error.message}` : "";
+        throw new Error(`External location URL rejected [url: ${redactExternalUrl(currentUrl)}]${reason}`);
+      }
+    }
+    controller = new AbortController;
+    try {
+      response = await fetch(currentUrl, { redirect: "manual", signal: controller.signal });
+    } catch {
+      throw new Error(`External location fetch failed [url: ${redactExternalUrl(currentUrl)}]`);
+    }
+    if (![301, 302, 303, 307, 308].includes(response.status))
+      break;
+    if (redirects >= maxRedirects) {
+      controller.abort();
+      throw new Error(`External location fetch exceeded maxRedirects (${maxRedirects})`);
+    }
+    const location = response.headers.get("Location");
+    if (!location) {
+      controller.abort();
+      throw new Error(`External location redirect had no Location header [url: ${redactExternalUrl(currentUrl)}]`);
+    }
+    try {
+      currentUrl = new URL(location, currentUrl).toString();
+    } catch {
+      controller.abort();
+      throw new Error(`External location redirect target is invalid [url: ${redactExternalUrl(currentUrl)}]`);
+    }
+    controller.abort();
   }
-  const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`External location fetch failed: ${response.status} ${response.statusText} [url: ${url}]`);
+    throw new Error(`External location fetch failed: ${response.status} ${response.statusText} [url: ${redactExternalUrl(currentUrl)}]`);
   }
-  let data = new Uint8Array(await response.arrayBuffer());
+  let data = await readResponseBounded(response, maxFetchBytes, controller);
   const contentEncoding = response.headers.get("Content-Encoding");
   if (contentEncoding === "zstd") {
-    const cap = data.byteLength * 16;
-    data = new Uint8Array(await zstdDecompress(data, cap));
+    data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
+    if (data.byteLength > maxDecompressedBytes) {
+      throw new Error(`External location decompressed body exceeds maxDecompressedBytes (${data.byteLength} > ${maxDecompressedBytes})`);
+    }
   }
   const expectedSha256 = batch.metadata?.get(LOCATION_SHA256_KEY);
   if (expectedSha256) {
     const actualSha256 = await sha256Hex(data);
     if (actualSha256 !== expectedSha256) {
-      throw new Error(`SHA-256 checksum mismatch for ${url}: expected ${expectedSha256}, got ${actualSha256}`);
+      throw new Error(`SHA-256 checksum mismatch for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`);
     }
   }
   const resolved = deserializeBatch(data);
   if (resolved.numRows === 0 && resolved.schema.fields.length === 0) {
-    throw new Error(`No data batch found in external IPC stream from ${url}`);
+    throw new Error(`No data batch found in external IPC stream from ${redactExternalUrl(currentUrl)}`);
   }
   return resolved;
 }
@@ -3056,20 +3164,23 @@ class HttpStreamSession {
       const batchWithMeta = new RecordBatch2(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
       return this._doExchange(zeroSchema, [batchWithMeta]);
     }
-    const keys = Object.keys(input[0]);
-    const fields = keys.map((key) => {
-      let sample;
-      for (const row of input) {
-        if (row[key] != null) {
-          sample = row[key];
-          break;
+    let inputSchema = this._inputSchema;
+    if (!inputSchema) {
+      const keys = Object.keys(input[0]);
+      const fields = keys.map((key) => {
+        let sample;
+        for (const row of input) {
+          if (row[key] != null) {
+            sample = row[key];
+            break;
+          }
         }
-      }
-      const arrowType = inferArrowType(sample);
-      const nullable = input.some((row) => row[key] == null);
-      return new Field2(key, arrowType, nullable);
-    });
-    const inputSchema = new Schema2(fields);
+        const arrowType = inferArrowType(sample);
+        const nullable = input.some((row) => row[key] == null);
+        return new Field2(key, arrowType, nullable);
+      });
+      inputSchema = new Schema2(fields);
+    }
     const children = inputSchema.fields.map((f) => {
       const values = input.map((row) => row[f.name]);
       return vectorFromArray2(values, f.type).data[0];
@@ -4298,6 +4409,28 @@ function isOpaquePassthroughType(type) {
 // src/wire/request.ts
 var MIN_SAFE_BIG = BigInt(Number.MIN_SAFE_INTEGER);
 var MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
+function validateRequestSchema(actual, expected, methodName) {
+  const actualFields = actual.fields;
+  const expectedFields = expected.fields;
+  if (actualFields.length !== expectedFields.length) {
+    throw new RpcError("ProtocolError", `Parameter schema mismatch for method '${methodName}': expected ${expectedFields.length} fields, got ${actualFields.length}.`, "");
+  }
+  for (let i = 0;i < expectedFields.length; i++) {
+    const got = actualFields[i];
+    const want = expectedFields[i];
+    if (got.name !== want.name) {
+      throw new RpcError("ProtocolError", `Parameter schema mismatch for method '${methodName}' at field ${i}: expected name '${want.name}', got '${got.name}'.`, "");
+    }
+    const gotType = String(got.type);
+    const wantType = String(want.type);
+    if (gotType !== wantType) {
+      throw new RpcError("ProtocolError", `Parameter schema mismatch for method '${methodName}' field '${want.name}': expected type ${wantType}, got ${gotType}.`, "");
+    }
+    if (got.nullable !== want.nullable) {
+      throw new RpcError("ProtocolError", `Parameter schema mismatch for method '${methodName}' field '${want.name}': expected nullable=${want.nullable}, got nullable=${got.nullable}.`, "");
+    }
+  }
+}
 function parseRequest(schema2, batch) {
   const metadata = batch.metadata ?? new Map;
   const methodName = metadata.get(RPC_METHOD_KEY);
@@ -5456,6 +5589,29 @@ function countExternalized(ctx) {
     egress.externalizedBytes += bytes;
   };
 }
+async function readInboundRequest(body, ctx) {
+  const { schema: schema2, batch } = await readRequestFromBody(body);
+  if (!ctx.externalLocation || !isExternalLocationBatch(batch))
+    return { schema: schema2, batch };
+  const resolved = await resolveExternalLocation(batch, ctx.externalLocation);
+  const mergedMetadata = new Map(resolved.metadata ?? []);
+  for (const [key, value] of batch.metadata ?? [])
+    mergedMetadata.set(key, value);
+  return {
+    schema: resolved.schema,
+    batch: withBatchMetadata(resolved, mergedMetadata)
+  };
+}
+function parseHttpRequest(schema2, batch) {
+  try {
+    return parseRequest(schema2, batch);
+  } catch (error) {
+    const message = error?.errorMessage;
+    const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
+    httpError.name = error instanceof Error ? error.name : "ProtocolError";
+    throw httpError;
+  }
+}
 function predictExternalizeBytes(batch, config) {
   if (!config?.storage)
     return 0;
@@ -5480,21 +5636,18 @@ async function httpDispatchDescribe(protocolName, methods, serverId, protocolVer
 }
 async function httpDispatchUnary(method, body, ctx) {
   const schema2 = method.resultSchema;
-  const { schema: reqSchema, batch: reqBatchRaw } = await readRequestFromBody(body);
-  let reqBatch = reqBatchRaw;
-  let effectiveSchema = reqSchema;
-  if (ctx.externalLocation && isExternalLocationBatch(reqBatchRaw)) {
-    const resolved = await resolveExternalLocation(reqBatchRaw, ctx.externalLocation);
-    const mergedMeta = new Map(resolved.metadata ?? []);
-    for (const [k, v] of reqBatchRaw.metadata ?? []) {
-      mergedMeta.set(k, v);
-    }
-    reqBatch = withBatchMetadata(resolved, mergedMeta);
-    effectiveSchema = resolved.schema;
-  }
-  const parsed = parseRequest(effectiveSchema, reqBatch);
+  const { schema: effectiveSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
+  const parsed = parseHttpRequest(effectiveSchema, reqBatch);
   if (parsed.methodName !== method.name) {
     throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
+  }
+  try {
+    validateRequestSchema(effectiveSchema, method.paramsSchema, method.name);
+  } catch (error) {
+    const message = error?.errorMessage;
+    const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
+    httpError.name = "ProtocolError";
+    throw httpError;
   }
   applyDefaults(parsed.params, method.defaults);
   const externalizationEnabled = !!ctx.externalLocation?.storage;
@@ -5544,10 +5697,18 @@ async function httpDispatchStreamInit(method, body, ctx) {
   const isProducer = !!method.producerFn;
   const outputSchema = method.outputSchema;
   const inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
-  const { schema: reqSchema, batch: reqBatch } = await readRequestFromBody(body);
-  const parsed = parseRequest(reqSchema, reqBatch);
+  const { schema: reqSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
+  const parsed = parseHttpRequest(reqSchema, reqBatch);
   if (parsed.methodName !== method.name) {
     throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${method.name}'`, 400);
+  }
+  try {
+    validateRequestSchema(reqSchema, method.paramsSchema, method.name);
+  } catch (error) {
+    const message = error?.errorMessage;
+    const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
+    httpError.name = "ProtocolError";
+    throw httpError;
   }
   applyDefaults(parsed.params, method.defaults);
   let state;
@@ -5612,7 +5773,7 @@ async function httpDispatchStreamInit(method, body, ctx) {
 }
 async function httpDispatchStreamExchange(method, body, ctx) {
   const isProducer = !!method.producerFn;
-  const { batch: reqBatch } = await readRequestFromBody(body);
+  const { batch: reqBatch } = await readInboundRequest(body, ctx);
   const tokenBase64 = reqBatch.metadata?.get(STATE_KEY);
   if (!tokenBase64) {
     throw new HttpRpcError("Missing state token in exchange request", 400);
@@ -7208,6 +7369,45 @@ var jsonStateSerializer = {
 // src/http/handler.ts
 var EMPTY_SCHEMA2 = schema([]);
 var EMPTY_COOKIES2 = new Map;
+var MAX_UPLOAD_URL_REQUEST_BYTES = 8 * 1024;
+async function readBodyBounded(request, maxBytes) {
+  if (maxBytes == null)
+    return new Uint8Array(await request.arrayBuffer());
+  const declared = request.headers.get("Content-Length");
+  if (declared != null) {
+    const parsed = Number(declared);
+    if (Number.isFinite(parsed) && parsed > maxBytes) {
+      throw new HttpRpcError("Request body too large", 413);
+    }
+  }
+  if (!request.body)
+    return new Uint8Array;
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("request body limit exceeded");
+        throw new HttpRpcError("Request body too large", 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
 function parseRequestCookies(request) {
   const header = request.headers.get("cookie");
   if (!header)
@@ -7773,22 +7973,22 @@ function createHttpHandler(protocol, options) {
         stickyLockRelease();
       return new Response(`Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`, { status: 415 });
     }
-    const exemptFromMaxBytes = path === healthPath || path === `${prefix}/${UPLOAD_URL_METHOD}/init` || path === `${prefix}/__capabilities__`;
-    if (maxRequestBytes != null && !exemptFromMaxBytes) {
-      const contentLength = request.headers.get("Content-Length");
-      if (contentLength && parseInt(contentLength, 10) > maxRequestBytes) {
-        return new Response("Request body too large", { status: 413 });
-      }
+    const isUploadUrlRequest = path === `${prefix}/${UPLOAD_URL_METHOD}/init`;
+    const wireBodyCap = isUploadUrlRequest ? Math.min(maxRequestBytes ?? Number.POSITIVE_INFINITY, MAX_UPLOAD_URL_REQUEST_BYTES) : maxRequestBytes;
+    let body;
+    try {
+      body = await readBodyBounded(request, wireBodyCap);
+    } catch (error) {
+      if (error instanceof HttpRpcError)
+        return new Response(error.message, { status: error.statusCode });
+      throw error;
     }
-    let body = new Uint8Array(await request.arrayBuffer());
     const requestWireBytes = body.byteLength;
-    if (maxRequestBytes != null && !exemptFromMaxBytes && body.byteLength > maxRequestBytes) {
-      return new Response("Request body too large", { status: 413 });
-    }
     const contentEncoding = (request.headers.get("Content-Encoding") ?? "").trim().toLowerCase();
     if (contentEncoding === "zstd" || contentEncoding === "gzip") {
       try {
-        body = contentEncoding === "zstd" ? await zstdDecompress(body, maxDecompressedRequestBytes) : await gzipDecompress(body, maxDecompressedRequestBytes);
+        const decompressedCap = isUploadUrlRequest ? Math.min(maxDecompressedRequestBytes ?? Number.POSITIVE_INFINITY, MAX_UPLOAD_URL_REQUEST_BYTES) : maxDecompressedRequestBytes;
+        body = contentEncoding === "zstd" ? await zstdDecompress(body, decompressedCap) : await gzipDecompress(body, decompressedCap);
       } catch (error) {
         const message = error?.message ?? `${contentEncoding} decompression failed`;
         const status = message.includes("exceed") || message.includes("cap") ? 413 : 400;
@@ -7812,6 +8012,14 @@ function createHttpHandler(protocol, options) {
         const parsed = parseRequest(reqSchema, reqBatch);
         if (parsed.methodName !== UPLOAD_URL_METHOD) {
           throw new HttpRpcError(`Method name in request '${parsed.methodName}' does not match URL '${UPLOAD_URL_METHOD}'`, 400);
+        }
+        try {
+          validateRequestSchema(reqSchema, UPLOAD_URL_PARAMS_SCHEMA, UPLOAD_URL_METHOD);
+        } catch (error) {
+          const message = error?.errorMessage;
+          const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
+          httpError.name = "ProtocolError";
+          throw httpError;
         }
         const rawCount = parsed.params.count;
         let count = typeof rawCount === "bigint" ? Number(rawCount) : Number(rawCount ?? 1);
@@ -9809,7 +10017,7 @@ class VgiRpcServer {
     try {
       while (true) {
         await this.notifyTransport(transportKind);
-        await this.serveOne(reader, writer);
+        await this.serveOne(reader, writer, transportKind);
       }
     } catch (e) {
       if (e.message?.includes("closed") || e.message?.includes("Expected Schema Message") || e.message?.includes("null or length 0") || e.code === "EPIPE" || e.code === "ERR_STREAM_PREMATURE_CLOSE" || e.code === "ERR_STREAM_DESTROYED" || e instanceof Error && e.message.includes("EOF")) {
@@ -9820,7 +10028,7 @@ class VgiRpcServer {
       await reader.cancel();
     }
   }
-  async serveOne(reader, writer) {
+  async serveOne(reader, writer, transportKind) {
     const stream = await reader.readStream();
     if (!stream) {
       throw new Error("EOF");
@@ -9862,6 +10070,14 @@ class VgiRpcServer {
       await writer.writeStream(EMPTY_SCHEMA5, [errBatch]);
       return;
     }
+    try {
+      validateRequestSchema(schema2, method.paramsSchema, methodName);
+    } catch (error) {
+      const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA5;
+      const errBatch = buildErrorBatch(errSchema, error, this.serverId, requestId);
+      await writer.writeStream(errSchema, [errBatch]);
+      return;
+    }
     if (this.protocol.protocolVersionParts !== null) {
       try {
         const md = batch.metadata;
@@ -9893,7 +10109,7 @@ class VgiRpcServer {
       protocol: this.protocol.name,
       protocolHash,
       protocolVersion: this.protocolVersion,
-      kind: "pipe" /* PIPE */,
+      kind: transportKind,
       principal: "",
       authDomain: "",
       authenticated: false,
@@ -9914,9 +10130,9 @@ class VgiRpcServer {
     applyDefaults(params, method.defaults);
     try {
       if (method.type === "unary" /* UNARY */) {
-        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig, "pipe" /* PIPE */);
+        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig, transportKind);
       } else {
-        await dispatchStream(method, params, writer, reader, this.serverId, requestId, this.externalConfig, "pipe" /* PIPE */);
+        await dispatchStream(method, params, writer, reader, this.serverId, requestId, this.externalConfig, transportKind);
       }
     } catch (e) {
       dispatchError = e instanceof Error ? e : new Error(String(e));
@@ -10636,6 +10852,13 @@ async function serveTcp(protocol, options = {}) {
       await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
       return;
     }
+    try {
+      validateRequestSchema(schema2, method.paramsSchema, methodName);
+    } catch (error) {
+      const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA6;
+      await writer.writeStream(errSchema, [buildErrorBatch(errSchema, error, serverId, requestId)]);
+      return;
+    }
     const methodType = method.type === "unary" /* UNARY */ ? "unary" : "stream";
     let requestData;
     try {
@@ -10867,6 +11090,13 @@ async function serveUnix(protocol, options) {
       await writer.writeStream(EMPTY_SCHEMA7, [errBatch]);
       return;
     }
+    try {
+      validateRequestSchema(schema2, method.paramsSchema, methodName);
+    } catch (error) {
+      const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA7;
+      await writer.writeStream(errSchema, [buildErrorBatch(errSchema, error, serverId, requestId)]);
+      return;
+    }
     const methodType = method.type === "unary" /* UNARY */ ? "unary" : "stream";
     let requestData;
     try {
@@ -11058,4 +11288,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=1B16AFA92D39B00764756E2164756E21
+//# debugId=B45BBB6468D7A8B964756E2164756E21

@@ -11,8 +11,10 @@ import {
   isExternalLocationBatch,
   makeExternalLocationBatch,
   maybeExternalizeBatch,
+  redactExternalUrl,
   resolveExternalLocation,
 } from "../src/external.js";
+import { zstdCompress } from "../src/util/zstd.js";
 import { buildEmptyBatch } from "../src/wire/response.js";
 
 const TEST_SCHEMA = new Schema([new Field("value", new Int64(), false)]);
@@ -218,6 +220,90 @@ describe("resolveExternalLocation URL validation", () => {
     const pointer = makeExternalLocationBatch(TEST_SCHEMA, "http://insecure.com/data");
     const config: ExternalLocationConfig = { storage: new MockStorage() };
     await expect(resolveExternalLocation(pointer, config)).rejects.toThrow("HTTPS");
+  });
+
+  test("revalidates every manual redirect target", async () => {
+    const originalFetch = globalThis.fetch;
+    const visited: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const target = String(input);
+      visited.push(target);
+      return new Response(null, { status: 302, headers: { Location: "http://internal.example/secret" } });
+    }) as typeof fetch;
+    try {
+      const pointer = makeExternalLocationBatch(TEST_SCHEMA, "https://public.example/start");
+      await expect(resolveExternalLocation(pointer, { storage: new MockStorage() })).rejects.toThrow("URL rejected");
+      expect(visited).toEqual(["https://public.example/start"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("stops streaming when the compressed-byte cap is crossed", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(4));
+          controller.enqueue(new Uint8Array(5));
+          controller.close();
+        },
+      });
+      return new Response(body);
+    }) as typeof fetch;
+    try {
+      const pointer = makeExternalLocationBatch(TEST_SCHEMA, "https://storage.example/data");
+      await expect(resolveExternalLocation(pointer, { storage: new MockStorage(), maxFetchBytes: 8 })).rejects.toThrow(
+        "maxFetchBytes",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("enforces the decompressed-byte cap", async () => {
+    const raw = serializeIpc(makeBatch(100));
+    const compressed = await zstdCompress(raw, 1);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(compressed, { headers: { "Content-Encoding": "zstd" } })) as typeof fetch;
+    try {
+      const pointer = makeExternalLocationBatch(TEST_SCHEMA, "https://storage.example/data");
+      await expect(
+        resolveExternalLocation(pointer, {
+          storage: new MockStorage(),
+          maxFetchBytes: compressed.byteLength + 1,
+          maxDecompressedBytes: raw.byteLength - 1,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("does not disclose signed URL components in fetch failures", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 403, statusText: "Forbidden" })) as typeof fetch;
+    const secret = "TOP-SECRET-SIGNATURE";
+    try {
+      const pointer = makeExternalLocationBatch(
+        TEST_SCHEMA,
+        `https://alice:password@storage.example/object?signature=${secret}#credential`,
+      );
+      const error = await resolveExternalLocation(pointer, { storage: new MockStorage() }).catch((e) => e as Error);
+      expect(error.message).not.toContain(secret);
+      expect(error.message).not.toContain("password");
+      expect(error.message).not.toContain("credential");
+      expect(error.message).toContain("https://storage.example/object");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("redacts URL credentials, query strings, and fragments in diagnostics", () => {
+    expect(redactExternalUrl("https://alice:secret@example.com/path?X-Amz-Signature=bearer#token")).toBe(
+      "https://example.com/path",
+    );
   });
 });
 

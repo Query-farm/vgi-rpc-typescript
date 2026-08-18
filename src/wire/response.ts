@@ -111,8 +111,16 @@ export function buildErrorBatch(schema: VgiSchema, error: Error, serverId: strin
   // Prefer the standard `error.name` property (which user classes can set
   // via `this.name = "Foo"` even after a bundler renames the class) over
   // `constructor.name`, which is fragile under minification.
-  const exceptionType = typeof error.name === "string" && error.name !== "Error" ? error.name : error.constructor.name;
-  metadata.set(LOG_MESSAGE_KEY, `${exceptionType}: ${error.message}`);
+  const rpcErrorType = (error as { errorType?: unknown }).errorType;
+  const exceptionType =
+    typeof rpcErrorType === "string" && rpcErrorType.length > 0
+      ? rpcErrorType
+      : typeof error.name === "string" && error.name !== "Error"
+        ? error.name
+        : error.constructor.name;
+  const rpcErrorMessage = (error as { errorMessage?: unknown }).errorMessage;
+  const exceptionMessage = typeof rpcErrorMessage === "string" ? rpcErrorMessage : error.message;
+  metadata.set(LOG_MESSAGE_KEY, `${exceptionType}: ${exceptionMessage}`);
 
   // Hoist `errorKind` (typed-exception marker) into the EXCEPTION batch
   // metadata as a top-level `vgi_rpc.error_kind` field so clients can
@@ -127,7 +135,7 @@ export function buildErrorBatch(schema: VgiSchema, error: Error, serverId: strin
 
   const extra: Record<string, any> = {
     exception_type: exceptionType,
-    exception_message: error.message,
+    exception_message: exceptionMessage,
     traceback: error.stack ?? "",
   };
   if (typeof errorKind === "string" && errorKind.length > 0) {

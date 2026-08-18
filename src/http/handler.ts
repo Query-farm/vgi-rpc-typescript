@@ -25,7 +25,7 @@ import { gzipCompress, gzipDecompress } from "../util/gzip.js";
 import { isWorkerd } from "../util/runtime.js";
 import { randomBytes } from "../util/web-crypto.js";
 import { isZstdCompressAvailable, zstdCompress, zstdDecompress } from "../util/zstd.js";
-import { parseRequest } from "../wire/request.js";
+import { parseRequest, validateRequestSchema } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
 import { chainAuthenticate } from "./bearer.js";
@@ -56,6 +56,7 @@ import {
   STICKY_ENABLED_HEADER,
   serializeIpcStream,
   UPLOAD_URL_METHOD,
+  UPLOAD_URL_PARAMS_SCHEMA,
   UPLOAD_URL_RESPONSE_SCHEMA,
 } from "./common.js";
 import {
@@ -107,6 +108,50 @@ import {
 const EMPTY_SCHEMA: VgiSchema = makeSchema([]);
 
 const EMPTY_COOKIES: ReadonlyMap<string, string> = new Map();
+
+/** The upload-URL request is one nullable int64 parameter. Keep a hard cap
+ * even when the general handler body cap is disabled so this helper endpoint
+ * can never become an unbounded buffering exception. */
+const MAX_UPLOAD_URL_REQUEST_BYTES = 8 * 1024;
+
+async function readBodyBounded(request: Request, maxBytes?: number): Promise<Uint8Array> {
+  if (maxBytes == null) return new Uint8Array(await request.arrayBuffer());
+
+  const declared = request.headers.get("Content-Length");
+  if (declared != null) {
+    const parsed = Number(declared);
+    if (Number.isFinite(parsed) && parsed > maxBytes) {
+      throw new HttpRpcError("Request body too large", 413);
+    }
+  }
+
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("request body limit exceeded");
+        throw new HttpRpcError("Request body too large", 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
 
 /**
  * Parse the Cookie request header into a Map.  Returns an empty map when
@@ -1107,35 +1152,35 @@ export function createHttpHandler(
       return new Response(`Unsupported Media Type: expected ${ARROW_CONTENT_TYPE}`, { status: 415 });
     }
 
-    // Check request body size (exempt the upload-URL and health endpoints —
-    // their payloads are intrinsically tiny, and __upload_url__ exists
-    // precisely to escape this limit).
-    const exemptFromMaxBytes =
-      path === healthPath || path === `${prefix}/${UPLOAD_URL_METHOD}/init` || path === `${prefix}/__capabilities__`;
-    if (maxRequestBytes != null && !exemptFromMaxBytes) {
-      const contentLength = request.headers.get("Content-Length");
-      if (contentLength && parseInt(contentLength, 10) > maxRequestBytes) {
-        return new Response("Request body too large", { status: 413 });
-      }
+    // Read incrementally so chunked requests cannot bypass the limit and do
+    // not first become one unbounded ArrayBuffer. The upload-URL helper has a
+    // small unconditional cap even if the general RPC cap is disabled.
+    const isUploadUrlRequest = path === `${prefix}/${UPLOAD_URL_METHOD}/init`;
+    const wireBodyCap = isUploadUrlRequest
+      ? Math.min(maxRequestBytes ?? Number.POSITIVE_INFINITY, MAX_UPLOAD_URL_REQUEST_BYTES)
+      : maxRequestBytes;
+    let body: Uint8Array;
+    try {
+      body = await readBodyBounded(request, wireBodyCap);
+    } catch (error) {
+      if (error instanceof HttpRpcError) return new Response(error.message, { status: error.statusCode });
+      throw error;
     }
-
-    // Read body, decompressing if needed
-    let body = new Uint8Array(await request.arrayBuffer());
     // What the peer actually sent, captured before decompression — the
     // egress-accounting figure. `input_bytes` on the same record measures the
     // decoded Arrow buffers instead, and the two differ by whatever the
     // client's compressor achieved.
     const requestWireBytes = body.byteLength;
-    if (maxRequestBytes != null && !exemptFromMaxBytes && body.byteLength > maxRequestBytes) {
-      return new Response("Request body too large", { status: 413 });
-    }
     const contentEncoding = (request.headers.get("Content-Encoding") ?? "").trim().toLowerCase();
     if (contentEncoding === "zstd" || contentEncoding === "gzip") {
       try {
+        const decompressedCap = isUploadUrlRequest
+          ? Math.min(maxDecompressedRequestBytes ?? Number.POSITIVE_INFINITY, MAX_UPLOAD_URL_REQUEST_BYTES)
+          : maxDecompressedRequestBytes;
         body =
           contentEncoding === "zstd"
-            ? await zstdDecompress(body, maxDecompressedRequestBytes)
-            : await gzipDecompress(body, maxDecompressedRequestBytes);
+            ? await zstdDecompress(body, decompressedCap)
+            : await gzipDecompress(body, decompressedCap);
       } catch (error: any) {
         // Decompression-bomb refusal surfaces as 413 (the wire-cap
         // sibling of maxRequestBytes); other decode errors are 400.
@@ -1166,6 +1211,14 @@ export function createHttpHandler(
             `Method name in request '${parsed.methodName}' does not match URL '${UPLOAD_URL_METHOD}'`,
             400,
           );
+        }
+        try {
+          validateRequestSchema(reqSchema, UPLOAD_URL_PARAMS_SCHEMA, UPLOAD_URL_METHOD);
+        } catch (error) {
+          const message = (error as { errorMessage?: unknown })?.errorMessage;
+          const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
+          httpError.name = "ProtocolError";
+          throw httpError;
         }
         const rawCount = parsed.params.count;
         let count = typeof rawCount === "bigint" ? Number(rawCount) : Number(rawCount ?? 1);

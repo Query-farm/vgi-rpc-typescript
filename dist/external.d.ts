@@ -47,9 +47,17 @@ export interface ExternalLocationConfig {
     };
     /** URL validator called before fetching. Throw to reject. Default: HTTPS-only. */
     urlValidator?: ((url: string) => void) | null;
+    /** Maximum compressed/on-wire bytes accepted from one fetch. Default: 256 MiB. */
+    maxFetchBytes?: number;
+    /** Maximum bytes accepted after decompression. Default: 16 * maxFetchBytes. */
+    maxDecompressedBytes?: number;
+    /** Maximum redirects followed while fetching. Each target is revalidated. Default: 5. */
+    maxRedirects?: number;
 }
 /** Default validator that rejects non-HTTPS URLs. */
 export declare function httpsOnlyValidator(url: string): void;
+/** Render a URL for diagnostics without bearer query strings or userinfo. */
+export declare function redactExternalUrl(url: string): string;
 /** Returns true if the batch is a zero-row pointer to external data. */
 export declare function isExternalLocationBatch(batch: VgiBatch): boolean;
 /** Create a zero-row pointer batch with location URL and optional SHA-256. */

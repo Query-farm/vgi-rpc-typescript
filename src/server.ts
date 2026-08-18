@@ -24,7 +24,7 @@ import {
   TransportKind,
 } from "./types.js";
 import { IpcStreamReader } from "./wire/reader.js";
-import { applyDefaults, parseRequest } from "./wire/request.js";
+import { applyDefaults, parseRequest, validateRequestSchema } from "./wire/request.js";
 import { buildErrorBatch } from "./wire/response.js";
 import { type ByteSink, IpcStreamWriter } from "./wire/writer.js";
 
@@ -211,7 +211,7 @@ export class VgiRpcServer {
         // the transport binding. Inside the loop so a failure on the very
         // first request can be retried.
         await this.notifyTransport(transportKind);
-        await this.serveOne(reader, writer);
+        await this.serveOne(reader, writer, transportKind);
       }
     } catch (e: any) {
       // EOF or broken pipe / closed channel → clean exit
@@ -233,7 +233,11 @@ export class VgiRpcServer {
     }
   }
 
-  private async serveOne(reader: IpcStreamReader, writer: IpcStreamWriter): Promise<void> {
+  private async serveOne(
+    reader: IpcStreamReader,
+    writer: IpcStreamWriter,
+    transportKind: TransportKind,
+  ): Promise<void> {
     const stream = await reader.readStream();
     if (!stream) {
       throw new Error("EOF");
@@ -286,6 +290,15 @@ export class VgiRpcServer {
       return;
     }
 
+    try {
+      validateRequestSchema(schema, method.paramsSchema, methodName);
+    } catch (error) {
+      const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
+      const errBatch = buildErrorBatch(errSchema, error as Error, this.serverId, requestId);
+      await writer.writeStream(errSchema, [errBatch]);
+      return;
+    }
+
     // Application-protocol-version gate. Fires only when the Protocol
     // declared a `protocolVersion`. `__describe__` is exempt — it is the
     // diagnostic path a mismatched client uses to introspect the server's
@@ -331,7 +344,7 @@ export class VgiRpcServer {
       protocol: this.protocol.name,
       protocolHash,
       protocolVersion: this.protocolVersion,
-      kind: TransportKind.PIPE,
+      kind: transportKind,
       principal: "",
       authDomain: "",
       authenticated: false,
@@ -355,7 +368,7 @@ export class VgiRpcServer {
 
     try {
       if (method.type === MethodType.UNARY) {
-        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig, TransportKind.PIPE);
+        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig, transportKind);
       } else {
         await dispatchStream(
           method,
@@ -365,7 +378,7 @@ export class VgiRpcServer {
           this.serverId,
           requestId,
           this.externalConfig,
-          TransportKind.PIPE,
+          transportKind,
         );
       }
     } catch (e) {

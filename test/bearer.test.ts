@@ -181,7 +181,7 @@ describe("bearer + HTTP handler integration", () => {
   function makeProtocol(): Protocol {
     const p = new Protocol("test-service");
     p.unary("whoami", {
-      params: { _dummy: str },
+      params: { message: str },
       result: { identity: str },
       handler: async (_params, ctx) => {
         ctx.auth.requireAuthenticated();

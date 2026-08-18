@@ -507,6 +507,116 @@ describe("HTTP Handler", () => {
     expect(exposed).toContain("VGI-Max-Upload-Bytes");
   });
 
+  test("rejects a request whose Arrow parameter schema differs from the registered method", async () => {
+    const wrongSchema = new Schema([new Field("name", new Float64(), false)]);
+    const body = buildRequestIpc(wrongSchema, { name: [42] }, "greet");
+    const res = await handler(
+      new Request(`${BASE}/vgi/greet`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body,
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("Parameter schema mismatch");
+  });
+
+  test("rejects a stream init whose Arrow parameter schema differs from the registered method", async () => {
+    const wrongSchema = new Schema([new Field("factor", new Utf8(), false)]);
+    const body = buildRequestIpc(wrongSchema, { factor: ["not-a-float"] }, "scale");
+    const res = await handler(
+      new Request(`${BASE}/vgi/scale/init`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body,
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("Parameter schema mismatch");
+  });
+
+  test("rejects unary requests whose parameter batch does not have exactly one row", async () => {
+    const paramSchema = new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]);
+    for (const values of [
+      { a: [], b: [] },
+      { a: [1, 2], b: [3, 4] },
+    ]) {
+      const res = await handler(
+        new Request(`${BASE}/vgi/add`, {
+          method: "POST",
+          headers: { "Content-Type": ARROW_CONTENT_TYPE },
+          body: buildRequestIpc(paramSchema, values, "add"),
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain("Expected 1 row in request batch");
+    }
+  });
+
+  test("rejects stream-init parameter batches that do not have exactly one row", async () => {
+    const paramSchema = new Schema([new Field("count", new Int32(), false)]);
+    const res = await handler(
+      new Request(`${BASE}/vgi/count/init`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body: buildRequestIpc(paramSchema, { count: [] }, "count"),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("Expected 1 row in request batch");
+  });
+
+  test("applies maxRequestBytes to the upload-URL endpoint", async () => {
+    const limited = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      maxRequestBytes: 64,
+      uploadUrlProvider: {
+        generateUploadUrl: () => ({
+          uploadUrl: "https://storage.example/put",
+          downloadUrl: "https://storage.example/get",
+          expiresAt: new Date(Date.now() + 60_000),
+        }),
+      },
+    });
+    const res = await limited(
+      new Request(`${BASE}/vgi/__upload_url__/init`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body: new Uint8Array(65),
+      }),
+    );
+    expect(res.status).toBe(413);
+  });
+
+  test("bounds a chunked upload-URL request even without a general body cap", async () => {
+    const limited = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      uploadUrlProvider: {
+        generateUploadUrl: () => ({
+          uploadUrl: "https://storage.example/put",
+          downloadUrl: "https://storage.example/get",
+          expiresAt: new Date(Date.now() + 60_000),
+        }),
+      },
+    });
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(4096));
+        controller.enqueue(new Uint8Array(4096));
+        controller.enqueue(new Uint8Array(1));
+        controller.close();
+      },
+    });
+    const res = await limited(
+      new Request(`${BASE}/vgi/__upload_url__/init`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body: stream,
+      }),
+    );
+    expect(res.status).toBe(413);
+  });
+
   test("every advertised capability header is exposed", async () => {
     // Mirrors the cross-language TestCors assertion: a capability header the
     // server advertises but does not expose is invisible to a browser and to
