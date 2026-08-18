@@ -130,7 +130,7 @@ async function readResponseBounded(
     const length = Number(declared);
     if (Number.isFinite(length) && length > maxBytes) {
       controller.abort();
-      throw new Error(`External location fetch exceeds maxFetchBytes (${length} > ${maxBytes})`);
+      throw new Error(`External location fetch exceeds max_fetch_bytes (${length} > ${maxBytes})`);
     }
   }
 
@@ -145,7 +145,7 @@ async function readResponseBounded(
       total += value.byteLength;
       if (total > maxBytes) {
         controller.abort();
-        throw new Error(`External location fetch exceeded maxFetchBytes (${maxBytes} bytes)`);
+        throw new Error(`External location fetch exceeded max_fetch_bytes (${maxBytes} bytes)`);
       }
       chunks.push(value);
     }
@@ -299,7 +299,10 @@ export async function resolveExternalLocation(
 
     controller = new AbortController();
     try {
-      response = await fetch(currentUrl, { redirect: "manual", signal: controller.signal });
+      // Bun otherwise transparently decodes Content-Encoding while retaining
+      // the header, which would charge decoded bytes to the encoded-body cap
+      // and then attempt to decode them a second time.
+      response = await fetch(currentUrl, { redirect: "manual", signal: controller.signal, decompress: false });
     } catch {
       throw new Error(`External location fetch failed [url: ${redactExternalUrl(currentUrl)}]`);
     }
@@ -307,7 +310,7 @@ export async function resolveExternalLocation(
     if (![301, 302, 303, 307, 308].includes(response.status)) break;
     if (redirects >= maxRedirects) {
       controller.abort();
-      throw new Error(`External location fetch exceeded maxRedirects (${maxRedirects})`);
+      throw new Error(`External location redirect limit exceeded (${maxRedirects})`);
     }
     const location = response.headers.get("Location");
     if (!location) {
@@ -332,12 +335,19 @@ export async function resolveExternalLocation(
 
   const contentEncoding = response.headers.get("Content-Encoding");
   if (contentEncoding === "zstd") {
-    data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
-    if (data.byteLength > maxDecompressedBytes) {
-      throw new Error(
-        `External location decompressed body exceeds maxDecompressedBytes (${data.byteLength} > ${maxDecompressedBytes})`,
-      );
+    try {
+      data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
+    } catch (error) {
+      if (error instanceof Error && /(?:decompressed size|\bcap\b)/i.test(error.message)) {
+        throw new Error(`External location decompressed body exceeds max_decompressed_bytes (${maxDecompressedBytes})`);
+      }
+      throw new Error("External location zstd decompression failed");
     }
+  }
+  if (data.byteLength > maxDecompressedBytes) {
+    throw new Error(
+      `External location decompressed body exceeds max_decompressed_bytes (${data.byteLength} > ${maxDecompressedBytes})`,
+    );
   }
 
   // Verify SHA-256 if present

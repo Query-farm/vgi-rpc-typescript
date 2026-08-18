@@ -254,7 +254,7 @@ describe("resolveExternalLocation URL validation", () => {
     try {
       const pointer = makeExternalLocationBatch(TEST_SCHEMA, "https://storage.example/data");
       await expect(resolveExternalLocation(pointer, { storage: new MockStorage(), maxFetchBytes: 8 })).rejects.toThrow(
-        "maxFetchBytes",
+        "max_fetch_bytes",
       );
     } finally {
       globalThis.fetch = originalFetch;

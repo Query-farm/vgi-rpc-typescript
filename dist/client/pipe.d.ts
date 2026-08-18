@@ -2,7 +2,7 @@ import { Schema } from "@query-farm/apache-arrow";
 import { type ExternalLocationConfig } from "../external.js";
 import { IpcStreamReader } from "../wire/reader.js";
 import type { RpcClient } from "./connect.js";
-import type { LogMessage, PipeConnectOptions, StreamSession, SubprocessConnectOptions } from "./types.js";
+import type { ExchangeInput, LogMessage, PipeConnectOptions, StreamSession, SubprocessConnectOptions } from "./types.js";
 interface PipeWritable {
     write(data: Uint8Array): void;
     flush?(): void;
@@ -57,7 +57,7 @@ export declare class PipeStreamSession implements StreamSession {
     /**
      * Send an exchange request and return the data rows.
      */
-    exchange(input: Record<string, any>[]): Promise<Record<string, any>[]>;
+    exchange(input: ExchangeInput): Promise<Record<string, any>[]>;
     /**
      * Clean up after an error: close input, drain output, release busy.
      */

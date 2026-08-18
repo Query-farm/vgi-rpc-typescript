@@ -397,6 +397,28 @@ def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> It
 
 
 @pytest.fixture(scope="session")
+def conformance_http_external_security_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Bun worker with independent external-fetch caps and per-hop URL policy."""
+    proc, port = _start_http_server(
+        [
+            *BUN_HTTP_WORKER,
+            "--fake-storage",
+            conformance_fake_storage,
+            "--max-request-bytes",
+            "1048576",
+            "--max-fetch-bytes",
+            "4096",
+            "--max-decompressed-fetch-bytes",
+            "8192",
+            "--reject-localhost-redirects",
+        ]
+    )
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def conformance_http_externalize_always_port(conformance_fake_storage: str) -> Iterator[int]:
     """Bun conformance HTTP server that externalizes EVERY non-empty response batch.
 

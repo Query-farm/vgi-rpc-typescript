@@ -90,12 +90,14 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
 
-  let methodCache: Map<string, MethodInfo> | null = null;
+  let methodCache: Map<string, MethodInfo> | null = options?.description
+    ? new Map(options.description.methods.map((method) => [method.name, method]))
+    : null;
   /** Application protocol surface version discovered via __describe__. When
    *  non-empty, the client emits it on every request as
    *  `vgi_rpc.protocol_version` so a versioned server can validate at the
    *  dispatch boundary. */
-  let serverProtocolVersion = "";
+  let serverProtocolVersion = options?.description?.protocolVersion ?? "";
   let compressFn: CompressFn | undefined;
   let decompressFn: DecompressFn | undefined;
   let compressionLoaded = false;

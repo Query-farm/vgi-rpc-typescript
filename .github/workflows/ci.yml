@@ -46,7 +46,7 @@ jobs:
         run: bun --conditions=flechette test test/batch-metadata.test.ts
 
       - name: Run client tests (bun transports only)
-        run: timeout 120 bun test test/client.test.ts
+        run: timeout 120 bun test test/client.test.ts test/client-native-conformance.test.ts
 
   build:
     runs-on: ubuntu-latest
@@ -281,4 +281,4 @@ jobs:
       - name: Run client tests (all transports)
         env:
           VGI_RPC_PYTHON_BIN: python3
-        run: timeout 120 bun test test/client.test.ts
+        run: timeout 120 bun test test/client.test.ts test/client-native-conformance.test.ts

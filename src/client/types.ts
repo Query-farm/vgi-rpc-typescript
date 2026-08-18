@@ -1,8 +1,21 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import type { RecordBatch } from "@query-farm/apache-arrow";
+
+/** Rows inferred for compatibility, or a batch built from an explicit declared Arrow schema. */
+export type ExchangeInput = Record<string, any>[] | RecordBatch;
+
 /** Options for {@link httpConnect}, the HTTP-transport RPC client. */
 export interface HttpConnectOptions {
+  /**
+   * Statically declared service description. When supplied, the client uses
+   * these method and stream schemas directly and does not call `__describe__`.
+   * This is required for services that intentionally expose only their
+   * declared RPC surface and for exact exchange input schemas that cannot be
+   * recovered by inspecting runtime values.
+   */
+  description?: import("./introspect.js").ServiceDescription;
   /** Route prefix the server mounts its methods under (e.g. `/api`). Trailing slashes are stripped. Defaults to no prefix. */
   prefix?: string;
   /** Callback invoked for each log/error message the server emits during a request. */
@@ -34,7 +47,7 @@ export interface StreamSession {
   /** The method's header row (returned once at stream start), or `null` if the method declares no header. */
   readonly header: Record<string, any> | null;
   /** Send one batch of input rows and receive the server's corresponding output rows (exchange streams). */
-  exchange(input: Record<string, any>[]): Promise<Record<string, any>[]>;
+  exchange(input: ExchangeInput): Promise<Record<string, any>[]>;
   /** Iterate the server-produced output batches one row-array at a time (producer streams). */
   [Symbol.asyncIterator](): AsyncIterableIterator<Record<string, any>[]>;
   /** Tear down the stream, flushing/draining the underlying transport. */

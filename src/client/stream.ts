@@ -9,7 +9,7 @@ import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
 import { decodeResponseBody } from "./decode.js";
 import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
-import type { LogMessage, StreamSession } from "./types.js";
+import type { ExchangeInput, LogMessage, StreamSession } from "./types.js";
 
 type CompressFn = (data: Uint8Array, level: number) => Promise<Uint8Array>;
 type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
@@ -211,9 +211,23 @@ export class HttpStreamSession implements StreamSession {
   /**
    * Send an exchange request and return the data rows.
    */
-  async exchange(input: Record<string, any>[]): Promise<Record<string, any>[]> {
+  async exchange(input: ExchangeInput): Promise<Record<string, any>[]> {
     if (this._stateToken === null) {
       throw new RpcError("ProtocolError", "Stream has finished \u2014 no state token available", "");
+    }
+
+    // A declared RecordBatch is the lossless client API for schemas that
+    // runtime values cannot describe: all-null columns, zero rows, dictionary
+    // index widths, timestamp units/timezones, decimal precision/scale, and
+    // nested child nullability. Preserve its schema and buffers verbatim and
+    // add only the stream tokens required by the transport.
+    if (!Array.isArray(input)) {
+      const metadata = new Map(input.metadata ?? []);
+      for (const [key, value] of this._tokenMetadata(this._stateToken)) {
+        metadata.set(key, value);
+      }
+      const batch = new RecordBatch(input.schema, input.data, metadata);
+      return this._doExchange(input.schema, [batch]);
     }
 
     // We need to determine the input schema from the data.

@@ -19,7 +19,13 @@ import { MAX_STREAM_CHUNK } from "../wire/writer.js";
 import type { RpcClient } from "./connect.js";
 import { type MethodInfo, parseDescribeResponse, type ServiceDescription } from "./introspect.js";
 import { buildRequestIpc, dispatchLogOrError, extractBatchRows, inferArrowType } from "./ipc.js";
-import type { LogMessage, PipeConnectOptions, StreamSession, SubprocessConnectOptions } from "./types.js";
+import type {
+  ExchangeInput,
+  LogMessage,
+  PipeConnectOptions,
+  StreamSession,
+  SubprocessConnectOptions,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Writable abstraction
@@ -32,6 +38,25 @@ interface PipeWritable {
 }
 
 type WriteFn = (bytes: Uint8Array) => void;
+
+function fieldsMatch(left: Field, right: Field): boolean {
+  if (left.name !== right.name || left.nullable !== right.nullable || String(left.type) !== String(right.type)) {
+    return false;
+  }
+  const leftChildren = left.type.children;
+  const rightChildren = right.type.children;
+  return (
+    leftChildren.length === rightChildren.length &&
+    leftChildren.every((child: Field, index: number) => fieldsMatch(child, rightChildren[index]))
+  );
+}
+
+function schemasMatch(left: Schema, right: Schema): boolean {
+  return (
+    left.fields.length === right.fields.length &&
+    left.fields.every((field, index) => fieldsMatch(field, right.fields[index]))
+  );
+}
 
 // ---------------------------------------------------------------------------
 // PipeIncrementalWriter — batch-by-batch IPC writing for lockstep streaming
@@ -166,7 +191,7 @@ export class PipeStreamSession implements StreamSession {
   /**
    * Send an exchange request and return the data rows.
    */
-  async exchange(input: Record<string, any>[]): Promise<Record<string, any>[]> {
+  async exchange(input: ExchangeInput): Promise<Record<string, any>[]> {
     if (this._closed) {
       throw new RpcError("ProtocolError", "Stream session is closed", "");
     }
@@ -175,7 +200,22 @@ export class PipeStreamSession implements StreamSession {
     let inputSchema: Schema;
     let batch: RecordBatch;
 
-    if (input.length === 0) {
+    if (!Array.isArray(input)) {
+      inputSchema = input.schema;
+      batch = input;
+
+      // One raw exchange session is one Arrow IPC stream, whose schema is
+      // fixed by its first batch. Refuse a later explicit batch whose declared
+      // schema differs instead of writing bytes the peer must misinterpret.
+      if (this._inputSchema && !schemasMatch(this._inputSchema, inputSchema)) {
+        throw new RpcError(
+          "ProtocolError",
+          `Exchange input schema changed: expected ${this._inputSchema}, got ${inputSchema}`,
+          "",
+        );
+      }
+      this._inputSchema ??= inputSchema;
+    } else if (input.length === 0) {
       // Zero-row exchange: use cached input schema from a prior exchange,
       // then fall back to the output schema from describe. The cached
       // schema is preferred because input and output schemas may differ

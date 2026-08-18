@@ -54,6 +54,9 @@ const args = process.argv.slice(2);
 let fakeStorageUrl: string | undefined;
 let externalizeThreshold = 4096;
 let maxRequestBytesArg: number | undefined;
+let maxFetchBytesArg: number | undefined;
+let maxDecompressedFetchBytesArg: number | undefined;
+let rejectLocalhostRedirects = false;
 let compression: ExternalLocationConfig["compression"] | undefined;
 let strictMode = false;
 let maxResponseBytesArg: number | undefined;
@@ -116,6 +119,12 @@ for (let i = 0; i < args.length; i++) {
     externalizeThreshold = Number.parseInt(args[++i], 10);
   } else if (a === "--max-request-bytes" && i + 1 < args.length) {
     maxRequestBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--max-fetch-bytes" && i + 1 < args.length) {
+    maxFetchBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--max-decompressed-fetch-bytes" && i + 1 < args.length) {
+    maxDecompressedFetchBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--reject-localhost-redirects") {
+    rejectLocalhostRedirects = true;
   } else if (a === "--compression" && i + 1 < args.length) {
     const v = args[++i];
     if (v === "zstd") compression = { algorithm: "zstd", level: 3 };
@@ -215,7 +224,16 @@ if (fakeStorageUrl) {
   externalLocation = {
     storage: fakeStorage,
     externalizeThresholdBytes: externalizeThreshold,
-    urlValidator: null, // fake storage runs on http://127.0.0.1
+    urlValidator: rejectLocalhostRedirects
+      ? (location) => {
+          const parsed = new URL(location);
+          if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1") {
+            throw new Error("fixture permits only the 127.0.0.1 fake-storage origin");
+          }
+        }
+      : null, // fake storage runs on http://127.0.0.1
+    ...(maxFetchBytesArg !== undefined ? { maxFetchBytes: maxFetchBytesArg } : {}),
+    ...(maxDecompressedFetchBytesArg !== undefined ? { maxDecompressedBytes: maxDecompressedFetchBytesArg } : {}),
     ...(compression ? { compression } : {}),
   };
 }

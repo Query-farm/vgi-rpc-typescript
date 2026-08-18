@@ -17,6 +17,7 @@ export {
 export { PipeStreamSession, pipeConnect, subprocessConnect } from "./pipe.js";
 export { HttpStreamSession, type RowsWithToken } from "./stream.js";
 export type {
+  ExchangeInput,
   HttpConnectOptions,
   LogMessage,
   PipeConnectOptions,

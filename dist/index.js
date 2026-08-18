@@ -1324,7 +1324,7 @@ async function readResponseBounded(response, maxBytes, controller) {
     const length = Number(declared);
     if (Number.isFinite(length) && length > maxBytes) {
       controller.abort();
-      throw new Error(`External location fetch exceeds maxFetchBytes (${length} > ${maxBytes})`);
+      throw new Error(`External location fetch exceeds max_fetch_bytes (${length} > ${maxBytes})`);
     }
   }
   if (!response.body)
@@ -1340,7 +1340,7 @@ async function readResponseBounded(response, maxBytes, controller) {
       total += value.byteLength;
       if (total > maxBytes) {
         controller.abort();
-        throw new Error(`External location fetch exceeded maxFetchBytes (${maxBytes} bytes)`);
+        throw new Error(`External location fetch exceeded max_fetch_bytes (${maxBytes} bytes)`);
       }
       chunks.push(value);
     }
@@ -1429,7 +1429,7 @@ async function resolveExternalLocation(batch, config) {
     }
     controller = new AbortController;
     try {
-      response = await fetch(currentUrl, { redirect: "manual", signal: controller.signal });
+      response = await fetch(currentUrl, { redirect: "manual", signal: controller.signal, decompress: false });
     } catch {
       throw new Error(`External location fetch failed [url: ${redactExternalUrl(currentUrl)}]`);
     }
@@ -1437,7 +1437,7 @@ async function resolveExternalLocation(batch, config) {
       break;
     if (redirects >= maxRedirects) {
       controller.abort();
-      throw new Error(`External location fetch exceeded maxRedirects (${maxRedirects})`);
+      throw new Error(`External location redirect limit exceeded (${maxRedirects})`);
     }
     const location = response.headers.get("Location");
     if (!location) {
@@ -1458,10 +1458,17 @@ async function resolveExternalLocation(batch, config) {
   let data = await readResponseBounded(response, maxFetchBytes, controller);
   const contentEncoding = response.headers.get("Content-Encoding");
   if (contentEncoding === "zstd") {
-    data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
-    if (data.byteLength > maxDecompressedBytes) {
-      throw new Error(`External location decompressed body exceeds maxDecompressedBytes (${data.byteLength} > ${maxDecompressedBytes})`);
+    try {
+      data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
+    } catch (error) {
+      if (error instanceof Error && /(?:decompressed size|\bcap\b)/i.test(error.message)) {
+        throw new Error(`External location decompressed body exceeds max_decompressed_bytes (${maxDecompressedBytes})`);
+      }
+      throw new Error("External location zstd decompression failed");
     }
+  }
+  if (data.byteLength > maxDecompressedBytes) {
+    throw new Error(`External location decompressed body exceeds max_decompressed_bytes (${data.byteLength} > ${maxDecompressedBytes})`);
   }
   const expectedSha256 = batch.metadata?.get(LOCATION_SHA256_KEY);
   if (expectedSha256) {
@@ -2156,6 +2163,18 @@ async function httpIntrospect(rawBaseUrl, options) {
 }
 
 // src/client/pipe.ts
+function fieldsMatch(left, right) {
+  if (left.name !== right.name || left.nullable !== right.nullable || String(left.type) !== String(right.type)) {
+    return false;
+  }
+  const leftChildren = left.type.children;
+  const rightChildren = right.type.children;
+  return leftChildren.length === rightChildren.length && leftChildren.every((child, index) => fieldsMatch(child, rightChildren[index]));
+}
+function schemasMatch(left, right) {
+  return left.fields.length === right.fields.length && left.fields.every((field2, index) => fieldsMatch(field2, right.fields[index]));
+}
+
 class PipeIncrementalWriter {
   writer;
   writeFn;
@@ -2245,7 +2264,14 @@ class PipeStreamSession {
     }
     let inputSchema;
     let batch;
-    if (input.length === 0) {
+    if (!Array.isArray(input)) {
+      inputSchema = input.schema;
+      batch = input;
+      if (this._inputSchema && !schemasMatch(this._inputSchema, inputSchema)) {
+        throw new RpcError("ProtocolError", `Exchange input schema changed: expected ${this._inputSchema}, got ${inputSchema}`, "");
+      }
+      this._inputSchema ??= inputSchema;
+    } else if (input.length === 0) {
       inputSchema = this._inputSchema ?? this._outputSchema;
       const children = inputSchema.fields.map((f) => {
         return makeData({ type: f.type, length: 0, nullCount: 0 });
@@ -3158,6 +3184,14 @@ class HttpStreamSession {
     if (this._stateToken === null) {
       throw new RpcError("ProtocolError", "Stream has finished — no state token available", "");
     }
+    if (!Array.isArray(input)) {
+      const metadata = new Map(input.metadata ?? []);
+      for (const [key, value] of this._tokenMetadata(this._stateToken)) {
+        metadata.set(key, value);
+      }
+      const batch2 = new RecordBatch2(input.schema, input.data, metadata);
+      return this._doExchange(input.schema, [batch2]);
+    }
     if (input.length === 0) {
       const zeroSchema = this._inputSchema ?? this._outputSchema;
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
@@ -3464,8 +3498,8 @@ function httpConnect(rawBaseUrl, options) {
   const compressionLevel = options?.compressionLevel;
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
-  let methodCache = null;
-  let serverProtocolVersion = "";
+  let methodCache = options?.description ? new Map(options.description.methods.map((method) => [method.name, method])) : null;
+  let serverProtocolVersion = options?.description?.protocolVersion ?? "";
   let compressFn;
   let decompressFn;
   let compressionLoaded = false;
@@ -11288,4 +11322,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=B45BBB6468D7A8B964756E2164756E21
+//# debugId=13399D1E2169AEFB64756E2164756E21

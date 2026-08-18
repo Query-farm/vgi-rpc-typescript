@@ -1,6 +1,6 @@
 import { RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { type ExternalLocationConfig } from "../external.js";
-import type { LogMessage, StreamSession } from "./types.js";
+import type { ExchangeInput, LogMessage, StreamSession } from "./types.js";
 type CompressFn = (data: Uint8Array, level: number) => Promise<Uint8Array>;
 type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
 /**
@@ -119,7 +119,7 @@ export declare class HttpStreamSession implements StreamSession {
     /**
      * Send an exchange request and return the data rows.
      */
-    exchange(input: Record<string, any>[]): Promise<Record<string, any>[]>;
+    exchange(input: ExchangeInput): Promise<Record<string, any>[]>;
     private _doExchange;
     private _buildEmptyBatch;
     /**
