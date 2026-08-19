@@ -143,6 +143,15 @@ def conformance_http_no_compression_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_small_request_cap_port() -> Iterator[int]:
+    """Bun HTTP worker with the shared suite's canonical 4 KiB request cap."""
+    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--max-request-bytes", "4096"])
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def conformance_http_auth_port() -> Iterator[int]:
     """Bun conformance HTTP server with reject-all authenticate, for TestHealth."""
     proc, port = _start_http_server(BUN_HTTP_AUTH_WORKER)

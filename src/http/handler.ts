@@ -193,15 +193,17 @@ export function createHttpHandler(
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 7200 : options.corsMaxAge;
   const maxRequestBytes = options?.maxRequestBytes;
-  // Bomb-cap on `Content-Encoding: zstd` decompression. Default to
-  // 16x maxRequestBytes when the operator set one — generous for normal
-  // Arrow IPC zstd ratios on legitimate payloads, tight enough that a
-  // tiny compressed body cannot inflate to hundreds of MB.  When
-  // maxRequestBytes is unset the cap stays unbounded (operator-chosen,
-  // explicit).  Mirrors Python's make_wsgi_app default.
+  // The advertised request cap applies independently to encoded and decoded
+  // bytes. Keeping the decoded default equal to maxRequestBytes prevents a
+  // small compressed request from bypassing the capability clients use to
+  // decide whether they must externalize.
+  const configuredDecompressedCap = options?.maxDecompressedRequestBytes;
   const maxDecompressedRequestBytes =
-    options?.maxDecompressedRequestBytes ??
-    (options?.maxRequestBytes != null ? options.maxRequestBytes * 16 : undefined);
+    maxRequestBytes == null
+      ? configuredDecompressedCap
+      : configuredDecompressedCap == null
+        ? maxRequestBytes
+        : Math.min(maxRequestBytes, configuredDecompressedCap);
   // ``maxStreamResponseBytes`` was the producer-only soft cap. Keep it
   // distinct from ``maxResponseBytes`` (the new hard cap that also applies
   // to unary/exchange) — falling one through to the other would turn the

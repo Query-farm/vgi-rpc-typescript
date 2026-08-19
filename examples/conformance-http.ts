@@ -400,11 +400,11 @@ const handler = createHttpHandler(protocol, {
     : { maxStreamResponseBytes: 1 }),
   ...(dispatchHook ? { dispatchHook } : {}),
   ...(externalLocation ? { externalLocation } : {}),
-  ...(fakeStorage
+  ...(fakeStorage || maxRequestBytesArg !== undefined
     ? {
-        uploadUrlProvider: fakeStorage,
+        ...(fakeStorage ? { uploadUrlProvider: fakeStorage } : {}),
         maxRequestBytes,
-        maxUploadBytes: 64 * 1024 * 1024,
+        ...(fakeStorage ? { maxUploadBytes: 64 * 1024 * 1024 } : {}),
       }
     : {}),
 });

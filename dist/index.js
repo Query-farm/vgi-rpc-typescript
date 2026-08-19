@@ -7465,7 +7465,8 @@ function createHttpHandler(protocol, options) {
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 7200 : options.corsMaxAge;
   const maxRequestBytes = options?.maxRequestBytes;
-  const maxDecompressedRequestBytes = options?.maxDecompressedRequestBytes ?? (options?.maxRequestBytes != null ? options.maxRequestBytes * 16 : undefined);
+  const configuredDecompressedCap = options?.maxDecompressedRequestBytes;
+  const maxDecompressedRequestBytes = maxRequestBytes == null ? configuredDecompressedCap : configuredDecompressedCap == null ? maxRequestBytes : Math.min(maxRequestBytes, configuredDecompressedCap);
   const maxStreamResponseBytes = options?.maxStreamResponseBytes;
   const maxResponseBytes = options?.maxResponseBytes;
   const maxExternalizedResponseBytes = options?.maxExternalizedResponseBytes;
@@ -11322,4 +11323,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=13399D1E2169AEFB64756E2164756E21
+//# debugId=97618BB22D28DA9664756E2164756E21
