@@ -22,7 +22,7 @@ import {
   STATE_KEY,
 } from "../../src/constants.js";
 import { ARROW_CONTENT_TYPE } from "../../src/http/common.js";
-import { createHttpHandler, float, int32, Protocol, str } from "../../src/index.js";
+import { createHttpHandler, float, int32, Protocol, str, TransportKind } from "../../src/index.js";
 import { gzipDecompress } from "../../src/util/gzip.js";
 import { zstdDecompress } from "../../src/util/zstd.js";
 
@@ -797,6 +797,98 @@ describe("HTTP Handler", () => {
       token = batches[0].metadata?.get(STATE_KEY) ?? "";
       expect(token).toBeDefined();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// on_serve_start lifecycle
+// ---------------------------------------------------------------------------
+
+describe("HTTP onServeStart lifecycle", () => {
+  const BASE = "http://localhost:9999";
+
+  function request(body: Uint8Array): Request {
+    return new Request(`${BASE}/vgi/ping`, {
+      method: "POST",
+      headers: { "Content-Type": ARROW_CONTENT_TYPE, "Accept-Encoding": "identity" },
+      body,
+    });
+  }
+
+  test("simultaneous first requests share one successful hook invocation", async () => {
+    const protocol = new Protocol("lifecycle-concurrency");
+    let dispatches = 0;
+    protocol.unary("ping", {
+      params: {},
+      result: { result: str },
+      handler: (_params, ctx) => {
+        dispatches += 1;
+        expect(ctx.kind).toBe(TransportKind.HTTP);
+        return { result: "pong" };
+      },
+    });
+
+    let release!: () => void;
+    let markEntered!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let hookCalls = 0;
+    const handler = createHttpHandler(protocol, {
+      prefix: "/vgi",
+      compressionLevel: null,
+      onServeStart: async (kind) => {
+        hookCalls += 1;
+        expect(kind).toBe(TransportKind.HTTP);
+        markEntered();
+        await gate;
+      },
+    });
+    const body = buildRequestIpc(new Schema([]), {}, "ping");
+
+    const pending = Array.from({ length: 8 }, () => Promise.resolve(handler(request(body))));
+    await entered;
+    expect(hookCalls).toBe(1);
+    expect(dispatches).toBe(0);
+
+    release();
+    const responses = await Promise.all(pending);
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(hookCalls).toBe(1);
+    expect(dispatches).toBe(8);
+  });
+
+  test("a failed hook retries once and never refires after success", async () => {
+    const protocol = new Protocol("lifecycle-retry");
+    protocol.unary("ping", {
+      params: {},
+      result: { result: str },
+      handler: () => ({ result: "pong" }),
+    });
+    let hookCalls = 0;
+    const handler = createHttpHandler(protocol, {
+      prefix: "/vgi",
+      compressionLevel: null,
+      onServeStart: () => {
+        hookCalls += 1;
+        if (hookCalls === 1) throw new Error("transient startup failure");
+      },
+    });
+    const body = buildRequestIpc(new Schema([]), {}, "ping");
+
+    let firstErrorMessage = "";
+    try {
+      await handler(request(body));
+    } catch (error) {
+      firstErrorMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(firstErrorMessage).toContain("transient startup failure");
+    expect((await handler(request(body))).status).toBe(200);
+    expect((await handler(request(body))).status).toBe(200);
+    expect(hookCalls).toBe(2);
   });
 });
 

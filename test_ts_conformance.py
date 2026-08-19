@@ -2,11 +2,14 @@
 import contextlib
 import os
 import shutil
+import socket
 import subprocess
+import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 
@@ -32,6 +35,11 @@ BUN_HTTP_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-
 BUN_HTTP_ZSTD_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-zstd.ts")]
 BUN_HTTP_AUTH_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-auth.ts")]
 BUN_HTTP_PROOF_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-proof.ts")]
+BUN_TRANSPORT_KIND_WORKER = [
+    "bun",
+    "run",
+    os.path.join(_TS_DIR, "examples", "conformance-transport-kind.ts"),
+]
 # Flechette variants — same source, different Arrow backend via Node's
 # conditional resolution (workerd → impl-flechette, default → impl-arrowjs).
 # Bun resolves the `imports` map in package.json by `--conditions`.
@@ -68,6 +76,51 @@ def _start_http_server(
             break  # Server is up, just returned an error status
 
     return proc, port
+
+
+def _wait_for_tcp(host: str, port: int, timeout: float = 10.0) -> None:
+    """Wait for a listener without issuing an HTTP request."""
+    deadline = time.monotonic() + timeout
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.05)
+    raise TimeoutError(f"TCP listener {host}:{port} did not become ready: {last_error}")
+
+
+@contextlib.contextmanager
+def _start_discovery_server(cmd: list[str], prefix: str) -> Iterator[str]:
+    """Start one listener worker and yield its machine-readable address."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        if not line.startswith(prefix):
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            stderr = b"" if proc.stderr is None else proc.stderr.read()
+            raise RuntimeError(
+                f"Expected {prefix}<value> from {cmd!r}, got {line!r}; "
+                f"stderr={stderr.decode(errors='replace')!r}"
+            )
+        yield line[len(prefix) :]
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 def _bundle_for_runtime(entry: str, outfile: str) -> None:
@@ -149,6 +202,93 @@ def conformance_http_small_request_cap_port() -> Iterator[int]:
     yield port
     proc.terminate()
     proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="class")
+def conformance_http_serve_start_fail_once_port() -> Iterator[int]:
+    """HTTP worker whose first lifecycle notification fails and then retries.
+
+    Readiness is intentionally TCP-only: an HTTP probe would itself consume
+    the injected first lifecycle failure before the shared test can observe it.
+    """
+    with _start_discovery_server(
+        [*BUN_HTTP_WORKER, "--fail-serve-start-once"],
+        "PORT:",
+    ) as raw_port:
+        port = int(raw_port)
+        _wait_for_tcp("127.0.0.1", port)
+        yield port
+
+
+@pytest.fixture(scope="session")
+def conformance_transport_kind_probes() -> Iterator[tuple[tuple[str, Callable[[], str]], ...]]:
+    """Expose real wire probes for every TypeScript server transport."""
+
+    class _KindProbe(Protocol):
+        def report_transport_kind(self) -> str: ...
+
+    from vgi_rpc.http import http_connect
+    from vgi_rpc.rpc import SubprocessTransport, _RpcProxy, tcp_connect, unix_connect
+
+    pipe_transport = SubprocessTransport(BUN_TRANSPORT_KIND_WORKER)
+    tmpdir = tempfile.mkdtemp(prefix="vgi-ts-kind-", dir="/tmp")
+    unix_path = os.path.join(tmpdir, "kind.sock")
+    try:
+        with contextlib.ExitStack() as stack:
+            http_port = int(
+                stack.enter_context(
+                    _start_discovery_server([*BUN_TRANSPORT_KIND_WORKER, "--http"], "PORT:")
+                )
+            )
+            _wait_for_tcp("127.0.0.1", http_port)
+
+            tcp_addr = stack.enter_context(
+                _start_discovery_server(
+                    [*BUN_TRANSPORT_KIND_WORKER, "--tcp", "127.0.0.1:0"],
+                    "TCP:",
+                )
+            )
+            tcp_host, _, tcp_port_raw = tcp_addr.rpartition(":")
+            tcp_port = int(tcp_port_raw)
+
+            unix_server_path: str | None = None
+            if sys.platform != "win32":
+                unix_server_path = stack.enter_context(
+                    _start_discovery_server(
+                        [*BUN_TRANSPORT_KIND_WORKER, "--unix", unix_path],
+                        "UNIX:",
+                    )
+                )
+
+            def _pipe_probe() -> str:
+                return str(_RpcProxy(_KindProbe, pipe_transport, None).report_transport_kind())
+
+            def _http_probe() -> str:
+                with http_connect(_KindProbe, f"http://127.0.0.1:{http_port}") as proxy:
+                    return str(proxy.report_transport_kind())
+
+            def _tcp_probe() -> str:
+                with tcp_connect(_KindProbe, tcp_host, tcp_port) as proxy:
+                    return str(proxy.report_transport_kind())
+
+            probes: list[tuple[str, Callable[[], str]]] = [
+                ("pipe", _pipe_probe),
+                ("http", _http_probe),
+                ("tcp", _tcp_probe),
+            ]
+            if unix_server_path is not None:
+
+                def _unix_probe() -> str:
+                    assert unix_server_path is not None
+                    with unix_connect(_KindProbe, unix_server_path) as proxy:
+                        return str(proxy.report_transport_kind())
+
+                probes.append(("unix", _unix_probe))
+
+            yield tuple(probes)
+    finally:
+        pipe_transport.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

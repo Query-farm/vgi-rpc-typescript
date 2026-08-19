@@ -7554,15 +7554,15 @@ function createHttpHandler(protocol, options) {
       serveStartFired = true;
       return;
     }
-    serveStartInFlight = (async () => {
-      try {
-        await onServeStart(kind);
-        serveStartFired = true;
-      } finally {
+    const attempt = Promise.resolve().then(() => onServeStart(kind));
+    serveStartInFlight = attempt;
+    try {
+      await attempt;
+      serveStartFired = true;
+    } finally {
+      if (serveStartInFlight === attempt)
         serveStartInFlight = null;
-      }
-    })();
-    await serveStartInFlight;
+    }
   }
   const enableLandingPage = options?.enableLandingPage ?? true;
   const enableDescribePage = options?.enableDescribePage ?? true;
@@ -10756,13 +10756,27 @@ async function serveTcp(protocol, options = {}) {
     return describePromise;
   }
   let serveStartFired = false;
+  let serveStartInFlight = null;
   async function notifyTransport() {
     if (serveStartFired)
       return;
-    if (onServeStart) {
-      await onServeStart("tcp" /* TCP */);
+    if (serveStartInFlight) {
+      await serveStartInFlight;
+      return;
     }
-    serveStartFired = true;
+    if (!onServeStart) {
+      serveStartFired = true;
+      return;
+    }
+    const attempt = Promise.resolve().then(() => onServeStart("tcp" /* TCP */));
+    serveStartInFlight = attempt;
+    try {
+      await attempt;
+      serveStartFired = true;
+    } finally {
+      if (serveStartInFlight === attempt)
+        serveStartInFlight = null;
+    }
   }
   const server = createServer({ allowHalfOpen: false });
   let activeConnections = 0;
@@ -10994,13 +11008,27 @@ async function serveUnix(protocol, options) {
     return describePromise;
   }
   let serveStartFired = false;
+  let serveStartInFlight = null;
   async function notifyTransport() {
     if (serveStartFired)
       return;
-    if (onServeStart) {
-      await onServeStart("unix" /* UNIX */);
+    if (serveStartInFlight) {
+      await serveStartInFlight;
+      return;
     }
-    serveStartFired = true;
+    if (!onServeStart) {
+      serveStartFired = true;
+      return;
+    }
+    const attempt = Promise.resolve().then(() => onServeStart("unix" /* UNIX */));
+    serveStartInFlight = attempt;
+    try {
+      await attempt;
+      serveStartFired = true;
+    } finally {
+      if (serveStartInFlight === attempt)
+        serveStartInFlight = null;
+    }
   }
   const server = createServer2({ allowHalfOpen: false });
   let activeConnections = 0;
@@ -11323,4 +11351,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=97618BB22D28DA9664756E2164756E21
+//# debugId=E270585FD8FD1DC164756E2164756E21

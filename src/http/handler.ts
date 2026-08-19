@@ -361,15 +361,20 @@ export function createHttpHandler(
       serveStartFired = true;
       return;
     }
-    serveStartInFlight = (async () => {
-      try {
-        await onServeStart(kind);
-        serveStartFired = true;
-      } finally {
-        serveStartInFlight = null;
-      }
-    })();
-    await serveStartInFlight;
+    // Publish the promise before invoking user code.  An async IIFE whose
+    // body calls a synchronously-throwing hook can run its `finally` before
+    // the assignment of that IIFE's returned promise completes, leaving the
+    // rejected promise cached forever.  Starting through a microtask avoids
+    // that assignment-order trap and the identity check prevents an older
+    // attempt from clearing a newer one.
+    const attempt = Promise.resolve().then(() => onServeStart(kind));
+    serveStartInFlight = attempt;
+    try {
+      await attempt;
+      serveStartFired = true;
+    } finally {
+      if (serveStartInFlight === attempt) serveStartInFlight = null;
+    }
   }
 
   // HTML page configuration

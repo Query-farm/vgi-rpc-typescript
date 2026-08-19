@@ -142,12 +142,25 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
 
   // Lifecycle: only commit `serveStartFired` after the hook returns successfully.
   let serveStartFired = false;
+  let serveStartInFlight: Promise<void> | null = null;
   async function notifyTransport(): Promise<void> {
     if (serveStartFired) return;
-    if (onServeStart) {
-      await onServeStart(TransportKind.TCP);
+    if (serveStartInFlight) {
+      await serveStartInFlight;
+      return;
     }
-    serveStartFired = true;
+    if (!onServeStart) {
+      serveStartFired = true;
+      return;
+    }
+    const attempt = Promise.resolve().then(() => onServeStart(TransportKind.TCP));
+    serveStartInFlight = attempt;
+    try {
+      await attempt;
+      serveStartFired = true;
+    } finally {
+      if (serveStartInFlight === attempt) serveStartInFlight = null;
+    }
   }
 
   const server: Server = createServer({ allowHalfOpen: false });

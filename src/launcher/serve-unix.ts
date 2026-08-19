@@ -137,12 +137,25 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
 
   // Lifecycle: only commit `serveStartFired` after the hook returns successfully.
   let serveStartFired = false;
+  let serveStartInFlight: Promise<void> | null = null;
   async function notifyTransport(): Promise<void> {
     if (serveStartFired) return;
-    if (onServeStart) {
-      await onServeStart(TransportKind.UNIX);
+    if (serveStartInFlight) {
+      await serveStartInFlight;
+      return;
     }
-    serveStartFired = true;
+    if (!onServeStart) {
+      serveStartFired = true;
+      return;
+    }
+    const attempt = Promise.resolve().then(() => onServeStart(TransportKind.UNIX));
+    serveStartInFlight = attempt;
+    try {
+      await attempt;
+      serveStartFired = true;
+    } finally {
+      if (serveStartInFlight === attempt) serveStartInFlight = null;
+    }
   }
 
   const server: Server = createServer({ allowHalfOpen: false });

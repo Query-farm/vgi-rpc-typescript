@@ -13,6 +13,7 @@ test("serveConnection threads its transport kind through hooks and call context"
   const protocol = new Protocol("transport-kind");
   let hookKind: TransportKind | undefined;
   let contextKind: TransportKind | undefined;
+  const serveStartKinds: TransportKind[] = [];
   protocol.unary("echo", {
     params: { value: float },
     result: { value: float },
@@ -26,10 +27,14 @@ test("serveConnection threads its transport kind through hooks and call context"
   const readable = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(request);
+      controller.enqueue(request);
       controller.close();
     },
   });
   const server = new VgiRpcServer(protocol, {
+    onServeStart(kind) {
+      serveStartKinds.push(kind);
+    },
     dispatchHook: {
       onDispatchStart(info: DispatchInfo) {
         hookKind = info.kind;
@@ -41,6 +46,7 @@ test("serveConnection threads its transport kind through hooks and call context"
   await server.serveConnection(readable, { write() {} }, TransportKind.TCP);
   expect(hookKind).toBe(TransportKind.TCP);
   expect(contextKind).toBe(TransportKind.TCP);
+  expect(serveStartKinds).toEqual([TransportKind.TCP]);
 });
 
 test("serveConnection rejects a mismatched parameter schema before invoking the handler", async () => {

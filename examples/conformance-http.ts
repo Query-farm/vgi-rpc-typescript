@@ -32,7 +32,7 @@ import type { ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvi
 import type { AuthenticateFn } from "../src/http/auth.js";
 import { AuthUnavailableError, createHttpHandler } from "../src/http/index.js";
 import type { TokenIdentity } from "../src/http/introspect.js";
-import type { DispatchHook, HookToken } from "../src/types.js";
+import type { DispatchHook, HookToken, ServeStartHook } from "../src/types.js";
 import { protocol } from "./conformance-protocol.js";
 
 /** Decode a hex string into bytes — used only for the `--token-key` fixture flag. */
@@ -94,6 +94,10 @@ let accessLogAsync = false;
 // Without this the record's `request_data` is a `payload_omitted` marker, so
 // `vgi-rpc-test --require-request-data` has nothing to validate against.
 let accessLogDebug = false;
+// Lifecycle fault-injection fixture.  The hook is deliberately wired into
+// the real HTTP handler so the shared suite observes the same first-request
+// path an application would use.
+let failServeStartOnce = false;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--server-id" && i + 1 < args.length) {
@@ -142,6 +146,8 @@ for (let i = 0; i < args.length; i++) {
     accessLogAsync = true;
   } else if (a === "--access-log-debug") {
     accessLogDebug = true;
+  } else if (a === "--fail-serve-start-once") {
+    failServeStartOnce = true;
   }
 }
 // Strict-cap mode: tight body + external caps so the http_response_cap.*
@@ -400,6 +406,19 @@ const handler = createHttpHandler(protocol, {
     : { maxStreamResponseBytes: 1 }),
   ...(dispatchHook ? { dispatchHook } : {}),
   ...(externalLocation ? { externalLocation } : {}),
+  ...(failServeStartOnce
+    ? {
+        onServeStart: (() => {
+          let calls = 0;
+          return () => {
+            calls += 1;
+            if (calls === 1) {
+              throw new Error("conformance injected on_serve_start failure");
+            }
+          };
+        })() satisfies ServeStartHook,
+      }
+    : {}),
   ...(fakeStorage || maxRequestBytesArg !== undefined
     ? {
         ...(fakeStorage ? { uploadUrlProvider: fakeStorage } : {}),
@@ -426,7 +445,17 @@ const wrappedHandler = async (req: Request): Promise<Response> => {
     }
     return new Response(null, { status: 405 });
   }
-  return handler(req);
+  try {
+    return await handler(req);
+  } catch (error) {
+    // Bun's default rejected-fetch handling is runtime-version dependent.
+    // The fixture contract is not: expose the injected lifecycle fault as a
+    // deterministic 500 while leaving the listener alive for the retry.
+    if (failServeStartOnce) {
+      return new Response("Internal Server Error", { status: 500 });
+    }
+    throw error;
+  }
 };
 
 const server = Bun.serve({ port: 0, fetch: wrappedHandler });

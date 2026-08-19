@@ -83,4 +83,50 @@ describe("serveTcp + tcpConnect", () => {
   test("TransportKind exposes TCP", () => {
     expect(TransportKind.TCP).toBe("tcp");
   });
+
+  test("concurrent first connections share one startup hook and success is sticky", async () => {
+    await handle.stop();
+    let release!: () => void;
+    let markEntered!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let hookCalls = 0;
+    handle = await serveTcp(protocol, {
+      host: "127.0.0.1",
+      port: 0,
+      idleTimeout: 0,
+      announcementSink: { write: () => true } as unknown as NodeJS.WritableStream,
+      onServeStart: async (kind) => {
+        hookCalls += 1;
+        expect(kind).toBe(TransportKind.TCP);
+        markEntered();
+        await gate;
+      },
+    });
+
+    const clients = Array.from({ length: 8 }, () => tcpConnect(handle.host, handle.port));
+    try {
+      const calls = clients.map((client, index) => client.call("ping", { msg: String(index) }));
+      await entered;
+      expect(hookCalls).toBe(1);
+      release();
+      expect((await Promise.all(calls)).map((result) => result?.msg)).toEqual(
+        Array.from({ length: 8 }, (_, index) => `pong:${index}`),
+      );
+
+      const later = tcpConnect(handle.host, handle.port);
+      try {
+        expect(await later.call("ping", { msg: "later" })).toEqual({ msg: "pong:later" });
+      } finally {
+        later.close();
+      }
+      expect(hookCalls).toBe(1);
+    } finally {
+      for (const client of clients) client.close();
+    }
+  });
 });
