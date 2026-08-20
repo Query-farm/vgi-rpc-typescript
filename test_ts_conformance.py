@@ -172,6 +172,41 @@ def conformance_http_port(ts_http_port: int) -> int:
     return ts_http_port
 
 
+@pytest.fixture
+def conformance_resource_soak_target() -> Iterator[Any]:
+    """Expose one isolated Bun HTTP worker to the shared resource soak."""
+    from vgi_rpc.conformance._resource_soak_pytest import (
+        ResourceSoakLimits,
+        ResourceSoakTarget,
+    )
+
+    proc, port = _start_http_server(BUN_HTTP_WORKER)
+    try:
+        def connect() -> contextlib.AbstractContextManager[Any]:
+            return http_connect(ConformanceService, f"http://127.0.0.1:{port}")
+
+        yield ResourceSoakTarget(
+            name="typescript-bun-http",
+            pid=proc.pid,
+            connect=connect,
+            limits=ResourceSoakLimits(
+                rss_growth_bytes=64 * 1024 * 1024,
+                rss_slope_bytes_per_epoch=8 * 1024 * 1024,
+                descriptor_growth=4,
+                thread_growth=4,
+                child_growth=0,
+            ),
+            warmup_multiplier=2,
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
 @pytest.fixture(scope="session")
 def conformance_http_no_compression_port() -> Iterator[int]:
     """Bun conformance HTTP server with response compression explicitly OFF.
