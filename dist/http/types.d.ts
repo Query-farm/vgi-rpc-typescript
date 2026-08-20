@@ -14,7 +14,7 @@ export interface HttpHandlerOptions {
     tokenTtl?: number;
     /** CORS allowed origins. If set, CORS headers are added to all responses. */
     corsOrigins?: string;
-    /** Access-Control-Max-Age value in seconds for preflight OPTIONS responses. Default: 7200 (2 hours). null omits the header. */
+    /** Access-Control-Max-Age value in seconds for preflight OPTIONS responses. Default: 300 (5 minutes). null omits the header. */
     corsMaxAge?: number | null;
     /** Maximum request body size in bytes. Advertised via VGI-Max-Request-Bytes header. */
     maxRequestBytes?: number;

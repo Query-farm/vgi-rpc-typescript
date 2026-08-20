@@ -191,7 +191,7 @@ export function createHttpHandler(
   const tokenKey = options?.tokenKey ?? randomBytes(32);
   const tokenTtl = options?.tokenTtl ?? 3600;
   const corsOrigins = options?.corsOrigins;
-  const corsMaxAge = options?.corsMaxAge === undefined ? 7200 : options.corsMaxAge;
+  const corsMaxAge = options?.corsMaxAge === undefined ? 300 : options.corsMaxAge;
   const maxRequestBytes = options?.maxRequestBytes;
   // The advertised request cap applies independently to encoded and decoded
   // bytes. Keeping the decoded default equal to maxRequestBytes prevents a

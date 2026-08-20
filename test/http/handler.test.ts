@@ -365,7 +365,7 @@ describe("HTTP Handler", () => {
     });
 
     const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
-    expect(res.headers.get("Access-Control-Max-Age")).toBe("7200");
+    expect(res.headers.get("Access-Control-Max-Age")).toBe("300");
   });
 
   test("CORS preflight custom corsMaxAge", async () => {

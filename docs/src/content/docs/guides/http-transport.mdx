@@ -76,7 +76,7 @@ const handler = createHttpHandler(protocol, {
   tokenTtl: 7200,                    // state-token TTL in seconds (default: 3600; 0 disables)
   serverId: "my-server",             // server ID in response metadata (random if omitted)
   corsOrigins: "*",                  // CORS allowed origins
-  corsMaxAge: 7200,                  // Access-Control-Max-Age for preflight (default: 7200; null omits)
+  corsMaxAge: 300,                   // Access-Control-Max-Age for preflight (default: 300; null omits)
   maxRequestBytes: 10_000_000,       // max request body size
   maxDecompressedRequestBytes: 160_000_000, // cap on decompressed request size (zstd-bomb defense)
   maxResponseBytes: 5_000_000,       // response body cap (hard for unary/exchange, soft for producer)
@@ -95,7 +95,7 @@ Key options:
 | `tokenKey` | 32-byte XChaCha20-Poly1305 master key sealing stream-state tokens. Random if omitted. |
 | `tokenTtl` | State-token TTL in seconds. Default `3600`; `0` disables TTL checks. |
 | `corsOrigins` | CORS allowed origins; enables CORS headers when set. |
-| `corsMaxAge` | `Access-Control-Max-Age` for preflight responses. Default `7200`; `null` omits it. |
+| `corsMaxAge` | `Access-Control-Max-Age` for preflight responses. Default `300`; `null` omits it. |
 | `maxRequestBytes` | Max request body size. Advertised via `VGI-Max-Request-Bytes`. |
 | `maxDecompressedRequestBytes` | Cap on post-decompression request size (zstd/gzip bomb defense). Defaults to `maxRequestBytes * 16` when that is set. |
 | `maxResponseBytes` | Response body cap. Hard for unary/exchange, soft for producer (overshoot mints a continuation token). |
@@ -129,7 +129,7 @@ const handler = createHttpHandler(protocol, {
 });
 ```
 
-The handler answers `OPTIONS` preflight requests automatically. The preflight reflects the request's `Access-Control-Request-Headers` back in `Access-Control-Allow-Headers`, so clients can send custom VGI request headers without a hard-coded allow-list. `corsMaxAge` controls how long browsers cache the preflight (default 2 hours; `null` omits the header), and the relevant VGI response headers are surfaced via `Access-Control-Expose-Headers`.
+The handler answers `OPTIONS` preflight requests automatically. The preflight reflects the request's `Access-Control-Request-Headers` back in `Access-Control-Allow-Headers`, so clients can send custom VGI request headers without a hard-coded allow-list. `corsMaxAge` controls how long browsers cache the preflight (default 5 minutes; `null` omits the header), and the relevant VGI response headers are surfaced via `Access-Control-Expose-Headers`.
 
 ## Health endpoint
 

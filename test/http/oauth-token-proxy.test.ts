@@ -98,6 +98,7 @@ describe("OAuth token proxy", () => {
     expect(resp.status).toBe(204);
     expect(resp.headers.get("access-control-allow-origin")).toBe("https://cupola.query-farm.services");
     expect(resp.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(resp.headers.get("access-control-max-age")).toBe("300");
   });
 
   test("authorization_code is forwarded with injected client_secret", async () => {

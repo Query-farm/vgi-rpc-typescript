@@ -6861,7 +6861,7 @@ async function handleOAuthTokenProxy(request, config) {
   if (request.method === "OPTIONS") {
     headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Content-Type");
-    headers.set("Access-Control-Max-Age", "7200");
+    headers.set("Access-Control-Max-Age", "300");
     return new Response(null, { status: 204, headers });
   }
   if (request.method !== "POST") {
@@ -7463,7 +7463,7 @@ function createHttpHandler(protocol, options) {
   const tokenKey = options?.tokenKey ?? randomBytes(32);
   const tokenTtl = options?.tokenTtl ?? 3600;
   const corsOrigins = options?.corsOrigins;
-  const corsMaxAge = options?.corsMaxAge === undefined ? 7200 : options.corsMaxAge;
+  const corsMaxAge = options?.corsMaxAge === undefined ? 300 : options.corsMaxAge;
   const maxRequestBytes = options?.maxRequestBytes;
   const configuredDecompressedCap = options?.maxDecompressedRequestBytes;
   const maxDecompressedRequestBytes = maxRequestBytes == null ? configuredDecompressedCap : configuredDecompressedCap == null ? maxRequestBytes : Math.min(maxRequestBytes, configuredDecompressedCap);
@@ -11351,4 +11351,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=E270585FD8FD1DC164756E2164756E21
+//# debugId=4F1D51B19A15128264756E2164756E21

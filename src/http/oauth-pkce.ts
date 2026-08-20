@@ -684,7 +684,7 @@ export async function handleOAuthTokenProxy(request: Request, config: OAuthPkceC
   if (request.method === "OPTIONS") {
     headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Content-Type");
-    headers.set("Access-Control-Max-Age", "7200");
+    headers.set("Access-Control-Max-Age", "300");
     return new Response(null, { status: 204, headers });
   }
 
