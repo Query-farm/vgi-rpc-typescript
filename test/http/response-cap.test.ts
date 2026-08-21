@@ -160,8 +160,17 @@ describe("producer stream external cap", () => {
       storage,
       externalizeThresholdBytes: 100, // force externalize
     };
+    // A stream cap is required for this scenario to exist at all. The external
+    // cap is cumulative WITHIN one turn (mirroring Python's
+    // _run_http_producer_turn), so two emits must land in the same turn for the
+    // second to be refused. With no stream cap the turn loop now ends after one
+    // produce cycle — the correct default — so set one high enough that the
+    // EXTERNAL cap is the binding constraint, which is what this test is about.
+    // Previously this relied on the turn loop never breaking, which silently
+    // made a per-turn cap behave as a whole-stream one.
     const handler = createHttpHandler(protocol, {
       maxExternalizedResponseBytes: 3 * 1024,
+      maxStreamResponseBytes: 1024 * 1024,
       externalLocation,
     });
 

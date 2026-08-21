@@ -6016,7 +6016,7 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
     if (out.finished) {
       break;
     }
-    if (maxBytes != null && estimatedBytes >= maxBytes) {
+    if (maxBytes == null || estimatedBytes >= maxBytes) {
       const stateBytes = ctx.stateSerializer.serialize(state);
       const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
       const tokenMeta = new Map;
@@ -11351,4 +11351,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=4F1D51B19A15128264756E2164756E21
+//# debugId=8BCAF2B23EC8F10464756E2164756E21

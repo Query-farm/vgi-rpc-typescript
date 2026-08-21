@@ -925,8 +925,25 @@ async function produceStreamResponse(
       break;
     }
 
-    // Check byte budget — if exceeded, emit continuation token
-    if (maxBytes != null && estimatedBytes >= maxBytes) {
+    // Emit a continuation token and hand this turn back. With NO cap
+    // configured this must happen after EVERY produce cycle — that is the
+    // default, and it is what makes a producer stream incremental.
+    //
+    // This read `maxBytes != null && estimatedBytes >= maxBytes`, so an
+    // unconfigured worker never broke at all: the loop ran to `out.finished`
+    // and packed an entire scan into one HTTP body. vgi-rpc-python has the
+    // opposite default and says so — "By default (no limit configured), break
+    // after every produce cycle so the client receives data incrementally"
+    // (_app_stream.py) — and no vgi-typescript worker sets either cap, so
+    // every TS HTTP worker inherited the wrong half of the condition.
+    //
+    // Three consequences, in increasing order of severity: a parallel scan
+    // collapsed to ONE reader (the primary drained the shared per-execution_id
+    // work queue inside its own /init, before the secondaries had even
+    // connected); the whole result was materialised in RAM on both ends; and
+    // the producer-cancellation contract documented above was vacuous, because
+    // an unbounded producer would never yield a turn to be cancelled.
+    if (maxBytes == null || estimatedBytes >= maxBytes) {
       const stateBytes = ctx.stateSerializer.serialize(state);
       const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
       const tokenMeta = new Map<string, string>();

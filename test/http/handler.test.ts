@@ -668,11 +668,49 @@ describe("HTTP Handler", () => {
 
     expect(res.status).toBe(200);
     const { batches } = await readResponseBatches(res);
-    // Should have 3 data batches (n=0,1,2)
-    expect(batches.length).toBe(3);
+
+    // ONE produce cycle per response, plus a continuation cursor — not the
+    // whole stream in one body. This asserted all 3 batches arriving at /init,
+    // which encoded a defect rather than the contract: with no byte cap
+    // configured the turn loop never broke, so an entire scan was materialised
+    // in one response. That collapsed parallel scans to a single reader (the
+    // primary drained the shared work queue before peers connected), held the
+    // whole result in RAM on both ends, and made the producer-cancellation
+    // contract unreachable. vgi-rpc-python breaks after every produce cycle by
+    // default; this now matches.
+    // One data batch, then a 0-row batch carrying the continuation cursor.
+    expect(batches.length).toBe(2);
+    expect(batches[0].numRows).toBe(1);
     expect(batches[0].getChildAt(0)?.get(0)).toBe(0);
-    expect(batches[1].getChildAt(0)?.get(0)).toBe(1);
-    expect(batches[2].getChildAt(0)?.get(0)).toBe(2);
+    expect(batches[1].numRows).toBe(0);
+    const cursor = batches[1].metadata?.get(STATE_KEY);
+    expect(cursor).toBeDefined();
+
+    // The remaining values still arrive, one turn at a time — the stream is
+    // incremental, not truncated.
+    const seen = [0];
+    let token = cursor;
+    for (let turn = 0; turn < 5 && token; turn++) {
+      const meta = new Map<string, string>();
+      meta.set(STATE_KEY, token);
+      // Continuation turns go to /exchange carrying the cursor — posting to
+      // /init again would re-initialise the producer and replay from 0.
+      const next = await handler(
+        new Request(`${BASE}/vgi/count/exchange`, {
+          method: "POST",
+          headers: { "Content-Type": ARROW_CONTENT_TYPE },
+          body: buildRequestIpc(paramSchema, { count: [3] }, "count", meta),
+        }),
+      );
+      expect(next.status).toBe(200);
+      const { batches: more } = await readResponseBatches(next);
+      token = more[more.length - 1]?.metadata?.get(STATE_KEY);
+      for (const b of more) {
+        if (b.numRows > 0) seen.push(b.getChildAt(0)?.get(0) as number);
+      }
+      if (!token) break;
+    }
+    expect(seen).toEqual([0, 1, 2]);
   });
 
   // -- Exchange stream --
