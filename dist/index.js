@@ -5785,7 +5785,7 @@ async function httpDispatchStreamInit(method, body, ctx) {
       schemaBytes: serializeSchema2(resolvedOutputSchema),
       inputSchemaBytes: serializeSchema2(resolvedInputSchema)
     });
-    return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes, { callId: initCallId, callToken: initCallToken }, reqBatch.metadata ?? undefined);
+    return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes, { callId: initCallId, callToken: initCallToken }, stripFrameworkTickMetadata(reqBatch.metadata));
   } else {
     const stateBytes = ctx.stateSerializer.serialize(state);
     const schemaBytes = serializeSchema2(resolvedOutputSchema);
@@ -5804,6 +5804,17 @@ async function httpDispatchStreamInit(method, body, ctx) {
     }
     return arrowResponse(responseBody);
   }
+}
+var FRAMEWORK_TICK_KEYS = new Set([STATE_KEY, CALL_STATE_KEY, CANCEL_KEY]);
+function stripFrameworkTickMetadata(meta) {
+  if (!meta)
+    return;
+  const out = new Map;
+  for (const [k, v] of meta) {
+    if (!FRAMEWORK_TICK_KEYS.has(k))
+      out.set(k, v);
+  }
+  return out.size > 0 ? out : undefined;
 }
 async function httpDispatchStreamExchange(method, body, ctx) {
   const isProducer = !!method.producerFn;
@@ -5856,7 +5867,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     return arrowResponse(serializeIpcStream(outputSchema, []));
   }
   if (effectiveProducer) {
-    return produceStreamResponse(method, state, outputSchema, inputSchema, ctx, null, null, { callId: unpacked.callId, callToken: null }, reqBatch.metadata ?? undefined);
+    return produceStreamResponse(method, state, outputSchema, inputSchema, ctx, null, null, { callId: unpacked.callId, callToken: null }, stripFrameworkTickMetadata(reqBatch.metadata));
   } else {
     const externalizationEnabled = !!ctx.externalLocation?.storage;
     const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
@@ -11351,4 +11362,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=8BCAF2B23EC8F10464756E2164756E21
+//# debugId=D70F6667D13D41D364756E2164756E21

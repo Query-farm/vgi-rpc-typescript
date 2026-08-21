@@ -55,6 +55,5 @@ export declare function httpDispatchDescribe(protocolName: string, methods: Map<
 export declare function httpDispatchUnary(method: MethodDefinition, body: Uint8Array, ctx: DispatchContext): Promise<Response>;
 /** Dispatch a stream init HTTP request (producer or exchange). */
 export declare function httpDispatchStreamInit(method: MethodDefinition, body: Uint8Array, ctx: DispatchContext): Promise<Response>;
-/** Dispatch a stream exchange HTTP request (producer continuation or exchange round). */
 export declare function httpDispatchStreamExchange(method: MethodDefinition, body: Uint8Array, ctx: DispatchContext): Promise<Response>;
 //# sourceMappingURL=dispatch.d.ts.map

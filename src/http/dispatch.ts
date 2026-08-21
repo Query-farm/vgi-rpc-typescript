@@ -509,7 +509,7 @@ export async function httpDispatchStreamInit(
       parsed.requestId,
       headerBytes,
       { callId: initCallId, callToken: initCallToken },
-      reqBatch.metadata ?? undefined,
+      stripFrameworkTickMetadata(reqBatch.metadata),
     );
   } else {
     // Exchange: serialize state into signed token, return zero-row batch with token
@@ -538,6 +538,27 @@ export async function httpDispatchStreamInit(
 }
 
 /** Dispatch a stream exchange HTTP request (producer continuation or exchange round). */
+/** Framework keys the transport puts on a continuation request, which must not
+ *  reach user code as tick metadata.
+ *
+ *  The pipe transport keeps stream/call state in the connection and never puts
+ *  it on a batch, so a worker that sees these over HTTP is seeing a transport
+ *  artefact — and STATE_KEY in particular is the sealed cursor token, which has
+ *  no business in application-visible metadata. vgi-rpc-python and -go and
+ *  -rust all strip the same three. */
+const FRAMEWORK_TICK_KEYS = new Set([STATE_KEY, CALL_STATE_KEY, CANCEL_KEY]);
+
+function stripFrameworkTickMetadata(
+  meta: Map<string, string> | null | undefined,
+): Map<string, string> | undefined {
+  if (!meta) return undefined;
+  const out = new Map<string, string>();
+  for (const [k, v] of meta) {
+    if (!FRAMEWORK_TICK_KEYS.has(k)) out.set(k, v);
+  }
+  return out.size > 0 ? out : undefined;
+}
+
 export async function httpDispatchStreamExchange(
   method: MethodDefinition,
   body: Uint8Array,
@@ -634,7 +655,7 @@ export async function httpDispatchStreamExchange(
       null,
       null,
       { callId: unpacked.callId, callToken: null },
-      reqBatch.metadata ?? undefined,
+      stripFrameworkTickMetadata(reqBatch.metadata),
     );
   } else {
     // Exchange path — also handles exchange-registered methods acting as
