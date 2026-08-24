@@ -133,6 +133,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check out vgi-rpc-python conformance suite
+        uses: actions/checkout@v7
+        with:
+          repository: Query-farm/vgi-rpc-python
+          path: .vgi-rpc-python
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -153,20 +159,13 @@ jobs:
         run: bun install
 
       - name: Install Python dependencies
-        # Keep this floor at the release carrying the newest conformance group
-        # this port implements. A floor that trails the suite resolves an older
-        # vgi-rpc where the new group is *absent rather than skipped*, so CI
-        # goes green having never run it. This run got 0.28.3 only by luck of
-        # timing — the Rust port's identical floor resolved 0.28.2 eighty
-        # seconds after 0.28.3 published, before PyPI's index reached pip.
-        # 0.28.3: TestProxyProof capability-header cases.
-        # 0.29.0: TestSticky failure-path fixtures (expiry, wrong worker,
-        #   cross-principal replay) — required now, not skippable.
-        # 0.37.0: vgi-rpc-test --require-request-data, used by the access-log
-        #   conformance step below. Below this floor the flag is unrecognised
-        #   and the step fails on argument parsing rather than on the log.
-        # 0.42.0: the large_payload group, with echo_binary_over_int32_max
-        #   ungated — it runs on every invocation below, no env var. Note that
+        # Test against the suite on Python main so coordinated protocol changes
+        # are verifiable before either package is published. Installing the
+        # latest PyPI release can pair a new worker protocol with an old client
+        # and fail before conformance begins.
+        #
+        # The large_payload group is ungated and runs on every invocation
+        # below. Note that
         #   the *transport* half of what it guards is invisible on this runner:
         #   Linux caps a single transfer at 0x7ffff000 and returns a short
         #   count that any correct loop absorbs, so the macOS pipe truncation
@@ -179,7 +178,7 @@ jobs:
         # so omitting the extra fails *only* the access-log step below, with an
         # ImportError that looks nothing like the contract violation it exists
         # to catch.
-        run: pip install "vgi-rpc[http,cli,external,conformance]>=0.42.0" pytest
+        run: pip install ".vgi-rpc-python[http,cli,external,conformance]" pytest
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_ts_conformance.py -x -v
