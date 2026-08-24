@@ -54,6 +54,8 @@ export declare class PipeStreamSession implements StreamSession {
      * the first input and writes the first output batch.
      */
     private _ensureOutputStream;
+    /** Send one producer tick, preserving application message metadata. */
+    tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]>;
     /**
      * Send an exchange request and return the data rows.
      */

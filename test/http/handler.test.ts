@@ -108,6 +108,27 @@ function makeTestProtocol(): Protocol {
     },
   });
 
+  protocol.producer<{ count: number; current: number }>("metadata_ticks", {
+    params: { count: int32 },
+    outputSchema: { seen: str },
+    init: ({ count }) => ({ count, current: 0 }),
+    produce: (state, out) => {
+      out.emitRow({ seen: out.inputMetadata?.get("application.tick") ?? "" });
+      state.current++;
+      if (state.current >= state.count) out.finish();
+    },
+  });
+
+  protocol.producer("double_emit", {
+    params: {},
+    outputSchema: { n: int32 },
+    init: () => ({}),
+    produce: (_state, out) => {
+      out.emitRow({ n: 1 });
+      out.emitRow({ n: 2 });
+    },
+  });
+
   protocol.exchange<{ factor: number }>("scale", {
     params: { factor: float },
     inputSchema: { value: float },
@@ -711,6 +732,55 @@ describe("HTTP Handler", () => {
       if (!token) break;
     }
     expect(seen).toEqual([0, 1, 2]);
+  });
+
+  test("producer invokes exactly once per request under a generous response cap", async () => {
+    const cappedHandler = createHttpHandler(makeTestProtocol(), {
+      prefix: "/vgi",
+      maxStreamResponseBytes: 1024 * 1024,
+    });
+    const paramSchema = new Schema([new Field("count", new Int32(), false)]);
+    const initRes = await cappedHandler(
+      new Request(`${BASE}/vgi/metadata_ticks/init`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body: buildRequestIpc(paramSchema, { count: [2] }, "metadata_ticks"),
+      }),
+    );
+    const { batches: initBatches } = await readResponseBatches(initRes);
+    expect(initBatches.filter((batch) => batch.numRows > 0)).toHaveLength(1);
+    const token = initBatches.find((batch) => batch.metadata?.get(STATE_KEY))?.metadata?.get(STATE_KEY);
+    expect(token).toBeDefined();
+
+    const metadata = new Map<string, string>([
+      [STATE_KEY, token!],
+      ["application.tick", "updated"],
+    ]);
+    const nextRes = await cappedHandler(
+      new Request(`${BASE}/vgi/metadata_ticks/exchange`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body: buildRequestIpc(paramSchema, { count: [2] }, "metadata_ticks", metadata),
+      }),
+    );
+    const { batches: nextBatches } = await readResponseBatches(nextRes);
+    const data = nextBatches.find((batch) => batch.numRows > 0);
+    expect(data?.getChildAt(0)?.get(0)).toBe("updated");
+  });
+
+  test("double data emission fails as a ProtocolError", async () => {
+    const emptySchema = new Schema([]);
+    const res = await handler(
+      new Request(`${BASE}/vgi/double_emit/init`, {
+        method: "POST",
+        headers: { "Content-Type": ARROW_CONTENT_TYPE },
+        body: buildRequestIpc(emptySchema, {}, "double_emit"),
+      }),
+    );
+    const { batches } = await readResponseBatches(res);
+    expect(batches).toHaveLength(1);
+    expect(batches[0].metadata?.get(LOG_LEVEL_KEY)).toBe("EXCEPTION");
+    expect(batches[0].metadata?.get(LOG_MESSAGE_KEY)).toContain("ProtocolError: Only one data batch");
   });
 
   // -- Exchange stream --

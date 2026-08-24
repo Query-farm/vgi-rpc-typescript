@@ -98,6 +98,9 @@ export interface CallContext extends LogContext {
     /** Authenticated principal for this call; {@link AuthContext.anonymous} when
      *  the request was not authenticated. */
     readonly auth: AuthContext;
+    /** Application custom metadata carried by this stream input batch/tick.
+     * Framework continuation and cancellation keys are removed on HTTP. */
+    readonly inputMetadata?: ReadonlyMap<string, string>;
     /** Coarse identifier of the bound transport, or `undefined` until the
      *  server begins serving (the value is committed by the lifecycle hook
      *  on the very first request). */
@@ -351,6 +354,7 @@ export declare class OutputCollector implements CallContext {
     /** Authenticated principal for this call; {@link AuthContext.anonymous} when
      *  the request was not authenticated. */
     readonly auth: AuthContext;
+    readonly inputMetadata?: ReadonlyMap<string, string>;
     readonly cookies: ReadonlyMap<string, string>;
     readonly kind?: TransportKind;
     readonly remainingResponseBytes?: number;
@@ -364,6 +368,7 @@ export declare class OutputCollector implements CallContext {
         remainingResponseBytes?: number;
         remainingExternalizedResponseBytes?: number;
         externalizationEnabled?: boolean;
+        inputMetadata?: ReadonlyMap<string, string>;
     });
     /**
      * Mark this collector as able to accept Set-Cookie directives.  Called

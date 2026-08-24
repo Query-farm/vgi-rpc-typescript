@@ -17,7 +17,7 @@ Two `HttpHandlerOptions` cap how much a single response may produce:
 
 | Option | Applies to | Behavior |
 |--------|------------|----------|
-| `maxResponseBytes` | unary, stream-exchange (**hard**); producer streams (**soft**) | Hard: overshoot replaces the response with an `EXCEPTION` batch. Soft: overshoot mints a continuation token and the producer resumes on the next request. |
+| `maxResponseBytes` | unary, stream-exchange (**hard**); producer streams (**soft**) | Hard: overshoot replaces the response with an `EXCEPTION` batch. Soft: exposes a per-invocation sizing budget; every unfinished producer turn receives a continuation token. |
 | `maxExternalizedResponseBytes` | every response that externalizes | **Always hard** — externalized uploads have no continuation-token escape valve. |
 
 ```typescript
@@ -31,12 +31,12 @@ const handler = createHttpHandler(protocol, {
 
 When a **hard** cap is exceeded the handler discards the data it had built and returns a stream carrying only an `EXCEPTION` batch (surfaced to the client as an `RpcError`). For unary and exchange this is the `maxResponseBytes` body cap; for any transport it is the `maxExternalizedResponseBytes` upload cap, which is pre-flighted *before* the upload is incurred so the bytes never leave the server.
 
-For **producer** streams, `maxResponseBytes` is a soft budget: when the accumulated body crosses it, the producer loop appends a zero-row continuation-token batch and stops, and the client resumes by calling `/{method}/exchange` with that token.
+For **producer** streams, `maxResponseBytes` is a soft, worker-visible budget for the current invocation. Producer dispatch is always lock-step: one HTTP request invokes the producer exactly once. If that invocation leaves the stream unfinished, the response carries a zero-row continuation-token batch and the client resumes by calling `/{method}/exchange` with that token. A single emitted batch may exceed the soft budget; it is not converted into a hard failure.
 
 The handler advertises these caps to clients via response headers `VGI-Max-Response-Bytes` and `VGI-Max-Externalized-Response-Bytes`. Undefined means unbounded.
 
 :::note
-`maxStreamResponseBytes` is the deprecated, producer-only predecessor of `maxResponseBytes`. If both are set, the producer loop prefers `maxStreamResponseBytes` for its soft budget; otherwise it falls through to `maxResponseBytes`. Prefer `maxResponseBytes` for new code.
+`maxStreamResponseBytes` is the deprecated, producer-only predecessor of `maxResponseBytes`. If both are set, the worker-visible producer budget prefers `maxStreamResponseBytes`; otherwise it falls through to `maxResponseBytes`. Neither setting permits the dispatcher to coalesce producer invocations. Prefer `maxResponseBytes` for new code.
 :::
 
 ## External-location offloading

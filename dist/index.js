@@ -2258,6 +2258,28 @@ class PipeStreamSession {
       throw new RpcError("ProtocolError", "Expected output stream but got EOF", "");
     }
   }
+  async tick(metadata) {
+    if (this._closed) {
+      throw new RpcError("ProtocolError", "Stream session is closed", "");
+    }
+    const tickSchema = new Schema([]);
+    if (!this._inputWriter) {
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
+    }
+    const tickData = makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
+    const tickBatch = new RecordBatch(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
+    this._inputWriter.write(tickBatch);
+    await this._ensureOutputStream();
+    const outputBatch = await this._readOutputBatch();
+    if (outputBatch === null) {
+      this._closed = true;
+      this._inputWriter.close();
+      this._inputWriter = null;
+      this._releaseBusy();
+      return [];
+    }
+    return extractBatchRows(outputBatch);
+  }
   async exchange(input) {
     if (this._closed) {
       throw new RpcError("ProtocolError", "Stream session is closed", "");
@@ -2356,22 +2378,12 @@ class PipeStreamSession {
     try {
       const tickSchema = new Schema([]);
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
-      const structType = new Struct(tickSchema.fields);
-      const tickData = makeData({
-        type: structType,
-        length: 0,
-        children: [],
-        nullCount: 0
-      });
-      const tickBatch = new RecordBatch(tickSchema, tickData);
       while (true) {
-        this._inputWriter.write(tickBatch);
-        await this._ensureOutputStream();
-        const outputBatch = await this._readOutputBatch();
-        if (outputBatch === null) {
+        const rows = await this.tick();
+        if (this._closed) {
           break;
         }
-        yield extractBatchRows(outputBatch);
+        yield rows;
       }
     } finally {
       if (this._inputWriter) {
@@ -2509,6 +2521,9 @@ function pipeConnect(readable, writable, options) {
               dispatchLogOrError(batch, onLog);
               continue;
             }
+          }
+          if (resultBatch !== null) {
+            throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
           }
           resultBatch = batch;
         }
@@ -3130,6 +3145,10 @@ class HttpStreamSession {
     this._authorization = opts.authorization;
     this._externalConfig = opts.externalConfig;
     this._postFn = opts.postFn;
+    const pendingData = opts.pendingBatches.filter((batch) => batch.numRows > 0 || isExternalLocationBatch(batch));
+    if (pendingData.length > 1) {
+      throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
+    }
   }
   async _post(url, body) {
     if (this._postFn)
@@ -3229,6 +3248,40 @@ class HttpStreamSession {
     const batch = new RecordBatch2(inputSchema, data, this._tokenMetadata(this._stateToken));
     return this._doExchange(inputSchema, [batch]);
   }
+  async tick(metadata) {
+    if (this._pendingBatches.length > 0) {
+      throw new RpcError("ProtocolError", "Consume the producer's init batch before sending an explicit tick", "");
+    }
+    if (this._finished || this._stateToken === null)
+      return [];
+    const responseBody = await this._sendContinuation(this._stateToken, metadata);
+    const { batches } = await readResponseBatches(responseBody);
+    let rows = null;
+    let nextToken = null;
+    for (let batch of batches) {
+      if (batch.numRows === 0) {
+        const token = batch.metadata?.get(STATE_KEY);
+        if (token) {
+          nextToken = token;
+          continue;
+        }
+        if (isExternalLocationBatch(batch)) {
+          batch = await resolveExternalLocation(batch, this._externalConfig);
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (rows !== null) {
+        throw new RpcError("ProtocolError", "A producer tick returned more than one data batch", "");
+      }
+      rows = extractBatchRows(batch);
+    }
+    this._stateToken = nextToken;
+    if (nextToken === null)
+      this._finished = true;
+    return rows ?? [];
+  }
   async _doExchange(schema2, batches) {
     const body = serializeIpcStream(schema2, batches);
     const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
@@ -3238,6 +3291,7 @@ class HttpStreamSession {
     const responseBody = await this._readResponse(resp);
     const { batches: responseBatches } = await readResponseBatches(responseBody);
     let resultRows = [];
+    let gotData = false;
     for (const batch of responseBatches) {
       if (batch.numRows === 0) {
         dispatchLogOrError(batch, this._onLog);
@@ -3247,6 +3301,10 @@ class HttpStreamSession {
         }
         continue;
       }
+      if (gotData) {
+        throw new RpcError("ProtocolError", "An exchange turn returned more than one data batch", "");
+      }
+      gotData = true;
       const token = batch.metadata?.get(STATE_KEY);
       if (token) {
         this._stateToken = token;
@@ -3292,6 +3350,7 @@ class HttpStreamSession {
       const responseBody = await this._sendContinuation(stateToken);
       const { batches } = await readResponseBatches(responseBody);
       let gotContinuation = false;
+      let dataRows = null;
       for (let batch of batches) {
         if (batch.numRows === 0) {
           const token = batch.metadata?.get(STATE_KEY);
@@ -3307,14 +3366,19 @@ class HttpStreamSession {
             continue;
           }
         }
-        yield extractBatchRows(batch);
+        if (dataRows !== null) {
+          throw new RpcError("ProtocolError", "A producer turn returned more than one data batch", "");
+        }
+        dataRows = extractBatchRows(batch);
       }
+      if (dataRows !== null)
+        yield dataRows;
       if (!gotContinuation)
         break;
     }
   }
   async nextWithToken() {
-    const multi = "nextWithToken requires one data batch per response; the upstream " + "worker buffered multiple (configured max_response_bytes?)";
+    const multi = "A producer turn returned more than one data batch";
     while (this._pendingBatches.length > 0) {
       let batch = this._pendingBatches.shift();
       if (batch.numRows === 0) {
@@ -3326,7 +3390,7 @@ class HttpStreamSession {
         }
       }
       if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
-        throw new Error(multi);
+        throw new RpcError("ProtocolError", multi, "");
       }
       return { rows: extractBatchRows(batch), token: this._resumeToken() };
     }
@@ -3353,7 +3417,7 @@ class HttpStreamSession {
         }
       }
       if (dataRows !== null) {
-        throw new Error(multi);
+        throw new RpcError("ProtocolError", multi, "");
       }
       dataRows = extractBatchRows(batch);
     }
@@ -3371,9 +3435,11 @@ class HttpStreamSession {
     this._callStateToken = callToken;
     this._finished = false;
   }
-  async _sendContinuation(token) {
+  async _sendContinuation(token, applicationMetadata) {
     const emptySchema = new Schema2([]);
-    const metadata = this._tokenMetadata(token);
+    const metadata = new Map(applicationMetadata ?? []);
+    for (const [key, value] of this._tokenMetadata(token))
+      metadata.set(key, value);
     const structType = new Struct2(emptySchema.fields);
     const data = makeData2({
       type: structType,
@@ -3629,6 +3695,9 @@ function httpConnect(rawBaseUrl, options) {
             continue;
           }
         }
+        if (resultBatch !== null) {
+          throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
+        }
         resultBatch = batch;
       }
       if (!resultBatch) {
@@ -3658,6 +3727,14 @@ function httpConnect(rawBaseUrl, options) {
       let stateToken = null;
       let callStateToken = null;
       const pendingBatches = [];
+      let dataBatchesInTurn = 0;
+      const queueDataBatch = (batch) => {
+        dataBatchesInTurn += 1;
+        if (dataBatchesInTurn > 1) {
+          throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
+        }
+        pendingBatches.push(batch);
+      };
       let finished = false;
       let streamSchema = null;
       if (info.headerSchema) {
@@ -3689,6 +3766,10 @@ function httpConnect(rawBaseUrl, options) {
                 callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
                 continue;
               }
+              if (isExternalLocationBatch(batch)) {
+                queueDataBatch(batch);
+                continue;
+              }
               const level = batch.metadata?.get(LOG_LEVEL_KEY);
               if (level === "EXCEPTION") {
                 headerErrorBatches.push(batch);
@@ -3697,7 +3778,7 @@ function httpConnect(rawBaseUrl, options) {
               dispatchLogOrError(batch, onLog);
               continue;
             }
-            pendingBatches.push(batch);
+            queueDataBatch(batch);
           }
         }
         if (headerErrorBatches.length > 0) {
@@ -3724,6 +3805,10 @@ function httpConnect(rawBaseUrl, options) {
               callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
               continue;
             }
+            if (isExternalLocationBatch(batch)) {
+              queueDataBatch(batch);
+              continue;
+            }
             const level = batch.metadata?.get(LOG_LEVEL_KEY);
             if (level === "EXCEPTION") {
               errorBatches.push(batch);
@@ -3732,7 +3817,7 @@ function httpConnect(rawBaseUrl, options) {
             dispatchLogOrError(batch, onLog);
             continue;
           }
-          pendingBatches.push(batch);
+          queueDataBatch(batch);
         }
         if (errorBatches.length > 0) {
           if (pendingBatches.length > 0 || stateToken !== null) {
@@ -4300,6 +4385,7 @@ class OutputCollector {
   _responseCookies = [];
   _stickyContext = null;
   auth;
+  inputMetadata;
   cookies;
   kind;
   remainingResponseBytes;
@@ -4311,6 +4397,7 @@ class OutputCollector {
     this._serverId = serverId;
     this._requestId = requestId;
     this.auth = authContext ?? AuthContext.anonymous();
+    this.inputMetadata = budgets?.inputMetadata;
     this.cookies = cookies ?? EMPTY_COOKIES;
     this.kind = kind;
     this.remainingResponseBytes = budgets?.remainingResponseBytes;
@@ -4403,7 +4490,7 @@ class OutputCollector {
       batch = batchFromColumns(this._outputSchema, cols);
     }
     if (this._dataBatchIdx !== null) {
-      throw new Error("Only one data batch may be emitted per call");
+      throw new RpcError("ProtocolError", "Only one data batch may be emitted per call", "");
     }
     this._dataBatchIdx = this._batches.length;
     this._batches.push({ batch, metadata });
@@ -5951,50 +6038,43 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
   const maxBytes = ctx.maxStreamResponseBytes ?? ctx.maxResponseBytes;
   const maxExternalBytes = ctx.maxExternalizedResponseBytes;
   const externalizationEnabled = !!ctx.externalLocation?.storage;
-  let estimatedBytes = 0;
-  let cumulativeExternalBytes = 0;
   let producerError;
   let externalOvershoot;
-  let firstTick = true;
-  while (true) {
-    const remainingWire = maxBytes != null ? Math.max(0, maxBytes - estimatedBytes) : undefined;
-    const remainingExternal = externalizationEnabled && maxExternalBytes != null ? Math.max(0, maxExternalBytes - cumulativeExternalBytes) : undefined;
-    const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
-      remainingResponseBytes: remainingWire,
-      remainingExternalizedResponseBytes: remainingExternal,
-      externalizationEnabled
-    });
-    if (ctx.stickyContext)
-      out.attachStickyContext(ctx.stickyContext);
-    try {
-      if (method.producerFn) {
-        await method.producerFn(state, out);
-      } else {
-        const tickBatch = buildEmptyBatch(inputSchema, firstTick ? requestMetadata : undefined);
-        await method.exchangeFn(state, tickBatch, out);
-      }
-      firstTick = false;
-    } catch (error) {
-      if (dispatchDebug())
-        console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split(`
+  const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
+    remainingResponseBytes: maxBytes,
+    remainingExternalizedResponseBytes: externalizationEnabled ? maxExternalBytes : undefined,
+    externalizationEnabled,
+    inputMetadata: requestMetadata
+  });
+  if (ctx.stickyContext)
+    out.attachStickyContext(ctx.stickyContext);
+  try {
+    if (method.producerFn) {
+      await method.producerFn(state, out);
+    } else {
+      const tickBatch = buildEmptyBatch(inputSchema, requestMetadata);
+      await method.exchangeFn(state, tickBatch, out);
+    }
+  } catch (error) {
+    if (dispatchDebug())
+      console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split(`
 `).slice(0, 3).join(`
 `));
-      allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
-      producerError = error instanceof Error ? error : new Error(String(error));
-      break;
-    }
+    allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
+    producerError = error instanceof Error ? error : new Error(String(error));
+  }
+  if (!producerError) {
     for (const emitted of out.batches) {
       let batch = emitted.batch;
       if (externalizationEnabled && ctx.externalLocation) {
         const predicted = predictExternalizeBytes(batch, ctx.externalLocation);
-        if (predicted > 0 && maxExternalBytes != null && cumulativeExternalBytes + predicted > maxExternalBytes) {
-          externalOvershoot = new Error(`Externalised payload exceeds max_externalized_response_bytes (${cumulativeExternalBytes + predicted} > ${maxExternalBytes}) for method '${method.name}'`);
+        if (predicted > 0 && maxExternalBytes != null && predicted > maxExternalBytes) {
+          externalOvershoot = new Error(`Externalised payload exceeds max_externalized_response_bytes (${predicted} > ${maxExternalBytes}) for method '${method.name}'`);
           externalOvershoot.name = "RuntimeError";
           break;
         }
         if (predicted > 0) {
           batch = await maybeExternalizeBatch(batch, ctx.externalLocation, countExternalized(ctx));
-          cumulativeExternalBytes += predicted;
         }
       }
       if (emitted.metadata && emitted.metadata.size > 0) {
@@ -6004,39 +6084,20 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
         batch = withBatchMetadata(batch, md);
       }
       allBatches.push(batch);
-      if (maxBytes != null) {
-        let sz = batch.data?.byteLength ?? 0;
-        if (sz === 0) {
-          try {
-            sz = serializeBatch(batch).byteLength;
-          } catch {
-            sz = 0;
-          }
-          if (sz === 0)
-            sz = 1;
-        }
-        estimatedBytes += sz;
-      }
     }
-    if (externalOvershoot) {
-      allBatches.length = 0;
-      allBatches.push(buildErrorBatch(outputSchema, externalOvershoot, ctx.serverId, requestId));
-      producerError = externalOvershoot;
-      break;
-    }
-    if (out.finished) {
-      break;
-    }
-    if (maxBytes == null || estimatedBytes >= maxBytes) {
-      const stateBytes = ctx.stateSerializer.serialize(state);
-      const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
-      const tokenMeta = new Map;
-      tokenMeta.set(STATE_KEY, token);
-      if (call.callToken)
-        tokenMeta.set(CALL_STATE_KEY, call.callToken);
-      allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));
-      break;
-    }
+  }
+  if (externalOvershoot) {
+    allBatches.length = 0;
+    allBatches.push(buildErrorBatch(outputSchema, externalOvershoot, ctx.serverId, requestId));
+    producerError = externalOvershoot;
+  } else if (!producerError && !out.finished) {
+    const stateBytes = ctx.stateSerializer.serialize(state);
+    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
+    const tokenMeta = new Map;
+    tokenMeta.set(STATE_KEY, token);
+    if (call.callToken)
+      tokenMeta.set(CALL_STATE_KEY, call.callToken);
+    allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));
   }
   const dataBytes = serializeIpcStream(outputSchema, allBatches);
   let responseBody;
@@ -9925,7 +9986,9 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
           console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
         }
       }
-      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId, undefined, undefined, kind);
+      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId, undefined, undefined, kind, {
+        inputMetadata: inputBatch.metadata ?? undefined
+      });
       if (isProducer) {
         await method.producerFn(state, out);
       } else {
@@ -11362,4 +11425,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=D70F6667D13D41D364756E2164756E21
+//# debugId=9C660BCBCC04307864756E2164756E21

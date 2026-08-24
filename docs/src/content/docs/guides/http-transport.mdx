@@ -98,7 +98,7 @@ Key options:
 | `corsMaxAge` | `Access-Control-Max-Age` for preflight responses. Default `300`; `null` omits it. |
 | `maxRequestBytes` | Max request body size. Advertised via `VGI-Max-Request-Bytes`. |
 | `maxDecompressedRequestBytes` | Cap on post-decompression request size (zstd/gzip bomb defense). Defaults to `maxRequestBytes * 16` when that is set. |
-| `maxResponseBytes` | Response body cap. Hard for unary/exchange, soft for producer (overshoot mints a continuation token). |
+| `maxResponseBytes` | Response body cap. Hard for unary/exchange; a worker-visible per-invocation soft budget for lock-step producers. |
 | `maxExternalizedResponseBytes` | Hard cap on bytes uploaded to external storage during one response. |
 | `compressionLevel` | zstd level for response compression. Default `1` (compression is **on** by default); `null` disables it. |
 | `authenticate` | Per-request authentication callback. |
@@ -107,7 +107,7 @@ Key options:
 | `externalLocation` / `uploadUrlProvider` / `maxUploadBytes` | Large-payload externalization. See [Large Payloads](/guides/large-payloads/). |
 | `dispatchHook` / `onServeStart` | Observability / lifecycle hooks. |
 | `serverId` | Server ID in response metadata. Random if omitted. |
-| `maxStreamResponseBytes` | **Deprecated** — use `maxResponseBytes`. The producer-only soft cap; kept for backward compatibility. |
+| `maxStreamResponseBytes` | **Deprecated** — use `maxResponseBytes`. Legacy producer budget; it never changes one-request/one-invocation lock-step dispatch. |
 
 See [Configuration](/reference/configuration/) for full details on each option.
 

@@ -28,7 +28,7 @@ examples/
   calculator.ts     — Unary methods example
   greeter.ts        — String params example
   streaming.ts      — Producer and exchange streams
-  conformance.ts    — 46-method conformance suite for wire-protocol testing
+  conformance.ts    — 87-method conformance suite for wire-protocol testing
 test/
   wire.test.ts      — Unit tests for wire serialization
   describe.test.ts  — Unit tests for __describe__ method

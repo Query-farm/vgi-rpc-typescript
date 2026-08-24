@@ -5,7 +5,6 @@ import {
   conformBatchToSchema,
   deserializeSchema as facadeDeserializeSchema,
   schema as makeSchema,
-  serializeBatch,
   type VgiBatch,
   type VgiSchema,
   withBatchMetadata,
@@ -193,8 +192,7 @@ export interface DispatchContext {
   tokenKey: Uint8Array;
   tokenTtl: number;
   serverId: string;
-  /** Producer-only soft wire-cap (deprecated alias for the producer-loop
-   *  byte budget). Unary/exchange ignore this. */
+  /** Producer-only soft wire budget (deprecated alias). Unary/exchange ignore this. */
   maxStreamResponseBytes?: number;
   /** Soft wire-cap for producer streams; hard wire-cap for unary/exchange.
    *  Externalised payloads do not count toward this. */
@@ -548,9 +546,7 @@ export async function httpDispatchStreamInit(
  *  -rust all strip the same three. */
 const FRAMEWORK_TICK_KEYS = new Set([STATE_KEY, CALL_STATE_KEY, CANCEL_KEY]);
 
-function stripFrameworkTickMetadata(
-  meta: Map<string, string> | null | undefined,
-): Map<string, string> | undefined {
+function stripFrameworkTickMetadata(meta: Map<string, string> | null | undefined): Map<string, string> | undefined {
   if (!meta) return undefined;
   const out = new Map<string, string>();
   for (const [k, v] of meta) {
@@ -783,16 +779,16 @@ export async function httpDispatchStreamExchange(
 }
 
 /**
- * Run the producer loop and build the response.
+ * Run exactly one producer turn and build the response.
  *
  * `requestMetadata` is the inbound request batch's custom_metadata. It is
- * attached to the **first** tick batch only, so an exchange-registered method
- * acting as a producer sees, on its first `process()`, whatever the client
+ * attached to the tick batch, so an exchange-registered method acting as a
+ * producer sees, on its `process()`, whatever the client
  * stamped on this turn's request — the same place the subprocess transport
  * delivers it. VGI's conditional-revalidation validators
  * (`vgi.cache.if_none_match` / `if_modified_since`) ride there: over HTTP the
  * first producer turn folds into the /init POST, so there is no earlier tick to
- * carry them. Later ticks in this turn are synthetic and carry no metadata.
+ * carry them.
  */
 async function produceStreamResponse(
   method: MethodDefinition,
@@ -812,167 +808,90 @@ async function produceStreamResponse(
   requestMetadata?: Map<string, string>,
 ): Promise<Response> {
   const allBatches: VgiBatch[] = [];
-  // Producer wire cap: prefer the legacy stream-only soft cap when set
-  // (lets old callers keep the "one batch per response" hack alive),
-  // else fall through to maxResponseBytes (which is hard for unary/
-  // exchange but soft for producer — continuation tokens cover overshoot).
+  // Producer wire cap: prefer the legacy stream-only soft budget when set,
+  // else fall through to maxResponseBytes. A producer is invoked exactly once
+  // per HTTP request; the value is a worker-visible sizing hint, not a license
+  // for the dispatcher to coalesce turns.
   const maxBytes = ctx.maxStreamResponseBytes ?? ctx.maxResponseBytes;
   const maxExternalBytes = ctx.maxExternalizedResponseBytes;
   const externalizationEnabled = !!ctx.externalLocation?.storage;
-  let estimatedBytes = 0;
-  /** Cumulative external-channel bytes across iterations.  External cap is
-   *  *hard* — externalised uploads have no continuation-token escape valve. */
-  let cumulativeExternalBytes = 0;
   let producerError: Error | undefined;
-  /** Set when the external cap is breached; the loop replaces the partial
-   *  stream with an EXCEPTION batch and breaks. */
   let externalOvershoot: Error | undefined;
-  /** Only the first tick of this turn carries the request's metadata. */
-  let firstTick = true;
+  const out = new OutputCollector(
+    outputSchema,
+    true,
+    ctx.serverId,
+    requestId,
+    ctx.authContext,
+    ctx.cookies,
+    ctx.kind ?? TransportKind.HTTP,
+    {
+      remainingResponseBytes: maxBytes,
+      remainingExternalizedResponseBytes: externalizationEnabled ? maxExternalBytes : undefined,
+      externalizationEnabled,
+      inputMetadata: requestMetadata,
+    },
+  );
+  if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
 
-  while (true) {
-    // Snapshot per-iteration budgets so the worker can size its emit.
-    const remainingWire = maxBytes != null ? Math.max(0, maxBytes - estimatedBytes) : undefined;
-    const remainingExternal =
-      externalizationEnabled && maxExternalBytes != null
-        ? Math.max(0, maxExternalBytes - cumulativeExternalBytes)
-        : undefined;
-
-    const out = new OutputCollector(
-      outputSchema,
-      true,
-      ctx.serverId,
-      requestId,
-      ctx.authContext,
-      ctx.cookies,
-      ctx.kind ?? TransportKind.HTTP,
-      {
-        remainingResponseBytes: remainingWire,
-        remainingExternalizedResponseBytes: remainingExternal,
-        externalizationEnabled,
-      },
-    );
-    if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
-
-    try {
-      if (method.producerFn) {
-        await method.producerFn(state, out);
-      } else {
-        // Exchange-registered method acting as producer (e.g. VGI's "init"
-        // method which is registered as exchange but may produce based on
-        // the __isProducer state flag). Call exchangeFn with an empty tick
-        // batch, matching how the subprocess transport dispatches these.
-        const tickBatch = buildEmptyBatch(inputSchema, firstTick ? requestMetadata : undefined);
-        await method.exchangeFn!(state, tickBatch, out);
-      }
-      firstTick = false;
-    } catch (error: any) {
-      if (dispatchDebug())
-        console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));
-      allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
-      producerError = error instanceof Error ? error : new Error(String(error));
-      break;
+  try {
+    if (method.producerFn) {
+      await method.producerFn(state, out);
+    } else {
+      // Exchange-registered method acting as producer (e.g. VGI's "init"
+      // method which is registered as exchange but may produce based on
+      // the __isProducer state flag). Call exchangeFn with one empty tick
+      // batch, matching how the subprocess transport dispatches these.
+      const tickBatch = buildEmptyBatch(inputSchema, requestMetadata);
+      await method.exchangeFn!(state, tickBatch, out);
     }
+  } catch (error: any) {
+    if (dispatchDebug())
+      console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));
+    allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
+    producerError = error instanceof Error ? error : new Error(String(error));
+  }
 
+  if (!producerError) {
     for (const emitted of out.batches) {
       let batch = emitted.batch;
-      // Externalize before charging wire bytes — externalised payloads
-      // ride on the side channel and only the small pointer batch ends
-      // up on the wire.  Pre-flight check + cumulative accounting mirror
-      // Python's _run_http_producer_turn so a worker exfiltrating big
-      // batches via tiny pointer outputs still hits the external cap.
+      // Externalised uploads are checked before they happen. The collector
+      // permits only one DATA batch, but log/control batches may surround it.
       if (externalizationEnabled && ctx.externalLocation) {
         const predicted = predictExternalizeBytes(batch, ctx.externalLocation);
-        if (predicted > 0 && maxExternalBytes != null && cumulativeExternalBytes + predicted > maxExternalBytes) {
+        if (predicted > 0 && maxExternalBytes != null && predicted > maxExternalBytes) {
           externalOvershoot = new Error(
-            `Externalised payload exceeds max_externalized_response_bytes (${cumulativeExternalBytes + predicted} > ${maxExternalBytes}) for method '${method.name}'`,
+            `Externalised payload exceeds max_externalized_response_bytes (${predicted} > ${maxExternalBytes}) for method '${method.name}'`,
           );
           externalOvershoot.name = "RuntimeError";
           break;
         }
         if (predicted > 0) {
           batch = await maybeExternalizeBatch(batch, ctx.externalLocation, countExternalized(ctx));
-          cumulativeExternalBytes += predicted;
         }
       }
-      // Preserve per-emit metadata (vgi_batch_index, vgi_partition_values#b64)
-      // as the RecordBatch custom_metadata so the C++ extension reads it.
       if (emitted.metadata && emitted.metadata.size > 0) {
         const md = new Map<string, string>(batch.metadata ?? []);
         for (const [k, v] of emitted.metadata) md.set(k, v);
         batch = withBatchMetadata(batch, md);
       }
       allBatches.push(batch);
-      if (maxBytes != null) {
-        // arrow-js exposes O(1) byteLength via batch.data; flechette has no
-        // equivalent. Best-effort estimate via serializeBatch in the latter.
-        let sz = (batch as any).data?.byteLength ?? 0;
-        if (sz === 0) {
-          // Either a zero-row externalisation pointer batch or a flechette
-          // batch that doesn't expose `data.byteLength`. The pointer case
-          // is real "work done" — the worker's emit became an upload, and
-          // we still need to advance the wire-cap loop so it eventually
-          // breaks. Use a serialized-size estimate; for pointer batches
-          // this captures the metadata-bearing zero-row body, for plain
-          // batches it's the actual wire size.
-          try {
-            sz = serializeBatch(batch).byteLength;
-          } catch {
-            sz = 0;
-          }
-          // Producer cancellation contract: the loop MUST make progress
-          // every iteration so an externalized infinite producer (e.g.,
-          // `cancellable_producer` with externalize-threshold=1) eventually
-          // mints a continuation token and lets the client cancel. Charge
-          // at least 1 byte when neither byteLength nor serialization
-          // gives us a real measurement.
-          if (sz === 0) sz = 1;
-        }
-        estimatedBytes += sz;
-      }
     }
+  }
 
-    if (externalOvershoot) {
-      // Replace the partial stream with a fresh one carrying only the
-      // EXCEPTION batch — clients see RpcError before any data, matching
-      // the unary/exchange strict-fail contract.
-      allBatches.length = 0;
-      allBatches.push(buildErrorBatch(outputSchema, externalOvershoot, ctx.serverId, requestId));
-      producerError = externalOvershoot;
-      break;
-    }
-
-    if (out.finished) {
-      break;
-    }
-
-    // Emit a continuation token and hand this turn back. With NO cap
-    // configured this must happen after EVERY produce cycle — that is the
-    // default, and it is what makes a producer stream incremental.
-    //
-    // This read `maxBytes != null && estimatedBytes >= maxBytes`, so an
-    // unconfigured worker never broke at all: the loop ran to `out.finished`
-    // and packed an entire scan into one HTTP body. vgi-rpc-python has the
-    // opposite default and says so — "By default (no limit configured), break
-    // after every produce cycle so the client receives data incrementally"
-    // (_app_stream.py) — and no vgi-typescript worker sets either cap, so
-    // every TS HTTP worker inherited the wrong half of the condition.
-    //
-    // Three consequences, in increasing order of severity: a parallel scan
-    // collapsed to ONE reader (the primary drained the shared per-execution_id
-    // work queue inside its own /init, before the secondaries had even
-    // connected); the whole result was materialised in RAM on both ends; and
-    // the producer-cancellation contract documented above was vacuous, because
-    // an unbounded producer would never yield a turn to be cancelled.
-    if (maxBytes == null || estimatedBytes >= maxBytes) {
-      const stateBytes = ctx.stateSerializer.serialize(state);
-      const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
-      const tokenMeta = new Map<string, string>();
-      tokenMeta.set(STATE_KEY, token);
-      if (call.callToken) tokenMeta.set(CALL_STATE_KEY, call.callToken);
-      allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));
-      break;
-    }
+  if (externalOvershoot) {
+    allBatches.length = 0;
+    allBatches.push(buildErrorBatch(outputSchema, externalOvershoot, ctx.serverId, requestId));
+    producerError = externalOvershoot;
+  } else if (!producerError && !out.finished) {
+    // Every unfinished invocation returns one cursor. A response-size budget
+    // never changes the fundamental one request/tick -> one invocation shape.
+    const stateBytes = ctx.stateSerializer.serialize(state);
+    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
+    const tokenMeta = new Map<string, string>();
+    tokenMeta.set(STATE_KEY, token);
+    if (call.callToken) tokenMeta.set(CALL_STATE_KEY, call.callToken);
+    allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));
   }
 
   const dataBytes = serializeIpcStream(outputSchema, allBatches);

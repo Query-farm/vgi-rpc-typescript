@@ -140,6 +140,10 @@ export class HttpStreamSession implements StreamSession {
     this._authorization = opts.authorization;
     this._externalConfig = opts.externalConfig;
     this._postFn = opts.postFn;
+    const pendingData = opts.pendingBatches.filter((batch) => batch.numRows > 0 || isExternalLocationBatch(batch));
+    if (pendingData.length > 1) {
+      throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
+    }
   }
 
   private async _post(url: string, body: Uint8Array): Promise<Response> {
@@ -283,6 +287,41 @@ export class HttpStreamSession implements StreamSession {
     return this._doExchange(inputSchema, [batch]);
   }
 
+  /** Send one producer continuation tick with application custom metadata. */
+  async tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]> {
+    if (this._pendingBatches.length > 0) {
+      throw new RpcError("ProtocolError", "Consume the producer's init batch before sending an explicit tick", "");
+    }
+    if (this._finished || this._stateToken === null) return [];
+
+    const responseBody = await this._sendContinuation(this._stateToken, metadata);
+    const { batches } = await readResponseBatches(responseBody);
+    let rows: Record<string, any>[] | null = null;
+    let nextToken: string | null = null;
+    for (let batch of batches) {
+      if (batch.numRows === 0) {
+        const token = batch.metadata?.get(STATE_KEY);
+        if (token) {
+          nextToken = token;
+          continue;
+        }
+        if (isExternalLocationBatch(batch)) {
+          batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (rows !== null) {
+        throw new RpcError("ProtocolError", "A producer tick returned more than one data batch", "");
+      }
+      rows = extractBatchRows(batch);
+    }
+    this._stateToken = nextToken;
+    if (nextToken === null) this._finished = true;
+    return rows ?? [];
+  }
+
   private async _doExchange(schema: Schema, batches: RecordBatch[]): Promise<Record<string, any>[]> {
     const body = serializeIpcStream(schema, batches);
     const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
@@ -294,6 +333,7 @@ export class HttpStreamSession implements StreamSession {
     const { batches: responseBatches } = await readResponseBatches(responseBody);
 
     let resultRows: Record<string, any>[] = [];
+    let gotData = false;
     for (const batch of responseBatches) {
       if (batch.numRows === 0) {
         // Could be log/error or state token
@@ -307,6 +347,10 @@ export class HttpStreamSession implements StreamSession {
       }
 
       // Data batch — extract state token from metadata
+      if (gotData) {
+        throw new RpcError("ProtocolError", "An exchange turn returned more than one data batch", "");
+      }
+      gotData = true;
       const token = batch.metadata?.get(STATE_KEY);
       if (token) {
         this._stateToken = token;
@@ -361,6 +405,7 @@ export class HttpStreamSession implements StreamSession {
       const { batches } = await readResponseBatches(responseBody);
 
       let gotContinuation = false;
+      let dataRows: Record<string, any>[] | null = null;
       for (let batch of batches) {
         if (batch.numRows === 0) {
           // Check for continuation token
@@ -380,8 +425,13 @@ export class HttpStreamSession implements StreamSession {
           }
         }
 
-        yield extractBatchRows(batch);
+        if (dataRows !== null) {
+          throw new RpcError("ProtocolError", "A producer turn returned more than one data batch", "");
+        }
+        dataRows = extractBatchRows(batch);
       }
+
+      if (dataRows !== null) yield dataRows;
 
       if (!gotContinuation) break;
     }
@@ -397,10 +447,8 @@ export class HttpStreamSession implements StreamSession {
    * resumes on any node, which is the basis for stateless, load-balanced
    * relays that must not pin a scan to one process.
    *
-   * Returns `null` at end-of-stream. Requires per-batch continuation tokens
-   * (the default server behaviour — i.e. the worker is not configured with
-   * `max_response_bytes`); throws if a single response carries more than one
-   * data batch (coarser-than-batch resume is not representable here).
+   * Returns `null` at end-of-stream. Throws a ProtocolError if a peer violates
+   * the lock-step contract by returning more than one data batch in a turn.
    *
    * Drives the same wire protocol as async iteration but yields one
    * `{ rows, token }` per call instead of auto-following the token. Do not
@@ -409,9 +457,7 @@ export class HttpStreamSession implements StreamSession {
    * Mirrors Python's `HttpStreamSession.next_with_token`.
    */
   async nextWithToken(): Promise<RowsWithToken | null> {
-    const multi =
-      "nextWithToken requires one data batch per response; the upstream " +
-      "worker buffered multiple (configured max_response_bytes?)";
+    const multi = "A producer turn returned more than one data batch";
 
     // Init may have preloaded data batches; their resume point is the
     // current state token. Zero-row log/error batches deferred from init are
@@ -427,7 +473,7 @@ export class HttpStreamSession implements StreamSession {
         }
       }
       if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
-        throw new Error(multi);
+        throw new RpcError("ProtocolError", multi, "");
       }
       return { rows: extractBatchRows(batch), token: this._resumeToken() };
     }
@@ -458,7 +504,7 @@ export class HttpStreamSession implements StreamSession {
         }
       }
       if (dataRows !== null) {
-        throw new Error(multi);
+        throw new RpcError("ProtocolError", multi, "");
       }
       dataRows = extractBatchRows(batch);
     }
@@ -490,9 +536,13 @@ export class HttpStreamSession implements StreamSession {
     this._finished = false;
   }
 
-  private async _sendContinuation(token: string): Promise<Uint8Array> {
+  private async _sendContinuation(
+    token: string,
+    applicationMetadata?: ReadonlyMap<string, string>,
+  ): Promise<Uint8Array> {
     const emptySchema = new Schema([]);
-    const metadata = this._tokenMetadata(token);
+    const metadata = new Map(applicationMetadata ?? []);
+    for (const [key, value] of this._tokenMetadata(token)) metadata.set(key, value);
 
     const structType = new Struct(emptySchema.fields);
     const data = makeData({

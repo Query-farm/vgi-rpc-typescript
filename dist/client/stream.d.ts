@@ -120,6 +120,8 @@ export declare class HttpStreamSession implements StreamSession {
      * Send an exchange request and return the data rows.
      */
     exchange(input: ExchangeInput): Promise<Record<string, any>[]>;
+    /** Send one producer continuation tick with application custom metadata. */
+    tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]>;
     private _doExchange;
     private _buildEmptyBatch;
     /**
@@ -136,10 +138,8 @@ export declare class HttpStreamSession implements StreamSession {
      * resumes on any node, which is the basis for stateless, load-balanced
      * relays that must not pin a scan to one process.
      *
-     * Returns `null` at end-of-stream. Requires per-batch continuation tokens
-     * (the default server behaviour — i.e. the worker is not configured with
-     * `max_response_bytes`); throws if a single response carries more than one
-     * data batch (coarser-than-batch resume is not representable here).
+     * Returns `null` at end-of-stream. Throws a ProtocolError if a peer violates
+     * the lock-step contract by returning more than one data batch in a turn.
      *
      * Drives the same wire protocol as async iteration but yields one
      * `{ rows, token }` per call instead of auto-following the token. Do not

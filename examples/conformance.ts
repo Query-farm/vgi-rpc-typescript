@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance worker — 48-method reference RPC service exercising all framework
+ * Conformance worker — 87-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * Flags:

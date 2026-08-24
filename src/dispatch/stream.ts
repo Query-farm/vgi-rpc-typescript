@@ -149,7 +149,18 @@ export async function dispatchStream(
         }
       }
 
-      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId, undefined, undefined, kind);
+      const out = new OutputCollector(
+        outputSchema,
+        effectiveProducer,
+        serverId,
+        requestId,
+        undefined,
+        undefined,
+        kind,
+        {
+          inputMetadata: inputBatch.metadata ?? undefined,
+        },
+      );
 
       if (isProducer) {
         await method.producerFn!(state, out);

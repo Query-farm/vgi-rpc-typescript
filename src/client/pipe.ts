@@ -188,6 +188,30 @@ export class PipeStreamSession implements StreamSession {
     }
   }
 
+  /** Send one producer tick, preserving application message metadata. */
+  async tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]> {
+    if (this._closed) {
+      throw new RpcError("ProtocolError", "Stream session is closed", "");
+    }
+    const tickSchema = new Schema([]);
+    if (!this._inputWriter) {
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
+    }
+    const tickData = makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
+    const tickBatch = new RecordBatch(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
+    this._inputWriter.write(tickBatch);
+    await this._ensureOutputStream();
+    const outputBatch = await this._readOutputBatch();
+    if (outputBatch === null) {
+      this._closed = true;
+      this._inputWriter.close();
+      this._inputWriter = null;
+      this._releaseBusy();
+      return [];
+    }
+    return extractBatchRows(outputBatch);
+  }
+
   /**
    * Send an exchange request and return the data rows.
    */
@@ -339,31 +363,13 @@ export class PipeStreamSession implements StreamSession {
       const tickSchema = new Schema([]);
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
 
-      // Build a zero-row tick batch
-      const structType = new Struct(tickSchema.fields);
-      const tickData = makeData({
-        type: structType,
-        length: 0,
-        children: [],
-        nullCount: 0,
-      });
-      const tickBatch = new RecordBatch(tickSchema, tickData);
-
       while (true) {
-        // Send one tick FIRST, then open output stream on first iteration.
-        // The server may not flush the output schema until it processes the
-        // first tick and writes the first output batch.
-        this._inputWriter.write(tickBatch);
-        await this._ensureOutputStream();
-
-        // Read output batch(es)
-        const outputBatch = await this._readOutputBatch();
-        if (outputBatch === null) {
+        const rows = await this.tick();
+        if (this._closed) {
           // Server finished — EOS on output stream
           break;
         }
-
-        yield extractBatchRows(outputBatch);
+        yield rows;
       }
     } finally {
       // Close input stream if still open
@@ -575,6 +581,9 @@ export function pipeConnect(
               dispatchLogOrError(batch, onLog);
               continue;
             }
+          }
+          if (resultBatch !== null) {
+            throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
           }
           resultBatch = batch;
         }

@@ -255,6 +255,9 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
             continue;
           }
         }
+        if (resultBatch !== null) {
+          throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
+        }
         resultBatch = batch;
       }
 
@@ -299,6 +302,14 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       // life of the stream and echoes it on every subsequent request.
       let callStateToken: string | null = null;
       const pendingBatches: RecordBatch[] = [];
+      let dataBatchesInTurn = 0;
+      const queueDataBatch = (batch: RecordBatch): void => {
+        dataBatchesInTurn += 1;
+        if (dataBatchesInTurn > 1) {
+          throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
+        }
+        pendingBatches.push(batch);
+      };
       let finished = false;
       let streamSchema: Schema | null = null;
 
@@ -339,6 +350,10 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
                 callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
                 continue;
               }
+              if (isExternalLocationBatch(batch)) {
+                queueDataBatch(batch);
+                continue;
+              }
               const level = batch.metadata?.get(LOG_LEVEL_KEY);
               if (level === "EXCEPTION") {
                 headerErrorBatches.push(batch);
@@ -347,7 +362,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
               dispatchLogOrError(batch, onLog);
               continue;
             }
-            pendingBatches.push(batch);
+            queueDataBatch(batch);
           }
         }
 
@@ -383,6 +398,10 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
               callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
               continue;
             }
+            if (isExternalLocationBatch(batch)) {
+              queueDataBatch(batch);
+              continue;
+            }
             // Collect EXCEPTION batches for deferred dispatch
             const level = batch.metadata?.get(LOG_LEVEL_KEY);
             if (level === "EXCEPTION") {
@@ -392,7 +411,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
             dispatchLogOrError(batch, onLog);
             continue;
           }
-          pendingBatches.push(batch);
+          queueDataBatch(batch);
         }
 
         // If we have data batches or a state token, defer errors to iteration.

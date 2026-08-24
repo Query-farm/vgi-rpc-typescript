@@ -29,15 +29,16 @@ export interface HttpHandlerOptions {
    *  payload.  When omitted, defaults to `maxRequestBytes * 16` if that
    *  is set, otherwise unbounded. */
   maxDecompressedRequestBytes?: number;
-  /** Maximum bytes before a producer stream emits a continuation token.
+  /** Worker-visible response-size budget for each producer invocation.
    *
    * @deprecated Use {@link maxResponseBytes} instead. The cap now governs all
    *  HTTP method responses (unary, exchange, producer), not just producer streams.
    */
   maxStreamResponseBytes?: number;
   /** HTTP body cap. Hard for unary and stream-exchange (overshoot surfaces
-   *  as 200 + X-VGI-RPC-Error EXCEPTION batch). Soft for producer streams
-   *  (overshoot mints a continuation token). Externalised payloads do not
+   *  as 200 + X-VGI-RPC-Error EXCEPTION batch). For producer streams it is a
+   *  worker-visible soft budget; every invocation returns independently.
+   *  Externalised payloads do not
    *  count toward this — they leave only tiny pointer batches on the wire.
    *  Advertised via VGI-Max-Response-Bytes.  Undefined = unbounded. */
   maxResponseBytes?: number;

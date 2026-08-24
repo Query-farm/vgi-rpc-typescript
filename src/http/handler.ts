@@ -204,10 +204,10 @@ export function createHttpHandler(
       : configuredDecompressedCap == null
         ? maxRequestBytes
         : Math.min(maxRequestBytes, configuredDecompressedCap);
-  // ``maxStreamResponseBytes`` was the producer-only soft cap. Keep it
-  // distinct from ``maxResponseBytes`` (the new hard cap that also applies
-  // to unary/exchange) — falling one through to the other would turn the
-  // producer hack into an unintended hard cap on every response.
+  // ``maxStreamResponseBytes`` was the producer-only soft budget. Keep it
+  // distinct from ``maxResponseBytes`` (the hard cap for unary/exchange).
+  // Producer dispatch is lock-step regardless: either value is only a sizing
+  // hint exposed to that request's single producer invocation.
   const maxStreamResponseBytes = options?.maxStreamResponseBytes;
   const maxResponseBytes = options?.maxResponseBytes;
   const maxExternalizedResponseBytes = options?.maxExternalizedResponseBytes;

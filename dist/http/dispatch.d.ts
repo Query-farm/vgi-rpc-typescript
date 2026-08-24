@@ -7,8 +7,7 @@ export interface DispatchContext {
     tokenKey: Uint8Array;
     tokenTtl: number;
     serverId: string;
-    /** Producer-only soft wire-cap (deprecated alias for the producer-loop
-     *  byte budget). Unary/exchange ignore this. */
+    /** Producer-only soft wire budget (deprecated alias). Unary/exchange ignore this. */
     maxStreamResponseBytes?: number;
     /** Soft wire-cap for producer streams; hard wire-cap for unary/exchange.
      *  Externalised payloads do not count toward this. */

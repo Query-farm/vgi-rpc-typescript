@@ -41,6 +41,9 @@ export interface StreamSession {
     readonly header: Record<string, any> | null;
     /** Send one batch of input rows and receive the server's corresponding output rows (exchange streams). */
     exchange(input: ExchangeInput): Promise<Record<string, any>[]>;
+    /** Send one producer tick with optional application custom metadata and
+     * return the rows emitted for that tick. */
+    tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]>;
     /** Iterate the server-produced output batches one row-array at a time (producer streams). */
     [Symbol.asyncIterator](): AsyncIterableIterator<Record<string, any>[]>;
     /** Tear down the stream, flushing/draining the underlying transport. */

@@ -819,6 +819,22 @@ function defineConformanceTests<TCtx>(
         client.close();
       });
 
+      it("forwards application metadata on an explicit producer tick", async () => {
+        const client = clientFactory(ctx);
+        const isHttp = label.includes("http");
+        const session = await client.stream("produce_tick_metadata", { count: isHttp ? 2 : 1 });
+        if (isHttp) {
+          // HTTP executes the first producer turn in /init. Consume that
+          // buffered batch before attaching metadata to the continuation.
+          await (session as any).nextWithToken();
+        }
+        const rows = await session.tick(new Map([["vgi.conformance.tick", "updated"]]));
+        expect(rows).toHaveLength(1);
+        expect(rows[0].seen).toBe("updated");
+        session.close();
+        client.close();
+      });
+
       it("produce_empty", async () => {
         const client = clientFactory(ctx);
         const session = await client.stream("produce_empty");
@@ -1113,9 +1129,9 @@ function defineConformanceTests<TCtx>(
     // -----------------------------------------------------------------
 
     describe("TestDescribeConformance", () => {
-      it("verify 81 methods", async () => {
+      it("verify 87 methods", async () => {
         const desc = await describeFactory(ctx);
-        expect(desc.methods.length).toBe(81);
+        expect(desc.methods.length).toBe(87);
         expect(["Conformance", "ConformanceService"]).toContain(desc.protocolName);
       });
 

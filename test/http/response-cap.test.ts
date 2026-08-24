@@ -132,10 +132,8 @@ describe("OutputCollector budget snapshots (worker-visible)", () => {
 });
 
 describe("producer stream external cap", () => {
-  test("producer exfiltrating via tiny pointer batches still hits the external cap", async () => {
-    // Each emit will externalize ~2KiB worth of data; the cap is 3KiB,
-    // so the second emit must be refused.
-    const PAYLOAD_SIZE = 2048;
+  test("producer rejects one externalized batch larger than the per-turn cap", async () => {
+    const PAYLOAD_SIZE = 4096;
     let calls = 0;
 
     const protocol = new Protocol("ExfilSvc").producer("drip", {
@@ -151,7 +149,7 @@ describe("producer stream external cap", () => {
         // Emit a batch large enough to trip externalization.
         const blob = new Uint8Array(PAYLOAD_SIZE);
         out.emit({ blob: [blob] });
-        if (calls >= 5) state.done = true; // safety cutoff
+        state.done = true;
       },
     });
 
@@ -160,14 +158,6 @@ describe("producer stream external cap", () => {
       storage,
       externalizeThresholdBytes: 100, // force externalize
     };
-    // A stream cap is required for this scenario to exist at all. The external
-    // cap is cumulative WITHIN one turn (mirroring Python's
-    // _run_http_producer_turn), so two emits must land in the same turn for the
-    // second to be refused. With no stream cap the turn loop now ends after one
-    // produce cycle — the correct default — so set one high enough that the
-    // EXTERNAL cap is the binding constraint, which is what this test is about.
-    // Previously this relied on the turn loop never breaking, which silently
-    // made a per-turn cap behave as a whole-stream one.
     const handler = createHttpHandler(protocol, {
       maxExternalizedResponseBytes: 3 * 1024,
       maxStreamResponseBytes: 1024 * 1024,
@@ -189,9 +179,9 @@ describe("producer stream external cap", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get(RPC_ERROR_HEADER)).toBe("true");
 
-    // Only one externalized upload should have completed before the cap
-    // overshoot replaced the response with an EXCEPTION batch.
-    expect(storage.uploads.length).toBe(1);
+    // The strict pre-flight check rejects before uploading anything.
+    expect(storage.uploads.length).toBe(0);
+    expect(calls).toBe(1);
 
     // The body's final batch carries an EXCEPTION metadata.
     const { batches } = await readBody(response);

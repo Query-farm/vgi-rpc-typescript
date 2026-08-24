@@ -68,8 +68,10 @@ describeFn("client request externalization (Python server)", () => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     if (url.endsWith("/__upload_url__/init") && method === "POST") counters.uploadUrlInits++;
-    if (url.includes("/blob/") && method === "PUT") counters.blobPuts++;
-    if (url.includes("/blob/") && method === "GET") counters.blobGets++;
+    // Current fake storage returns separate /upload/ and /download/ URLs;
+    // older releases used one /blob/ URL for both directions.
+    if ((url.includes("/upload/") || url.includes("/blob/")) && method === "PUT") counters.blobPuts++;
+    if ((url.includes("/download/") || url.includes("/blob/")) && method === "GET") counters.blobGets++;
     const resp = await realFetch(input as any, init);
     if (resp.status === 413) counters.total413s++;
     return resp;
@@ -164,8 +166,7 @@ describeFn("client request externalization (Python server)", () => {
     const big = "z".repeat(2 * 1024 * 1024);
     const r = await client.call("echo_large_string", { value: big });
     expect(r!.result).toBe(big);
-    // The blob URL was a GET — assert at least one fetch landed on /blob/
-    // (the response-side download is a GET, not a PUT).
+    // The response-side download is a GET, not a PUT.
     expect(counters.blobGets).toBeGreaterThanOrEqual(1);
     client.close();
   });

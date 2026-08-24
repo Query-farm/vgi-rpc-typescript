@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance protocol — 48-method reference RPC service exercising all framework
+ * Conformance protocol — 87-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * This module exports the Protocol instance so it can be reused by both the
@@ -12,8 +12,9 @@
 // embedded-arrow / IPC-roundtrip handlers. Type *classes* used to live
 // here too; the conformance protocol now constructs schemas/types via the
 // vgi-rpc Arrow facade (imports below) so it can run on either backend.
-import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter } from "@query-farm/apache-arrow";
+import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter, Vector } from "@query-farm/apache-arrow";
 import {
+  batchFromColumns,
   binary,
   bool as boolType,
   dateDay,
@@ -199,7 +200,7 @@ function _serializeBatch(schema: Schema, batch: RecordBatch): Uint8Array {
 // must support the per-request `vgi_rpc.protocol_version` metadata key that
 // vgi-rpc enforces at the dispatch boundary. Mirrors Python's
 // ConformanceService.protocol_version.
-export const protocol = new Protocol("ConformanceService", { protocolVersion: "1.0.0" });
+export const protocol = new Protocol("ConformanceService", { protocolVersion: "2.0.0" });
 
 // ===== Scalar Echo (5) =====
 
@@ -314,7 +315,7 @@ protocol.unary("echo_nested_list", {
   },
 });
 
-// ===== Optional/Nullable (2) =====
+// ===== Optional/Nullable (5) =====
 
 protocol.unary("echo_optional_string", {
   params: schema([field("value", utf8(), true)]),
@@ -325,6 +326,25 @@ protocol.unary("echo_optional_string", {
 protocol.unary("echo_optional_int", {
   params: schema([field("value", int64(), true)]),
   result: schema([field("result", int64(), true)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+protocol.unary("echo_optional_point", {
+  params: schema([field("point", binary(), true)]),
+  result: schema([field("result", binary(), true)]),
+  handler: (p) => ({ result: p.point }),
+  paramTypes: { point: "Point | null" },
+});
+
+protocol.unary("echo_annotated_optional_int", {
+  params: schema([field("value", int32Type(), true)]),
+  result: schema([field("result", int32Type(), true)]),
+  handler: (p) => ({ result: p.value }),
+});
+
+protocol.unary("echo_outer_optional_non_null", {
+  params: schema([field("value", int32Type(), false)]),
+  result: schema([field("result", int32Type(), false)]),
   handler: (p) => ({ result: p.value }),
 });
 
@@ -511,6 +531,74 @@ protocol.unary("echo_deep_nested", {
   paramTypes: { data: "DeepNested" },
 });
 
+const statusDictionaryType = () => dictionary(int16Type(), utf8());
+const statusListType = () => list(field("item", statusDictionaryType(), true));
+const pointListType = list(field("item", POINT_STRUCT, true));
+const statusMapType = () => mapType(field("key", utf8(), false), field("value", statusDictionaryType(), true));
+const nestedContainersSchema = schema([
+  // Each dictionary occurrence needs its own Arrow dictionary id. Reusing a
+  // Dictionary instance across fields makes arrow-js reject the IPC schema
+  // once the fields build distinct dictionaries from their values.
+  field("statuses", statusListType(), false),
+  field("points", pointListType, false),
+  field("status_by_name", statusMapType(), false),
+  field("frozen_statuses", statusListType(), false),
+  field("tagged_status", statusDictionaryType(), true),
+  field("tagged_point", POINT_STRUCT, true),
+  field("tagged_batch", binary(), true),
+]);
+
+function materializeMap(value: any): Map<string, string> {
+  let row = value;
+  // arrow-js deliberately hands top-level Map parameters to handlers as
+  // their lossless Data object. Re-wrap that one value so it can be nested
+  // in the result dataclass's IPC batch.
+  if (value && typeof value === "object" && Array.isArray(value.buffers)) {
+    row = new Vector([value]).get(0);
+  }
+  if (row instanceof Map) return new Map(row);
+  if (row && typeof row[Symbol.iterator] === "function") return new Map(Array.from(row));
+  return new Map(Object.entries(row?.toJSON?.() ?? row ?? {}).map(([k, v]) => [k, String(v)]));
+}
+
+protocol.unary("pack_nested_containers", {
+  params: schema([
+    field("statuses", statusListType(), false),
+    field("points", pointListType, false),
+    field("status_by_name", statusMapType(), false),
+  ]),
+  result: schema([field("result", binary(), false)]),
+  handler: (p) => {
+    const statuses = Array.from(p.statuses as Iterable<string>);
+    const points = Array.from(p.points as Iterable<any>).map((point) => point?.toJSON?.() ?? point);
+    const statusByName = materializeMap(p.status_by_name);
+    const taggedSchema = schema([field("value", int64(), true)]);
+    const taggedBatch = batchFromColumns(taggedSchema, { value: [[1n, 2n]].flat() });
+    const nestedBatch = batchFromColumns(nestedContainersSchema, {
+      statuses: [statuses],
+      points: [points],
+      status_by_name: [statusByName],
+      frozen_statuses: [statuses],
+      tagged_status: [statuses[0] ?? null],
+      tagged_point: [points[0] ?? null],
+      tagged_batch: [_serializeBatch(taggedSchema as Schema, taggedBatch as RecordBatch)],
+    });
+    return { result: _serializeBatch(nestedContainersSchema as Schema, nestedBatch as RecordBatch) };
+  },
+  paramTypes: {
+    statuses: "list[Status]",
+    points: "list[Point]",
+    status_by_name: "dict[str, Status]",
+  },
+});
+
+protocol.unary("echo_status_list", {
+  params: schema([field("statuses", statusListType(), false)]),
+  result: schema([field("result", statusListType(), false)]),
+  handler: (p) => ({ result: Array.from(p.statuses as Iterable<string>) }),
+  paramTypes: { statuses: "list[Status]" },
+});
+
 protocol.unary("echo_embedded_arrow", {
   params: { data: bytes },
   result: { result: bytes },
@@ -617,7 +705,7 @@ protocol.unary("echo_with_all_log_levels", {
   },
 });
 
-// ===== Producer Streams (7) =====
+// ===== Producer Streams (8) =====
 
 protocol.producer<{ count: number; current: number }>("produce_n", {
   params: { count: int },
@@ -630,6 +718,21 @@ protocol.producer<{ count: number; current: number }>("produce_n", {
     }
     out.emitRow({ index: state.current, value: state.current * 10 });
     state.current++;
+  },
+  paramTypes: { count: "int" },
+});
+
+const TICK_METADATA_SCHEMA = schema([field("index", int64(), false), field("seen", utf8(), false)]);
+
+protocol.producer<{ count: number; current: number }>("produce_tick_metadata", {
+  params: { count: int },
+  outputSchema: TICK_METADATA_SCHEMA,
+  init: ({ count }) => ({ count, current: 0 }),
+  produce: (state, out) => {
+    const seen = out.inputMetadata?.get("vgi.conformance.tick") ?? "";
+    out.emitRow({ index: state.current, seen });
+    state.current++;
+    if (state.current >= state.count) out.finish();
   },
   paramTypes: { count: "int" },
 });

@@ -392,12 +392,10 @@ const handler = createHttpHandler(protocol, {
   // runs on the library default (zstd level 1, gzip fallback on runtimes
   // without a zstd encoder).
   ...(responseCompressionLevel !== undefined ? { compressionLevel: responseCompressionLevel } : {}),
-  // Bound per-response size so infinite producers (e.g. ``cancellable_producer``)
-  // return promptly and the client can follow continuation tokens or cancel
-  // mid-stream. Any positive value works; 1 byte forces a continuation after
-  // every produce cycle, matching the Python reference server's default.
-  // In strict-cap mode we use a real byte cap instead so the strict-fail
-  // tests can deliberately overshoot.
+  // Advertise a small producer response budget for the legacy-cap test path.
+  // Producer dispatch is always lock-step: exactly one invocation per request,
+  // regardless of this value. In strict-cap mode use the configured budget so
+  // workers can size their single turn to it.
   ...(capsConfigured
     ? {
         maxResponseBytes,

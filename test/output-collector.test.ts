@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { Field, Float64, Int64, Schema, Utf8 } from "@query-farm/apache-arrow";
+import { RpcError } from "../src/errors.js";
 import { OutputCollector } from "../src/types.js";
 import { buildResultBatch } from "../src/wire/response.js";
 
@@ -29,8 +30,18 @@ describe("OutputCollector.emit(columns)", () => {
 
   it("throws on second data batch emission", () => {
     const out = new OutputCollector(textSchema);
+    out.clientLog("INFO", "before");
     out.emit({ name: ["alice"], value: [1.0] });
-    expect(() => out.emit({ name: ["bob"], value: [2.0] })).toThrow("Only one data batch may be emitted per call");
+    out.clientLog("INFO", "after");
+    try {
+      out.emit({ name: ["bob"], value: [2.0] });
+      throw new Error("expected second emit to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RpcError);
+      expect((error as RpcError).errorType).toBe("ProtocolError");
+      expect((error as RpcError).errorMessage).toBe("Only one data batch may be emitted per call");
+    }
+    expect(out.batches).toHaveLength(3);
   });
 });
 

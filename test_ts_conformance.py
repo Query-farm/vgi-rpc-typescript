@@ -751,8 +751,8 @@ _DEFAULT_TRANSPORTS = [
     "pipe", "subprocess",
     "http", "http-zstd",
     "http_externalize_always",
-    "node-http", "node-http-zstd",
-    "deno-http", "deno-http-zstd",
+    "http-node", "http-node-zstd",
+    "http-deno", "http-deno-zstd",
 ]
 
 # Flechette Arrow backend — same TS source, different `imports` condition.
@@ -811,14 +811,14 @@ def conformance_conn(
                 # in-process fake storage; disable the HTTPS-only validator.
                 external_location=ExternalLocationConfig(url_validator=None),
             )
-        elif request.param == "node-http":
+        elif request.param == "http-node":
             port = request.getfixturevalue("ts_node_http_port")
             return http_connect(
                 ConformanceService,
                 f"http://127.0.0.1:{port}",
                 on_log=on_log,
             )
-        elif request.param == "node-http-zstd":
+        elif request.param == "http-node-zstd":
             port = request.getfixturevalue("ts_node_http_zstd_port")
             return http_connect(
                 ConformanceService,
@@ -826,14 +826,14 @@ def conformance_conn(
                 on_log=on_log,
                 compression_level=3,
             )
-        elif request.param == "deno-http":
+        elif request.param == "http-deno":
             port = request.getfixturevalue("ts_deno_http_port")
             return http_connect(
                 ConformanceService,
                 f"http://127.0.0.1:{port}",
                 on_log=on_log,
             )
-        elif request.param == "deno-http-zstd":
+        elif request.param == "http-deno-zstd":
             port = request.getfixturevalue("ts_deno_http_zstd_port")
             return http_connect(
                 ConformanceService,
@@ -866,6 +866,37 @@ def conformance_conn(
                 yield _RpcProxy(ConformanceService, ts_transport, on_log)
 
             return _conn()
+
+    return factory
+
+
+@pytest.fixture(params=["pipe", "subprocess"])
+def conformance_raw_conn(
+    request: pytest.FixtureRequest,
+    ts_transport: SubprocessTransport,
+) -> ConnFactory:
+    """Connect only through the default persistent byte-stream transports."""
+
+    def factory(
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[Any]:
+        if request.param == "pipe":
+
+            @contextlib.contextmanager
+            def _pipe_conn() -> Iterator[_RpcProxy]:
+                transport = SubprocessTransport(BUN_WORKER)
+                try:
+                    yield _RpcProxy(ConformanceService, transport, on_log)
+                finally:
+                    transport.close()
+
+            return _pipe_conn()
+
+        @contextlib.contextmanager
+        def _shared_conn() -> Iterator[_RpcProxy]:
+            yield _RpcProxy(ConformanceService, ts_transport, on_log)
+
+        return _shared_conn()
 
     return factory
 
@@ -904,13 +935,13 @@ def conformance_describe(
         port = ts_http_zstd_port
     elif param == "http_externalize_always":
         port = request.getfixturevalue("conformance_http_externalize_always_port")
-    elif param == "node-http":
+    elif param == "http-node":
         port = request.getfixturevalue("ts_node_http_port")
-    elif param == "node-http-zstd":
+    elif param == "http-node-zstd":
         port = request.getfixturevalue("ts_node_http_zstd_port")
-    elif param == "deno-http":
+    elif param == "http-deno":
         port = request.getfixturevalue("ts_deno_http_port")
-    elif param == "deno-http-zstd":
+    elif param == "http-deno-zstd":
         port = request.getfixturevalue("ts_deno_http_zstd_port")
     elif param == "flechette-http":
         port = request.getfixturevalue("ts_flechette_http_port")
@@ -925,32 +956,12 @@ from vgi_rpc.conformance._pytest_suite import *  # noqa: F401,F403,E402
 from vgi_rpc.introspect import ServiceDescription  # noqa: E402
 
 
-from vgi_rpc.rpc import AnnotatedBatch, RpcError  # noqa: E402
-
-
 # Override: allow TestLargeData on all transports (the upstream suite may
 # skip non-pipe transports, but the TS worker handles them fine).
 class TestLargeData(TestLargeData):  # type: ignore[no-redef]  # noqa: F811
     @pytest.fixture(autouse=True)
     def _skip_non_pipe(self) -> None:
         pass
-
-
-# Override: the TS server drains client input after stream init errors, so
-# these tests work on all transports (the upstream suite skips them).
-class TestProducerStream(TestProducerStream):  # type: ignore[no-redef]  # noqa: F811
-    def test_produce_error_on_init(self, conformance_conn: ConnFactory) -> None:
-        with conformance_conn() as proxy, pytest.raises(RpcError, match="intentional init error"):
-            list(proxy.produce_error_on_init())
-
-
-class TestExchangeStream(TestExchangeStream):  # type: ignore[no-redef]  # noqa: F811
-    def test_error_on_init(self, conformance_conn: ConnFactory) -> None:
-        with conformance_conn() as proxy:
-            with pytest.raises(RpcError, match="intentional exchange init error"):
-                session = proxy.exchange_error_on_init()
-                # HTTP raises during init; pipe/subprocess raises on first exchange.
-                session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))
 
 
 # The stdio worker's `IncrementalStream` (src/wire/writer.ts) uses arrow-js's
