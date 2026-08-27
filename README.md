@@ -1,6 +1,18 @@
 [![VGI — The Vector Gateway Interface](https://vgi-rpc.query.farm/logo-hero.png)](https://vgi-rpc.query.farm)
 
-# vgi-rpc
+<h1 align="center">vgi-rpc</h1>
+
+<p align="center">
+  Transport-agnostic RPC framework built on <a href="https://arrow.apache.org/">Apache Arrow</a> IPC serialization — the TypeScript port of <a href="https://github.com/Query-farm/vgi-rpc-python">vgi-rpc</a>.<br>
+  Built by <a href="https://query.farm">🚜 Query.Farm</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Query-farm/vgi-rpc-typescript/actions/workflows/ci.yml"><img src="https://github.com/Query-farm/vgi-rpc-typescript/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/@query-farm/vgi-rpc"><img src="https://img.shields.io/npm/v/%40query-farm%2Fvgi-rpc" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/@query-farm/vgi-rpc"><img src="https://img.shields.io/npm/dm/%40query-farm%2Fvgi-rpc" alt="npm downloads"></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
+</p>
 
 TypeScript server library for the [vgi-rpc](https://vgi-rpc.query.farm) framework. Implements RPC servers that communicate over stdin/stdout using [Apache Arrow](https://arrow.apache.org/) IPC serialization.
 
