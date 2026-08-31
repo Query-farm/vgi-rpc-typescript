@@ -202,9 +202,10 @@ export function sessionPrincipalKey(
   authenticated: boolean,
   domain: string | null | undefined,
   principal: string | null | undefined,
+  evidenceBinding?: string,
 ): string {
-  if (!authenticated) return "\u0000anonymous";
-  return `${domain ?? ""}\u0000${principal ?? ""}`;
+  const key = authenticated ? `${domain ?? ""}\u0000${principal ?? ""}` : "\u0000anonymous";
+  return evidenceBinding ? `${key}\u0000${evidenceBinding}` : key;
 }
 
 /** Hex-encode a session_id Uint8Array (24-char lowercase hex). */

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ExternalLocationConfig, UploadUrlProvider } from "../external.js";
+import type { PeerAuthenticationPolicy, PeerIdentityProvider, PeerResolutionOptions } from "../identity.js";
 import type { DispatchHook, ServeStartHook } from "../types.js";
 import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 import type { TokenResolver } from "./introspect.js";
@@ -67,6 +68,27 @@ export interface HttpHandlerOptions {
   compressionLevel?: number | null;
   /** Optional authentication callback. Called for each request before dispatch. */
   authenticate?: AuthenticateFn;
+  /** Off-wire transport peer evidence providers. */
+  peerIdentityProviders?: readonly PeerIdentityProvider[];
+  /** Composition policy for application auth and resolved peer evidence. */
+  peerAuthenticationPolicy?: PeerAuthenticationPolicy;
+  /** Runtime adapter for immediate/destination socket facts unavailable to Fetch Request.
+   * Header-based identity providers must also supply raw, multiplicity-preserving `headers`
+   * here. Fetch `Headers` has already merged duplicates and is therefore never trusted as
+   * identity evidence. When this hook is absent, or omits `headers`, providers see no
+   * identity headers at all; there is deliberately no fallback to `request.headers`.
+   * Values must be arrays even for single-valued headers so accidental use of a lossy
+   * string-valued adapter fails closed. */
+  peerResolutionContext?: (request: Request) => PeerResolutionOptions | Promise<PeerResolutionOptions>;
+  /** Operator-configured logical destination for destination-scoped evidence. */
+  peerServiceName?: string;
+  /** Total peer-provider deadline in milliseconds. Default: 5000. */
+  peerResolutionTimeoutMs?: number;
+  /** Maximum provider calls allowed to remain active, including calls that ignore abort after
+   * their request deadline. Must be at least the configured provider count. An exhausted
+   * provider contributes `UNAVAILABLE` evidence; the authentication policy decides whether
+   * that request may continue. Default: 64. */
+  peerProviderConcurrency?: number;
   /** Advertise `VGI-Proxy-Proof-Required: true` on every response, so a proxy
    *  or operator can confirm this worker rejects unproofed requests.
    *

@@ -4,6 +4,7 @@
 import { batchFromColumns, isBatch, type VgiBatch, type VgiSchema } from "./arrow/index.js";
 import { AuthContext } from "./auth.js";
 import { RpcError } from "./errors.js";
+import { PeerEvidenceSet } from "./identity.js";
 import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
 /**
@@ -111,6 +112,8 @@ export interface CallContext extends LogContext {
   /** Authenticated principal for this call; {@link AuthContext.anonymous} when
    *  the request was not authenticated. */
   readonly auth: AuthContext;
+  /** Immutable, off-wire transport peer identity evidence for this call. */
+  readonly peerEvidence?: PeerEvidenceSet;
   /** Application custom metadata carried by this stream input batch/tick.
    * Framework continuation and cancellation keys are removed on HTTP. */
   readonly inputMetadata?: ReadonlyMap<string, string>;
@@ -405,6 +408,7 @@ export class OutputCollector implements CallContext {
   /** Authenticated principal for this call; {@link AuthContext.anonymous} when
    *  the request was not authenticated. */
   readonly auth: AuthContext;
+  readonly peerEvidence: PeerEvidenceSet;
   readonly inputMetadata?: ReadonlyMap<string, string>;
   readonly cookies: ReadonlyMap<string, string>;
   readonly kind?: TransportKind;
@@ -428,6 +432,7 @@ export class OutputCollector implements CallContext {
       remainingExternalizedResponseBytes?: number;
       externalizationEnabled?: boolean;
       inputMetadata?: ReadonlyMap<string, string>;
+      peerEvidence?: PeerEvidenceSet;
     },
   ) {
     this._outputSchema = outputSchema;
@@ -435,6 +440,7 @@ export class OutputCollector implements CallContext {
     this._serverId = serverId;
     this._requestId = requestId;
     this.auth = authContext ?? AuthContext.anonymous();
+    this.peerEvidence = budgets?.peerEvidence ?? PeerEvidenceSet.EMPTY;
     this.inputMetadata = budgets?.inputMetadata;
     this.cookies = cookies ?? EMPTY_COOKIES;
     this.kind = kind;

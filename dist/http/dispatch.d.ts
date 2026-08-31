@@ -1,5 +1,6 @@
 import type { AuthContext } from "../auth.js";
 import { type ExternalLocationConfig } from "../external.js";
+import type { PeerEvidenceSet } from "../identity.js";
 import type { MethodDefinition } from "../types.js";
 import { TransportKind } from "../types.js";
 import type { StateSerializer } from "./types.js";
@@ -19,6 +20,7 @@ export interface DispatchContext {
     callStateCacheEntries?: number;
     stateSerializer: StateSerializer;
     authContext?: AuthContext;
+    peerEvidence?: PeerEvidenceSet;
     externalLocation?: ExternalLocationConfig;
     /** Incoming HTTP request cookies.  Empty/absent on non-HTTP paths. */
     cookies?: ReadonlyMap<string, string>;

@@ -2,11 +2,71 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, test } from "bun:test";
-import { packCallToken, packStateToken, unpackCallToken, unpackStateToken } from "../../src/http/token.js";
+import {
+  computeAad,
+  computeCallAad,
+  packCallToken,
+  packStateToken,
+  unpackCallToken,
+  unpackStateToken,
+} from "../../src/http/token.js";
 import { jsonStateSerializer } from "../../src/http/types.js";
 import { randomBytes } from "../../src/util/web-crypto.js";
 
 describe("State Token", () => {
+  test("bound authenticated empty principals remain domain-separated", () => {
+    expect(computeAad("", "binding", "domain-a")).not.toEqual(computeAad("", "binding", "domain-b"));
+    expect(computeCallAad("", "binding", "domain-a")).not.toEqual(computeCallAad("", "binding", "domain-b"));
+    expect(computeAad("", "binding", "domain-a")).not.toEqual(computeAad(null, "binding", "domain-a"));
+    expect(computeCallAad("", "binding", "domain-a")).not.toEqual(computeCallAad(null, "binding", "domain-a"));
+  });
+
+  test("peer evidence selects v5 AAD and binds domain, principal, and digest", () => {
+    const aad = computeAad("alice", "evidence-digest", "oauth");
+    expect(new TextDecoder().decode(aad)).toBe("vgi_rpc.state.v5\0\x01oauth\0alice\0evidence-digest");
+  });
+
+  test("peer-bound tokens reject a changed evidence digest or auth domain", () => {
+    const token = packStateToken(
+      new Uint8Array([1]),
+      CALL_ID,
+      tokenKey,
+      "alice",
+      undefined,
+      "evidence-digest",
+      "oauth",
+    );
+    expect(() => unpackStateToken(token, tokenKey, 3600, "alice", "evidence-digest", "oauth")).not.toThrow();
+    expect(() => unpackStateToken(token, tokenKey, 3600, "alice", "other-digest", "oauth")).toThrow(
+      "signature verification failed",
+    );
+    expect(() => unpackStateToken(token, tokenKey, 3600, "alice", "evidence-digest", "other-domain")).toThrow(
+      "signature verification failed",
+    );
+  });
+
+  test("peer-bound call tokens reject a changed digest or empty-principal domain", () => {
+    const token = packCallToken(
+      CALL_ID,
+      new Uint8Array([1]),
+      new Uint8Array([2]),
+      tokenKey,
+      "",
+      undefined,
+      "binding",
+      "domain-a",
+    );
+    expect(() => unpackCallToken(token, tokenKey, "", 3600, "binding", "domain-a")).not.toThrow();
+    expect(() => unpackCallToken(token, tokenKey, "", 3600, "other", "domain-a")).toThrow(
+      "signature verification failed",
+    );
+    expect(() => unpackCallToken(token, tokenKey, "", 3600, "binding", "domain-b")).toThrow(
+      "signature verification failed",
+    );
+    expect(() => unpackCallToken(token, tokenKey, null, 3600, "binding", "domain-a")).toThrow(
+      "signature verification failed",
+    );
+  });
   const tokenKey = randomBytes(32);
   const CALL_ID = new Uint8Array(16).fill(7);
   const ANON = "";

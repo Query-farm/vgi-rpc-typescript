@@ -106,7 +106,11 @@ describe("HTTP Auth", () => {
     // matching on the message.
     expect(resp.headers.get("Content-Type")).toBe("application/json");
     expect(resp.headers.get("VGI-Auth-Reason")).toBe("unauthorized");
-    expect(await resp.json()).toEqual({ error: "unauthorized", reason: "unauthorized", detail: "Invalid token" });
+    expect(await resp.json()).toEqual({
+      error: "unauthorized",
+      reason: "unauthorized",
+      detail: "authentication rejected",
+    });
   });
 
   test("well-known endpoint serves RFC 9728 JSON", async () => {

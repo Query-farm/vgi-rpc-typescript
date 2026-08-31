@@ -26,6 +26,13 @@ export interface HttpConnectOptions {
   authorization?: string;
   /** External storage config for resolving externalized batches. */
   externalLocation?: import("../external.js").ExternalLocationConfig;
+  /**
+   * Request implementation used for every HTTP operation owned by this
+   * client, including introspection and upload-URL exchange. Defaults to the
+   * runtime's global `fetch`. Node callers normally use
+   * `httpConnectSocks5h` instead of setting this directly.
+   */
+  fetch?: typeof globalThis.fetch;
 }
 
 /** A log or error message delivered to an {@link HttpConnectOptions.onLog} callback. */
@@ -72,6 +79,28 @@ export interface PipeConnectOptions {
  * trusted endpoints (use {@link httpConnect} for untrusted networks).
  */
 export interface TcpConnectOptions extends PipeConnectOptions {}
+
+/** Options for the Node-only {@link tcpConnectSocks5h} constructor. */
+export interface Socks5hTcpConnectOptions extends TcpConnectOptions {
+  /** One deadline for proxy TCP setup and the complete SOCKS5 negotiation. Default: 5000 ms. */
+  connectTimeoutMs?: number;
+  /** Cancels proxy setup and negotiation. */
+  signal?: AbortSignal;
+}
+
+/** Options for the Node-only {@link httpConnectSocks5h} constructor. */
+export interface Socks5hHttpConnectOptions extends Omit<HttpConnectOptions, "fetch"> {
+  /** One deadline for each proxy TCP setup, SOCKS5 negotiation, and TLS handshake. Default: 5000 ms. */
+  connectTimeoutMs?: number;
+  /** Total deadline for one HTTP request, including setup and response. Default: 300000 ms. */
+  requestTimeoutMs?: number;
+  /** Maximum buffered HTTP response, including headers. Default: 268435456 bytes. */
+  maxResponseBytes?: number;
+  /** Maximum HTTP response-header bytes within maxResponseBytes. Default: 65536 bytes. */
+  maxResponseHeaderBytes?: number;
+  /** Cancels HTTP requests and any in-progress proxy setup. */
+  signal?: AbortSignal;
+}
 
 /** Options for {@link subprocessConnect}, which spawns a server process and pipes to it. */
 export interface SubprocessConnectOptions extends PipeConnectOptions {

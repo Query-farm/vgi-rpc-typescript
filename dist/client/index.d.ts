@@ -4,5 +4,5 @@ export type { OAuthResourceMetadataResponse } from "./oauth.js";
 export { fetchOAuthMetadata, httpOAuthMetadata, parseClientId, parseClientSecret, parseDeviceCodeClientId, parseDeviceCodeClientSecret, parseResourceMetadataUrl, parseUseIdTokenAsBearer, } from "./oauth.js";
 export { PipeStreamSession, pipeConnect, subprocessConnect } from "./pipe.js";
 export { HttpStreamSession, type RowsWithToken } from "./stream.js";
-export type { ExchangeInput, HttpConnectOptions, LogMessage, PipeConnectOptions, StreamSession, SubprocessConnectOptions, TcpConnectOptions, } from "./types.js";
+export type { ExchangeInput, HttpConnectOptions, LogMessage, PipeConnectOptions, Socks5hHttpConnectOptions, Socks5hTcpConnectOptions, StreamSession, SubprocessConnectOptions, TcpConnectOptions, } from "./types.js";
 //# sourceMappingURL=index.d.ts.map

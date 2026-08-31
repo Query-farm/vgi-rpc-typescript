@@ -156,7 +156,7 @@ describe("handler response", () => {
     expect(resp.headers.get("Cache-Control")).toContain("no-store");
     const body = await resp.json();
     expect(body.reason).toBe(resp.headers.get(AUTH_REASON_HEADER));
-    expect(body.detail).toBe("read-only key");
+    expect(body.detail).toBe("authentication rejected");
   });
 
   test("a browser is never answered with HTML this port does not render", async () => {

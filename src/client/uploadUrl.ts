@@ -40,12 +40,13 @@ export async function requestUploadUrls(
   prefix: string,
   count: number,
   authorization?: string,
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<UploadUrlPair[]> {
   const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA, { count: BigInt(count) }, UPLOAD_URL_METHOD);
   const headers: Record<string, string> = { "Content-Type": ARROW_CONTENT_TYPE };
   if (authorization) headers.Authorization = authorization;
 
-  const resp = await fetch(`${baseUrl}${prefix}/${UPLOAD_URL_METHOD}/init`, {
+  const resp = await fetchFn(`${baseUrl}${prefix}/${UPLOAD_URL_METHOD}/init`, {
     method: "POST",
     headers,
     body: body as unknown as BodyInit,
@@ -140,6 +141,7 @@ export interface ExternalizeOptions {
   authorization?: string;
   /** Optional per-URL validator; throw to reject. */
   urlValidator?: ((url: string) => void) | null;
+  fetch?: typeof globalThis.fetch;
 }
 
 /**
@@ -148,7 +150,8 @@ export interface ExternalizeOptions {
  * not advertise upload-URL support or the upload fails.
  */
 export async function externalizeRequestBody(body: Uint8Array, opts: ExternalizeOptions): Promise<Uint8Array> {
-  const pairs = await requestUploadUrls(opts.baseUrl, opts.prefix, 1, opts.authorization);
+  const fetchFn = opts.fetch ?? globalThis.fetch;
+  const pairs = await requestUploadUrls(opts.baseUrl, opts.prefix, 1, opts.authorization, fetchFn);
   const pair = pairs[0];
 
   if (opts.urlValidator) {
@@ -156,7 +159,7 @@ export async function externalizeRequestBody(body: Uint8Array, opts: Externalize
     opts.urlValidator(pair.downloadUrl);
   }
 
-  const putResp = await fetch(pair.uploadUrl, {
+  const putResp = await fetchFn(pair.uploadUrl, {
     method: "PUT",
     headers: { "Content-Type": ARROW_CONTENT_TYPE },
     body: body as unknown as BodyInit,

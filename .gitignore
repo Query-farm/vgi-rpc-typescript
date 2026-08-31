@@ -1,5 +1,21 @@
 node_modules/
 dist/
+# Declaration artifacts are normally already tracked. Keep newly introduced
+# public modules visible so `git add -A` cannot silently omit their types.
+!dist/
+dist/*
+!dist/identity.d.ts
+!dist/identity.d.ts.map
+!dist/tailscale.d.ts
+!dist/tailscale.d.ts.map
+!dist/client/
+dist/client/*
+!dist/client/socks5h.d.ts
+!dist/client/socks5h.d.ts.map
+!dist/http/
+dist/http/*
+!dist/http/spiffe.d.ts
+!dist/http/spiffe.d.ts.map
 .astro/
 .conformance-bundles/
 .smoke-bundle/

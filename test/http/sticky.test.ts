@@ -24,6 +24,12 @@ describe("sessionPrincipalKey", () => {
     expect(fromOpen).toBe(fromDelete);
     expect(fromOpen).toBe("corp\u0000alice");
   });
+
+  test("peer evidence partitions otherwise identical principals", () => {
+    expect(sessionPrincipalKey(true, "corp", "alice", "binding-a")).not.toBe(
+      sessionPrincipalKey(true, "corp", "alice", "binding-b"),
+    );
+  });
 });
 
 describe("SessionRegistry reaper", () => {

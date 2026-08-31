@@ -3,7 +3,7 @@ title: Client Transports
 description: Connect to vgi-rpc servers over HTTP, subprocess pipes, or raw streams.
 ---
 
-The vgi-rpc client library provides three connect functions that all return the same `RpcClient` interface. Pick the transport that fits your deployment and use `call()`, `stream()`, `describe()`, and `close()` identically across all of them.
+The vgi-rpc client library provides HTTP, subprocess, pipe, and raw-TCP connect functions that all return the same `RpcClient` interface. Pick the transport that fits your deployment and use `call()`, `stream()`, `describe()`, and `close()` identically across all of them.
 
 :::note
 This page covers the client-side connect functions. To **serve** over an AF_UNIX socket via the launcher (`serveUnix`), see the [Unix Socket Launcher](/guides/launcher/) guide.
@@ -47,6 +47,41 @@ client.close();
 HTTP transport is stateless — stream continuity is managed via XChaCha20-Poly1305 AEAD-sealed state tokens exchanged in batch metadata.
 
 The `authorization` option (HTTP only) sets the `Authorization` request header. All three connect functions also accept an `externalLocation` option for configuring out-of-band data transfer locations.
+
+## SOCKS5h (Node/Bun)
+
+The Node/Bun entry point provides explicit credential-free SOCKS5h constructors for HTTP and raw TCP:
+
+```typescript
+import { httpConnectSocks5h, tcpConnectSocks5h } from "@query-farm/vgi-rpc";
+
+const http = httpConnectSocks5h(
+  "https://worker.example.internal",
+  "socks5h://127.0.0.1:1080",
+  {
+    connectTimeoutMs: 5_000,
+    requestTimeoutMs: 300_000,
+    maxResponseBytes: 268_435_456,
+    maxResponseHeaderBytes: 65_536,
+    signal: abortController.signal,
+  },
+);
+
+const tcp = await tcpConnectSocks5h(
+  "worker.example.internal",
+  9400,
+  "socks5h://127.0.0.1:1080",
+  { connectTimeoutMs: 5_000, signal: abortController.signal },
+);
+```
+
+Only the SOCKS `NO AUTH` method is offered. Proxy URIs with credentials, paths, queries, or fragments are rejected before dialing. Target domains are IDNA-normalized and sent as SOCKS domain names for proxy-side resolution; IPv4 and IPv6 literals use their native SOCKS address types. One request deadline covers setup, request writes, and the complete response; the smaller setup deadline additionally caps proxy TCP connection, the complete partial-I/O-safe negotiation, and (for HTTPS) TLS setup. Failure or cancellation destroys the socket and never retries directly. `TCP_NODELAY` is enabled.
+
+The HTTP adapter buffers one response under `maxResponseBytes` and independently bounds its headers with `maxResponseHeaderBytes`. It accepts exactly one `Content-Length` or one final `Transfer-Encoding: chunked`, rejects ambiguous/conflicting framing, and does not support streaming request bodies. Tune the limits to the largest VGI batch your worker is expected to return.
+
+`httpConnectSocks5h` routes every HTTP operation owned by the RPC client through the adapter: description, unary and streaming turns, upload-URL acquisition and PUT, and external-location GETs. It does not consult `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY`. A custom `ExternalStorage.upload()` implementation is application code rather than an SDK HTTP boundary and is not intercepted.
+
+There is no SOCKS server/listener mode: SOCKS is an outbound dialer. Browser and Worker entry points omit it because their fetch implementations do not expose a TCP dialer.
 
 ## Subprocess Transport
 

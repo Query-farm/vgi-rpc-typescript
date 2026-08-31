@@ -53,6 +53,8 @@ export interface ExternalLocationConfig {
     maxDecompressedBytes?: number;
     /** Maximum redirects followed while fetching. Each target is revalidated. Default: 5. */
     maxRedirects?: number;
+    /** Request implementation for external downloads. Defaults to global `fetch`. */
+    fetch?: typeof globalThis.fetch;
 }
 /** Default validator that rejects non-HTTPS URLs. */
 export declare function httpsOnlyValidator(url: string): void;

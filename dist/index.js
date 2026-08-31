@@ -723,19 +723,13 @@ var init_zstd = __esm(() => {
   isBun = typeof globalThis.Bun !== "undefined";
 });
 
-// src/client/tcp.ts
-import { connect } from "node:net";
+// src/client/socks5h.ts
+import { isIP, connect as tcpDial } from "node:net";
+import { connect as tlsDial } from "node:tls";
+import { domainToASCII } from "node:url";
 
-// src/client/pipe.ts
-import {
-  Field,
-  makeData,
-  RecordBatch,
-  RecordBatchStreamWriter as RecordBatchStreamWriter2,
-  Schema,
-  Struct,
-  vectorFromArray
-} from "@query-farm/apache-arrow";
+// src/client/connect.ts
+import { Schema as Schema3 } from "@query-farm/apache-arrow";
 
 // src/constants.ts
 var RPC_METHOD_KEY = "vgi_rpc.method";
@@ -1429,7 +1423,11 @@ async function resolveExternalLocation(batch, config) {
     }
     controller = new AbortController;
     try {
-      response = await fetch(currentUrl, { redirect: "manual", signal: controller.signal, decompress: false });
+      response = await (config.fetch ?? globalThis.fetch)(currentUrl, {
+        redirect: "manual",
+        signal: controller.signal,
+        decompress: false
+      });
     } catch {
       throw new Error(`External location fetch failed [url: ${redactExternalUrl(currentUrl)}]`);
     }
@@ -1483,6 +1481,54 @@ async function resolveExternalLocation(batch, config) {
   }
   return resolved;
 }
+
+// src/http/codec.ts
+var DEFAULT_COMPRESSION_LEVEL = 1;
+var COMPRESSION_ENCODINGS = ["zstd", "gzip"];
+var IDENTITY_ENCODING = "identity";
+var KNOWN_ENCODINGS = [...COMPRESSION_ENCODINGS, IDENTITY_ENCODING];
+function parseEncodingList(headerValue) {
+  if (!headerValue)
+    return [];
+  const out = [];
+  const seen = new Set;
+  for (const raw of headerValue.split(",")) {
+    let token = raw.trim().toLowerCase();
+    if (!token)
+      continue;
+    const semi = token.indexOf(";");
+    if (semi >= 0)
+      token = token.slice(0, semi).trim();
+    if (!KNOWN_ENCODINGS.includes(token))
+      continue;
+    if (seen.has(token))
+      continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+function pickResponseEncoding(standardHeader, customHeader, canProduce) {
+  const standard = parseEncodingList(standardHeader);
+  const custom = parseEncodingList(customHeader);
+  const merged = [...custom, ...standard.filter((e) => !custom.includes(e))];
+  for (const enc of merged) {
+    if (enc === IDENTITY_ENCODING) {
+      return { codec: null, usedCustom: false };
+    }
+    if (canProduce(enc)) {
+      return { codec: enc, usedCustom: custom.includes(enc) && !standard.includes(enc) };
+    }
+  }
+  return { codec: null, usedCustom: custom.length > 0 };
+}
+var CONTENT_ENCODING_HEADER = "Content-Encoding";
+var VGI_CONTENT_ENCODING_HEADER = "X-VGI-Content-Encoding";
+var VGI_ACCEPT_ENCODING_HEADER = "X-VGI-Accept-Encoding";
+function clientAcceptEncoding(hasZstdDecoder) {
+  return hasZstdDecoder ? "zstd, gzip" : "gzip";
+}
+var SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings";
 
 // src/util/gzip.ts
 async function streamThrough(data, transform, maxOutputSize) {
@@ -1616,6 +1662,91 @@ async function readRequestFromBody(body) {
   return { schema: batch.schema, batch };
 }
 
+// src/client/capabilities.ts
+var MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes";
+var UPLOAD_URL_HEADER = "VGI-Upload-URL-Support";
+var MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes";
+function parseHeaderInt(headers, name) {
+  const raw = headers.get(name) ?? headers.get(name.toLowerCase());
+  if (raw == null)
+    return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function parseCapabilitiesFromHeaders(headers) {
+  const uploadRaw = headers.get(UPLOAD_URL_HEADER) ?? headers.get(UPLOAD_URL_HEADER.toLowerCase());
+  const uploadUrlSupport = uploadRaw === "true";
+  let cacheExpiresAt = null;
+  const cc = headers.get("Cache-Control") ?? headers.get("cache-control");
+  if (cc) {
+    for (const token of cc.split(",")) {
+      const t = token.trim().toLowerCase();
+      if (t.startsWith("max-age=")) {
+        const seconds = Number.parseFloat(t.slice("max-age=".length));
+        if (Number.isFinite(seconds)) {
+          cacheExpiresAt = Date.now() + seconds * 1000;
+        }
+        break;
+      }
+    }
+  }
+  return {
+    maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
+    uploadUrlSupport,
+    maxUploadBytes: parseHeaderInt(headers, MAX_UPLOAD_BYTES_HEADER),
+    cacheExpiresAt
+  };
+}
+function isCapabilitySnapshotFresh(snapshot) {
+  if (!snapshot)
+    return false;
+  if (snapshot.cacheExpiresAt == null)
+    return true;
+  return Date.now() < snapshot.cacheExpiresAt;
+}
+
+// src/client/decode.ts
+function resolveResponseEncoding(headers) {
+  const custom = headers.get(VGI_CONTENT_ENCODING_HEADER)?.trim().toLowerCase();
+  if (custom && custom !== "identity") {
+    return { codec: custom, custom: true };
+  }
+  const standard = headers.get(CONTENT_ENCODING_HEADER)?.trim().toLowerCase();
+  if (standard === "zstd") {
+    return { codec: "zstd", custom: false };
+  }
+  return { codec: null, custom: false };
+}
+async function decodeResponseBody(headers, body, zstdDecompress2) {
+  const { codec, custom } = resolveResponseEncoding(headers);
+  if (!codec)
+    return body;
+  if (codec === "gzip") {
+    return new Uint8Array(await gzipDecompress(body));
+  }
+  if (codec === "zstd") {
+    if (!zstdDecompress2) {
+      throw new RpcError("ProtocolError", "Server sent a zstd-encoded response but this client has no zstd decoder. " + "Install the optional zstd dependency, or configure the server not to negotiate zstd.", "");
+    }
+    return new Uint8Array(await zstdDecompress2(body));
+  }
+  throw new RpcError("ProtocolError", `Unsupported response encoding '${codec}'` + `${custom ? ` (${VGI_CONTENT_ENCODING_HEADER})` : ` (${CONTENT_ENCODING_HEADER})`}.`, "");
+}
+
+// src/client/introspect.ts
+import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
+
+// src/client/ipc.ts
+import {
+  Binary,
+  Bool,
+  DataType,
+  Float64,
+  Int64,
+  RecordBatchReader as RecordBatchReader3,
+  Utf8
+} from "@query-farm/apache-arrow";
+
 // src/wire/reader.ts
 import { RecordBatchReader as RecordBatchReader2 } from "@query-farm/apache-arrow";
 var MAX_READ_CHUNK = 1 << 26;
@@ -1704,249 +1835,7 @@ class IpcStreamReader {
   }
 }
 
-// src/wire/writer.ts
-var STDOUT_FD = 1;
-var RESOLVED = Promise.resolve();
-var _NODE_FS_MOD = "node:fs";
-var _writeSync = null;
-function _loadWriteSync() {
-  if (_writeSync)
-    return _writeSync;
-  const getBuiltin = globalThis.process?.getBuiltinModule;
-  if (typeof getBuiltin === "function") {
-    const fs2 = getBuiltin.call(globalThis.process, _NODE_FS_MOD);
-    if (fs2?.writeSync) {
-      _writeSync = fs2.writeSync.bind(fs2);
-      return _writeSync;
-    }
-  }
-  const req = import.meta.require ?? globalThis.require ?? null;
-  if (!req) {
-    throw new Error("IpcStreamWriter needs synchronous node:fs.writeSync, reached via " + "import.meta.require (Bun), globalThis.require (Node CJS), or " + "process.getBuiltinModule (Node >= 20.16). This runtime offers none of " + "them, so the subprocess transport is unavailable. On an older Node ESM, " + "either upgrade or set globalThis.require = createRequire(import.meta.url).");
-  }
-  const fs = req(_NODE_FS_MOD);
-  _writeSync = fs.writeSync.bind(fs);
-  return _writeSync;
-}
-var MAX_WRITE_CHUNK = 1 << 30;
-var MAX_STREAM_CHUNK = 128 * 1024;
-function writeAll(fd, data) {
-  const writeSync = _loadWriteSync();
-  let offset = 0;
-  let spins = 0;
-  while (offset < data.length) {
-    try {
-      const written = writeSync(fd, data, offset, Math.min(data.length - offset, MAX_WRITE_CHUNK));
-      if (written <= 0)
-        throw new Error(`writeSync returned ${written}`);
-      offset += written;
-      spins = 0;
-    } catch (e) {
-      if (e.code === "EAGAIN") {
-        if (++spins < 8192)
-          continue;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
-        spins = 0;
-        continue;
-      }
-      throw e;
-    }
-  }
-}
-async function socketWriteAll(socket, data) {
-  let offset = 0;
-  do {
-    const end = Math.min(offset + MAX_STREAM_CHUNK, data.length);
-    await socketWriteChunk(socket, data.subarray(offset, end));
-    offset = end;
-  } while (offset < data.length);
-}
-async function socketWriteChunk(socket, data) {
-  if (socket.destroyed || socket.writableEnded) {
-    throw new Error("socketWriteAll: socket is already closed");
-  }
-  const ok = socket.write(data);
-  if (ok)
-    return;
-  await new Promise((resolve, reject) => {
-    const cleanup = () => {
-      socket.off("drain", onDrain);
-      socket.off("error", onError);
-      socket.off("close", onClose);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err2) => {
-      cleanup();
-      reject(err2);
-    };
-    const onClose = () => {
-      cleanup();
-      resolve();
-    };
-    socket.once("drain", onDrain);
-    socket.once("error", onError);
-    socket.once("close", onClose);
-  });
-}
-
-class IpcStreamWriter {
-  target;
-  constructor(fdOrSocketOrSink = STDOUT_FD) {
-    if (typeof fdOrSocketOrSink === "number") {
-      this.target = { kind: "fd", fd: fdOrSocketOrSink };
-    } else if (typeof fdOrSocketOrSink.write === "function" && !("writable" in fdOrSocketOrSink)) {
-      this.target = { kind: "sink", sink: fdOrSocketOrSink };
-    } else {
-      this.target = { kind: "socket", socket: fdOrSocketOrSink };
-    }
-  }
-  async writeStream(schema2, batches) {
-    const bytes = serializeBatches(schema2, batches);
-    if (this.target.kind === "fd") {
-      writeAll(this.target.fd, bytes);
-    } else if (this.target.kind === "sink") {
-      await this.target.sink.write(bytes);
-    } else {
-      await socketWriteAll(this.target.socket, bytes);
-    }
-  }
-  openStream(schema2) {
-    return new IncrementalStream(this.target, schema2);
-  }
-}
-
-class IncrementalStream {
-  encoder;
-  target;
-  closed = false;
-  writeChain = Promise.resolve();
-  constructor(target, schema2) {
-    this.target = target;
-    this.encoder = createIncrementalEncoder(schema2);
-    this.enqueue(this.encoder.start());
-  }
-  async write(batch) {
-    if (this.closed)
-      throw new Error("Stream already closed");
-    return this.enqueue(this.encoder.writeBatch(batch));
-  }
-  async close() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    return this.enqueue(this.encoder.finish());
-  }
-  enqueue(bytes) {
-    const target = this.target;
-    if (target.kind === "fd") {
-      writeAll(target.fd, bytes);
-      return RESOLVED;
-    }
-    const next = this.writeChain.then(() => {
-      if (target.kind === "sink") {
-        return target.sink.write(bytes);
-      }
-      return socketWriteAll(target.socket, bytes);
-    });
-    this.writeChain = next.catch(() => {
-      return;
-    });
-    return next;
-  }
-}
-
-// src/client/introspect.ts
-import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
-
-// src/http/codec.ts
-var DEFAULT_COMPRESSION_LEVEL = 1;
-var COMPRESSION_ENCODINGS = ["zstd", "gzip"];
-var IDENTITY_ENCODING = "identity";
-var KNOWN_ENCODINGS = [...COMPRESSION_ENCODINGS, IDENTITY_ENCODING];
-function parseEncodingList(headerValue) {
-  if (!headerValue)
-    return [];
-  const out = [];
-  const seen = new Set;
-  for (const raw of headerValue.split(",")) {
-    let token = raw.trim().toLowerCase();
-    if (!token)
-      continue;
-    const semi = token.indexOf(";");
-    if (semi >= 0)
-      token = token.slice(0, semi).trim();
-    if (!KNOWN_ENCODINGS.includes(token))
-      continue;
-    if (seen.has(token))
-      continue;
-    seen.add(token);
-    out.push(token);
-  }
-  return out;
-}
-function pickResponseEncoding(standardHeader, customHeader, canProduce) {
-  const standard = parseEncodingList(standardHeader);
-  const custom = parseEncodingList(customHeader);
-  const merged = [...custom, ...standard.filter((e) => !custom.includes(e))];
-  for (const enc of merged) {
-    if (enc === IDENTITY_ENCODING) {
-      return { codec: null, usedCustom: false };
-    }
-    if (canProduce(enc)) {
-      return { codec: enc, usedCustom: custom.includes(enc) && !standard.includes(enc) };
-    }
-  }
-  return { codec: null, usedCustom: custom.length > 0 };
-}
-var CONTENT_ENCODING_HEADER = "Content-Encoding";
-var VGI_CONTENT_ENCODING_HEADER = "X-VGI-Content-Encoding";
-var VGI_ACCEPT_ENCODING_HEADER = "X-VGI-Accept-Encoding";
-function clientAcceptEncoding(hasZstdDecoder) {
-  return hasZstdDecoder ? "zstd, gzip" : "gzip";
-}
-var SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings";
-
-// src/client/decode.ts
-function resolveResponseEncoding(headers) {
-  const custom = headers.get(VGI_CONTENT_ENCODING_HEADER)?.trim().toLowerCase();
-  if (custom && custom !== "identity") {
-    return { codec: custom, custom: true };
-  }
-  const standard = headers.get(CONTENT_ENCODING_HEADER)?.trim().toLowerCase();
-  if (standard === "zstd") {
-    return { codec: "zstd", custom: false };
-  }
-  return { codec: null, custom: false };
-}
-async function decodeResponseBody(headers, body, zstdDecompress2) {
-  const { codec, custom } = resolveResponseEncoding(headers);
-  if (!codec)
-    return body;
-  if (codec === "gzip") {
-    return new Uint8Array(await gzipDecompress(body));
-  }
-  if (codec === "zstd") {
-    if (!zstdDecompress2) {
-      throw new RpcError("ProtocolError", "Server sent a zstd-encoded response but this client has no zstd decoder. " + "Install the optional zstd dependency, or configure the server not to negotiate zstd.", "");
-    }
-    return new Uint8Array(await zstdDecompress2(body));
-  }
-  throw new RpcError("ProtocolError", `Unsupported response encoding '${codec}'` + `${custom ? ` (${VGI_CONTENT_ENCODING_HEADER})` : ` (${CONTENT_ENCODING_HEADER})`}.`, "");
-}
-
 // src/client/ipc.ts
-import {
-  Binary,
-  Bool,
-  DataType,
-  Float64,
-  Int64,
-  RecordBatchReader as RecordBatchReader3,
-  Utf8
-} from "@query-farm/apache-arrow";
 function inferArrowType(value) {
   if (typeof value === "string")
     return new Utf8;
@@ -2148,7 +2037,7 @@ async function httpIntrospect(rawBaseUrl, options) {
     headers["Accept-Encoding"] = "zstd";
   }
   headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
-  const response = await fetch(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
+  const response = await (options?.fetch ?? globalThis.fetch)(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
     method: "POST",
     headers,
     body: sendBody
@@ -2160,6 +2049,977 @@ async function httpIntrospect(rawBaseUrl, options) {
   const responseBody = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn));
   const { batches } = await readResponseBatches(responseBody);
   return parseDescribeResponse(batches);
+}
+
+// src/client/stream.ts
+import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
+function packResumeToken(cursor, callToken) {
+  return callToken === null ? cursor : `${cursor.length}:${cursor}${callToken}`;
+}
+function unpackResumeToken(token) {
+  const sep = token.indexOf(":");
+  if (sep < 0)
+    return { cursor: token, callToken: null };
+  const cursorLen = Number(token.slice(0, sep));
+  if (!Number.isInteger(cursorLen) || cursorLen < 0)
+    return { cursor: token, callToken: null };
+  const rest = token.slice(sep + 1);
+  if (cursorLen > rest.length)
+    return { cursor: token, callToken: null };
+  const call = rest.slice(cursorLen);
+  return { cursor: rest.slice(0, cursorLen), callToken: call === "" ? null : call };
+}
+
+class HttpStreamSession {
+  _baseUrl;
+  _prefix;
+  _method;
+  _stateToken;
+  _callStateToken;
+  _outputSchema;
+  _inputSchema;
+  _onLog;
+  _pendingBatches;
+  _finished;
+  _header;
+  _compressionLevel;
+  _compressFn;
+  _decompressFn;
+  _authorization;
+  _externalConfig;
+  _postFn;
+  constructor(opts) {
+    this._baseUrl = opts.baseUrl;
+    this._prefix = opts.prefix;
+    this._method = opts.method;
+    this._stateToken = opts.stateToken;
+    this._callStateToken = opts.callStateToken ?? null;
+    this._outputSchema = opts.outputSchema;
+    this._inputSchema = opts.inputSchema;
+    this._onLog = opts.onLog;
+    this._pendingBatches = opts.pendingBatches;
+    this._finished = opts.finished;
+    this._header = opts.header;
+    this._compressionLevel = opts.compressionLevel;
+    this._compressFn = opts.compressFn;
+    this._decompressFn = opts.decompressFn;
+    this._authorization = opts.authorization;
+    this._externalConfig = opts.externalConfig;
+    this._postFn = opts.postFn;
+    const pendingData = opts.pendingBatches.filter((batch) => batch.numRows > 0 || isExternalLocationBatch(batch));
+    if (pendingData.length > 1) {
+      throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
+    }
+  }
+  async _post(url, body) {
+    if (this._postFn)
+      return this._postFn(url, body);
+    return fetch(url, {
+      method: "POST",
+      headers: this._buildHeaders(),
+      body: await this._prepareBody(body)
+    });
+  }
+  get header() {
+    return this._header;
+  }
+  _tokenMetadata(token) {
+    const metadata = new Map;
+    metadata.set(STATE_KEY, token);
+    if (this._callStateToken !== null) {
+      metadata.set(CALL_STATE_KEY, this._callStateToken);
+    }
+    return metadata;
+  }
+  _resumeToken() {
+    return this._stateToken === null ? null : packResumeToken(this._stateToken, this._callStateToken);
+  }
+  _buildHeaders() {
+    const headers = {
+      "Content-Type": ARROW_CONTENT_TYPE
+    };
+    if (this._compressionLevel != null && this._compressFn) {
+      headers["Content-Encoding"] = "zstd";
+    }
+    if (this._compressionLevel != null && this._decompressFn) {
+      headers["Accept-Encoding"] = "zstd";
+    }
+    headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(this._decompressFn != null);
+    if (this._authorization) {
+      headers.Authorization = this._authorization;
+    }
+    return headers;
+  }
+  async _prepareBody(content) {
+    if (this._compressionLevel != null && this._compressFn) {
+      return await this._compressFn(content, this._compressionLevel);
+    }
+    return content;
+  }
+  async _readResponse(resp) {
+    const body = new Uint8Array(await resp.arrayBuffer());
+    return new Uint8Array(await decodeResponseBody(resp.headers, body, this._decompressFn));
+  }
+  async exchange(input) {
+    if (this._stateToken === null) {
+      throw new RpcError("ProtocolError", "Stream has finished — no state token available", "");
+    }
+    if (!Array.isArray(input)) {
+      const metadata = new Map(input.metadata ?? []);
+      for (const [key, value] of this._tokenMetadata(this._stateToken)) {
+        metadata.set(key, value);
+      }
+      const batch2 = new RecordBatch(input.schema, input.data, metadata);
+      return this._doExchange(input.schema, [batch2]);
+    }
+    if (input.length === 0) {
+      const zeroSchema = this._inputSchema ?? this._outputSchema;
+      const emptyBatch = this._buildEmptyBatch(zeroSchema);
+      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
+      return this._doExchange(zeroSchema, [batchWithMeta]);
+    }
+    let inputSchema = this._inputSchema;
+    if (!inputSchema) {
+      const keys = Object.keys(input[0]);
+      const fields = keys.map((key) => {
+        let sample;
+        for (const row of input) {
+          if (row[key] != null) {
+            sample = row[key];
+            break;
+          }
+        }
+        const arrowType = inferArrowType(sample);
+        const nullable = input.some((row) => row[key] == null);
+        return new Field(key, arrowType, nullable);
+      });
+      inputSchema = new Schema(fields);
+    }
+    const children = inputSchema.fields.map((f) => {
+      const values = input.map((row) => row[f.name]);
+      return vectorFromArray(values, f.type).data[0];
+    });
+    const structType = new Struct(inputSchema.fields);
+    const data = makeData({
+      type: structType,
+      length: input.length,
+      children,
+      nullCount: 0
+    });
+    const batch = new RecordBatch(inputSchema, data, this._tokenMetadata(this._stateToken));
+    return this._doExchange(inputSchema, [batch]);
+  }
+  async tick(metadata) {
+    if (this._pendingBatches.length > 0) {
+      throw new RpcError("ProtocolError", "Consume the producer's init batch before sending an explicit tick", "");
+    }
+    if (this._finished || this._stateToken === null)
+      return [];
+    const responseBody = await this._sendContinuation(this._stateToken, metadata);
+    const { batches } = await readResponseBatches(responseBody);
+    let rows = null;
+    let nextToken = null;
+    for (let batch of batches) {
+      if (batch.numRows === 0) {
+        const token = batch.metadata?.get(STATE_KEY);
+        if (token) {
+          nextToken = token;
+          continue;
+        }
+        if (isExternalLocationBatch(batch)) {
+          batch = await resolveExternalLocation(batch, this._externalConfig);
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (rows !== null) {
+        throw new RpcError("ProtocolError", "A producer tick returned more than one data batch", "");
+      }
+      rows = extractBatchRows(batch);
+    }
+    this._stateToken = nextToken;
+    if (nextToken === null)
+      this._finished = true;
+    return rows ?? [];
+  }
+  async _doExchange(schema2, batches) {
+    const body = serializeIpcStream(schema2, batches);
+    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
+    if (resp.status === 401) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
+    const responseBody = await this._readResponse(resp);
+    const { batches: responseBatches } = await readResponseBatches(responseBody);
+    let resultRows = [];
+    let gotData = false;
+    for (const batch of responseBatches) {
+      if (batch.numRows === 0) {
+        dispatchLogOrError(batch, this._onLog);
+        const token2 = batch.metadata?.get(STATE_KEY);
+        if (token2) {
+          this._stateToken = token2;
+        }
+        continue;
+      }
+      if (gotData) {
+        throw new RpcError("ProtocolError", "An exchange turn returned more than one data batch", "");
+      }
+      gotData = true;
+      const token = batch.metadata?.get(STATE_KEY);
+      if (token) {
+        this._stateToken = token;
+      }
+      resultRows = extractBatchRows(batch);
+    }
+    return resultRows;
+  }
+  _buildEmptyBatch(schema2) {
+    const children = schema2.fields.map((f) => {
+      return makeData({ type: f.type, length: 0, nullCount: 0 });
+    });
+    const structType = new Struct(schema2.fields);
+    const data = makeData({
+      type: structType,
+      length: 0,
+      children,
+      nullCount: 0
+    });
+    return new RecordBatch(schema2, data);
+  }
+  async* [Symbol.asyncIterator]() {
+    for (let batch of this._pendingBatches) {
+      if (batch.numRows === 0) {
+        if (isExternalLocationBatch(batch)) {
+          batch = await resolveExternalLocation(batch, this._externalConfig);
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      yield extractBatchRows(batch);
+    }
+    this._pendingBatches = [];
+    if (this._finished)
+      return;
+    if (this._stateToken === null)
+      return;
+    while (true) {
+      const stateToken = this._stateToken;
+      if (stateToken === null)
+        return;
+      const responseBody = await this._sendContinuation(stateToken);
+      const { batches } = await readResponseBatches(responseBody);
+      let gotContinuation = false;
+      let dataRows = null;
+      for (let batch of batches) {
+        if (batch.numRows === 0) {
+          const token = batch.metadata?.get(STATE_KEY);
+          if (token) {
+            this._stateToken = token;
+            gotContinuation = true;
+            continue;
+          }
+          if (isExternalLocationBatch(batch)) {
+            batch = await resolveExternalLocation(batch, this._externalConfig);
+          } else {
+            dispatchLogOrError(batch, this._onLog);
+            continue;
+          }
+        }
+        if (dataRows !== null) {
+          throw new RpcError("ProtocolError", "A producer turn returned more than one data batch", "");
+        }
+        dataRows = extractBatchRows(batch);
+      }
+      if (dataRows !== null)
+        yield dataRows;
+      if (!gotContinuation)
+        break;
+    }
+  }
+  async nextWithToken() {
+    const multi = "A producer turn returned more than one data batch";
+    while (this._pendingBatches.length > 0) {
+      let batch = this._pendingBatches.shift();
+      if (batch.numRows === 0) {
+        if (isExternalLocationBatch(batch)) {
+          batch = await resolveExternalLocation(batch, this._externalConfig);
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
+        throw new RpcError("ProtocolError", multi, "");
+      }
+      return { rows: extractBatchRows(batch), token: this._resumeToken() };
+    }
+    if (this._finished || this._stateToken === null) {
+      this._finished = true;
+      return null;
+    }
+    const responseBody = await this._sendContinuation(this._stateToken);
+    const { batches } = await readResponseBatches(responseBody);
+    let dataRows = null;
+    let nextToken = null;
+    for (let batch of batches) {
+      if (batch.numRows === 0) {
+        const token = batch.metadata?.get(STATE_KEY);
+        if (token) {
+          nextToken = token;
+          continue;
+        }
+        if (isExternalLocationBatch(batch)) {
+          batch = await resolveExternalLocation(batch, this._externalConfig);
+        } else {
+          dispatchLogOrError(batch, this._onLog);
+          continue;
+        }
+      }
+      if (dataRows !== null) {
+        throw new RpcError("ProtocolError", multi, "");
+      }
+      dataRows = extractBatchRows(batch);
+    }
+    this._stateToken = nextToken;
+    if (dataRows === null) {
+      this._finished = true;
+      return null;
+    }
+    return { rows: dataRows, token: this._resumeToken() };
+  }
+  seekToToken(token) {
+    const { cursor, callToken } = unpackResumeToken(token);
+    this._pendingBatches = [];
+    this._stateToken = cursor;
+    this._callStateToken = callToken;
+    this._finished = false;
+  }
+  async _sendContinuation(token, applicationMetadata) {
+    const emptySchema = new Schema([]);
+    const metadata = new Map(applicationMetadata ?? []);
+    for (const [key, value] of this._tokenMetadata(token))
+      metadata.set(key, value);
+    const structType = new Struct(emptySchema.fields);
+    const data = makeData({
+      type: structType,
+      length: 1,
+      children: [],
+      nullCount: 0
+    });
+    const batch = new RecordBatch(emptySchema, data, metadata);
+    const body = serializeIpcStream(emptySchema, [batch]);
+    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
+    if (resp.status === 401) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
+    return this._readResponse(resp);
+  }
+  close() {}
+}
+
+// src/client/uploadUrl.ts
+import { Field as Field2, Int64 as Int642, RecordBatchReader as RecordBatchReader4, Schema as Schema2 } from "@query-farm/apache-arrow";
+var UPLOAD_URL_METHOD2 = "__upload_url__";
+var UPLOAD_URL_PARAMS_SCHEMA2 = new Schema2([new Field2("count", new Int642, false)]);
+async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn = globalThis.fetch) {
+  const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA2, { count: BigInt(count) }, UPLOAD_URL_METHOD2);
+  const headers = { "Content-Type": ARROW_CONTENT_TYPE };
+  if (authorization)
+    headers.Authorization = authorization;
+  const resp = await fetchFn(`${baseUrl}${prefix}/${UPLOAD_URL_METHOD2}/init`, {
+    method: "POST",
+    headers,
+    body
+  });
+  if (resp.status === 404) {
+    throw new RpcError("NotSupported", "Server does not support upload URLs", "");
+  }
+  if (resp.status === 401) {
+    throw new RpcError("AuthenticationError", "Authentication required", "");
+  }
+  if (!resp.ok) {
+    throw new RpcError("HttpError", `__upload_url__/init failed: HTTP ${resp.status}`, "");
+  }
+  const respBody = new Uint8Array(await resp.arrayBuffer());
+  const reader = await RecordBatchReader4.from(respBody);
+  await reader.open();
+  const pairs = [];
+  for (const batch of reader.readAll()) {
+    if (batch.numRows === 0)
+      continue;
+    for (let r = 0;r < batch.numRows; r++) {
+      const uploadUrl = batch.getChildAt(0)?.get(r);
+      const downloadUrl = batch.getChildAt(1)?.get(r);
+      const expiresRaw = batch.getChildAt(2)?.get(r);
+      let expiresAt;
+      if (expiresRaw instanceof Date) {
+        expiresAt = expiresRaw;
+      } else if (typeof expiresRaw === "bigint") {
+        expiresAt = new Date(Number(expiresRaw / 1000n));
+      } else if (typeof expiresRaw === "number") {
+        expiresAt = new Date(expiresRaw);
+      } else {
+        expiresAt = new Date;
+      }
+      pairs.push({ uploadUrl, downloadUrl, expiresAt });
+    }
+  }
+  if (pairs.length === 0) {
+    throw new RpcError("ProtocolError", "Server returned no upload URLs", "");
+  }
+  return pairs;
+}
+async function buildPointerRequestBody(originalBody, downloadUrl) {
+  const reader = await RecordBatchReader4.from(originalBody);
+  await reader.open();
+  const schema2 = reader.schema;
+  if (!schema2) {
+    throw new RpcError("ProtocolError", "Original request body has no schema", "");
+  }
+  const batches = reader.readAll();
+  if (batches.length === 0) {
+    throw new RpcError("ProtocolError", "Original request body has no batches", "");
+  }
+  const original = batches[0];
+  const originalMeta = original.metadata ?? new Map;
+  const pointer = makeExternalLocationBatch(schema2, downloadUrl);
+  const merged = new Map(pointer.metadata ?? new Map);
+  const method = originalMeta.get(RPC_METHOD_KEY);
+  const version = originalMeta.get(REQUEST_VERSION_KEY) ?? REQUEST_VERSION;
+  if (method)
+    merged.set(RPC_METHOD_KEY, method);
+  merged.set(REQUEST_VERSION_KEY, version);
+  for (const [k, v] of originalMeta) {
+    if (!merged.has(k))
+      merged.set(k, v);
+  }
+  const { RecordBatch: RecordBatch2 } = await import("@query-farm/apache-arrow");
+  const pointerWithMeta = new RecordBatch2(schema2, pointer.data, merged);
+  return serializeIpcStream(schema2, [pointerWithMeta]);
+}
+async function externalizeRequestBody(body, opts) {
+  const fetchFn = opts.fetch ?? globalThis.fetch;
+  const pairs = await requestUploadUrls(opts.baseUrl, opts.prefix, 1, opts.authorization, fetchFn);
+  const pair = pairs[0];
+  if (opts.urlValidator) {
+    opts.urlValidator(pair.uploadUrl);
+    opts.urlValidator(pair.downloadUrl);
+  }
+  const putResp = await fetchFn(pair.uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": ARROW_CONTENT_TYPE },
+    body
+  });
+  if (!putResp.ok) {
+    throw new RpcError("ExternalUploadFailed", `PUT to upload URL failed: HTTP ${putResp.status}`, "");
+  }
+  return buildPointerRequestBody(body, pair.downloadUrl);
+}
+
+// src/client/connect.ts
+function httpConnect(rawBaseUrl, options) {
+  const baseUrl = rawBaseUrl.replace(/\/+$/, "");
+  const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
+  const onLog = options?.onLog;
+  const compressionLevel = options?.compressionLevel;
+  const authorization = options?.authorization;
+  const externalConfig = options?.externalLocation;
+  const fetchFn = options?.fetch ?? globalThis.fetch;
+  const effectiveExternalConfig = externalConfig ? { ...externalConfig, fetch: fetchFn } : externalConfig;
+  let methodCache = options?.description ? new Map(options.description.methods.map((method) => [method.name, method])) : null;
+  let serverProtocolVersion = options?.description?.protocolVersion ?? "";
+  let compressFn;
+  let decompressFn;
+  let compressionLoaded = false;
+  let capabilities = null;
+  function updateCapabilitiesFromResponse(resp) {
+    const next = parseCapabilitiesFromHeaders(resp.headers);
+    if (next.maxRequestBytes != null || next.uploadUrlSupport) {
+      capabilities = next;
+    }
+  }
+  async function maybeExternalize(body) {
+    const caps = isCapabilitySnapshotFresh(capabilities) ? capabilities : null;
+    if (!caps)
+      return body;
+    if (!caps.uploadUrlSupport)
+      return body;
+    if (caps.maxRequestBytes == null || body.byteLength <= caps.maxRequestBytes)
+      return body;
+    return externalizeRequestBody(body, {
+      baseUrl,
+      prefix,
+      authorization,
+      urlValidator: externalConfig?.urlValidator ?? null,
+      fetch: fetchFn
+    });
+  }
+  async function postWithExternalization(url, body) {
+    const sendBody = await maybeExternalize(body);
+    let resp = await fetchFn(url, {
+      method: "POST",
+      headers: buildHeaders(),
+      body: await prepareBody(sendBody)
+    });
+    updateCapabilitiesFromResponse(resp);
+    if (resp.status === 413 && capabilities?.uploadUrlSupport && body.byteLength > 0) {
+      const externalized = await externalizeRequestBody(body, {
+        baseUrl,
+        prefix,
+        authorization,
+        urlValidator: externalConfig?.urlValidator ?? null,
+        fetch: fetchFn
+      });
+      resp = await fetchFn(url, {
+        method: "POST",
+        headers: buildHeaders(),
+        body: await prepareBody(externalized)
+      });
+      updateCapabilitiesFromResponse(resp);
+    }
+    return resp;
+  }
+  async function ensureCompression() {
+    if (compressionLoaded || compressionLevel == null)
+      return;
+    try {
+      const mod = await Promise.resolve().then(() => (init_zstd(), exports_zstd));
+      compressFn = mod.zstdCompress;
+      decompressFn = mod.zstdDecompress;
+    } catch {}
+    compressionLoaded = true;
+  }
+  function buildHeaders() {
+    const headers = {
+      "Content-Type": ARROW_CONTENT_TYPE
+    };
+    if (compressionLevel != null && compressFn) {
+      headers["Content-Encoding"] = "zstd";
+    }
+    if (compressionLevel != null && decompressFn) {
+      headers["Accept-Encoding"] = "zstd";
+    }
+    headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
+    if (authorization) {
+      headers.Authorization = authorization;
+    }
+    return headers;
+  }
+  async function prepareBody(content) {
+    if (compressionLevel != null && compressFn) {
+      return await compressFn(content, compressionLevel);
+    }
+    return content;
+  }
+  function checkAuth(resp) {
+    if (resp.status === 401) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
+  }
+  async function readResponse(resp) {
+    const body = new Uint8Array(await resp.arrayBuffer());
+    return new Uint8Array(await decodeResponseBody(resp.headers, body, decompressFn));
+  }
+  async function ensureMethodCache() {
+    if (methodCache)
+      return methodCache;
+    await ensureCompression();
+    const desc = await httpIntrospect(baseUrl, {
+      prefix,
+      authorization,
+      compressionLevel,
+      compressFn,
+      decompressFn,
+      fetch: fetchFn
+    });
+    methodCache = new Map(desc.methods.map((m) => [m.name, m]));
+    serverProtocolVersion = desc.protocolVersion;
+    return methodCache;
+  }
+  return {
+    async call(method, params) {
+      await ensureCompression();
+      const methods = await ensureMethodCache();
+      const info = methods.get(method);
+      if (!info) {
+        throw new Error(`Unknown method: '${method}'`);
+      }
+      const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
+      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}`, body);
+      checkAuth(resp);
+      const responseBody = await readResponse(resp);
+      const { batches } = await readResponseBatches(responseBody);
+      let resultBatch = null;
+      for (let batch of batches) {
+        if (batch.numRows === 0) {
+          if (isExternalLocationBatch(batch)) {
+            batch = await resolveExternalLocation(batch, effectiveExternalConfig);
+          } else {
+            dispatchLogOrError(batch, onLog);
+            continue;
+          }
+        }
+        if (resultBatch !== null) {
+          throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
+        }
+        resultBatch = batch;
+      }
+      if (!resultBatch) {
+        return null;
+      }
+      const rows = extractBatchRows(resultBatch);
+      if (rows.length === 0)
+        return null;
+      const result = rows[0];
+      if (info.resultSchema.fields.length === 0)
+        return null;
+      return result;
+    },
+    async stream(method, params) {
+      await ensureCompression();
+      const methods = await ensureMethodCache();
+      const info = methods.get(method);
+      if (!info) {
+        throw new Error(`Unknown method: '${method}'`);
+      }
+      const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
+      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}/init`, body);
+      checkAuth(resp);
+      const responseBody = await readResponse(resp);
+      let header = null;
+      let stateToken = null;
+      let callStateToken = null;
+      const pendingBatches = [];
+      let dataBatchesInTurn = 0;
+      const queueDataBatch = (batch) => {
+        dataBatchesInTurn += 1;
+        if (dataBatchesInTurn > 1) {
+          throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
+        }
+        pendingBatches.push(batch);
+      };
+      let finished = false;
+      let streamSchema = null;
+      if (info.headerSchema) {
+        const reader = await readSequentialStreams(responseBody);
+        const headerStream = await reader.readStream();
+        if (headerStream) {
+          for (const batch of headerStream.batches) {
+            if (batch.numRows === 0) {
+              dispatchLogOrError(batch, onLog);
+              continue;
+            }
+            const rows = extractBatchRows(batch);
+            if (rows.length > 0) {
+              header = rows[0];
+            }
+          }
+        }
+        const dataStream = await reader.readStream();
+        if (dataStream) {
+          streamSchema = dataStream.schema;
+        }
+        const headerErrorBatches = [];
+        if (dataStream) {
+          for (const batch of dataStream.batches) {
+            if (batch.numRows === 0) {
+              const token = batch.metadata?.get(STATE_KEY);
+              if (token) {
+                stateToken = token;
+                callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
+                continue;
+              }
+              if (isExternalLocationBatch(batch)) {
+                queueDataBatch(batch);
+                continue;
+              }
+              const level = batch.metadata?.get(LOG_LEVEL_KEY);
+              if (level === "EXCEPTION") {
+                headerErrorBatches.push(batch);
+                continue;
+              }
+              dispatchLogOrError(batch, onLog);
+              continue;
+            }
+            queueDataBatch(batch);
+          }
+        }
+        if (headerErrorBatches.length > 0) {
+          if (pendingBatches.length > 0 || stateToken !== null) {
+            pendingBatches.push(...headerErrorBatches);
+          } else {
+            for (const batch of headerErrorBatches) {
+              dispatchLogOrError(batch, onLog);
+            }
+          }
+        }
+        if (!dataStream && !stateToken) {
+          finished = true;
+        }
+      } else {
+        const { schema: responseSchema, batches } = await readResponseBatches(responseBody);
+        streamSchema = responseSchema;
+        const errorBatches = [];
+        for (const batch of batches) {
+          if (batch.numRows === 0) {
+            const token = batch.metadata?.get(STATE_KEY);
+            if (token) {
+              stateToken = token;
+              callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
+              continue;
+            }
+            if (isExternalLocationBatch(batch)) {
+              queueDataBatch(batch);
+              continue;
+            }
+            const level = batch.metadata?.get(LOG_LEVEL_KEY);
+            if (level === "EXCEPTION") {
+              errorBatches.push(batch);
+              continue;
+            }
+            dispatchLogOrError(batch, onLog);
+            continue;
+          }
+          queueDataBatch(batch);
+        }
+        if (errorBatches.length > 0) {
+          if (pendingBatches.length > 0 || stateToken !== null) {
+            pendingBatches.push(...errorBatches);
+          } else {
+            for (const batch of errorBatches) {
+              dispatchLogOrError(batch, onLog);
+            }
+          }
+        }
+      }
+      if (pendingBatches.length === 0 && stateToken === null) {
+        finished = true;
+      }
+      const outputSchema = (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null) ?? (pendingBatches.length > 0 ? pendingBatches[0].schema : null) ?? info.outputSchema ?? info.resultSchema;
+      return new HttpStreamSession({
+        baseUrl,
+        prefix,
+        method,
+        stateToken,
+        callStateToken,
+        outputSchema,
+        inputSchema: info.inputSchema,
+        onLog,
+        pendingBatches,
+        finished,
+        header,
+        compressionLevel,
+        compressFn,
+        decompressFn,
+        authorization,
+        externalConfig: effectiveExternalConfig,
+        postFn: postWithExternalization
+      });
+    },
+    async resumeStream(method, token, outputSchema) {
+      await ensureCompression();
+      const { cursor, callToken } = unpackResumeToken(token);
+      return new HttpStreamSession({
+        baseUrl,
+        prefix,
+        method,
+        stateToken: cursor,
+        callStateToken: callToken,
+        outputSchema: outputSchema ?? new Schema3([]),
+        onLog,
+        pendingBatches: [],
+        finished: false,
+        header: null,
+        compressionLevel,
+        compressFn,
+        decompressFn,
+        authorization,
+        externalConfig: effectiveExternalConfig,
+        postFn: postWithExternalization
+      });
+    },
+    async describe() {
+      await ensureCompression();
+      return httpIntrospect(baseUrl, {
+        prefix,
+        authorization,
+        compressionLevel,
+        compressFn,
+        decompressFn,
+        fetch: fetchFn
+      });
+    },
+    close() {}
+  };
+}
+
+// src/client/pipe.ts
+import {
+  Field as Field3,
+  makeData as makeData2,
+  RecordBatch as RecordBatch2,
+  RecordBatchStreamWriter as RecordBatchStreamWriter2,
+  Schema as Schema4,
+  Struct as Struct2,
+  vectorFromArray as vectorFromArray2
+} from "@query-farm/apache-arrow";
+
+// src/wire/writer.ts
+var STDOUT_FD = 1;
+var RESOLVED = Promise.resolve();
+var _NODE_FS_MOD = "node:fs";
+var _writeSync = null;
+function _loadWriteSync() {
+  if (_writeSync)
+    return _writeSync;
+  const getBuiltin = globalThis.process?.getBuiltinModule;
+  if (typeof getBuiltin === "function") {
+    const fs2 = getBuiltin.call(globalThis.process, _NODE_FS_MOD);
+    if (fs2?.writeSync) {
+      _writeSync = fs2.writeSync.bind(fs2);
+      return _writeSync;
+    }
+  }
+  const req = import.meta.require ?? globalThis.require ?? null;
+  if (!req) {
+    throw new Error("IpcStreamWriter needs synchronous node:fs.writeSync, reached via " + "import.meta.require (Bun), globalThis.require (Node CJS), or " + "process.getBuiltinModule (Node >= 20.16). This runtime offers none of " + "them, so the subprocess transport is unavailable. On an older Node ESM, " + "either upgrade or set globalThis.require = createRequire(import.meta.url).");
+  }
+  const fs = req(_NODE_FS_MOD);
+  _writeSync = fs.writeSync.bind(fs);
+  return _writeSync;
+}
+var MAX_WRITE_CHUNK = 1 << 30;
+var MAX_STREAM_CHUNK = 128 * 1024;
+function writeAll(fd, data) {
+  const writeSync = _loadWriteSync();
+  let offset = 0;
+  let spins = 0;
+  while (offset < data.length) {
+    try {
+      const written = writeSync(fd, data, offset, Math.min(data.length - offset, MAX_WRITE_CHUNK));
+      if (written <= 0)
+        throw new Error(`writeSync returned ${written}`);
+      offset += written;
+      spins = 0;
+    } catch (e) {
+      if (e.code === "EAGAIN") {
+        if (++spins < 8192)
+          continue;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        spins = 0;
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+async function socketWriteAll(socket, data) {
+  let offset = 0;
+  do {
+    const end = Math.min(offset + MAX_STREAM_CHUNK, data.length);
+    await socketWriteChunk(socket, data.subarray(offset, end));
+    offset = end;
+  } while (offset < data.length);
+}
+async function socketWriteChunk(socket, data) {
+  if (socket.destroyed || socket.writableEnded) {
+    throw new Error("socketWriteAll: socket is already closed");
+  }
+  const ok = socket.write(data);
+  if (ok)
+    return;
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      socket.off("drain", onDrain);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err2) => {
+      cleanup();
+      reject(err2);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    socket.once("drain", onDrain);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+  });
+}
+
+class IpcStreamWriter {
+  target;
+  constructor(fdOrSocketOrSink = STDOUT_FD) {
+    if (typeof fdOrSocketOrSink === "number") {
+      this.target = { kind: "fd", fd: fdOrSocketOrSink };
+    } else if (typeof fdOrSocketOrSink.write === "function" && !("writable" in fdOrSocketOrSink)) {
+      this.target = { kind: "sink", sink: fdOrSocketOrSink };
+    } else {
+      this.target = { kind: "socket", socket: fdOrSocketOrSink };
+    }
+  }
+  async writeStream(schema2, batches) {
+    const bytes = serializeBatches(schema2, batches);
+    if (this.target.kind === "fd") {
+      writeAll(this.target.fd, bytes);
+    } else if (this.target.kind === "sink") {
+      await this.target.sink.write(bytes);
+    } else {
+      await socketWriteAll(this.target.socket, bytes);
+    }
+  }
+  openStream(schema2) {
+    return new IncrementalStream(this.target, schema2);
+  }
+}
+
+class IncrementalStream {
+  encoder;
+  target;
+  closed = false;
+  writeChain = Promise.resolve();
+  constructor(target, schema2) {
+    this.target = target;
+    this.encoder = createIncrementalEncoder(schema2);
+    this.enqueue(this.encoder.start());
+  }
+  async write(batch) {
+    if (this.closed)
+      throw new Error("Stream already closed");
+    return this.enqueue(this.encoder.writeBatch(batch));
+  }
+  async close() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    return this.enqueue(this.encoder.finish());
+  }
+  enqueue(bytes) {
+    const target = this.target;
+    if (target.kind === "fd") {
+      writeAll(target.fd, bytes);
+      return RESOLVED;
+    }
+    const next = this.writeChain.then(() => {
+      if (target.kind === "sink") {
+        return target.sink.write(bytes);
+      }
+      return socketWriteAll(target.socket, bytes);
+    });
+    this.writeChain = next.catch(() => {
+      return;
+    });
+    return next;
+  }
 }
 
 // src/client/pipe.ts
@@ -2262,12 +3122,12 @@ class PipeStreamSession {
     if (this._closed) {
       throw new RpcError("ProtocolError", "Stream session is closed", "");
     }
-    const tickSchema = new Schema([]);
+    const tickSchema = new Schema4([]);
     if (!this._inputWriter) {
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
     }
-    const tickData = makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
-    const tickBatch = new RecordBatch(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
+    const tickData = makeData2({ type: new Struct2([]), length: 0, children: [], nullCount: 0 });
+    const tickBatch = new RecordBatch2(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
     this._inputWriter.write(tickBatch);
     await this._ensureOutputStream();
     const outputBatch = await this._readOutputBatch();
@@ -2296,16 +3156,16 @@ class PipeStreamSession {
     } else if (input.length === 0) {
       inputSchema = this._inputSchema ?? this._outputSchema;
       const children = inputSchema.fields.map((f) => {
-        return makeData({ type: f.type, length: 0, nullCount: 0 });
+        return makeData2({ type: f.type, length: 0, nullCount: 0 });
       });
-      const structType = new Struct(inputSchema.fields);
-      const data = makeData({
+      const structType = new Struct2(inputSchema.fields);
+      const data = makeData2({
         type: structType,
         length: 0,
         children,
         nullCount: 0
       });
-      batch = new RecordBatch(inputSchema, data);
+      batch = new RecordBatch2(inputSchema, data);
     } else {
       const keys = Object.keys(input[0]);
       const fields = keys.map((key) => {
@@ -2317,9 +3177,9 @@ class PipeStreamSession {
           }
         }
         const arrowType = inferArrowType(sample);
-        return new Field(key, arrowType, true);
+        return new Field3(key, arrowType, true);
       });
-      inputSchema = new Schema(fields);
+      inputSchema = new Schema4(fields);
       if (this._inputSchema) {
         const cached = this._inputSchema;
         if (cached.fields.length !== inputSchema.fields.length || cached.fields.some((f, i) => f.name !== inputSchema.fields[i].name)) {
@@ -2330,16 +3190,16 @@ class PipeStreamSession {
       }
       const children = inputSchema.fields.map((f) => {
         const values = input.map((row) => row[f.name]);
-        return vectorFromArray(values, f.type).data[0];
+        return vectorFromArray2(values, f.type).data[0];
       });
-      const structType = new Struct(inputSchema.fields);
-      const data = makeData({
+      const structType = new Struct2(inputSchema.fields);
+      const data = makeData2({
         type: structType,
         length: input.length,
         children,
         nullCount: 0
       });
-      batch = new RecordBatch(inputSchema, data);
+      batch = new RecordBatch2(inputSchema, data);
     }
     if (!this._inputWriter) {
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
@@ -2376,7 +3236,7 @@ class PipeStreamSession {
     if (this._closed)
       return;
     try {
-      const tickSchema = new Schema([]);
+      const tickSchema = new Schema4([]);
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
       while (true) {
         const rows = await this.tick();
@@ -2407,7 +3267,7 @@ class PipeStreamSession {
       this._inputWriter.close();
       this._inputWriter = null;
     } else {
-      const emptySchema = new Schema([]);
+      const emptySchema = new Schema4([]);
       const ipc = serializeIpcStream(emptySchema, []);
       this._writeFn(ipc);
     }
@@ -2478,7 +3338,7 @@ function pipeConnect(readable, writable, options) {
       return methodCache;
     await acquireBusy();
     try {
-      const emptySchema = new Schema([]);
+      const emptySchema = new Schema4([]);
       const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
       writeFn(body);
       const r = await ensureReader();
@@ -2582,7 +3442,7 @@ function pipeConnect(readable, writable, options) {
       } catch (e) {
         try {
           const r = await ensureReader();
-          const emptySchema = new Schema([]);
+          const emptySchema = new Schema4([]);
           const ipc = serializeIpcStream(emptySchema, []);
           writeFn(ipc);
           const outStream = await r.readStream();
@@ -2641,7 +3501,740 @@ function subprocessConnect(cmd, options) {
   return client;
 }
 
+// src/client/socks5h.ts
+var DEFAULT_CONNECT_TIMEOUT_MS = 5000;
+var DEFAULT_REQUEST_TIMEOUT_MS = 300000;
+var DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
+var DEFAULT_MAX_RESPONSE_HEADER_BYTES = 64 * 1024;
+function parseSocks5hProxy(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new TypeError("invalid SOCKS5h proxy URI");
+  }
+  if (url.protocol !== "socks5h:" || url.username !== "" || url.password !== "" || url.pathname !== "" && url.pathname !== "/" || url.search !== "" || url.hash !== "" || url.hostname === "" || url.port === "") {
+    throw new TypeError("SOCKS5h proxy must be socks5h://host:port without credentials or options");
+  }
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new TypeError("invalid SOCKS5h proxy port");
+  return Object.freeze({ host: stripIpv6Brackets(url.hostname), port });
+}
+function stripIpv6Brackets(host) {
+  return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+}
+function checkedPort(port) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new TypeError("target port must be 1..65535");
+  return port;
+}
+function targetAddress(host) {
+  if (host === "" || Array.from(host).some((character) => {
+    const code = character.codePointAt(0);
+    return code <= 31 || code === 127;
+  }))
+    throw new TypeError("invalid SOCKS5h target host");
+  const kind = isIP(host);
+  if (kind === 4)
+    return Uint8Array.of(1, ...host.split(".").map(Number));
+  if (kind === 6) {
+    const bytes = ipv6Bytes(host);
+    return Uint8Array.of(4, ...bytes);
+  }
+  const ascii = domainToASCII(host);
+  if (!ascii || ascii.length > 255 || /[^\x21-\x7e]/u.test(ascii)) {
+    throw new TypeError("SOCKS5h target domain must contain 1..255 IDNA bytes");
+  }
+  const encoded = new TextEncoder().encode(ascii);
+  return Uint8Array.of(3, encoded.length, ...encoded);
+}
+function ipv6Bytes(input) {
+  const host = input.split("%")[0].toLowerCase();
+  const pieces = host.split("::");
+  if (pieces.length > 2)
+    throw new TypeError("invalid SOCKS5h IPv6 target");
+  const parseSide = (side) => {
+    if (!side)
+      return [];
+    const words2 = [];
+    for (const part of side.split(":")) {
+      if (part.includes(".")) {
+        const octets = part.split(".").map(Number);
+        if (octets.length !== 4 || octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
+          throw new TypeError("invalid SOCKS5h IPv6 target");
+        }
+        words2.push(octets[0] << 8 | octets[1], octets[2] << 8 | octets[3]);
+      } else {
+        const value = Number.parseInt(part, 16);
+        if (!/^[0-9a-f]{1,4}$/u.test(part) || !Number.isInteger(value)) {
+          throw new TypeError("invalid SOCKS5h IPv6 target");
+        }
+        words2.push(value);
+      }
+    }
+    return words2;
+  };
+  const left = parseSide(pieces[0]);
+  const right = parseSide(pieces[1] ?? "");
+  const missing = 8 - left.length - right.length;
+  if (pieces.length === 1 && missing !== 0 || pieces.length === 2 && missing < 1) {
+    throw new TypeError("invalid SOCKS5h IPv6 target");
+  }
+  const words = [...left, ...Array(missing).fill(0), ...right];
+  return words.flatMap((word) => [word >>> 8, word & 255]);
+}
+function setupSignal(timeoutMs, signal) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    throw new TypeError("SOCKS5h connect timeout must be positive");
+  const controller = new AbortController;
+  const timeout = setTimeout(() => controller.abort(new Error("SOCKS5h connection deadline elapsed")), timeoutMs);
+  const abort = () => controller.abort(signal?.reason ?? new Error("SOCKS5h connection cancelled"));
+  if (signal?.aborted)
+    abort();
+  else
+    signal?.addEventListener("abort", abort, { once: true });
+  return {
+    signal: controller.signal,
+    finish: () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+    }
+  };
+}
+function waitConnect(socket, signal) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      socket.off("connect", connected);
+      socket.off("error", failed);
+      signal.removeEventListener("abort", aborted);
+    };
+    const connected = () => {
+      cleanup();
+      resolve();
+    };
+    const failed = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const aborted = () => {
+      cleanup();
+      socket.destroy();
+      reject(signal.reason instanceof Error ? signal.reason : new Error("SOCKS5h connection cancelled"));
+    };
+    socket.once("connect", connected);
+    socket.once("error", failed);
+    if (signal.aborted)
+      aborted();
+    else
+      signal.addEventListener("abort", aborted, { once: true });
+  });
+}
+function write(socket, bytes, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted)
+      return reject(signal.reason);
+    const aborted = () => {
+      socket.destroy();
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", aborted, { once: true });
+    socket.write(bytes, (error) => {
+      signal.removeEventListener("abort", aborted);
+      if (error)
+        reject(error);
+      else
+        resolve();
+    });
+  });
+}
+
+class SocketReader {
+  socket;
+  signal;
+  buffered = Buffer.alloc(0);
+  ended = false;
+  failure;
+  wake;
+  constructor(socket, signal) {
+    this.socket = socket;
+    this.signal = signal;
+    socket.on("data", this.onData);
+    socket.once("end", this.onEnd);
+    socket.once("error", this.onError);
+    signal.addEventListener("abort", this.onAbort, { once: true });
+  }
+  onData = (chunk) => {
+    this.buffered = this.buffered.length === 0 ? chunk : Buffer.concat([this.buffered, chunk]);
+    this.wake?.();
+  };
+  onEnd = () => {
+    this.ended = true;
+    this.wake?.();
+  };
+  onError = (error) => {
+    this.failure = error;
+    this.wake?.();
+  };
+  onAbort = () => {
+    this.failure = this.signal.reason;
+    this.socket.destroy();
+    this.wake?.();
+  };
+  async exact(size) {
+    while (this.buffered.length < size) {
+      if (this.failure)
+        throw this.failure;
+      if (this.ended)
+        throw new Error("SOCKS5h reply was truncated");
+      await new Promise((resolve) => {
+        this.wake = resolve;
+      });
+      this.wake = undefined;
+    }
+    const value = this.buffered.subarray(0, size);
+    this.buffered = this.buffered.subarray(size);
+    return value;
+  }
+  release() {
+    this.socket.off("data", this.onData);
+    this.socket.off("end", this.onEnd);
+    this.socket.off("error", this.onError);
+    this.signal.removeEventListener("abort", this.onAbort);
+    if (this.buffered.length > 0)
+      this.socket.unshift(this.buffered);
+  }
+}
+async function negotiate(socket, host, port, signal) {
+  const reader = new SocketReader(socket, signal);
+  try {
+    await write(socket, Uint8Array.of(5, 1, 0), signal);
+    const method = await reader.exact(2);
+    if (method[0] !== 5 || method[1] !== 0)
+      throw new Error("SOCKS5h proxy rejected the NO AUTH method");
+    const address = targetAddress(host);
+    await write(socket, Uint8Array.of(5, 1, 0, ...address, port >>> 8, port & 255), signal);
+    const head = await reader.exact(4);
+    if (head[0] !== 5 || head[2] !== 0)
+      throw new Error("malformed SOCKS5h connect response");
+    if (head[1] !== 0)
+      throw new Error(`SOCKS5h proxy rejected target connection (reply ${head[1]})`);
+    let addressLength;
+    if (head[3] === 1)
+      addressLength = 4;
+    else if (head[3] === 4)
+      addressLength = 16;
+    else if (head[3] === 3)
+      addressLength = (await reader.exact(1))[0];
+    else
+      throw new Error("SOCKS5h response used an invalid address type");
+    await reader.exact(addressLength + 2);
+  } finally {
+    reader.release();
+  }
+}
+async function dialSocks5h(proxyUri, targetHost, targetPort, options = {}) {
+  const proxy = typeof proxyUri === "string" ? parseSocks5hProxy(proxyUri) : proxyUri;
+  if (!proxy.host || Array.from(proxy.host).some((character) => {
+    const code = character.codePointAt(0);
+    return code <= 31 || code === 127;
+  }))
+    throw new TypeError("invalid SOCKS5h proxy host");
+  checkedPort(proxy.port);
+  const port = checkedPort(targetPort);
+  targetAddress(targetHost);
+  const setup = setupSignal(options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS, options.signal);
+  const socket = tcpDial({ host: proxy.host, port: proxy.port });
+  try {
+    await waitConnect(socket, setup.signal);
+    socket.setNoDelay(true);
+    await negotiate(socket, targetHost, port, setup.signal);
+    return socket;
+  } catch (error) {
+    socket.destroy();
+    throw error instanceof Error ? error : new Error("SOCKS5h connection failed");
+  } finally {
+    setup.finish();
+  }
+}
+async function tcpConnectSocks5h(host, port, proxy, options = {}) {
+  const socket = await dialSocks5h(proxy, host, port, options);
+  socket.on("error", () => {});
+  const client = pipeConnect(socket, {
+    write(data) {
+      socket.write(data);
+    },
+    end() {
+      socket.end();
+    }
+  }, options);
+  const close = client.close;
+  client.close = () => {
+    close.call(client);
+    socket.destroy();
+  };
+  return client;
+}
+function nodeHeaders(input) {
+  const headers = {};
+  new Headers(input).forEach((value, name) => {
+    headers[name] = value;
+  });
+  return headers;
+}
+function requestBody(input, init) {
+  const body = init?.body ?? (input instanceof Request ? input.body : null);
+  if (body == null)
+    return new Uint8Array;
+  if (typeof body === "string")
+    return new TextEncoder().encode(body);
+  if (body instanceof Uint8Array)
+    return body;
+  if (body instanceof ArrayBuffer)
+    return new Uint8Array(body);
+  throw new TypeError("SOCKS5h fetch supports string, ArrayBuffer, and Uint8Array request bodies");
+}
+var HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
+function invalidHeaderValue(value) {
+  for (let index = 0;index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 32 && code !== 9 || code === 127)
+      return true;
+  }
+  return false;
+}
+function responseHeaders(raw, headerEnd) {
+  const lines = raw.toString("latin1", 0, headerEnd).split(`\r
+`);
+  const status = /^HTTP\/1\.[01] (\d{3})(?: [^\r\n]*)?$/u.exec(lines.shift() ?? "");
+  if (!status)
+    throw new Error("invalid HTTP status line");
+  const statusCode = Number(status[1]);
+  if (statusCode < 200 || statusCode > 599)
+    throw new Error("unsupported informational HTTP response");
+  const contentLengths = [];
+  const transferEncodings = [];
+  for (const line of lines) {
+    const colon = line.indexOf(":");
+    if (colon <= 0 || /^[ \t]/u.test(line))
+      throw new Error("invalid HTTP response header");
+    const name = line.slice(0, colon);
+    const value = line.slice(colon + 1).trim();
+    if (!HEADER_NAME.test(name) || invalidHeaderValue(value)) {
+      throw new Error("invalid HTTP response header");
+    }
+    if (name.toLowerCase() === "content-length")
+      contentLengths.push(value);
+    if (name.toLowerCase() === "transfer-encoding")
+      transferEncodings.push(value);
+  }
+  if (contentLengths.length > 1 || transferEncodings.length > 1) {
+    throw new Error("ambiguous HTTP response framing");
+  }
+  if (contentLengths.length > 0 && transferEncodings.length > 0) {
+    throw new Error("conflicting HTTP response framing");
+  }
+  if (transferEncodings.length === 1 && transferEncodings[0].toLowerCase() !== "chunked") {
+    throw new Error("unsupported HTTP Transfer-Encoding");
+  }
+  let contentLength;
+  if (contentLengths.length === 1) {
+    if (!/^\d+$/u.test(contentLengths[0]))
+      throw new Error("invalid HTTP Content-Length");
+    contentLength = Number(contentLengths[0]);
+    if (!Number.isSafeInteger(contentLength))
+      throw new Error("invalid HTTP Content-Length");
+  }
+  return { statusCode, contentLength, chunked: transferEncodings.length === 1 };
+}
+
+class HttpResponseFramer {
+  method;
+  maxResponseBytes;
+  maxHeaderBytes;
+  bytes;
+  length = 0;
+  headerSearchFrom = 0;
+  headerEnd;
+  expectedLength;
+  chunkOffset;
+  chunkLineSearchFrom;
+  chunkDataEnd;
+  trailerOffset;
+  trailerSearchFrom;
+  closeDelimited = false;
+  constructor(method, maxResponseBytes, maxHeaderBytes) {
+    this.method = method;
+    this.maxResponseBytes = maxResponseBytes;
+    this.maxHeaderBytes = maxHeaderBytes;
+    this.bytes = Buffer.allocUnsafe(Math.min(8192, maxResponseBytes));
+  }
+  append(chunk) {
+    const nextLength = this.length + chunk.length;
+    if (nextLength > this.maxResponseBytes)
+      throw new Error("HTTP response exceeds configured limit");
+    this.ensureCapacity(nextLength);
+    chunk.copy(this.bytes, this.length);
+    this.length = nextLength;
+    return this.inspect();
+  }
+  finish() {
+    const complete = this.inspect();
+    if (complete !== null)
+      return complete;
+    if (this.closeDelimited && this.headerEnd !== undefined)
+      return this.length;
+    throw new Error("truncated HTTP response");
+  }
+  materialize(length) {
+    return Buffer.from(this.bytes.subarray(0, length));
+  }
+  ensureCapacity(required) {
+    if (required <= this.bytes.length)
+      return;
+    let capacity = this.bytes.length;
+    while (capacity < required)
+      capacity = Math.min(this.maxResponseBytes, Math.max(capacity * 2, required));
+    const replacement = Buffer.allocUnsafe(capacity);
+    this.bytes.copy(replacement, 0, 0, this.length);
+    this.bytes = replacement;
+  }
+  inspect() {
+    if (this.headerEnd === undefined) {
+      const marker = this.bytes.subarray(0, this.length).indexOf(`\r
+\r
+`, this.headerSearchFrom);
+      if (marker < 0) {
+        if (this.length >= this.maxHeaderBytes)
+          throw new Error("oversized HTTP response headers");
+        this.headerSearchFrom = Math.max(0, this.length - 3);
+        return null;
+      }
+      if (marker + 4 > this.maxHeaderBytes)
+        throw new Error("oversized HTTP response headers");
+      this.headerEnd = marker + 4;
+      const framing = responseHeaders(this.bytes, marker);
+      if (this.method === "HEAD" || framing.statusCode === 204 || framing.statusCode === 205 || framing.statusCode === 304) {
+        return this.headerEnd;
+      }
+      if (framing.contentLength !== undefined) {
+        this.expectedLength = this.headerEnd + framing.contentLength;
+        if (!Number.isSafeInteger(this.expectedLength) || this.expectedLength > this.maxResponseBytes) {
+          throw new Error("HTTP response exceeds configured limit");
+        }
+      } else if (framing.chunked) {
+        this.chunkOffset = this.headerEnd;
+        this.chunkLineSearchFrom = this.headerEnd;
+      } else {
+        this.closeDelimited = true;
+      }
+    }
+    if (this.expectedLength !== undefined)
+      return this.length >= this.expectedLength ? this.expectedLength : null;
+    if (this.chunkOffset === undefined)
+      return null;
+    return this.inspectChunks();
+  }
+  inspectChunks() {
+    while (this.chunkOffset !== undefined) {
+      if (this.trailerOffset !== undefined) {
+        if (this.length >= this.trailerOffset + 2 && this.bytes[this.trailerOffset] === 13 && this.bytes[this.trailerOffset + 1] === 10) {
+          return this.trailerOffset + 2;
+        }
+        const trailerEnd = this.bytes.subarray(0, this.length).indexOf(`\r
+\r
+`, this.trailerSearchFrom ?? this.trailerOffset);
+        if (trailerEnd < 0) {
+          this.trailerSearchFrom = Math.max(this.trailerOffset, this.length - 3);
+          return null;
+        }
+        const trailers = this.bytes.toString("latin1", this.trailerOffset, trailerEnd).split(`\r
+`);
+        for (const trailer of trailers) {
+          const colon = trailer.indexOf(":");
+          const name = trailer.slice(0, colon);
+          const value = trailer.slice(colon + 1).trim();
+          if (colon <= 0 || /^[ \t]/u.test(trailer) || !HEADER_NAME.test(name) || invalidHeaderValue(value) || name.toLowerCase() === "content-length" || name.toLowerCase() === "transfer-encoding") {
+            throw new Error("invalid chunked HTTP trailer");
+          }
+        }
+        return trailerEnd + 4;
+      }
+      if (this.chunkDataEnd !== undefined) {
+        if (this.length < this.chunkDataEnd)
+          return null;
+        if (this.bytes[this.chunkDataEnd - 2] !== 13 || this.bytes[this.chunkDataEnd - 1] !== 10) {
+          throw new Error("invalid chunked HTTP response");
+        }
+        this.chunkOffset = this.chunkDataEnd;
+        this.chunkLineSearchFrom = this.chunkDataEnd;
+        this.chunkDataEnd = undefined;
+        continue;
+      }
+      const lineEnd = this.bytes.subarray(0, this.length).indexOf(`\r
+`, this.chunkLineSearchFrom ?? this.chunkOffset);
+      if (lineEnd < 0) {
+        this.chunkLineSearchFrom = Math.max(this.chunkOffset, this.length - 1);
+        return null;
+      }
+      const sizeText = this.bytes.toString("ascii", this.chunkOffset, lineEnd).split(";", 1)[0].trim();
+      if (!/^[0-9A-Fa-f]+$/u.test(sizeText))
+        throw new Error("invalid chunked HTTP response");
+      const size = Number.parseInt(sizeText, 16);
+      if (!Number.isSafeInteger(size))
+        throw new Error("invalid chunked HTTP response");
+      const dataOffset = lineEnd + 2;
+      if (size === 0) {
+        this.trailerOffset = dataOffset;
+        this.trailerSearchFrom = dataOffset;
+        continue;
+      }
+      const nextOffset = dataOffset + size + 2;
+      if (!Number.isSafeInteger(nextOffset) || nextOffset > this.maxResponseBytes) {
+        throw new Error("HTTP response exceeds configured limit");
+      }
+      this.chunkDataEnd = nextOffset;
+    }
+    return null;
+  }
+}
+function readSocketResponse(socket, signal, method, maxResponseBytes, maxHeaderBytes) {
+  return new Promise((resolve, reject) => {
+    const framer = new HttpResponseFramer(method, maxResponseBytes, maxHeaderBytes);
+    let settled = false;
+    const cleanup = () => {
+      socket.off("data", data);
+      socket.off("end", end);
+      socket.off("error", fail);
+      signal.removeEventListener("abort", abort);
+    };
+    const succeed = (length) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      socket.pause();
+      resolve(framer.materialize(length));
+    };
+    const rejectOnce = (error) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      socket.destroy();
+      reject(error);
+    };
+    const data = (chunk) => {
+      try {
+        const complete = framer.append(chunk);
+        if (complete !== null)
+          succeed(complete);
+      } catch (error) {
+        rejectOnce(error);
+      }
+    };
+    const end = () => {
+      try {
+        succeed(framer.finish());
+      } catch (error) {
+        rejectOnce(error);
+      }
+    };
+    const fail = (error) => {
+      rejectOnce(error);
+    };
+    const abort = () => {
+      rejectOnce(signal.reason ?? new Error("SOCKS5h HTTP request cancelled"));
+    };
+    socket.on("data", data);
+    socket.once("end", end);
+    socket.once("error", fail);
+    if (signal.aborted)
+      abort();
+    else
+      signal.addEventListener("abort", abort, { once: true });
+  });
+}
+function decodeChunked(body) {
+  const chunks = [];
+  let offset = 0;
+  while (true) {
+    const lineEnd = body.indexOf(`\r
+`, offset);
+    if (lineEnd < 0)
+      throw new Error("truncated chunked HTTP response");
+    const sizeText = body.toString("ascii", offset, lineEnd).split(";", 1)[0].trim();
+    if (!/^[0-9A-Fa-f]+$/u.test(sizeText))
+      throw new Error("invalid chunked HTTP response");
+    const size = Number.parseInt(sizeText, 16);
+    offset = lineEnd + 2;
+    if (size === 0)
+      return Buffer.concat(chunks);
+    if (offset + size + 2 > body.length || body[offset + size] !== 13 || body[offset + size + 1] !== 10) {
+      throw new Error("truncated chunked HTTP response");
+    }
+    chunks.push(body.subarray(offset, offset + size));
+    offset += size + 2;
+  }
+}
+function decodeHttpResponse(raw, maxHeaderBytes) {
+  const headerEnd = raw.indexOf(`\r
+\r
+`);
+  if (headerEnd < 0 || headerEnd + 4 > maxHeaderBytes)
+    throw new Error("invalid or oversized HTTP response headers");
+  const lines = raw.toString("latin1", 0, headerEnd).split(`\r
+`);
+  const status = /^HTTP\/1\.[01] (\d{3})(?: (.*))?$/u.exec(lines.shift() ?? "");
+  if (!status)
+    throw new Error("invalid HTTP status line");
+  const headers = new Headers;
+  const contentLengths = [];
+  const transferEncodings = [];
+  for (const line of lines) {
+    const colon = line.indexOf(":");
+    if (colon <= 0 || /^[ \t]/u.test(line))
+      throw new Error("invalid HTTP response header");
+    const name = line.slice(0, colon);
+    const value = line.slice(colon + 1).trim();
+    if (name.toLowerCase() === "content-length")
+      contentLengths.push(value);
+    if (name.toLowerCase() === "transfer-encoding")
+      transferEncodings.push(value);
+    headers.append(name, value);
+  }
+  if (contentLengths.length > 1 || transferEncodings.length > 1)
+    throw new Error("ambiguous HTTP response framing");
+  if (contentLengths.length > 0 && transferEncodings.length > 0)
+    throw new Error("conflicting HTTP response framing");
+  let body = raw.subarray(headerEnd + 4);
+  if (transferEncodings.length === 1) {
+    if (transferEncodings[0].toLowerCase() !== "chunked")
+      throw new Error("unsupported HTTP Transfer-Encoding");
+    body = decodeChunked(body);
+    headers.delete("Transfer-Encoding");
+  } else if (contentLengths.length === 1) {
+    if (!/^\d+$/u.test(contentLengths[0]))
+      throw new Error("invalid HTTP Content-Length");
+    const length = Number(contentLengths[0]);
+    if (!Number.isSafeInteger(length) || body.length < length)
+      throw new Error("invalid HTTP Content-Length");
+    body = body.subarray(0, length);
+  }
+  const statusCode = Number(status[1]);
+  const noBody = statusCode === 204 || statusCode === 205 || statusCode === 304;
+  return new Response(noBody ? null : Uint8Array.from(body), {
+    status: statusCode,
+    statusText: status[2] ?? "",
+    headers
+  });
+}
+function createSocks5hFetch(proxy, connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS, requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES, maxResponseHeaderBytes = DEFAULT_MAX_RESPONSE_HEADER_BYTES) {
+  const parsedProxy = parseSocks5hProxy(proxy);
+  if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) {
+    throw new TypeError("SOCKS5h connectTimeoutMs must be positive");
+  }
+  if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) {
+    throw new TypeError("SOCKS5h requestTimeoutMs must be positive");
+  }
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1) {
+    throw new TypeError("SOCKS5h maxResponseBytes must be a positive integer");
+  }
+  if (!Number.isSafeInteger(maxResponseHeaderBytes) || maxResponseHeaderBytes < 1 || maxResponseHeaderBytes > maxResponseBytes) {
+    throw new TypeError("SOCKS5h maxResponseHeaderBytes must be a positive integer within maxResponseBytes");
+  }
+  return async (input, init) => {
+    const requestUrl = new URL(input instanceof Request ? input.url : input.toString());
+    if (requestUrl.protocol !== "http:" && requestUrl.protocol !== "https:") {
+      throw new TypeError("SOCKS5h fetch supports only HTTP and HTTPS URLs");
+    }
+    const secure = requestUrl.protocol === "https:";
+    const targetPort = requestUrl.port ? Number(requestUrl.port) : secure ? 443 : 80;
+    const targetHost = stripIpv6Brackets(requestUrl.hostname);
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    const body = requestBody(input, init);
+    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    if (!HEADER_NAME.test(method))
+      throw new TypeError("invalid HTTP method");
+    const headers = nodeHeaders(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    headers.host = requestUrl.host;
+    headers.connection = "close";
+    if (headers["transfer-encoding"] !== undefined)
+      throw new TypeError("SOCKS5h fetch does not accept Transfer-Encoding");
+    if (headers["content-length"] !== undefined) {
+      if (!/^\d+$/u.test(headers["content-length"]) || Number(headers["content-length"]) !== body.byteLength) {
+        throw new TypeError("request Content-Length does not match the buffered body");
+      }
+    } else if (body.byteLength > 0) {
+      headers["content-length"] = String(body.byteLength);
+    }
+    const requestBudget = setupSignal(requestTimeoutMs, signal ?? undefined);
+    const setup = setupSignal(connectTimeoutMs, requestBudget.signal);
+    let connection;
+    try {
+      connection = await dialSocks5h(parsedProxy, targetHost, targetPort, {
+        connectTimeoutMs,
+        signal: setup.signal
+      });
+      if (secure) {
+        connection = await new Promise((resolve, reject) => {
+          const tls = tlsDial({ socket: connection, servername: isIP(targetHost) ? undefined : targetHost });
+          const aborted = () => tls.destroy(setup.signal.reason);
+          const failed = (error) => {
+            setup.signal.removeEventListener("abort", aborted);
+            tls.destroy();
+            reject(error);
+          };
+          tls.once("error", failed);
+          tls.once("secureConnect", () => {
+            tls.off("error", failed);
+            setup.signal.removeEventListener("abort", aborted);
+            tls.setNoDelay(true);
+            resolve(tls);
+          });
+          if (setup.signal.aborted)
+            aborted();
+          else
+            setup.signal.addEventListener("abort", aborted, { once: true });
+        });
+      }
+    } catch (error) {
+      setup.finish();
+      requestBudget.finish();
+      throw error;
+    }
+    setup.finish();
+    try {
+      const start = `${method} ${requestUrl.pathname}${requestUrl.search} HTTP/1.1\r
+`;
+      const head = `${start}${Object.entries(headers).map(([name, value]) => `${name}: ${value}\r
+`).join("")}\r
+`;
+      await write(connection, new TextEncoder().encode(head), requestBudget.signal);
+      if (body.byteLength > 0)
+        await write(connection, body, requestBudget.signal);
+      const rawResponse = await readSocketResponse(connection, requestBudget.signal, method, maxResponseBytes, maxResponseHeaderBytes);
+      connection.destroy();
+      const response = decodeHttpResponse(rawResponse, maxResponseHeaderBytes);
+      requestBudget.finish();
+      return response;
+    } catch (error) {
+      connection.destroy();
+      requestBudget.finish();
+      throw error;
+    }
+  };
+}
+function httpConnectSocks5h(baseUrl, proxy, options = {}) {
+  const { connectTimeoutMs, requestTimeoutMs, maxResponseBytes, maxResponseHeaderBytes, signal, ...httpOptions } = options;
+  const socksFetch = createSocks5hFetch(proxy, connectTimeoutMs, requestTimeoutMs, maxResponseBytes, maxResponseHeaderBytes);
+  return httpConnect(baseUrl, {
+    ...httpOptions,
+    fetch: (input, init) => socksFetch(input, { ...init, signal: init?.signal ?? signal })
+  });
+}
 // src/client/tcp.ts
+import { connect } from "node:net";
 function tcpConnect(host, port, options) {
   const socket = connect({ host, port });
   socket.setNoDelay(true);
@@ -3043,850 +4636,6 @@ class AuthContext {
       throw new RpcError("AuthenticationError", "Authentication required", "");
     }
   }
-}
-// src/client/connect.ts
-import { Schema as Schema4 } from "@query-farm/apache-arrow";
-
-// src/client/capabilities.ts
-var MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes";
-var UPLOAD_URL_HEADER = "VGI-Upload-URL-Support";
-var MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes";
-function parseHeaderInt(headers, name) {
-  const raw = headers.get(name) ?? headers.get(name.toLowerCase());
-  if (raw == null)
-    return null;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-function parseCapabilitiesFromHeaders(headers) {
-  const uploadRaw = headers.get(UPLOAD_URL_HEADER) ?? headers.get(UPLOAD_URL_HEADER.toLowerCase());
-  const uploadUrlSupport = uploadRaw === "true";
-  let cacheExpiresAt = null;
-  const cc = headers.get("Cache-Control") ?? headers.get("cache-control");
-  if (cc) {
-    for (const token of cc.split(",")) {
-      const t = token.trim().toLowerCase();
-      if (t.startsWith("max-age=")) {
-        const seconds = Number.parseFloat(t.slice("max-age=".length));
-        if (Number.isFinite(seconds)) {
-          cacheExpiresAt = Date.now() + seconds * 1000;
-        }
-        break;
-      }
-    }
-  }
-  return {
-    maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
-    uploadUrlSupport,
-    maxUploadBytes: parseHeaderInt(headers, MAX_UPLOAD_BYTES_HEADER),
-    cacheExpiresAt
-  };
-}
-function isCapabilitySnapshotFresh(snapshot) {
-  if (!snapshot)
-    return false;
-  if (snapshot.cacheExpiresAt == null)
-    return true;
-  return Date.now() < snapshot.cacheExpiresAt;
-}
-
-// src/client/stream.ts
-import { Field as Field2, makeData as makeData2, RecordBatch as RecordBatch2, Schema as Schema2, Struct as Struct2, vectorFromArray as vectorFromArray2 } from "@query-farm/apache-arrow";
-function packResumeToken(cursor, callToken) {
-  return callToken === null ? cursor : `${cursor.length}:${cursor}${callToken}`;
-}
-function unpackResumeToken(token) {
-  const sep = token.indexOf(":");
-  if (sep < 0)
-    return { cursor: token, callToken: null };
-  const cursorLen = Number(token.slice(0, sep));
-  if (!Number.isInteger(cursorLen) || cursorLen < 0)
-    return { cursor: token, callToken: null };
-  const rest = token.slice(sep + 1);
-  if (cursorLen > rest.length)
-    return { cursor: token, callToken: null };
-  const call = rest.slice(cursorLen);
-  return { cursor: rest.slice(0, cursorLen), callToken: call === "" ? null : call };
-}
-
-class HttpStreamSession {
-  _baseUrl;
-  _prefix;
-  _method;
-  _stateToken;
-  _callStateToken;
-  _outputSchema;
-  _inputSchema;
-  _onLog;
-  _pendingBatches;
-  _finished;
-  _header;
-  _compressionLevel;
-  _compressFn;
-  _decompressFn;
-  _authorization;
-  _externalConfig;
-  _postFn;
-  constructor(opts) {
-    this._baseUrl = opts.baseUrl;
-    this._prefix = opts.prefix;
-    this._method = opts.method;
-    this._stateToken = opts.stateToken;
-    this._callStateToken = opts.callStateToken ?? null;
-    this._outputSchema = opts.outputSchema;
-    this._inputSchema = opts.inputSchema;
-    this._onLog = opts.onLog;
-    this._pendingBatches = opts.pendingBatches;
-    this._finished = opts.finished;
-    this._header = opts.header;
-    this._compressionLevel = opts.compressionLevel;
-    this._compressFn = opts.compressFn;
-    this._decompressFn = opts.decompressFn;
-    this._authorization = opts.authorization;
-    this._externalConfig = opts.externalConfig;
-    this._postFn = opts.postFn;
-    const pendingData = opts.pendingBatches.filter((batch) => batch.numRows > 0 || isExternalLocationBatch(batch));
-    if (pendingData.length > 1) {
-      throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
-    }
-  }
-  async _post(url, body) {
-    if (this._postFn)
-      return this._postFn(url, body);
-    return fetch(url, {
-      method: "POST",
-      headers: this._buildHeaders(),
-      body: await this._prepareBody(body)
-    });
-  }
-  get header() {
-    return this._header;
-  }
-  _tokenMetadata(token) {
-    const metadata = new Map;
-    metadata.set(STATE_KEY, token);
-    if (this._callStateToken !== null) {
-      metadata.set(CALL_STATE_KEY, this._callStateToken);
-    }
-    return metadata;
-  }
-  _resumeToken() {
-    return this._stateToken === null ? null : packResumeToken(this._stateToken, this._callStateToken);
-  }
-  _buildHeaders() {
-    const headers = {
-      "Content-Type": ARROW_CONTENT_TYPE
-    };
-    if (this._compressionLevel != null && this._compressFn) {
-      headers["Content-Encoding"] = "zstd";
-    }
-    if (this._compressionLevel != null && this._decompressFn) {
-      headers["Accept-Encoding"] = "zstd";
-    }
-    headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(this._decompressFn != null);
-    if (this._authorization) {
-      headers.Authorization = this._authorization;
-    }
-    return headers;
-  }
-  async _prepareBody(content) {
-    if (this._compressionLevel != null && this._compressFn) {
-      return await this._compressFn(content, this._compressionLevel);
-    }
-    return content;
-  }
-  async _readResponse(resp) {
-    const body = new Uint8Array(await resp.arrayBuffer());
-    return new Uint8Array(await decodeResponseBody(resp.headers, body, this._decompressFn));
-  }
-  async exchange(input) {
-    if (this._stateToken === null) {
-      throw new RpcError("ProtocolError", "Stream has finished — no state token available", "");
-    }
-    if (!Array.isArray(input)) {
-      const metadata = new Map(input.metadata ?? []);
-      for (const [key, value] of this._tokenMetadata(this._stateToken)) {
-        metadata.set(key, value);
-      }
-      const batch2 = new RecordBatch2(input.schema, input.data, metadata);
-      return this._doExchange(input.schema, [batch2]);
-    }
-    if (input.length === 0) {
-      const zeroSchema = this._inputSchema ?? this._outputSchema;
-      const emptyBatch = this._buildEmptyBatch(zeroSchema);
-      const batchWithMeta = new RecordBatch2(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
-      return this._doExchange(zeroSchema, [batchWithMeta]);
-    }
-    let inputSchema = this._inputSchema;
-    if (!inputSchema) {
-      const keys = Object.keys(input[0]);
-      const fields = keys.map((key) => {
-        let sample;
-        for (const row of input) {
-          if (row[key] != null) {
-            sample = row[key];
-            break;
-          }
-        }
-        const arrowType = inferArrowType(sample);
-        const nullable = input.some((row) => row[key] == null);
-        return new Field2(key, arrowType, nullable);
-      });
-      inputSchema = new Schema2(fields);
-    }
-    const children = inputSchema.fields.map((f) => {
-      const values = input.map((row) => row[f.name]);
-      return vectorFromArray2(values, f.type).data[0];
-    });
-    const structType = new Struct2(inputSchema.fields);
-    const data = makeData2({
-      type: structType,
-      length: input.length,
-      children,
-      nullCount: 0
-    });
-    const batch = new RecordBatch2(inputSchema, data, this._tokenMetadata(this._stateToken));
-    return this._doExchange(inputSchema, [batch]);
-  }
-  async tick(metadata) {
-    if (this._pendingBatches.length > 0) {
-      throw new RpcError("ProtocolError", "Consume the producer's init batch before sending an explicit tick", "");
-    }
-    if (this._finished || this._stateToken === null)
-      return [];
-    const responseBody = await this._sendContinuation(this._stateToken, metadata);
-    const { batches } = await readResponseBatches(responseBody);
-    let rows = null;
-    let nextToken = null;
-    for (let batch of batches) {
-      if (batch.numRows === 0) {
-        const token = batch.metadata?.get(STATE_KEY);
-        if (token) {
-          nextToken = token;
-          continue;
-        }
-        if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
-        } else {
-          dispatchLogOrError(batch, this._onLog);
-          continue;
-        }
-      }
-      if (rows !== null) {
-        throw new RpcError("ProtocolError", "A producer tick returned more than one data batch", "");
-      }
-      rows = extractBatchRows(batch);
-    }
-    this._stateToken = nextToken;
-    if (nextToken === null)
-      this._finished = true;
-    return rows ?? [];
-  }
-  async _doExchange(schema2, batches) {
-    const body = serializeIpcStream(schema2, batches);
-    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
-    if (resp.status === 401) {
-      throw new RpcError("AuthenticationError", "Authentication required", "");
-    }
-    const responseBody = await this._readResponse(resp);
-    const { batches: responseBatches } = await readResponseBatches(responseBody);
-    let resultRows = [];
-    let gotData = false;
-    for (const batch of responseBatches) {
-      if (batch.numRows === 0) {
-        dispatchLogOrError(batch, this._onLog);
-        const token2 = batch.metadata?.get(STATE_KEY);
-        if (token2) {
-          this._stateToken = token2;
-        }
-        continue;
-      }
-      if (gotData) {
-        throw new RpcError("ProtocolError", "An exchange turn returned more than one data batch", "");
-      }
-      gotData = true;
-      const token = batch.metadata?.get(STATE_KEY);
-      if (token) {
-        this._stateToken = token;
-      }
-      resultRows = extractBatchRows(batch);
-    }
-    return resultRows;
-  }
-  _buildEmptyBatch(schema2) {
-    const children = schema2.fields.map((f) => {
-      return makeData2({ type: f.type, length: 0, nullCount: 0 });
-    });
-    const structType = new Struct2(schema2.fields);
-    const data = makeData2({
-      type: structType,
-      length: 0,
-      children,
-      nullCount: 0
-    });
-    return new RecordBatch2(schema2, data);
-  }
-  async* [Symbol.asyncIterator]() {
-    for (let batch of this._pendingBatches) {
-      if (batch.numRows === 0) {
-        if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
-        } else {
-          dispatchLogOrError(batch, this._onLog);
-          continue;
-        }
-      }
-      yield extractBatchRows(batch);
-    }
-    this._pendingBatches = [];
-    if (this._finished)
-      return;
-    if (this._stateToken === null)
-      return;
-    while (true) {
-      const stateToken = this._stateToken;
-      if (stateToken === null)
-        return;
-      const responseBody = await this._sendContinuation(stateToken);
-      const { batches } = await readResponseBatches(responseBody);
-      let gotContinuation = false;
-      let dataRows = null;
-      for (let batch of batches) {
-        if (batch.numRows === 0) {
-          const token = batch.metadata?.get(STATE_KEY);
-          if (token) {
-            this._stateToken = token;
-            gotContinuation = true;
-            continue;
-          }
-          if (isExternalLocationBatch(batch)) {
-            batch = await resolveExternalLocation(batch, this._externalConfig);
-          } else {
-            dispatchLogOrError(batch, this._onLog);
-            continue;
-          }
-        }
-        if (dataRows !== null) {
-          throw new RpcError("ProtocolError", "A producer turn returned more than one data batch", "");
-        }
-        dataRows = extractBatchRows(batch);
-      }
-      if (dataRows !== null)
-        yield dataRows;
-      if (!gotContinuation)
-        break;
-    }
-  }
-  async nextWithToken() {
-    const multi = "A producer turn returned more than one data batch";
-    while (this._pendingBatches.length > 0) {
-      let batch = this._pendingBatches.shift();
-      if (batch.numRows === 0) {
-        if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
-        } else {
-          dispatchLogOrError(batch, this._onLog);
-          continue;
-        }
-      }
-      if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
-        throw new RpcError("ProtocolError", multi, "");
-      }
-      return { rows: extractBatchRows(batch), token: this._resumeToken() };
-    }
-    if (this._finished || this._stateToken === null) {
-      this._finished = true;
-      return null;
-    }
-    const responseBody = await this._sendContinuation(this._stateToken);
-    const { batches } = await readResponseBatches(responseBody);
-    let dataRows = null;
-    let nextToken = null;
-    for (let batch of batches) {
-      if (batch.numRows === 0) {
-        const token = batch.metadata?.get(STATE_KEY);
-        if (token) {
-          nextToken = token;
-          continue;
-        }
-        if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
-        } else {
-          dispatchLogOrError(batch, this._onLog);
-          continue;
-        }
-      }
-      if (dataRows !== null) {
-        throw new RpcError("ProtocolError", multi, "");
-      }
-      dataRows = extractBatchRows(batch);
-    }
-    this._stateToken = nextToken;
-    if (dataRows === null) {
-      this._finished = true;
-      return null;
-    }
-    return { rows: dataRows, token: this._resumeToken() };
-  }
-  seekToToken(token) {
-    const { cursor, callToken } = unpackResumeToken(token);
-    this._pendingBatches = [];
-    this._stateToken = cursor;
-    this._callStateToken = callToken;
-    this._finished = false;
-  }
-  async _sendContinuation(token, applicationMetadata) {
-    const emptySchema = new Schema2([]);
-    const metadata = new Map(applicationMetadata ?? []);
-    for (const [key, value] of this._tokenMetadata(token))
-      metadata.set(key, value);
-    const structType = new Struct2(emptySchema.fields);
-    const data = makeData2({
-      type: structType,
-      length: 1,
-      children: [],
-      nullCount: 0
-    });
-    const batch = new RecordBatch2(emptySchema, data, metadata);
-    const body = serializeIpcStream(emptySchema, [batch]);
-    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
-    if (resp.status === 401) {
-      throw new RpcError("AuthenticationError", "Authentication required", "");
-    }
-    return this._readResponse(resp);
-  }
-  close() {}
-}
-
-// src/client/uploadUrl.ts
-import { Field as Field3, Int64 as Int642, RecordBatchReader as RecordBatchReader4, Schema as Schema3 } from "@query-farm/apache-arrow";
-var UPLOAD_URL_METHOD2 = "__upload_url__";
-var UPLOAD_URL_PARAMS_SCHEMA2 = new Schema3([new Field3("count", new Int642, false)]);
-async function requestUploadUrls(baseUrl, prefix, count, authorization) {
-  const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA2, { count: BigInt(count) }, UPLOAD_URL_METHOD2);
-  const headers = { "Content-Type": ARROW_CONTENT_TYPE };
-  if (authorization)
-    headers.Authorization = authorization;
-  const resp = await fetch(`${baseUrl}${prefix}/${UPLOAD_URL_METHOD2}/init`, {
-    method: "POST",
-    headers,
-    body
-  });
-  if (resp.status === 404) {
-    throw new RpcError("NotSupported", "Server does not support upload URLs", "");
-  }
-  if (resp.status === 401) {
-    throw new RpcError("AuthenticationError", "Authentication required", "");
-  }
-  if (!resp.ok) {
-    throw new RpcError("HttpError", `__upload_url__/init failed: HTTP ${resp.status}`, "");
-  }
-  const respBody = new Uint8Array(await resp.arrayBuffer());
-  const reader = await RecordBatchReader4.from(respBody);
-  await reader.open();
-  const pairs = [];
-  for (const batch of reader.readAll()) {
-    if (batch.numRows === 0)
-      continue;
-    for (let r = 0;r < batch.numRows; r++) {
-      const uploadUrl = batch.getChildAt(0)?.get(r);
-      const downloadUrl = batch.getChildAt(1)?.get(r);
-      const expiresRaw = batch.getChildAt(2)?.get(r);
-      let expiresAt;
-      if (expiresRaw instanceof Date) {
-        expiresAt = expiresRaw;
-      } else if (typeof expiresRaw === "bigint") {
-        expiresAt = new Date(Number(expiresRaw / 1000n));
-      } else if (typeof expiresRaw === "number") {
-        expiresAt = new Date(expiresRaw);
-      } else {
-        expiresAt = new Date;
-      }
-      pairs.push({ uploadUrl, downloadUrl, expiresAt });
-    }
-  }
-  if (pairs.length === 0) {
-    throw new RpcError("ProtocolError", "Server returned no upload URLs", "");
-  }
-  return pairs;
-}
-async function buildPointerRequestBody(originalBody, downloadUrl) {
-  const reader = await RecordBatchReader4.from(originalBody);
-  await reader.open();
-  const schema2 = reader.schema;
-  if (!schema2) {
-    throw new RpcError("ProtocolError", "Original request body has no schema", "");
-  }
-  const batches = reader.readAll();
-  if (batches.length === 0) {
-    throw new RpcError("ProtocolError", "Original request body has no batches", "");
-  }
-  const original = batches[0];
-  const originalMeta = original.metadata ?? new Map;
-  const pointer = makeExternalLocationBatch(schema2, downloadUrl);
-  const merged = new Map(pointer.metadata ?? new Map);
-  const method = originalMeta.get(RPC_METHOD_KEY);
-  const version = originalMeta.get(REQUEST_VERSION_KEY) ?? REQUEST_VERSION;
-  if (method)
-    merged.set(RPC_METHOD_KEY, method);
-  merged.set(REQUEST_VERSION_KEY, version);
-  for (const [k, v] of originalMeta) {
-    if (!merged.has(k))
-      merged.set(k, v);
-  }
-  const { RecordBatch: RecordBatch3 } = await import("@query-farm/apache-arrow");
-  const pointerWithMeta = new RecordBatch3(schema2, pointer.data, merged);
-  return serializeIpcStream(schema2, [pointerWithMeta]);
-}
-async function externalizeRequestBody(body, opts) {
-  const pairs = await requestUploadUrls(opts.baseUrl, opts.prefix, 1, opts.authorization);
-  const pair = pairs[0];
-  if (opts.urlValidator) {
-    opts.urlValidator(pair.uploadUrl);
-    opts.urlValidator(pair.downloadUrl);
-  }
-  const putResp = await fetch(pair.uploadUrl, {
-    method: "PUT",
-    headers: { "Content-Type": ARROW_CONTENT_TYPE },
-    body
-  });
-  if (!putResp.ok) {
-    throw new RpcError("ExternalUploadFailed", `PUT to upload URL failed: HTTP ${putResp.status}`, "");
-  }
-  return buildPointerRequestBody(body, pair.downloadUrl);
-}
-
-// src/client/connect.ts
-function httpConnect(rawBaseUrl, options) {
-  const baseUrl = rawBaseUrl.replace(/\/+$/, "");
-  const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
-  const onLog = options?.onLog;
-  const compressionLevel = options?.compressionLevel;
-  const authorization = options?.authorization;
-  const externalConfig = options?.externalLocation;
-  let methodCache = options?.description ? new Map(options.description.methods.map((method) => [method.name, method])) : null;
-  let serverProtocolVersion = options?.description?.protocolVersion ?? "";
-  let compressFn;
-  let decompressFn;
-  let compressionLoaded = false;
-  let capabilities = null;
-  function updateCapabilitiesFromResponse(resp) {
-    const next = parseCapabilitiesFromHeaders(resp.headers);
-    if (next.maxRequestBytes != null || next.uploadUrlSupport) {
-      capabilities = next;
-    }
-  }
-  async function maybeExternalize(body) {
-    const caps = isCapabilitySnapshotFresh(capabilities) ? capabilities : null;
-    if (!caps)
-      return body;
-    if (!caps.uploadUrlSupport)
-      return body;
-    if (caps.maxRequestBytes == null || body.byteLength <= caps.maxRequestBytes)
-      return body;
-    return externalizeRequestBody(body, {
-      baseUrl,
-      prefix,
-      authorization,
-      urlValidator: externalConfig?.urlValidator ?? null
-    });
-  }
-  async function postWithExternalization(url, body) {
-    const sendBody = await maybeExternalize(body);
-    let resp = await fetch(url, {
-      method: "POST",
-      headers: buildHeaders(),
-      body: await prepareBody(sendBody)
-    });
-    updateCapabilitiesFromResponse(resp);
-    if (resp.status === 413 && capabilities?.uploadUrlSupport && body.byteLength > 0) {
-      const externalized = await externalizeRequestBody(body, {
-        baseUrl,
-        prefix,
-        authorization,
-        urlValidator: externalConfig?.urlValidator ?? null
-      });
-      resp = await fetch(url, {
-        method: "POST",
-        headers: buildHeaders(),
-        body: await prepareBody(externalized)
-      });
-      updateCapabilitiesFromResponse(resp);
-    }
-    return resp;
-  }
-  async function ensureCompression() {
-    if (compressionLoaded || compressionLevel == null)
-      return;
-    try {
-      const mod = await Promise.resolve().then(() => (init_zstd(), exports_zstd));
-      compressFn = mod.zstdCompress;
-      decompressFn = mod.zstdDecompress;
-    } catch {}
-    compressionLoaded = true;
-  }
-  function buildHeaders() {
-    const headers = {
-      "Content-Type": ARROW_CONTENT_TYPE
-    };
-    if (compressionLevel != null && compressFn) {
-      headers["Content-Encoding"] = "zstd";
-    }
-    if (compressionLevel != null && decompressFn) {
-      headers["Accept-Encoding"] = "zstd";
-    }
-    headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
-    if (authorization) {
-      headers.Authorization = authorization;
-    }
-    return headers;
-  }
-  async function prepareBody(content) {
-    if (compressionLevel != null && compressFn) {
-      return await compressFn(content, compressionLevel);
-    }
-    return content;
-  }
-  function checkAuth(resp) {
-    if (resp.status === 401) {
-      throw new RpcError("AuthenticationError", "Authentication required", "");
-    }
-  }
-  async function readResponse(resp) {
-    const body = new Uint8Array(await resp.arrayBuffer());
-    return new Uint8Array(await decodeResponseBody(resp.headers, body, decompressFn));
-  }
-  async function ensureMethodCache() {
-    if (methodCache)
-      return methodCache;
-    await ensureCompression();
-    const desc = await httpIntrospect(baseUrl, {
-      prefix,
-      authorization,
-      compressionLevel,
-      compressFn,
-      decompressFn
-    });
-    methodCache = new Map(desc.methods.map((m) => [m.name, m]));
-    serverProtocolVersion = desc.protocolVersion;
-    return methodCache;
-  }
-  return {
-    async call(method, params) {
-      await ensureCompression();
-      const methods = await ensureMethodCache();
-      const info = methods.get(method);
-      if (!info) {
-        throw new Error(`Unknown method: '${method}'`);
-      }
-      const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
-      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}`, body);
-      checkAuth(resp);
-      const responseBody = await readResponse(resp);
-      const { batches } = await readResponseBatches(responseBody);
-      let resultBatch = null;
-      for (let batch of batches) {
-        if (batch.numRows === 0) {
-          if (isExternalLocationBatch(batch)) {
-            batch = await resolveExternalLocation(batch, externalConfig);
-          } else {
-            dispatchLogOrError(batch, onLog);
-            continue;
-          }
-        }
-        if (resultBatch !== null) {
-          throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
-        }
-        resultBatch = batch;
-      }
-      if (!resultBatch) {
-        return null;
-      }
-      const rows = extractBatchRows(resultBatch);
-      if (rows.length === 0)
-        return null;
-      const result = rows[0];
-      if (info.resultSchema.fields.length === 0)
-        return null;
-      return result;
-    },
-    async stream(method, params) {
-      await ensureCompression();
-      const methods = await ensureMethodCache();
-      const info = methods.get(method);
-      if (!info) {
-        throw new Error(`Unknown method: '${method}'`);
-      }
-      const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
-      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}/init`, body);
-      checkAuth(resp);
-      const responseBody = await readResponse(resp);
-      let header = null;
-      let stateToken = null;
-      let callStateToken = null;
-      const pendingBatches = [];
-      let dataBatchesInTurn = 0;
-      const queueDataBatch = (batch) => {
-        dataBatchesInTurn += 1;
-        if (dataBatchesInTurn > 1) {
-          throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
-        }
-        pendingBatches.push(batch);
-      };
-      let finished = false;
-      let streamSchema = null;
-      if (info.headerSchema) {
-        const reader = await readSequentialStreams(responseBody);
-        const headerStream = await reader.readStream();
-        if (headerStream) {
-          for (const batch of headerStream.batches) {
-            if (batch.numRows === 0) {
-              dispatchLogOrError(batch, onLog);
-              continue;
-            }
-            const rows = extractBatchRows(batch);
-            if (rows.length > 0) {
-              header = rows[0];
-            }
-          }
-        }
-        const dataStream = await reader.readStream();
-        if (dataStream) {
-          streamSchema = dataStream.schema;
-        }
-        const headerErrorBatches = [];
-        if (dataStream) {
-          for (const batch of dataStream.batches) {
-            if (batch.numRows === 0) {
-              const token = batch.metadata?.get(STATE_KEY);
-              if (token) {
-                stateToken = token;
-                callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
-                continue;
-              }
-              if (isExternalLocationBatch(batch)) {
-                queueDataBatch(batch);
-                continue;
-              }
-              const level = batch.metadata?.get(LOG_LEVEL_KEY);
-              if (level === "EXCEPTION") {
-                headerErrorBatches.push(batch);
-                continue;
-              }
-              dispatchLogOrError(batch, onLog);
-              continue;
-            }
-            queueDataBatch(batch);
-          }
-        }
-        if (headerErrorBatches.length > 0) {
-          if (pendingBatches.length > 0 || stateToken !== null) {
-            pendingBatches.push(...headerErrorBatches);
-          } else {
-            for (const batch of headerErrorBatches) {
-              dispatchLogOrError(batch, onLog);
-            }
-          }
-        }
-        if (!dataStream && !stateToken) {
-          finished = true;
-        }
-      } else {
-        const { schema: responseSchema, batches } = await readResponseBatches(responseBody);
-        streamSchema = responseSchema;
-        const errorBatches = [];
-        for (const batch of batches) {
-          if (batch.numRows === 0) {
-            const token = batch.metadata?.get(STATE_KEY);
-            if (token) {
-              stateToken = token;
-              callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
-              continue;
-            }
-            if (isExternalLocationBatch(batch)) {
-              queueDataBatch(batch);
-              continue;
-            }
-            const level = batch.metadata?.get(LOG_LEVEL_KEY);
-            if (level === "EXCEPTION") {
-              errorBatches.push(batch);
-              continue;
-            }
-            dispatchLogOrError(batch, onLog);
-            continue;
-          }
-          queueDataBatch(batch);
-        }
-        if (errorBatches.length > 0) {
-          if (pendingBatches.length > 0 || stateToken !== null) {
-            pendingBatches.push(...errorBatches);
-          } else {
-            for (const batch of errorBatches) {
-              dispatchLogOrError(batch, onLog);
-            }
-          }
-        }
-      }
-      if (pendingBatches.length === 0 && stateToken === null) {
-        finished = true;
-      }
-      const outputSchema = (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null) ?? (pendingBatches.length > 0 ? pendingBatches[0].schema : null) ?? info.outputSchema ?? info.resultSchema;
-      return new HttpStreamSession({
-        baseUrl,
-        prefix,
-        method,
-        stateToken,
-        callStateToken,
-        outputSchema,
-        inputSchema: info.inputSchema,
-        onLog,
-        pendingBatches,
-        finished,
-        header,
-        compressionLevel,
-        compressFn,
-        decompressFn,
-        authorization,
-        externalConfig,
-        postFn: postWithExternalization
-      });
-    },
-    async resumeStream(method, token, outputSchema) {
-      await ensureCompression();
-      const { cursor, callToken } = unpackResumeToken(token);
-      return new HttpStreamSession({
-        baseUrl,
-        prefix,
-        method,
-        stateToken: cursor,
-        callStateToken: callToken,
-        outputSchema: outputSchema ?? new Schema4([]),
-        onLog,
-        pendingBatches: [],
-        finished: false,
-        header: null,
-        compressionLevel,
-        compressFn,
-        decompressFn,
-        authorization,
-        externalConfig,
-        postFn: postWithExternalization
-      });
-    },
-    async describe() {
-      await ensureCompression();
-      return httpIntrospect(baseUrl, {
-        prefix,
-        authorization,
-        compressionLevel,
-        compressFn,
-        decompressFn
-      });
-    },
-    close() {}
-  };
 }
 // src/client/oauth.ts
 function parseMetadataJson(json) {
@@ -4345,6 +5094,530 @@ async function buildDescribeBatch(protocolName, methods, serverId, protocolVersi
   return { batch, metadata };
 }
 
+// src/identity.ts
+var PeerIdentityStatus = {
+  OFF: "off",
+  NOT_APPLICABLE: "not_applicable",
+  AVAILABLE: "available",
+  UNAVAILABLE: "unavailable",
+  PERMISSION_DENIED: "permission_denied",
+  NO_MATCH: "no_match",
+  INVALID: "invalid",
+  UNTRUSTED_PROXY: "untrusted_proxy"
+};
+var PEER_IDENTITY_STATUSES = new Set(Object.values(PeerIdentityStatus));
+var IdentityAssurance = {
+  CRYPTOGRAPHIC_PEER: "cryptographic_peer",
+  LOCAL_DAEMON: "local_daemon",
+  CONFIGURED_PROXY: "configured_proxy"
+};
+var IDENTITY_ASSURANCES = new Set(Object.values(IdentityAssurance));
+var PeerSubjectKind = {
+  USER: "user",
+  TAGGED_NODE: "tagged_node",
+  WORKLOAD: "workload",
+  ENDPOINT: "endpoint",
+  UNKNOWN: "unknown"
+};
+var PEER_SUBJECT_KINDS = new Set(Object.values(PeerSubjectKind));
+var SubjectStability = {
+  STABLE: "stable",
+  LOGIN: "login",
+  NONE: "none"
+};
+var SUBJECT_STABILITIES = new Set(Object.values(SubjectStability));
+var MAX_JSON_BYTES = 65536;
+var MAX_JSON_DEPTH = 16;
+var MAX_JSON_VALUES = 4096;
+var MAX_HEADER_COUNT = 128;
+var MAX_HEADER_VALUES = 16;
+var MAX_HEADER_BYTES = 65536;
+var HTTP_FIELD_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+function assertWellFormedUtf16(value, path) {
+  for (let index = 0;index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 55296 && unit <= 56319) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 56320 && next <= 57343))
+        throw new TypeError(`${path} contains an unpaired surrogate`);
+      index++;
+    } else if (unit >= 56320 && unit <= 57343) {
+      throw new TypeError(`${path} contains an unpaired surrogate`);
+    }
+  }
+}
+function snapshotJson(value, path = "evidence", depth = 0, limits = { values: 0, sourceBytes: 0 }) {
+  if (depth > MAX_JSON_DEPTH)
+    throw new TypeError(`${path} exceeds maximum JSON depth`);
+  limits.values++;
+  if (limits.values > MAX_JSON_VALUES)
+    throw new TypeError(`${path} exceeds maximum JSON value count`);
+  if (value === null || typeof value === "boolean")
+    return value;
+  if (typeof value === "string") {
+    assertWellFormedUtf16(value, path);
+    if (value.length > MAX_JSON_BYTES)
+      throw new TypeError(`${path} exceeds maximum JSON byte size`);
+    limits.sourceBytes += new TextEncoder().encode(value).length;
+    if (limits.sourceBytes > MAX_JSON_BYTES)
+      throw new TypeError(`${path} exceeds maximum JSON byte size`);
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new TypeError(`${path} numbers must be finite`);
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item, index) => snapshotJson(item, `${path}[${index}]`, depth + 1, limits)));
+  }
+  if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      assertWellFormedUtf16(key, `${path} key`);
+      limits.sourceBytes += new TextEncoder().encode(key).length;
+      if (limits.sourceBytes > MAX_JSON_BYTES)
+        throw new TypeError(`${path} exceeds maximum JSON byte size`);
+      if (item === undefined)
+        throw new TypeError(`${path}.${key} is not JSON-compatible`);
+      out[key] = snapshotJson(item, `${path}.${key}`, depth + 1, limits);
+    }
+    return Object.freeze(out);
+  }
+  throw new TypeError(`${path} is not JSON-compatible`);
+}
+function snapshotObject(value, path) {
+  const snapshot = snapshotJson(value ?? {}, path);
+  if (new TextEncoder().encode(canonicalJson(snapshot)).length > MAX_JSON_BYTES) {
+    throw new TypeError(`${path} exceeds maximum JSON byte size`);
+  }
+  return snapshot;
+}
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object")
+    return JSON.stringify(value);
+  if (Array.isArray(value))
+    return `[${value.map(canonicalJson).join(",")}]`;
+  const object = value;
+  return `{${Object.keys(object).sort(compareUnicode).map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+}
+function containsControl(value) {
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code <= 31 || code === 127)
+      return true;
+  }
+  return false;
+}
+
+class PeerResolutionContext {
+  transport;
+  immediatePeer;
+  sourceEndpoint;
+  assertedPeer;
+  destinationAddress;
+  authority;
+  serviceName;
+  metadata;
+  deadline;
+  budgetMs;
+  #startedAt;
+  #headers;
+  constructor(transport, options = {}) {
+    if (!transport)
+      throw new TypeError("peer transport must not be empty");
+    assertWellFormedUtf16(transport, "peer transport");
+    this.transport = transport;
+    for (const [name, value] of Object.entries({
+      immediatePeer: options.immediatePeer,
+      sourceEndpoint: options.sourceEndpoint,
+      assertedPeer: options.assertedPeer,
+      destinationAddress: options.destinationAddress,
+      authority: options.authority,
+      serviceName: options.serviceName
+    })) {
+      if (value !== undefined)
+        assertWellFormedUtf16(value, name);
+    }
+    this.immediatePeer = options.immediatePeer;
+    this.sourceEndpoint = options.sourceEndpoint;
+    this.assertedPeer = options.assertedPeer;
+    this.destinationAddress = options.destinationAddress;
+    this.authority = options.authority;
+    this.serviceName = options.serviceName;
+    if (options.deadline !== undefined && (!Number.isFinite(options.deadline) || options.deadline <= 0)) {
+      throw new TypeError("peer deadline must be a positive epoch millisecond value");
+    }
+    this.deadline = options.deadline;
+    if (options.budgetMs !== undefined && (!Number.isFinite(options.budgetMs) || options.budgetMs <= 0)) {
+      throw new TypeError("peer budgetMs must be positive");
+    }
+    this.budgetMs = options.budgetMs;
+    this.#startedAt = performance.now();
+    this.metadata = snapshotObject(options.metadata, "peer metadata");
+    const headers = new Map;
+    const entries = options.headers instanceof Map ? options.headers.entries() : Object.entries(options.headers ?? {});
+    let headerBytes = 0;
+    for (const [name, rawValues] of entries) {
+      if (headers.size >= MAX_HEADER_COUNT)
+        throw new PeerIdentityRejectedError("too many peer identity headers");
+      assertWellFormedUtf16(name, "peer-resolution header name");
+      if (!HTTP_FIELD_NAME.test(name))
+        throw new TypeError("invalid peer-resolution header name");
+      const key = name.toLowerCase();
+      if (headers.has(key))
+        throw new PeerIdentityRejectedError("case-varied duplicate peer identity header");
+      if (!Array.isArray(rawValues)) {
+        throw new PeerIdentityRejectedError(`peer identity header ${JSON.stringify(name)} did not preserve multiplicity`);
+      }
+      const values = Object.freeze([...rawValues]);
+      if (values.length > MAX_HEADER_VALUES) {
+        throw new PeerIdentityRejectedError(`too many values for peer identity header: ${name}`);
+      }
+      values.forEach((value) => {
+        assertWellFormedUtf16(value, `peer-resolution header value: ${name}`);
+      });
+      if (values.some((value) => typeof value !== "string" || containsControl(value))) {
+        throw new TypeError(`invalid peer-resolution header value: ${name}`);
+      }
+      headerBytes += new TextEncoder().encode(name).length;
+      for (const value of values)
+        headerBytes += new TextEncoder().encode(value).length;
+      if (headerBytes > MAX_HEADER_BYTES)
+        throw new PeerIdentityRejectedError("peer identity headers are too large");
+      headers.set(key, values);
+    }
+    this.#headers = headers;
+    Object.freeze(this);
+  }
+  header(name) {
+    assertWellFormedUtf16(name, "peer-resolution header lookup");
+    const values = this.#headers.get(name.toLowerCase()) ?? [];
+    if (values.length > 1)
+      throw new PeerIdentityRejectedError(`duplicate peer identity header: ${name}`);
+    return values[0];
+  }
+  remainingBudgetMs() {
+    return this.budgetMs === undefined ? undefined : Math.max(0, this.budgetMs - (performance.now() - this.#startedAt));
+  }
+}
+
+class PeerIdentity {
+  provider;
+  evidenceSource;
+  assurance;
+  issuer;
+  transport;
+  subjectKind;
+  subjectKey;
+  subjectStability;
+  subjectVerified;
+  attributes;
+  capabilities;
+  capabilitiesVerified;
+  sourceAddress;
+  proxyAddress;
+  constructor(options) {
+    if (!options.provider || !options.evidenceSource || !options.issuer || !options.transport) {
+      throw new TypeError("provider, evidenceSource, issuer, and transport are required");
+    }
+    for (const [name, value] of Object.entries({
+      provider: options.provider,
+      evidenceSource: options.evidenceSource,
+      issuer: options.issuer,
+      transport: options.transport,
+      subjectKey: options.subjectKey,
+      sourceAddress: options.sourceAddress,
+      proxyAddress: options.proxyAddress
+    })) {
+      if (value !== undefined)
+        assertWellFormedUtf16(value, name);
+    }
+    const stability = options.subjectStability ?? SubjectStability.NONE;
+    const subjectKind = options.subjectKind ?? PeerSubjectKind.UNKNOWN;
+    if (!IDENTITY_ASSURANCES.has(options.assurance))
+      throw new TypeError("invalid peer identity assurance");
+    if (!PEER_SUBJECT_KINDS.has(subjectKind))
+      throw new TypeError("invalid peer subject kind");
+    if (!SUBJECT_STABILITIES.has(stability))
+      throw new TypeError("invalid peer subject stability");
+    if (options.subjectVerified && !options.subjectKey)
+      throw new TypeError("verified peer identity requires subjectKey");
+    if (!options.subjectKey && stability !== SubjectStability.NONE) {
+      throw new TypeError("subjectless peer identity must use none stability");
+    }
+    this.provider = options.provider;
+    this.evidenceSource = options.evidenceSource;
+    this.assurance = options.assurance;
+    this.issuer = options.issuer;
+    this.transport = options.transport;
+    this.subjectKind = subjectKind;
+    this.subjectKey = options.subjectKey;
+    this.subjectStability = stability;
+    this.subjectVerified = options.subjectVerified ?? false;
+    this.attributes = snapshotObject(options.attributes, "peer attributes");
+    this.capabilities = snapshotObject(options.capabilities, "peer capabilities");
+    this.capabilitiesVerified = options.capabilitiesVerified ?? false;
+    this.sourceAddress = options.sourceAddress;
+    this.proxyAddress = options.proxyAddress;
+    Object.freeze(this);
+  }
+  get canonicalPrincipal() {
+    if (!this.subjectKey)
+      throw new TypeError("subjectless peer evidence has no canonical principal");
+    return `peer/${percentIdentity(this.provider)}/${percentIdentity(this.issuer)}/${percentIdentity(this.subjectKey)}`;
+  }
+}
+function percentIdentity(value) {
+  let out = "";
+  for (const byte of new TextEncoder().encode(value)) {
+    const character = String.fromCharCode(byte);
+    out += /[A-Za-z0-9._~-]/.test(character) ? character : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+class PeerIdentityResult {
+  provider;
+  status;
+  identities;
+  constructor(provider, status, identities = []) {
+    if (!provider)
+      throw new TypeError("peer identity provider is required");
+    assertWellFormedUtf16(provider, "peer identity provider");
+    if (!PEER_IDENTITY_STATUSES.has(status))
+      throw new TypeError("invalid peer identity status");
+    if (status === PeerIdentityStatus.AVAILABLE !== identities.length > 0) {
+      throw new TypeError("only an available result may carry identities");
+    }
+    if (identities.some((identity) => identity.provider !== provider))
+      throw new TypeError("peer result provider mismatch");
+    this.provider = provider;
+    this.status = status;
+    this.identities = Object.freeze([...identities]);
+    Object.freeze(this);
+  }
+  static available(identity) {
+    return new PeerIdentityResult(identity.provider, PeerIdentityStatus.AVAILABLE, [identity]);
+  }
+}
+
+class PeerEvidenceSet {
+  static EMPTY = new PeerEvidenceSet;
+  identities;
+  #statuses;
+  constructor(results = []) {
+    const statuses = new Map;
+    const identities = [];
+    for (const result of results) {
+      if (!PEER_IDENTITY_STATUSES.has(result.status)) {
+        throw new TypeError(`invalid peer identity status: ${String(result.status)}`);
+      }
+      if (statuses.has(result.provider))
+        throw new TypeError(`duplicate peer identity provider: ${result.provider}`);
+      statuses.set(result.provider, result.status);
+      identities.push(...result.identities);
+    }
+    this.#statuses = statuses;
+    this.identities = Object.freeze(identities);
+    Object.freeze(this);
+  }
+  status(provider) {
+    return this.#statuses.get(provider) ?? PeerIdentityStatus.OFF;
+  }
+  forProvider(provider) {
+    return Object.freeze(this.identities.filter((identity) => identity.provider === provider));
+  }
+  eligibleSubjects(provider) {
+    return Object.freeze(this.forProvider(provider).filter((identity) => identity.subjectVerified && !!identity.subjectKey && identity.subjectStability === SubjectStability.STABLE));
+  }
+  uniqueVerifiedSubject(provider) {
+    const matches = this.eligibleSubjects(provider);
+    if (matches.length !== 1) {
+      throw new PeerIdentityRejectedError(`provider ${JSON.stringify(provider)} did not produce one verified stable subject`);
+    }
+    return matches[0];
+  }
+  requireUsableProvider(provider) {
+    const status = this.status(provider);
+    if (status === PeerIdentityStatus.UNAVAILABLE || status === PeerIdentityStatus.PERMISSION_DENIED) {
+      throw new PeerIdentityUnavailableError(`peer identity provider ${JSON.stringify(provider)} is unavailable`);
+    }
+    if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
+      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`, status === PeerIdentityStatus.UNTRUSTED_PROXY ? "proxy_required" : "invalid_credential");
+    }
+    return this.uniqueVerifiedSubject(provider);
+  }
+  requireAvailableProvider(provider) {
+    const status = this.status(provider);
+    if (status === PeerIdentityStatus.UNAVAILABLE || status === PeerIdentityStatus.PERMISSION_DENIED) {
+      throw new PeerIdentityUnavailableError(`peer identity provider ${JSON.stringify(provider)} is unavailable`);
+    }
+    if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
+      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`, status === PeerIdentityStatus.UNTRUSTED_PROXY ? "proxy_required" : "invalid_credential");
+    }
+    const identities = this.forProvider(provider);
+    if (status !== PeerIdentityStatus.AVAILABLE || identities.length === 0) {
+      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} did not produce evidence`);
+    }
+    return identities;
+  }
+  async bindingDigest(providers, applicationAuth) {
+    const fields = [];
+    for (const provider of [...new Set(providers)].sort()) {
+      fields.push(provider, this.status(provider));
+      const identities = this.forProvider(provider).map((identity) => [
+        identity.provider,
+        identity.issuer,
+        identity.subjectKey ?? "",
+        identity.assurance,
+        identity.evidenceSource,
+        identity.transport,
+        identity.subjectKind,
+        identity.subjectStability,
+        String(identity.subjectVerified),
+        String(identity.capabilitiesVerified),
+        "",
+        "",
+        canonicalJson(identity.attributes),
+        canonicalJson(identity.capabilities)
+      ]).sort((a, b) => compareFields(a, b));
+      for (const identity of identities)
+        fields.push(...identity);
+    }
+    if (applicationAuth)
+      fields.push("application_auth", applicationAuth.domain ?? "", applicationAuth.principal ?? "");
+    let size = 0;
+    const encoded = fields.map((field2) => {
+      const bytes = new TextEncoder().encode(field2);
+      size += 8 + bytes.length;
+      return bytes;
+    });
+    const input = new Uint8Array(size);
+    const view = new DataView(input.buffer);
+    let offset = 0;
+    for (const bytes of encoded) {
+      view.setBigUint64(offset, BigInt(bytes.length));
+      offset += 8;
+      input.set(bytes, offset);
+      offset += bytes.length;
+    }
+    return sha256Hex2(input);
+  }
+}
+function compareFields(a, b) {
+  for (let index = 0;index < a.length; index++) {
+    const comparison = compareUnicode(a[index], b[index]);
+    if (comparison !== 0)
+      return comparison;
+  }
+  return 0;
+}
+function compareUnicode(a, b) {
+  const left = Array.from(a, (character) => character.codePointAt(0));
+  const right = Array.from(b, (character) => character.codePointAt(0));
+  for (let index = 0;index < Math.min(left.length, right.length); index++) {
+    if (left[index] < right[index])
+      return -1;
+    if (left[index] > right[index])
+      return 1;
+  }
+  return left.length - right.length;
+}
+
+class PeerIdentityUnavailableError extends Error {
+  retryAfter;
+  constructor(message = "peer identity provider unavailable", retryAfter = 5) {
+    super(message);
+    this.name = "PeerIdentityUnavailableError";
+    this.retryAfter = retryAfter;
+  }
+}
+
+class PeerIdentityRejectedError extends Error {
+  vgiAuthReason;
+  constructor(message, reason = "invalid_credential") {
+    super(message);
+    this.name = "PeerIdentityRejectedError";
+    this.vgiAuthReason = reason;
+  }
+}
+function observePeerIdentity(_evidence, auth) {
+  return auth;
+}
+function requirePeerIdentity(provider) {
+  return async (evidence, auth) => {
+    evidence.requireAvailableProvider(provider);
+    return withEvidenceBinding(auth, await evidence.bindingDigest([provider]));
+  };
+}
+function peerIdentityPrimary(provider) {
+  return async (evidence) => {
+    const identity = evidence.requireUsableProvider(provider);
+    return new AuthContext(provider, true, identity.canonicalPrincipal, {
+      issuer: identity.issuer,
+      subject_kind: identity.subjectKind,
+      assurance: identity.assurance,
+      evidence_source: identity.evidenceSource,
+      subject: identity.subjectKey,
+      peer_evidence_binding: await evidence.bindingDigest([provider])
+    });
+  };
+}
+function anyOfPeerIdentities(...providers) {
+  if (providers.length === 0)
+    throw new TypeError("at least one peer provider is required");
+  return async (evidence, auth) => {
+    for (const provider of providers) {
+      const status = evidence.status(provider);
+      if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
+        throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`);
+      }
+      if (evidence.eligibleSubjects(provider).length > 1) {
+        throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} produced ambiguous subjects`);
+      }
+    }
+    if (auth.authenticated)
+      return auth;
+    for (const provider of providers) {
+      if (evidence.status(provider) === PeerIdentityStatus.AVAILABLE && evidence.eligibleSubjects(provider).length === 1) {
+        return peerIdentityPrimary(provider)(evidence, auth);
+      }
+    }
+    if (providers.some((provider) => evidence.status(provider) === PeerIdentityStatus.UNAVAILABLE || evidence.status(provider) === PeerIdentityStatus.PERMISSION_DENIED)) {
+      throw new PeerIdentityUnavailableError("no usable authentication factor; a peer provider is unavailable");
+    }
+    throw new PeerIdentityRejectedError("no configured provider produced a verified subject");
+  };
+}
+function allOfPeerIdentities(providers, identityLinker, principalProvider = providers[0]) {
+  if (providers.length === 0 || !identityLinker)
+    throw new TypeError("all-of requires providers and an identity linker");
+  if (!providers.includes(principalProvider))
+    throw new TypeError("principalProvider must be one of providers");
+  return async (evidence, auth) => {
+    if (!auth.authenticated)
+      throw new PeerIdentityRejectedError("all-of requires application authentication");
+    const identities = new Map;
+    for (const provider of providers)
+      identities.set(provider, evidence.requireUsableProvider(provider));
+    await identityLinker(auth, identities);
+    const primary = await peerIdentityPrimary(principalProvider)(evidence, auth);
+    return new AuthContext(primary.domain, true, primary.principal, {
+      ...primary.claims,
+      application_domain: auth.domain,
+      application_principal: auth.principal,
+      peer_evidence_binding: await evidence.bindingDigest(providers, auth)
+    });
+  };
+}
+function withEvidenceBinding(auth, binding) {
+  return new AuthContext(auth.domain, auth.authenticated, auth.principal, {
+    ...auth.claims,
+    peer_evidence_binding: binding
+  });
+}
+
 // src/types.ts
 var MethodType;
 ((MethodType2) => {
@@ -4385,6 +5658,7 @@ class OutputCollector {
   _responseCookies = [];
   _stickyContext = null;
   auth;
+  peerEvidence;
   inputMetadata;
   cookies;
   kind;
@@ -4397,6 +5671,7 @@ class OutputCollector {
     this._serverId = serverId;
     this._requestId = requestId;
     this.auth = authContext ?? AuthContext.anonymous();
+    this.peerEvidence = budgets?.peerEvidence ?? PeerEvidenceSet.EMPTY;
     this.inputMetadata = budgets?.inputMetadata;
     this.cookies = cookies ?? EMPTY_COOKIES;
     this.kind = kind;
@@ -5425,12 +6700,21 @@ var TOKEN_VERSION = 5;
 var CALL_TOKEN_VERSION = 1;
 var CALL_ID_LEN = 16;
 var AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\x00");
+var BOUND_AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v5\x00");
 var CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v1\x00");
-function computeAad(principal) {
-  return aadWith(AAD_PREFIX, principal);
+var BOUND_CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v2\x00");
+function computeAad(principal, evidenceBinding, domain) {
+  return evidenceBinding ? boundAadWith(BOUND_AAD_PREFIX, principal, domain, evidenceBinding) : aadWith(AAD_PREFIX, principal);
 }
-function computeCallAad(principal) {
-  return aadWith(CALL_AAD_PREFIX, principal);
+function computeCallAad(principal, evidenceBinding, domain) {
+  return evidenceBinding ? boundAadWith(BOUND_CALL_AAD_PREFIX, principal, domain, evidenceBinding) : aadWith(CALL_AAD_PREFIX, principal);
+}
+function boundAadWith(prefix, principal, domain, evidenceBinding) {
+  const binding = _UTF8.encode(evidenceBinding);
+  if (principal === null || principal === undefined) {
+    return concatBytes2(prefix, _UTF8.encode("\x00anonymous\x00"), binding);
+  }
+  return concatBytes2(prefix, new Uint8Array([1]), _UTF8.encode(domain ?? ""), new Uint8Array([0]), _UTF8.encode(principal), new Uint8Array([0]), binding);
 }
 function aadWith(prefix, principal) {
   if (!principal) {
@@ -5481,7 +6765,7 @@ function concatBytes2(...parts) {
   }
   return out;
 }
-function packStateToken(stateBytes, callId, tokenKey, principal, createdAt) {
+function packStateToken(stateBytes, callId, tokenKey, principal, createdAt, evidenceBinding, domain) {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
@@ -5496,10 +6780,13 @@ function packStateToken(stateBytes, callId, tokenKey, principal, createdAt) {
   writeU32LE(view, offset, stateBytes.length);
   offset += 4;
   plaintext.set(stateBytes, offset);
-  const wire = sealBytes(plaintext, tokenKey, { aad: computeAad(principal), version: TOKEN_VERSION });
+  const wire = sealBytes(plaintext, tokenKey, {
+    aad: computeAad(principal, evidenceBinding, domain),
+    version: TOKEN_VERSION
+  });
   return bytesToBase64(wire);
 }
-function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principal, createdAt) {
+function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principal, createdAt, evidenceBinding, domain) {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
@@ -5519,12 +6806,12 @@ function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principa
   offset += 4;
   plaintext.set(inputSchemaBytes, offset);
   const wire = sealBytes(plaintext, tokenKey, {
-    aad: computeCallAad(principal),
+    aad: computeCallAad(principal, evidenceBinding, domain),
     version: CALL_TOKEN_VERSION
   });
   return bytesToBase64(wire);
 }
-function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal) {
+function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal, evidenceBinding, domain) {
   let raw;
   try {
     raw = base64ToBytes(tokenBase64);
@@ -5536,7 +6823,10 @@ function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal) {
   }
   let plaintext;
   try {
-    plaintext = openBytes(raw, tokenKey, { aad: computeAad(principal), version: TOKEN_VERSION });
+    plaintext = openBytes(raw, tokenKey, {
+      aad: computeAad(principal, evidenceBinding, domain),
+      version: TOKEN_VERSION
+    });
   } catch (err2) {
     if (err2 instanceof SealError) {
       throw new Error("State token signature verification failed");
@@ -5571,7 +6861,7 @@ function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal) {
   const stateBytes = copyAligned(offset, stateLen);
   return { stateBytes, callId, createdAt };
 }
-function unpackCallToken(token, tokenKey, principal, tokenTtl = 0) {
+function unpackCallToken(token, tokenKey, principal, tokenTtl = 0, evidenceBinding, domain) {
   const raw = base64ToBytes(token);
   if (raw.length >= 1 && raw[0] !== CALL_TOKEN_VERSION) {
     throw new Error(`Unsupported call token version ${raw[0]}`);
@@ -5579,11 +6869,11 @@ function unpackCallToken(token, tokenKey, principal, tokenTtl = 0) {
   let plaintext;
   try {
     plaintext = openBytes(raw, tokenKey, {
-      aad: computeCallAad(principal),
+      aad: computeCallAad(principal, evidenceBinding, domain),
       version: CALL_TOKEN_VERSION
     });
   } catch (err2) {
-    if (err2 instanceof Error && /decrypt|auth|tag/i.test(err2.message)) {
+    if (err2 instanceof SealError) {
       throw new Error("State token signature verification failed");
     }
     throw err2;
@@ -5631,11 +6921,18 @@ function dispatchDebug() {
 }
 var CALL_STATE_CACHE_ENTRIES = 4096;
 var callStates = new Map;
-function callCacheKey(callId, principal) {
+function peerEvidenceBinding(auth) {
+  const value = auth?.claims?.peer_evidence_binding;
+  return typeof value === "string" && value ? value : undefined;
+}
+function tokenPrincipal(auth) {
+  return auth?.authenticated ? auth.principal ?? "" : null;
+}
+function callCacheKey(callId, auth) {
   let hex = "";
   for (const b of callId)
     hex += b.toString(16).padStart(2, "0");
-  return `${hex}\x00${principal ?? ""}`;
+  return `${hex}\x00${auth?.authenticated ? "1" : "0"}\x00${auth?.domain ?? ""}\x00${auth?.principal ?? ""}\x00${peerEvidenceBinding(auth) ?? ""}`;
 }
 function cacheEntriesFor(ctx) {
   return ctx.callStateCacheEntries ?? CALL_STATE_CACHE_ENTRIES;
@@ -5648,7 +6945,7 @@ function cacheCall(callId, ctx, call) {
     callStates.clear();
   }
   const ttl = ctx.tokenTtl;
-  callStates.set(callCacheKey(callId, ctx.authContext?.principal), {
+  callStates.set(callCacheKey(callId, ctx.authContext), {
     expiresAt: Math.floor(Date.now() / 1000) + (ttl > 0 ? ttl : 3600),
     call
   });
@@ -5659,8 +6956,10 @@ function newCallId() {
   return id;
 }
 function resolveCall(callId, callTokenB64, ctx) {
-  const principal = ctx.authContext?.principal;
-  const key = callCacheKey(callId, principal);
+  const principal = tokenPrincipal(ctx.authContext);
+  const binding = peerEvidenceBinding(ctx.authContext);
+  const domain = ctx.authContext?.domain;
+  const key = callCacheKey(callId, ctx.authContext);
   const hit = cacheEntriesFor(ctx) > 0 ? callStates.get(key) : undefined;
   if (hit) {
     if (Math.floor(Date.now() / 1000) <= hit.expiresAt)
@@ -5670,7 +6969,7 @@ function resolveCall(callId, callTokenB64, ctx) {
   if (!callTokenB64) {
     throw new HttpRpcError("Missing call token in exchange request", 400);
   }
-  const { callId: tokenCallId, call } = unpackCallToken(callTokenB64, ctx.tokenKey, principal, ctx.tokenTtl);
+  const { callId: tokenCallId, call } = unpackCallToken(callTokenB64, ctx.tokenKey, principal, ctx.tokenTtl, binding, domain);
   if (tokenCallId.length !== callId.length || !tokenCallId.every((b, i) => b === callId[i])) {
     throw new HttpRpcError("Invalid state token: Malformed state token", 400);
   }
@@ -5680,12 +6979,14 @@ function resolveCall(callId, callTokenB64, ctx) {
 function mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx) {
   const callId = newCallId();
   noteStream(ctx, callId);
-  const principal = ctx.authContext?.principal;
-  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal);
+  const principal = tokenPrincipal(ctx.authContext);
+  const binding = peerEvidenceBinding(ctx.authContext);
+  const domain = ctx.authContext?.domain;
+  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal, undefined, binding, domain);
   cacheCall(callId, ctx, { schemaBytes, inputSchemaBytes });
   return {
     callId,
-    token: packStateToken(stateBytes, callId, ctx.tokenKey, principal),
+    token: packStateToken(stateBytes, callId, ctx.tokenKey, principal, undefined, binding, domain),
     callToken
   };
 }
@@ -5775,7 +7076,8 @@ async function httpDispatchUnary(method, body, ctx) {
   const out = new OutputCollector(schema2, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
     remainingResponseBytes: ctx.maxResponseBytes,
     remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
-    externalizationEnabled
+    externalizationEnabled,
+    peerEvidence: ctx.peerEvidence
   });
   out.enableCookieSink();
   if (ctx.stickyContext)
@@ -5852,7 +7154,7 @@ async function httpDispatchStreamInit(method, body, ctx) {
   let headerBytes = null;
   if (method.headerSchema && method.headerInit) {
     try {
-      const headerOut = new OutputCollector(method.headerSchema, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */);
+      const headerOut = new OutputCollector(method.headerSchema, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, { peerEvidence: ctx.peerEvidence });
       const headerValues = method.headerInit(parsed.params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, ctx.serverId, parsed.requestId);
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
@@ -5867,7 +7169,7 @@ async function httpDispatchStreamInit(method, body, ctx) {
   if (effectiveProducer) {
     const initCallId = newCallId();
     noteStream(ctx, initCallId);
-    const initCallToken = packCallToken(initCallId, serializeSchema2(resolvedOutputSchema), serializeSchema2(resolvedInputSchema), ctx.tokenKey, ctx.authContext?.principal);
+    const initCallToken = packCallToken(initCallId, serializeSchema2(resolvedOutputSchema), serializeSchema2(resolvedInputSchema), ctx.tokenKey, tokenPrincipal(ctx.authContext), undefined, peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain);
     cacheCall(initCallId, ctx, {
       schemaBytes: serializeSchema2(resolvedOutputSchema),
       inputSchemaBytes: serializeSchema2(resolvedInputSchema)
@@ -5915,7 +7217,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     ctx.streamObserver.cancelled = true;
   let unpacked;
   try {
-    unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, ctx.authContext?.principal);
+    unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, tokenPrincipal(ctx.authContext), peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain);
   } catch (error) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
@@ -5960,7 +7262,8 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
       remainingResponseBytes: ctx.maxResponseBytes,
       remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
-      externalizationEnabled
+      externalizationEnabled,
+      peerEvidence: ctx.peerEvidence
     });
     if (ctx.stickyContext)
       out.attachStickyContext(ctx.stickyContext);
@@ -6004,7 +7307,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
       }
     } else {
       const stateBytes = ctx.stateSerializer.serialize(state);
-      const token = packStateToken(stateBytes, unpacked.callId, ctx.tokenKey, ctx.authContext?.principal);
+      const token = packStateToken(stateBytes, unpacked.callId, ctx.tokenKey, tokenPrincipal(ctx.authContext), undefined, peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain);
       for (const [idx, emitted] of out.batches.entries()) {
         const batch = emitted.batch;
         if (idx === out.dataBatchIdx) {
@@ -6044,7 +7347,8 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
     remainingResponseBytes: maxBytes,
     remainingExternalizedResponseBytes: externalizationEnabled ? maxExternalBytes : undefined,
     externalizationEnabled,
-    inputMetadata: requestMetadata
+    inputMetadata: requestMetadata,
+    peerEvidence: ctx.peerEvidence
   });
   if (ctx.stickyContext)
     out.attachStickyContext(ctx.stickyContext);
@@ -6092,7 +7396,7 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
     producerError = externalOvershoot;
   } else if (!producerError && !out.finished) {
     const stateBytes = ctx.stateSerializer.serialize(state);
-    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
+    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, tokenPrincipal(ctx.authContext), undefined, peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain);
     const tokenMeta = new Map;
     tokenMeta.set(STATE_KEY, token);
     if (call.callToken)
@@ -6230,7 +7534,7 @@ async function introspect(request, auth, resolver, principals, defaultTtlSeconds
     console.warn("[introspect] unavailable", {
       principal: caller,
       tokenDigest: digest,
-      error: err2.message
+      error: "authentication authority unavailable"
     });
     return new Response(JSON.stringify({ error: "unavailable" }), {
       status: 503,
@@ -7338,10 +8642,9 @@ class AsyncMutex {
     }
   }
 }
-function sessionPrincipalKey(authenticated, domain, principal) {
-  if (!authenticated)
-    return "\x00anonymous";
-  return `${domain ?? ""}\x00${principal ?? ""}`;
+function sessionPrincipalKey(authenticated, domain, principal, evidenceBinding) {
+  const key = authenticated ? `${domain ?? ""}\x00${principal ?? ""}` : "\x00anonymous";
+  return evidenceBinding ? `${key}\x00${evidenceBinding}` : key;
 }
 function sessionIdHex(sessionId) {
   let s = "";
@@ -7545,6 +8848,27 @@ function createHttpHandler(protocol, options) {
   const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
   let authenticate = options?.authenticate;
   const oauthMetadata = options?.oauthResourceMetadata;
+  const peerIdentityProviders = [...options?.peerIdentityProviders ?? []];
+  const peerAuthenticationPolicy = options?.peerAuthenticationPolicy;
+  const peerResolutionTimeoutMs = options?.peerResolutionTimeoutMs ?? 5000;
+  if (!Number.isFinite(peerResolutionTimeoutMs) || peerResolutionTimeoutMs <= 0) {
+    throw new TypeError("peerResolutionTimeoutMs must be positive");
+  }
+  const peerProviderConcurrency = options?.peerProviderConcurrency ?? 64;
+  if (!Number.isInteger(peerProviderConcurrency) || peerProviderConcurrency <= 0) {
+    throw new TypeError("peerProviderConcurrency must be a positive integer");
+  }
+  let activePeerProviderCalls = 0;
+  const peerProviderNames = new Set;
+  for (const provider of peerIdentityProviders) {
+    if (!provider?.provider || peerProviderNames.has(provider.provider)) {
+      throw new TypeError("peer identity providers must have unique non-empty names");
+    }
+    peerProviderNames.add(provider.provider);
+  }
+  if (peerProviderConcurrency < peerIdentityProviders.length) {
+    throw new TypeError("peerProviderConcurrency must be at least the configured provider fanout");
+  }
   let pkceConfig = null;
   if (authenticate && oauthMetadata?.clientId) {
     const resourceUrl = new URL(oauthMetadata.resource);
@@ -7805,6 +9129,121 @@ function createHttpHandler(protocol, options) {
     headers.set("Cache-Control", "no-store");
     return new Response(unauthorizedEnvelope(reason, detail, proxyHint), { status: 401, headers });
   }
+  function authenticationErrorResponse(error, request) {
+    if (error instanceof AuthUnavailableError || error instanceof PeerIdentityUnavailableError) {
+      const headers2 = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
+      addCorsHeaders(headers2);
+      const retryAfter = Number.isFinite(error.retryAfter) && error.retryAfter >= 0 ? Math.ceil(error.retryAfter) : 5;
+      headers2.set("Retry-After", String(retryAfter));
+      const detail = error instanceof PeerIdentityUnavailableError ? "peer identity unavailable" : "authentication authority unavailable";
+      return new Response(JSON.stringify({ error: "authentication_unavailable", detail }), { status: 503, headers: headers2 });
+    }
+    const headers = new Headers;
+    addCorsHeaders(headers);
+    if (oauthMetadata) {
+      const metadataUrl = new URL(request.url);
+      metadataUrl.pathname = wellKnownPath(prefix);
+      metadataUrl.search = "";
+      headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString(), oauthMetadata.clientId, oauthMetadata.clientSecret, oauthMetadata.useIdTokenAsBearer, oauthMetadata.deviceCodeClientId, oauthMetadata.deviceCodeClientSecret));
+    }
+    const { reason } = classifyAuthFailure(error);
+    return unauthorizedResponse(reason, "authentication rejected", headers);
+  }
+  function peerEvidenceBinding2(auth) {
+    const value = auth?.claims?.peer_evidence_binding;
+    return typeof value === "string" && value ? value : undefined;
+  }
+  async function resolveRequestIdentity(request) {
+    let authContext = AuthContext.anonymous();
+    let missingCredential;
+    if (authenticate) {
+      try {
+        authContext = await authenticate(request) ?? AuthContext.anonymous();
+      } catch (error) {
+        if (peerAuthenticationPolicy && error instanceof AuthFailure && error.reason === AuthReason.MissingCredential) {
+          missingCredential = error;
+        } else {
+          throw error;
+        }
+      }
+    }
+    let peerEvidence = PeerEvidenceSet.EMPTY;
+    if (peerIdentityProviders.length > 0) {
+      const controller = new AbortController;
+      const deadline = Date.now() + peerResolutionTimeoutMs;
+      const startedAt = performance.now();
+      const timer = setTimeout(() => controller.abort(), peerResolutionTimeoutMs);
+      const timeout = new Promise((_resolve, reject) => {
+        const rejectTimeout = () => reject(new PeerIdentityUnavailableError("peer identity resolution timed out"));
+        if (controller.signal.aborted)
+          rejectTimeout();
+        else
+          controller.signal.addEventListener("abort", rejectTimeout, { once: true });
+      });
+      try {
+        let supplied;
+        try {
+          supplied = await Promise.race([Promise.resolve(options?.peerResolutionContext?.(request)), timeout]) ?? {};
+        } catch (error) {
+          if (error instanceof PeerIdentityRejectedError || error instanceof PeerIdentityUnavailableError)
+            throw error;
+          throw new PeerIdentityUnavailableError("peer identity resolution context failed");
+        }
+        const remainingBudgetMs = peerResolutionTimeoutMs - (performance.now() - startedAt);
+        if (remainingBudgetMs <= 0 || controller.signal.aborted) {
+          throw new PeerIdentityUnavailableError("peer identity resolution timed out");
+        }
+        const resolution = new PeerResolutionContext("http", {
+          authority: new URL(request.url).host,
+          serviceName: options?.peerServiceName,
+          headers: new Map,
+          ...supplied,
+          deadline,
+          budgetMs: remainingBudgetMs
+        });
+        const outcomes = new Array(peerIdentityProviders.length);
+        const providerTasks = peerIdentityProviders.map((provider, index) => {
+          if (activePeerProviderCalls >= peerProviderConcurrency) {
+            outcomes[index] = new PeerIdentityResult(provider.provider, PeerIdentityStatus.UNAVAILABLE);
+            return Promise.resolve();
+          }
+          activePeerProviderCalls++;
+          return Promise.resolve().then(() => provider.resolve(resolution, controller.signal)).then((result) => {
+            outcomes[index] = result && result.provider === provider.provider ? result : new PeerIdentityResult(provider.provider, PeerIdentityStatus.INVALID);
+          }).catch((error) => {
+            outcomes[index] = new PeerIdentityResult(provider.provider, error instanceof PeerIdentityRejectedError ? PeerIdentityStatus.INVALID : PeerIdentityStatus.UNAVAILABLE);
+          }).finally(() => {
+            activePeerProviderCalls--;
+          });
+        });
+        await Promise.race([Promise.all(providerTasks), timeout]).catch((error) => {
+          if (!(error instanceof PeerIdentityUnavailableError))
+            throw error;
+        });
+        await Promise.resolve();
+        const results = Array.from({ length: peerIdentityProviders.length }, (_unused, index) => outcomes[index] ?? new PeerIdentityResult(peerIdentityProviders[index].provider, PeerIdentityStatus.UNAVAILABLE));
+        peerEvidence = new PeerEvidenceSet(results);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (peerAuthenticationPolicy) {
+      try {
+        authContext = await peerAuthenticationPolicy(peerEvidence, authContext);
+      } catch (error) {
+        if (error instanceof PeerIdentityUnavailableError) {
+          throw new PeerIdentityUnavailableError;
+        }
+        if (error instanceof PeerIdentityRejectedError) {
+          throw new PeerIdentityRejectedError("peer identity authentication rejected", error.vgiAuthReason);
+        }
+        throw new PeerIdentityRejectedError("peer identity authentication rejected");
+      }
+    }
+    if (missingCredential && !authContext.authenticated)
+      throw missingCredential;
+    return { authContext, peerEvidence };
+  }
   function makeErrorResponse(error, statusCode, schema2 = EMPTY_SCHEMA2) {
     const errBatch = buildErrorBatch(schema2, error, serverId, null);
     const body = serializeIpcStream(schema2, [errBatch]);
@@ -7916,16 +9355,19 @@ function createHttpHandler(protocol, options) {
       }
       let principalKey = sessionPrincipalKey(false, null, null);
       let aadPrincipal = null;
-      if (authenticate) {
-        try {
-          const auth2 = await authenticate(request);
-          if (auth2?.authenticated) {
-            aadPrincipal = auth2.principal ?? "";
-            principalKey = sessionPrincipalKey(true, auth2.domain, auth2.principal);
-          }
-        } catch {}
-      }
-      const aad = computeAad(aadPrincipal);
+      let aadDomain = null;
+      let evidenceBinding;
+      try {
+        const identity = await resolveRequestIdentity(request);
+        const auth2 = identity.authContext;
+        evidenceBinding = peerEvidenceBinding2(auth2);
+        if (auth2.authenticated) {
+          aadPrincipal = auth2.principal ?? "";
+          aadDomain = auth2.domain;
+        }
+        principalKey = sessionPrincipalKey(auth2.authenticated, auth2.domain, auth2.principal, evidenceBinding);
+      } catch {}
+      const aad = computeAad(aadPrincipal, evidenceBinding, aadDomain);
       let opened;
       try {
         opened = openSessionToken(tokenHeader, tokenKey, aad);
@@ -7958,30 +9400,12 @@ function createHttpHandler(protocol, options) {
     }
     const streamObserver = {};
     const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress, streamObserver };
-    if (authenticate) {
-      try {
-        ctx.authContext = await authenticate(request);
-      } catch (error) {
-        if (error instanceof AuthUnavailableError) {
-          const headers2 = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
-          addCorsHeaders(headers2);
-          headers2.set("Retry-After", String(error.retryAfter));
-          return new Response(JSON.stringify({ error: "authentication_unavailable", detail: error.detail }), {
-            status: 503,
-            headers: headers2
-          });
-        }
-        const headers = new Headers;
-        addCorsHeaders(headers);
-        if (oauthMetadata) {
-          const metadataUrl = new URL(request.url);
-          metadataUrl.pathname = wellKnownPath(prefix);
-          metadataUrl.search = "";
-          headers.set("WWW-Authenticate", buildWwwAuthenticateHeader(metadataUrl.toString(), oauthMetadata.clientId, oauthMetadata.clientSecret, oauthMetadata.useIdTokenAsBearer, oauthMetadata.deviceCodeClientId, oauthMetadata.deviceCodeClientSecret));
-        }
-        const { reason, detail } = classifyAuthFailure(error);
-        return unauthorizedResponse(reason, detail, headers);
-      }
+    try {
+      const identity = await resolveRequestIdentity(request);
+      ctx.authContext = identity.authContext;
+      ctx.peerEvidence = identity.peerEvidence;
+    } catch (error) {
+      return authenticationErrorResponse(error, request);
     }
     if (introspector && path === introspectPath) {
       const response = await introspector.handle(request, ctx.authContext);
@@ -7995,8 +9419,9 @@ function createHttpHandler(protocol, options) {
     if (stickyEnabled && sessionRegistry) {
       const auth2 = ctx.authContext;
       const aadPrincipal = auth2?.authenticated ? auth2.principal ?? "" : null;
-      const principalKey = sessionPrincipalKey(!!auth2?.authenticated, auth2?.domain, auth2?.principal);
-      const aad = computeAad(aadPrincipal);
+      const evidenceBinding = peerEvidenceBinding2(auth2);
+      const principalKey = sessionPrincipalKey(!!auth2?.authenticated, auth2?.domain, auth2?.principal, evidenceBinding);
+      const aad = computeAad(aadPrincipal, evidenceBinding, auth2?.domain);
       const acceptOpens = (request.headers.get(SESSION_ACCEPT_HEADER) ?? "").trim().toLowerCase() === "true";
       const sessionHeader = (request.headers.get(SESSION_HEADER) ?? "").trim();
       let resumeState = null;
@@ -9762,6 +11187,663 @@ function mtlsAuthenticateSubject(options) {
   }
   return mtlsAuthenticate({ validate, header, checkExpiry });
 }
+// src/ip.ts
+function normalizeIpLiteral(value) {
+  const ipv4 = parseIpv4(value);
+  if (ipv4)
+    return ipv4.join(".");
+  if (!value.includes(":") || value.includes("%") || value.includes("[") || value.includes("]"))
+    return null;
+  const halves = value.toLowerCase().split("::");
+  if (halves.length > 2)
+    return null;
+  const left = parseIpv6Words(halves[0], halves.length === 1);
+  const right = parseIpv6Words(halves.length === 2 ? halves[1] : "", true);
+  if (!left || !right)
+    return null;
+  let words;
+  if (halves.length === 1) {
+    if (left.length !== 8)
+      return null;
+    words = left;
+  } else {
+    const omitted = 8 - left.length - right.length;
+    if (omitted < 1)
+      return null;
+    words = [...left, ...Array(omitted).fill(0), ...right];
+  }
+  if (words.length !== 8)
+    return null;
+  if (words.slice(0, 5).every((word) => word === 0) && words[5] === 65535) {
+    return `${words[6] >>> 8}.${words[6] & 255}.${words[7] >>> 8}.${words[7] & 255}`;
+  }
+  let bestStart = -1;
+  let bestLength = 0;
+  for (let index = 0;index < words.length; ) {
+    if (words[index] !== 0) {
+      index++;
+      continue;
+    }
+    let end = index;
+    while (end < words.length && words[end] === 0)
+      end++;
+    if (end - index > bestLength && end - index >= 2) {
+      bestStart = index;
+      bestLength = end - index;
+    }
+    index = end;
+  }
+  if (bestStart < 0)
+    return words.map((word) => word.toString(16)).join(":");
+  const before = words.slice(0, bestStart).map((word) => word.toString(16)).join(":");
+  const after = words.slice(bestStart + bestLength).map((word) => word.toString(16)).join(":");
+  return `${before}::${after}`;
+}
+function normalizeTrustedProxyAddresses(values, label) {
+  const normalized = new Set;
+  let count = 0;
+  for (const value of values) {
+    count++;
+    const address = normalizeIpLiteral(value);
+    if (!address)
+      throw new TypeError(`${label} must contain exact IP literals`);
+    if (normalized.has(address))
+      throw new TypeError(`${label} contains a duplicate normalized address`);
+    normalized.add(address);
+  }
+  if (count === 0)
+    throw new TypeError(`${label} must not be empty`);
+  return normalized;
+}
+function parseIpv4(value) {
+  const parts = value.split(".");
+  if (parts.length !== 4)
+    return null;
+  const bytes = [];
+  for (const part of parts) {
+    if (!/^(?:0|[1-9][0-9]{0,2})$/u.test(part))
+      return null;
+    const byte = Number(part);
+    if (byte > 255)
+      return null;
+    bytes.push(byte);
+  }
+  return bytes;
+}
+function parseIpv6Words(value, allowIpv4) {
+  if (value === "")
+    return [];
+  const parts = value.split(":");
+  const words = [];
+  for (let index = 0;index < parts.length; index++) {
+    const part = parts[index];
+    if (part.includes(".")) {
+      if (!allowIpv4 || index !== parts.length - 1)
+        return null;
+      const bytes = parseIpv4(part);
+      if (!bytes)
+        return null;
+      words.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
+    } else {
+      if (!/^[0-9a-f]{1,4}$/u.test(part))
+        return null;
+      words.push(Number.parseInt(part, 16));
+    }
+  }
+  return words;
+}
+
+// src/http/spiffe.ts
+var PROVIDER = "spiffe";
+var TRUST_DOMAIN = /^[a-z0-9](?:[a-z0-9._-]{0,253}[a-z0-9])?$/;
+var SPIFFE_PATH = /^\/(?:[A-Za-z0-9._-]+)(?:\/[A-Za-z0-9._-]+)*$/;
+var HTTP_FIELD_NAME2 = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+var XFCC_KEY = /^[A-Za-z][A-Za-z0-9_-]*$/;
+var SHA256 = /^[0-9A-Fa-f]{64}$/;
+var PERCENT_ESCAPE = /%(?:[0-9A-Fa-f]{2})/g;
+var NODE_CRYPTO = "node:crypto";
+var x509Constructor;
+function loadX509() {
+  x509Constructor ??= (async () => {
+    const req = import.meta.require ?? globalThis.require ?? null;
+    if (req)
+      return req(NODE_CRYPTO).X509Certificate;
+    const crypto2 = await import(NODE_CRYPTO);
+    if (!crypto2.X509Certificate)
+      throw new Error("node:crypto X509Certificate is unavailable");
+    return crypto2.X509Certificate;
+  })();
+  return x509Constructor;
+}
+function ascii(value) {
+  for (let index = 0;index < value.length; index++) {
+    if (value.charCodeAt(index) > 127)
+      return false;
+  }
+  return true;
+}
+function hasControl(value) {
+  for (let index = 0;index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127)
+      return true;
+  }
+  return false;
+}
+function byteLength(value) {
+  return new TextEncoder().encode(value).length;
+}
+function headersFromNodeRawHeaders(rawHeaders) {
+  if (rawHeaders.length % 2 !== 0)
+    throw new PeerIdentityRejectedError("rawHeaders contains an unmatched name");
+  const headers = new Map;
+  for (let index = 0;index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index];
+    const value = rawHeaders[index + 1];
+    const values = headers.get(name) ?? [];
+    values.push(value);
+    headers.set(name, values);
+  }
+  return new Map([...headers].map(([name, values]) => [name, Object.freeze(values)]));
+}
+function validateDomainsAndProxies(trustDomains, trustedProxyAddresses) {
+  const domains = new Set(trustDomains);
+  const proxies = normalizeTrustedProxyAddresses(trustedProxyAddresses, "trustedProxyAddresses");
+  if (domains.size === 0) {
+    throw new TypeError("trustDomains and trustedProxyAddresses must not be empty");
+  }
+  for (const domain of domains) {
+    if (!TRUST_DOMAIN.test(domain))
+      throw new TypeError(`invalid SPIFFE trust domain: ${JSON.stringify(domain)}`);
+  }
+  return { domains, proxies };
+}
+function validateHeaderName(value, label) {
+  if (!HTTP_FIELD_NAME2.test(value))
+    throw new TypeError(`${label} must be a valid HTTP field name`);
+}
+function validateSpiffeId(value, trustDomains) {
+  if (!value || !ascii(value) || byteLength(value) > 2048 || value.includes("%")) {
+    throw new TypeError("SPIFFE ID is empty, non-ASCII, percent-encoded, or exceeds 2048 bytes");
+  }
+  if (value.includes("?") || value.includes("#"))
+    throw new TypeError("SPIFFE ID cannot contain query or fragment");
+  const match = /^spiffe:\/\/([^/]+)(\/.*)$/.exec(value);
+  if (!match)
+    throw new TypeError("invalid SPIFFE ID scheme or authority");
+  const trustDomain = match[1];
+  const path = match[2];
+  if (!TRUST_DOMAIN.test(trustDomain) || !SPIFFE_PATH.test(path)) {
+    throw new TypeError("SPIFFE ID trust domain or path is not canonical");
+  }
+  if (path.split("/").some((segment) => segment === "." || segment === "..")) {
+    throw new TypeError("SPIFFE ID path cannot contain dot segments");
+  }
+  if (!trustDomains.has(trustDomain))
+    throw new TypeError("SPIFFE trust domain is not allowed");
+  return trustDomain;
+}
+function readDer(bytes, offset) {
+  if (offset + 2 > bytes.length)
+    throw new TypeError("truncated DER value");
+  const tag = bytes[offset];
+  const first = bytes[offset + 1];
+  let length = 0;
+  let header = 2;
+  if ((first & 128) === 0) {
+    length = first;
+  } else {
+    const count = first & 127;
+    if (count === 0 || count > 4 || offset + 2 + count > bytes.length)
+      throw new TypeError("invalid DER length");
+    header += count;
+    for (let index = 0;index < count; index++)
+      length = length * 256 + bytes[offset + 2 + index];
+    if (length < 128)
+      throw new TypeError("non-canonical DER length");
+  }
+  const start = offset + header;
+  const end = start + length;
+  if (!Number.isSafeInteger(end) || end > bytes.length)
+    throw new TypeError("truncated DER body");
+  return { tag, start, end, bytes };
+}
+function derChildren(node) {
+  const children = [];
+  let offset = node.start;
+  while (offset < node.end) {
+    const child = readDer(node.bytes, offset);
+    if (child.end > node.end)
+      throw new TypeError("DER child exceeds parent");
+    children.push(child);
+    offset = child.end;
+  }
+  if (offset !== node.end)
+    throw new TypeError("malformed DER children");
+  return children;
+}
+function derContent(node) {
+  return node.bytes.subarray(node.start, node.end);
+}
+function oid(node) {
+  if (node.tag !== 6)
+    throw new TypeError("expected DER OID");
+  const bytes = derContent(node);
+  if (bytes.length === 0)
+    throw new TypeError("empty DER OID");
+  const parts = [Math.min(2, Math.floor(bytes[0] / 40)), 0];
+  parts[1] = bytes[0] - parts[0] * 40;
+  let value = 0;
+  for (let index = 1;index < bytes.length; index++) {
+    value = value * 128 + (bytes[index] & 127);
+    if (!Number.isSafeInteger(value))
+      throw new TypeError("oversized DER OID");
+    if ((bytes[index] & 128) === 0) {
+      parts.push(value);
+      value = 0;
+    }
+  }
+  if ((bytes[bytes.length - 1] & 128) !== 0)
+    throw new TypeError("truncated DER OID");
+  return parts.join(".");
+}
+function parseSvidProfile(raw) {
+  const certificate = readDer(raw, 0);
+  if (certificate.tag !== 48 || certificate.end !== raw.length)
+    throw new TypeError("invalid certificate DER");
+  const certificateParts = derChildren(certificate);
+  if (certificateParts.length !== 3 || certificateParts[0].tag !== 48)
+    throw new TypeError("invalid certificate shape");
+  const tbs = certificateParts[0];
+  const parts = derChildren(tbs);
+  const base = parts[0]?.tag === 160 ? 1 : 0;
+  if (parts.length < base + 6 || parts[base + 4].tag !== 48)
+    throw new TypeError("invalid TBSCertificate");
+  const subjectEmpty = parts[base + 4].start === parts[base + 4].end;
+  const extensionWrapper = parts.find((part) => part.tag === 163);
+  if (!extensionWrapper)
+    throw new TypeError("X.509-SVID extensions are missing");
+  const wrapperParts = derChildren(extensionWrapper);
+  if (wrapperParts.length !== 1 || wrapperParts[0].tag !== 48)
+    throw new TypeError("invalid certificate extensions");
+  const extensions = new Map;
+  for (const extension of derChildren(wrapperParts[0])) {
+    if (extension.tag !== 48)
+      throw new TypeError("invalid certificate extension");
+    const values = derChildren(extension);
+    if (values.length < 2 || values.length > 3)
+      throw new TypeError("invalid certificate extension shape");
+    const name = oid(values[0]);
+    let critical = false;
+    let valueNode = values[1];
+    if (values[1].tag === 1) {
+      const boolean = derContent(values[1]);
+      if (boolean.length !== 1 || boolean[0] !== 0 && boolean[0] !== 255 || values.length !== 3) {
+        throw new TypeError("invalid extension critical flag");
+      }
+      critical = boolean[0] === 255;
+      valueNode = values[2];
+    }
+    if (valueNode.tag !== 4 || extensions.has(name))
+      throw new TypeError("invalid or duplicate extension");
+    extensions.set(name, { critical, value: derContent(valueNode) });
+  }
+  const san = extensions.get("2.5.29.17");
+  const basic = extensions.get("2.5.29.19");
+  const usage = extensions.get("2.5.29.15");
+  if (!san || !basic || !usage)
+    throw new TypeError("required X.509-SVID extension is missing");
+  const sanRoot = readDer(san.value, 0);
+  if (sanRoot.tag !== 48 || sanRoot.end !== san.value.length)
+    throw new TypeError("invalid SAN extension");
+  const uriSans = derChildren(sanRoot).filter((name) => name.tag === 134).map((name) => {
+    const value = new TextDecoder("ascii", { fatal: true }).decode(derContent(name));
+    if (!ascii(value))
+      throw new TypeError("non-ASCII URI SAN");
+    return value;
+  });
+  if (uriSans.length !== 1)
+    throw new TypeError("X.509-SVID must contain exactly one URI SAN");
+  const basicRoot = readDer(basic.value, 0);
+  if (basicRoot.tag !== 48 || basicRoot.end !== basic.value.length)
+    throw new TypeError("invalid basic constraints");
+  const basicParts = derChildren(basicRoot);
+  const ca = basicParts[0]?.tag === 1 && derContent(basicParts[0])[0] !== 0;
+  const usageRoot = readDer(usage.value, 0);
+  if (usageRoot.tag !== 3 || usageRoot.end !== usage.value.length)
+    throw new TypeError("invalid key usage");
+  const bits = derContent(usageRoot);
+  if (bits.length < 2 || bits[0] > 7)
+    throw new TypeError("invalid key usage bits");
+  const bit = (index) => {
+    const byte = bits[1 + Math.floor(index / 8)];
+    return byte !== undefined && (byte & 128 >> index % 8) !== 0;
+  };
+  const eku = extensions.get("2.5.29.37");
+  let extendedKeyUsage;
+  if (eku) {
+    const root = readDer(eku.value, 0);
+    if (root.tag !== 48 || root.end !== eku.value.length)
+      throw new TypeError("invalid extended key usage");
+    extendedKeyUsage = new Set(derChildren(root).map(oid));
+  }
+  return {
+    spiffeId: uriSans[0],
+    subjectEmpty,
+    sanCritical: san.critical,
+    ca,
+    keyUsageCritical: usage.critical,
+    digitalSignature: bit(0),
+    keyCertSign: bit(5),
+    crlSign: bit(6),
+    extendedKeyUsage
+  };
+}
+function identityFromCertificate(cert, domains, context, evidenceSource) {
+  const now = Date.now();
+  const notBefore = Date.parse(cert.validFrom);
+  const notAfter = Date.parse(cert.validTo);
+  if (!Number.isFinite(notBefore) || !Number.isFinite(notAfter) || now < notBefore || now > notAfter) {
+    throw new TypeError("X.509-SVID is outside its validity period");
+  }
+  const profile = parseSvidProfile(new Uint8Array(cert.raw));
+  if (profile.subjectEmpty && !profile.sanCritical)
+    throw new TypeError("subjectless SVID requires critical SAN");
+  if (profile.ca)
+    throw new TypeError("X.509-SVID leaf cannot be a CA");
+  if (!profile.keyUsageCritical || !profile.digitalSignature || profile.keyCertSign || profile.crlSign) {
+    throw new TypeError("invalid X.509-SVID key usage");
+  }
+  if (profile.extendedKeyUsage && (!profile.extendedKeyUsage.has("1.3.6.1.5.5.7.3.1") || !profile.extendedKeyUsage.has("1.3.6.1.5.5.7.3.2"))) {
+    throw new TypeError("X.509-SVID extended key usage must include clientAuth and serverAuth");
+  }
+  const trustDomain = validateSpiffeId(profile.spiffeId, domains);
+  return new PeerIdentity({
+    provider: PROVIDER,
+    evidenceSource,
+    assurance: IdentityAssurance.CONFIGURED_PROXY,
+    issuer: `spiffe://${trustDomain}`,
+    transport: "http",
+    subjectKind: PeerSubjectKind.WORKLOAD,
+    subjectKey: profile.spiffeId,
+    subjectStability: SubjectStability.STABLE,
+    subjectVerified: true,
+    sourceAddress: context.assertedPeer,
+    proxyAddress: context.immediatePeer
+  });
+}
+function certificateProvider(options) {
+  const { domains, proxies } = validateDomainsAndProxies(options.trustDomains, options.trustedProxyAddresses);
+  validateHeaderName(options.certificateHeader, "certificateHeader");
+  if (options.verificationHeader !== undefined) {
+    validateHeaderName(options.verificationHeader, "verificationHeader");
+    if (options.certificateHeader.toLowerCase() === options.verificationHeader.toLowerCase()) {
+      throw new TypeError("certificate and verification headers must be distinct");
+    }
+    if (hasControl(options.verificationValue ?? ""))
+      throw new TypeError("invalid verification value");
+  }
+  if (!Number.isSafeInteger(options.maxHeaderBytes) || options.maxHeaderBytes <= 0) {
+    throw new TypeError("maxHeaderBytes must be a positive integer");
+  }
+  return {
+    provider: PROVIDER,
+    async resolve(context) {
+      const immediatePeer = normalizeIpLiteral(context.immediatePeer ?? "");
+      if (!immediatePeer || !proxies.has(immediatePeer)) {
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.UNTRUSTED_PROXY);
+      }
+      let raw;
+      let verified;
+      try {
+        raw = context.header(options.certificateHeader);
+        if (options.verificationHeader)
+          verified = context.header(options.verificationHeader);
+      } catch (error) {
+        if (error instanceof PeerIdentityRejectedError)
+          return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.INVALID);
+        throw error;
+      }
+      if (!raw)
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.NO_MATCH);
+      if (!ascii(raw) || byteLength(raw) > options.maxHeaderBytes) {
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.INVALID);
+      }
+      if (options.verificationHeader && (verified === undefined || byteLength(verified) > 64 || verified !== options.verificationValue)) {
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.INVALID);
+      }
+      try {
+        const decoded = decodeURIComponent(raw);
+        if (!ascii(decoded) || byteLength(decoded) > options.maxHeaderBytes || decoded.split("-----BEGIN CERTIFICATE-----").length - 1 !== 1 || decoded.split("-----END CERTIFICATE-----").length - 1 !== 1 || !decoded.trim().endsWith("-----END CERTIFICATE-----")) {
+          throw new TypeError("invalid certificate header");
+        }
+        const X509 = await loadX509();
+        const identity = identityFromCertificate(new X509(decoded), domains, context, options.evidenceSource);
+        return PeerIdentityResult.available(identity);
+      } catch {
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.INVALID);
+      }
+    }
+  };
+}
+function spiffeX509HeaderProvider(options) {
+  if (!options.chainVerifiedHeader)
+    throw new TypeError("chainVerifiedHeader is required");
+  return certificateProvider({
+    trustDomains: options.trustDomains,
+    trustedProxyAddresses: options.trustedProxyAddresses,
+    certificateHeader: options.header ?? "X-SSL-Client-Cert",
+    verificationHeader: options.chainVerifiedHeader,
+    verificationValue: options.chainVerifiedValue ?? "true",
+    maxHeaderBytes: options.maxHeaderBytes ?? 16384,
+    evidenceSource: "verified_certificate_header"
+  });
+}
+function nginxSpiffeProvider(options) {
+  return certificateProvider({
+    trustDomains: options.trustDomains,
+    trustedProxyAddresses: options.trustedProxyAddresses,
+    certificateHeader: options.certificateHeader ?? "X-SSL-Client-Cert",
+    verificationHeader: options.verificationHeader ?? "X-SSL-Client-Verify",
+    verificationValue: "SUCCESS",
+    maxHeaderBytes: options.maxHeaderBytes ?? 16384,
+    evidenceSource: "nginx_mtls"
+  });
+}
+function azureApplicationGatewaySpiffeProvider(options) {
+  return certificateProvider({
+    trustDomains: options.trustDomains,
+    trustedProxyAddresses: options.trustedProxyAddresses,
+    certificateHeader: options.certificateHeader ?? "X-Client-Certificate",
+    verificationHeader: options.verificationHeader ?? "X-Client-Certificate-Verification",
+    verificationValue: "SUCCESS",
+    maxHeaderBytes: options.maxHeaderBytes ?? 16384,
+    evidenceSource: "azure_application_gateway_mtls_strict"
+  });
+}
+function awsAlbSpiffeProvider(options) {
+  return certificateProvider({
+    trustDomains: options.trustDomains,
+    trustedProxyAddresses: options.trustedProxyAddresses,
+    certificateHeader: options.leafHeader ?? "X-Amzn-Mtls-Clientcert-Leaf",
+    maxHeaderBytes: options.maxHeaderBytes ?? 16384,
+    evidenceSource: "aws_alb_mtls_verify"
+  });
+}
+function gcpLoadBalancerSpiffeProvider(options) {
+  const { domains, proxies } = validateDomainsAndProxies(options.trustDomains, options.trustedProxyAddresses);
+  const headers = {
+    spiffe: options.spiffeIdHeader ?? "X-Client-Cert-Spiffe-Id",
+    present: options.presentHeader ?? "X-Client-Cert-Present",
+    verified: options.chainVerifiedHeader ?? "X-Client-Cert-Chain-Verified",
+    error: options.errorHeader ?? "X-Client-Cert-Error"
+  };
+  for (const [name, value] of Object.entries(headers))
+    validateHeaderName(value, name);
+  if (new Set(Object.values(headers).map((header) => header.toLowerCase())).size !== 4) {
+    throw new TypeError("GCP mTLS header names must be distinct");
+  }
+  return {
+    provider: PROVIDER,
+    resolve(context) {
+      const immediatePeer = normalizeIpLiteral(context.immediatePeer ?? "");
+      if (!immediatePeer || !proxies.has(immediatePeer)) {
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.UNTRUSTED_PROXY);
+      }
+      try {
+        const present = context.header(headers.present);
+        const verified = context.header(headers.verified);
+        const spiffeId = context.header(headers.spiffe);
+        const error = context.header(headers.error);
+        if (present === "false" && (verified === undefined || verified === "false") && spiffeId === undefined) {
+          return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.NO_MATCH);
+        }
+        if (present !== "true" || verified !== "true" || error !== undefined && error !== "" || !spiffeId) {
+          return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.INVALID);
+        }
+        const trustDomain = validateSpiffeId(spiffeId, domains);
+        return PeerIdentityResult.available(new PeerIdentity({
+          provider: PROVIDER,
+          evidenceSource: "gcp_load_balancer_mtls",
+          assurance: IdentityAssurance.CONFIGURED_PROXY,
+          issuer: `spiffe://${trustDomain}`,
+          transport: "http",
+          subjectKind: PeerSubjectKind.WORKLOAD,
+          subjectKey: spiffeId,
+          subjectStability: SubjectStability.STABLE,
+          subjectVerified: true,
+          attributes: { client_certificate_present: true, client_certificate_chain_verified: true },
+          sourceAddress: context.assertedPeer,
+          proxyAddress: context.immediatePeer
+        }));
+      } catch {
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.INVALID);
+      }
+    }
+  };
+}
+function splitXfcc(value, delimiter) {
+  const parts = [];
+  let current = "";
+  let quoted = false;
+  let escaped = false;
+  for (const character of value) {
+    if (escaped) {
+      if (character !== '"' && character !== "\\")
+        throw new TypeError("unsupported XFCC quoted escape");
+      current += character;
+      escaped = false;
+    } else if (quoted && character === "\\") {
+      escaped = true;
+    } else if (character === '"') {
+      quoted = !quoted;
+      current += character;
+    } else if (character === delimiter && !quoted) {
+      parts.push(current);
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  if (quoted || escaped)
+    throw new TypeError("unterminated XFCC quoted value");
+  parts.push(current);
+  return parts;
+}
+function xfccValue(value) {
+  if (value.startsWith('"') || value.endsWith('"')) {
+    if (value.length < 2 || !value.startsWith('"') || !value.endsWith('"'))
+      throw new TypeError("malformed quoted XFCC");
+    return value.slice(1, -1);
+  }
+  if (!value || /[,;=]/.test(value))
+    throw new TypeError("invalid unquoted XFCC value");
+  return value;
+}
+function strictPercentDecode(value) {
+  if (value.replace(PERCENT_ESCAPE, "").includes("%"))
+    throw new TypeError("invalid XFCC percent escape");
+  const decoded = decodeURIComponent(value);
+  if (hasControl(decoded))
+    throw new TypeError("decoded XFCC value contains controls");
+  return decoded;
+}
+function parseSingleXfcc(raw, maximum) {
+  if (!ascii(raw) || byteLength(raw) > maximum || hasControl(raw))
+    throw new TypeError("invalid XFCC bytes");
+  const elements = splitXfcc(raw, ",");
+  if (elements.length !== 1 || !elements[0].trim())
+    throw new TypeError("XFCC must contain one element");
+  const fields = new Map;
+  for (const rawPair of splitXfcc(elements[0], ";")) {
+    const pair = rawPair.trim();
+    const equal = pair.indexOf("=");
+    if (!pair || equal < 0)
+      throw new TypeError("malformed XFCC field");
+    const rawKey = pair.slice(0, equal).trim();
+    const key = rawKey.toLowerCase();
+    if (!XFCC_KEY.test(rawKey) || !["by", "hash", "cert", "chain", "subject", "uri", "dns", "issuer"].includes(key)) {
+      throw new TypeError("unsupported XFCC field");
+    }
+    let value = xfccValue(pair.slice(equal + 1).trim());
+    if (["by", "uri", "cert", "chain"].includes(key))
+      value = strictPercentDecode(value);
+    if (!["by", "uri", "dns"].includes(key) && fields.has(key))
+      throw new TypeError("duplicate XFCC singleton");
+    const values = fields.get(key) ?? [];
+    values.push(value);
+    fields.set(key, values);
+  }
+  return fields;
+}
+function envoyXfccSpiffeProvider(options) {
+  const { domains, proxies } = validateDomainsAndProxies(options.trustDomains, options.trustedProxyAddresses);
+  const header = options.header ?? "X-Forwarded-Client-Cert";
+  const maximum = options.maxHeaderBytes ?? 16384;
+  validateHeaderName(header, "header");
+  if (!Number.isSafeInteger(maximum) || maximum <= 0)
+    throw new TypeError("maxHeaderBytes must be positive");
+  return {
+    provider: PROVIDER,
+    resolve(context) {
+      const immediatePeer = normalizeIpLiteral(context.immediatePeer ?? "");
+      if (!immediatePeer || !proxies.has(immediatePeer)) {
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.UNTRUSTED_PROXY);
+      }
+      try {
+        const raw = context.header(header);
+        if (raw === undefined)
+          return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.NO_MATCH);
+        const fields = parseSingleXfcc(raw, maximum);
+        const uris = fields.get("uri") ?? [];
+        const hashes = fields.get("hash") ?? [];
+        if (uris.length !== 1 || hashes.length !== 1 || !SHA256.test(hashes[0]))
+          throw new TypeError("ambiguous XFCC identity");
+        const trustDomain = validateSpiffeId(uris[0], domains);
+        const by = fields.get("by") ?? [];
+        return PeerIdentityResult.available(new PeerIdentity({
+          provider: PROVIDER,
+          evidenceSource: "envoy_xfcc_sanitize_set",
+          assurance: IdentityAssurance.CONFIGURED_PROXY,
+          issuer: `spiffe://${trustDomain}`,
+          transport: "http",
+          subjectKind: PeerSubjectKind.WORKLOAD,
+          subjectKey: uris[0],
+          subjectStability: SubjectStability.STABLE,
+          subjectVerified: true,
+          attributes: {
+            certificate_sha256: hashes[0].toLowerCase(),
+            ...by.length > 0 ? { proxy_identities: by } : {}
+          },
+          sourceAddress: context.assertedPeer,
+          proxyAddress: context.immediatePeer
+        }));
+      } catch {
+        return new PeerIdentityResult(PROVIDER, PeerIdentityStatus.INVALID);
+      }
+    }
+  };
+}
 // src/schema.ts
 var str = utf8();
 var bytes = binary();
@@ -10328,7 +12410,7 @@ function writeUnaryResult(envelopeSchema, resultBytes) {
 }
 // src/launcher/hash.ts
 var HASH_LEN = 16;
-function canonicalJson(value) {
+function canonicalJson2(value) {
   if (value === null)
     return "null";
   if (typeof value === "boolean")
@@ -10339,11 +12421,11 @@ function canonicalJson(value) {
   if (typeof value === "string")
     return JSON.stringify(value);
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
+    return `[${value.map(canonicalJson2).join(",")}]`;
   }
   if (typeof value === "object") {
     const keys = Object.keys(value).sort();
-    const parts = keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`);
+    const parts = keys.map((k) => `${JSON.stringify(k)}:${canonicalJson2(value[k])}`);
     return `{${parts.join(",")}}`;
   }
   throw new TypeError(`canonicalJson: unsupported type ${typeof value}`);
@@ -10370,7 +12452,7 @@ async function computeHash(workerArgv, cwd, env) {
     cwd: cwdValue,
     env: filteredEnv
   };
-  const payload = new TextEncoder().encode(canonicalJson(canonical));
+  const payload = new TextEncoder().encode(canonicalJson2(canonical));
   const hex = await sha256Hex3(payload);
   return hex.slice(0, HASH_LEN);
 }
@@ -11302,9 +13384,653 @@ async function serveUnix(protocol, options) {
     done
   };
 }
+// src/tailscale.ts
+import { connect as tcpConnect2 } from "node:net";
+var PROVIDER2 = "tailscale";
+var LOCALAPI_HOST = "local-tailscaled.sock";
+var DEFAULT_SOCKET = "/var/run/tailscale/tailscaled.sock";
+var SERVICE_NAME = /^svc:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
+var ENCODED_WORDS = /^=\?[Uu][Tt][Ff]-8\?[Qq]\?[^?]*\?=(?: +=\?[Uu][Tt][Ff]-8\?[Qq]\?[^?]*\?=)*$/u;
+function result(status, identity) {
+  return new PeerIdentityResult(PROVIDER2, status, identity ? [identity] : []);
+}
+function hasControl2(value) {
+  return Array.from(value).some((character) => {
+    const code = character.codePointAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+function validText(value) {
+  try {
+    for (let index = 0;index < value.length; index++) {
+      const code = value.charCodeAt(index);
+      if (code >= 55296 && code <= 56319) {
+        const low = value.charCodeAt(++index);
+        if (low < 56320 || low > 57343)
+          return false;
+      } else if (code >= 56320 && code <= 57343)
+        return false;
+    }
+    return !hasControl2(value);
+  } catch {
+    return false;
+  }
+}
+function decodeServeHeader(raw, maxBytes) {
+  if (new TextEncoder().encode(raw).length > maxBytes || !validText(raw))
+    throw new Error("invalid Serve header");
+  if (Array.from(raw).some((character) => character.codePointAt(0) > 127)) {
+    throw new Error("Serve header must be ASCII or encoded-word text");
+  }
+  if (!raw.startsWith("=?"))
+    return raw;
+  if (!ENCODED_WORDS.test(raw))
+    throw new Error("invalid Serve encoded-word syntax");
+  const output = [];
+  const words = raw.split(/ +/u);
+  for (const word of words) {
+    const encoded = word.slice(word.indexOf("?q?") >= 0 ? word.indexOf("?q?") + 3 : word.indexOf("?Q?") + 3, -2);
+    for (let index = 0;index < encoded.length; index++) {
+      const character = encoded[index];
+      if (character === "_")
+        output.push(32);
+      else if (character === "=") {
+        const hex = encoded.slice(index + 1, index + 3);
+        if (!/^[0-9A-Fa-f]{2}$/u.test(hex))
+          throw new Error("invalid Serve Q escape");
+        output.push(Number.parseInt(hex, 16));
+        index += 2;
+      } else
+        output.push(character.charCodeAt(0));
+    }
+  }
+  const decoded = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(output));
+  if (!validText(decoded) || new TextEncoder().encode(decoded).length > maxBytes)
+    throw new Error("invalid Serve text");
+  return decoded;
+}
+
+class StrictJsonParser {
+  text;
+  index = 0;
+  values = 0;
+  constructor(text) {
+    this.text = text;
+  }
+  parse() {
+    const value = this.value(0);
+    this.space();
+    if (this.index !== this.text.length)
+      throw new Error("trailing JSON data");
+    return value;
+  }
+  value(depth) {
+    if (depth > 16)
+      throw new Error("JSON exceeds maximum depth");
+    if (++this.values > 4096)
+      throw new Error("JSON exceeds maximum value count");
+    this.space();
+    const char = this.text[this.index];
+    if (char === '"')
+      return this.string();
+    if (char === "{")
+      return this.object(depth);
+    if (char === "[")
+      return this.array(depth);
+    for (const [token, value] of [
+      ["true", true],
+      ["false", false],
+      ["null", null]
+    ]) {
+      if (this.text.startsWith(token, this.index)) {
+        this.index += token.length;
+        return value;
+      }
+    }
+    const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/u.exec(this.text.slice(this.index));
+    if (!match)
+      throw new Error("invalid JSON value");
+    this.index += match[0].length;
+    const number = Number(match[0]);
+    if (!Number.isFinite(number))
+      throw new Error("non-finite JSON number");
+    return number;
+  }
+  string() {
+    const start = this.index++;
+    let escaped = false;
+    while (this.index < this.text.length) {
+      const char = this.text[this.index++];
+      if (!escaped && char === '"') {
+        const value = JSON.parse(this.text.slice(start, this.index));
+        if (!validText(value))
+          throw new Error("invalid JSON string");
+        return value;
+      }
+      if (!escaped && char.charCodeAt(0) < 32)
+        throw new Error("control in JSON string");
+      if (!escaped && char === "\\")
+        escaped = true;
+      else
+        escaped = false;
+    }
+    throw new Error("unterminated JSON string");
+  }
+  object(depth) {
+    this.index++;
+    const object = {};
+    const keys = new Set;
+    this.space();
+    if (this.text[this.index] === "}") {
+      this.index++;
+      return object;
+    }
+    while (true) {
+      this.space();
+      if (this.text[this.index] !== '"')
+        throw new Error("JSON object key must be a string");
+      const key = this.string();
+      if (keys.has(key))
+        throw new Error("duplicate JSON object key");
+      keys.add(key);
+      this.space();
+      if (this.text[this.index++] !== ":")
+        throw new Error("missing JSON colon");
+      Object.defineProperty(object, key, {
+        value: this.value(depth + 1),
+        enumerable: true,
+        configurable: true,
+        writable: true
+      });
+      this.space();
+      const delimiter = this.text[this.index++];
+      if (delimiter === "}")
+        return object;
+      if (delimiter !== ",")
+        throw new Error("invalid JSON object delimiter");
+    }
+  }
+  array(depth) {
+    this.index++;
+    const array = [];
+    this.space();
+    if (this.text[this.index] === "]") {
+      this.index++;
+      return array;
+    }
+    while (true) {
+      array.push(this.value(depth + 1));
+      this.space();
+      const delimiter = this.text[this.index++];
+      if (delimiter === "]")
+        return array;
+      if (delimiter !== ",")
+        throw new Error("invalid JSON array delimiter");
+    }
+  }
+  space() {
+    while (` 	\r
+`.includes(this.text[this.index] ?? "\x00"))
+      this.index++;
+  }
+}
+function parseStrictJson(bytes2, limit) {
+  if (bytes2.byteLength > limit)
+    throw new Error("JSON exceeds byte limit");
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes2);
+  return new StrictJsonParser(text).parse();
+}
+function capabilities(value, requireSlash, requireObjectEntries) {
+  if (value === null || Array.isArray(value) || typeof value !== "object")
+    throw new Error("capabilities must be an object");
+  for (const [name, entries] of Object.entries(value)) {
+    if (!validText(name) || name.length > 512 || requireSlash && (name.startsWith("/") || !name.includes("/"))) {
+      throw new Error("invalid capability name");
+    }
+    if (!Array.isArray(entries) || requireObjectEntries && entries.some((entry) => entry === null || Array.isArray(entry) || typeof entry !== "object")) {
+      throw new Error("capability entries must be objects");
+    }
+  }
+  return value;
+}
+function tailscaleServeIdentityProvider(options) {
+  if (!options.issuer || !validText(options.issuer))
+    throw new TypeError("Tailscale issuer must be non-empty text without controls");
+  const trusted = normalizeTrustedProxyAddresses(options.trustedProxyAddresses, "Tailscale Serve trustedProxyAddresses");
+  const maxHeaderBytes = options.maxHeaderBytes ?? 16384;
+  if (!Number.isSafeInteger(maxHeaderBytes) || maxHeaderBytes <= 0)
+    throw new TypeError("maxHeaderBytes must be positive");
+  return {
+    provider: PROVIDER2,
+    resolve(context) {
+      const immediate = context ? normalizeIpLiteral(context.immediatePeer ?? "") : null;
+      if (!immediate || !trusted.has(immediate))
+        return result(PeerIdentityStatus.UNTRUSTED_PROXY);
+      try {
+        const funnel = context.header("Tailscale-Funnel-Request");
+        const loginRaw = context.header("Tailscale-User-Login");
+        const nameRaw = context.header("Tailscale-User-Name");
+        const profileRaw = context.header("Tailscale-User-Profile-Pic");
+        const capRaw = context.header("Tailscale-App-Capabilities");
+        if (funnel !== undefined)
+          return result(funnel === "?1" ? PeerIdentityStatus.NOT_APPLICABLE : PeerIdentityStatus.INVALID);
+        const login = loginRaw === undefined ? "" : decodeServeHeader(loginRaw, maxHeaderBytes);
+        const displayName = nameRaw === undefined ? "" : decodeServeHeader(nameRaw, maxHeaderBytes);
+        if (profileRaw !== undefined)
+          decodeServeHeader(profileRaw, maxHeaderBytes);
+        const caps = capRaw === undefined ? {} : capabilities(parseStrictJson(new TextEncoder().encode(decodeServeHeader(capRaw, maxHeaderBytes)), maxHeaderBytes), true, true);
+        if (loginRaw !== undefined && login === "" || (nameRaw !== undefined || profileRaw !== undefined) && login === "") {
+          return result(PeerIdentityStatus.INVALID);
+        }
+        if (!login && Object.keys(caps).length === 0)
+          return result(PeerIdentityStatus.NO_MATCH);
+        const attributes = {};
+        if (login)
+          attributes.user_login = login;
+        if (displayName)
+          attributes.user_display_name = displayName;
+        const identity = new PeerIdentity({
+          provider: PROVIDER2,
+          evidenceSource: "serve_proxy",
+          assurance: IdentityAssurance.CONFIGURED_PROXY,
+          issuer: options.issuer,
+          transport: "http",
+          subjectKind: login ? PeerSubjectKind.USER : PeerSubjectKind.UNKNOWN,
+          subjectKey: login ? `login:${login}` : undefined,
+          subjectStability: login ? SubjectStability.LOGIN : SubjectStability.NONE,
+          subjectVerified: !!login,
+          attributes,
+          capabilities: caps,
+          capabilitiesVerified: capRaw !== undefined,
+          sourceAddress: context.assertedPeer,
+          proxyAddress: context.immediatePeer
+        });
+        return result(PeerIdentityStatus.AVAILABLE, identity);
+      } catch {
+        return result(PeerIdentityStatus.INVALID);
+      }
+    }
+  };
+}
+function destinationIp(value) {
+  const direct = normalizeIpLiteral(value);
+  if (direct)
+    return direct;
+  try {
+    const url = new URL(`tcp://${value}`);
+    return normalizeIpLiteral(url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname);
+  } catch {
+    return null;
+  }
+}
+function remainingTimeout(context, configured) {
+  const candidates = [configured];
+  if (context.deadline !== undefined)
+    candidates.push(context.deadline - Date.now());
+  const budget = context.remainingBudgetMs();
+  if (budget !== undefined)
+    candidates.push(budget);
+  return Math.max(0, Math.min(...candidates));
+}
+async function localApiGet(transport, path3, timeoutMs, maxBody, maxHeaders, signal2) {
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(new Error("LocalAPI deadline elapsed")), timeoutMs);
+  const cancel = () => controller.abort(signal2?.reason ?? new Error("LocalAPI request cancelled"));
+  if (signal2?.aborted)
+    cancel();
+  else
+    signal2?.addEventListener("abort", cancel, { once: true });
+  const headers = { Accept: "application/json", Host: LOCALAPI_HOST };
+  if (transport.password)
+    headers.Authorization = `Basic ${Buffer.from(`:${transport.password}`).toString("base64")}`;
+  const socket = transport.socket ? tcpConnect2({ path: transport.socket }) : tcpConnect2({ host: transport.endpoint.hostname, port: Number(transport.endpoint.port || 80) });
+  try {
+    await localApiWaitConnect(socket, controller.signal);
+    const request = `GET ${path3} HTTP/1.1\r
+${Object.entries(headers).map(([name, value]) => `${name}: ${value}\r
+`).join("")}Connection: close\r
+\r
+`;
+    await localApiWrite(socket, new TextEncoder().encode(request), controller.signal);
+    const raw = await localApiRead(socket, maxHeaders + maxBody + 4, controller.signal);
+    try {
+      return decodeLocalApiResponse(raw, maxHeaders, maxBody);
+    } catch (error) {
+      throw new LocalApiInvalidResponseError(error instanceof Error ? error.message : "invalid LocalAPI response");
+    }
+  } finally {
+    socket.destroy();
+    clearTimeout(timer);
+    signal2?.removeEventListener("abort", cancel);
+  }
+}
+
+class LocalApiInvalidResponseError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "LocalApiInvalidResponseError";
+  }
+}
+function localApiWaitConnect(socket, signal2) {
+  return new Promise((resolve2, reject) => {
+    const cleanup = () => {
+      socket.off("connect", connected);
+      socket.off("error", failed);
+      signal2.removeEventListener("abort", aborted);
+    };
+    const connected = () => {
+      cleanup();
+      resolve2();
+    };
+    const failed = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const aborted = () => {
+      cleanup();
+      socket.destroy();
+      reject(signal2.reason);
+    };
+    socket.once("connect", connected);
+    socket.once("error", failed);
+    signal2.addEventListener("abort", aborted, { once: true });
+  });
+}
+function localApiWrite(socket, bytes2, signal2) {
+  return new Promise((resolve2, reject) => {
+    const aborted = () => {
+      socket.destroy();
+      reject(signal2.reason);
+    };
+    signal2.addEventListener("abort", aborted, { once: true });
+    socket.write(bytes2, (error) => {
+      signal2.removeEventListener("abort", aborted);
+      if (error)
+        reject(error);
+      else
+        resolve2();
+    });
+  });
+}
+function localApiRead(socket, maxBytes, signal2) {
+  return new Promise((resolve2, reject) => {
+    const chunks = [];
+    let length = 0;
+    const cleanup = () => {
+      socket.off("data", data);
+      socket.off("end", ended);
+      socket.off("error", failed);
+      signal2.removeEventListener("abort", aborted);
+    };
+    const data = (chunk) => {
+      length += chunk.length;
+      if (length > maxBytes) {
+        cleanup();
+        socket.destroy();
+        reject(new LocalApiInvalidResponseError("LocalAPI response exceeds configured limits"));
+      } else
+        chunks.push(chunk);
+    };
+    const ended = () => {
+      cleanup();
+      resolve2(Buffer.concat(chunks, length));
+    };
+    const failed = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const aborted = () => {
+      cleanup();
+      socket.destroy();
+      reject(signal2.reason);
+    };
+    socket.on("data", data);
+    socket.once("end", ended);
+    socket.once("error", failed);
+    signal2.addEventListener("abort", aborted, { once: true });
+  });
+}
+function decodeLocalApiChunked(body, maxBody) {
+  const chunks = [];
+  let total = 0;
+  let offset = 0;
+  while (true) {
+    const lineEnd = body.indexOf(`\r
+`, offset);
+    if (lineEnd < 0)
+      throw new Error("truncated LocalAPI chunk");
+    const sizeText = body.toString("ascii", offset, lineEnd).split(";", 1)[0].trim();
+    if (!/^[0-9A-Fa-f]+$/u.test(sizeText))
+      throw new Error("invalid LocalAPI chunk size");
+    const size = Number.parseInt(sizeText, 16);
+    offset = lineEnd + 2;
+    if (size === 0)
+      return Buffer.concat(chunks, total);
+    total += size;
+    if (total > maxBody || offset + size + 2 > body.length)
+      throw new Error("LocalAPI response exceeds body limit");
+    chunks.push(body.subarray(offset, offset + size));
+    offset += size + 2;
+  }
+}
+function decodeLocalApiResponse(raw, maxHeaders, maxBody) {
+  const headerEnd = raw.indexOf(`\r
+\r
+`);
+  if (headerEnd < 0 || headerEnd > maxHeaders)
+    throw new Error("invalid or oversized LocalAPI response headers");
+  const lines = raw.toString("latin1", 0, headerEnd).split(`\r
+`);
+  const statusLine = /^HTTP\/1\.[01] (\d{3})(?: .*)?$/u.exec(lines.shift() ?? "");
+  if (!statusLine)
+    throw new Error("invalid LocalAPI status line");
+  const rawHeaders = [];
+  let chunked = false;
+  let contentLength;
+  for (const line of lines) {
+    const colon = line.indexOf(":");
+    if (colon <= 0)
+      throw new Error("invalid LocalAPI response header");
+    const name = line.slice(0, colon);
+    const value = line.slice(colon + 1).trim();
+    rawHeaders.push(name, value);
+    if (name.toLowerCase() === "transfer-encoding" && /\bchunked\b/iu.test(value))
+      chunked = true;
+    if (name.toLowerCase() === "content-length")
+      contentLength = Number(value);
+  }
+  let body = raw.subarray(headerEnd + 4);
+  if (chunked)
+    body = decodeLocalApiChunked(body, maxBody);
+  else if (contentLength !== undefined) {
+    if (!Number.isSafeInteger(contentLength) || contentLength < 0 || body.length < contentLength) {
+      throw new Error("invalid LocalAPI Content-Length");
+    }
+    body = body.subarray(0, contentLength);
+  }
+  if (body.length > maxBody)
+    throw new Error("LocalAPI response exceeds body limit");
+  return { status: Number(statusLine[1]), rawHeaders, body };
+}
+function optionalString(object, key) {
+  const value = object[key];
+  if (value === undefined || value === null)
+    return "";
+  if (typeof value !== "string" || !validText(value))
+    throw new Error(`${key} must be valid text`);
+  return value;
+}
+function tailscaleLocalApiIdentityProvider(options) {
+  if (!options.issuer || !validText(options.issuer))
+    throw new TypeError("Tailscale issuer must be non-empty text without controls");
+  if (options.unixSocket && options.endpoint)
+    throw new TypeError("configure only one Tailscale LocalAPI transport");
+  if (options.password && !options.endpoint)
+    throw new TypeError("LocalAPI password requires an explicit HTTP endpoint");
+  if (options.password && !validText(options.password))
+    throw new TypeError("invalid LocalAPI password");
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const maxBody = options.maxResponseBytes ?? 65536;
+  const maxHeaders = options.maxResponseHeaderBytes ?? 32768;
+  for (const [name, value] of Object.entries({
+    timeoutMs,
+    maxResponseBytes: maxBody,
+    maxResponseHeaderBytes: maxHeaders
+  })) {
+    if (!Number.isSafeInteger(value) || value <= 0)
+      throw new TypeError(`${name} must be positive`);
+  }
+  let transport;
+  if (options.endpoint) {
+    const endpoint = new URL(options.endpoint);
+    if (endpoint.protocol !== "http:" || !endpoint.host || endpoint.username || endpoint.password || endpoint.pathname !== "" && endpoint.pathname !== "/" || endpoint.search || endpoint.hash) {
+      throw new TypeError("LocalAPI endpoint must be a plain HTTP origin without userinfo or path");
+    }
+    transport = { endpoint, password: options.password };
+  } else {
+    const socket = options.unixSocket ?? (process.platform === "linux" ? DEFAULT_SOCKET : undefined);
+    if (!socket) {
+      throw new TypeError(`native Tailscale LocalAPI discovery is not implemented for Node on ${process.platform}; configure endpoint explicitly`);
+    }
+    if (socket.includes("\x00"))
+      throw new TypeError("invalid LocalAPI Unix socket path");
+    transport = { socket };
+  }
+  return {
+    provider: PROVIDER2,
+    async resolve(context, signal2) {
+      if (!context)
+        return result(PeerIdentityStatus.INVALID);
+      const source = context.assertedPeer ?? context.sourceEndpoint ?? context.immediatePeer;
+      if (!source)
+        return result(PeerIdentityStatus.NOT_APPLICABLE);
+      if (!validText(source) || new TextEncoder().encode(source).length > 4096)
+        return result(PeerIdentityStatus.INVALID);
+      const query = new URLSearchParams({ addr: source, proto: "tcp" });
+      let target = { kind: "node" };
+      if (context.serviceName) {
+        if (!SERVICE_NAME.test(context.serviceName))
+          return result(PeerIdentityStatus.INVALID);
+        query.set("svc_name", context.serviceName);
+        target = { kind: "service", value: context.serviceName };
+      } else if (context.destinationAddress) {
+        const address = destinationIp(context.destinationAddress);
+        if (!address)
+          return result(PeerIdentityStatus.INVALID);
+        query.set("dst_ip", address);
+        target = { kind: "destination_ip", value: address };
+      }
+      const budget = remainingTimeout(context, timeoutMs);
+      if (budget <= 0)
+        return result(PeerIdentityStatus.UNAVAILABLE);
+      let response;
+      try {
+        response = await localApiGet(transport, `/localapi/v0/whois?${query.toString()}`, budget, maxBody, maxHeaders, signal2);
+      } catch (error) {
+        return result(error instanceof LocalApiInvalidResponseError ? PeerIdentityStatus.INVALID : PeerIdentityStatus.UNAVAILABLE);
+      }
+      if (response.status === 401 || response.status === 403)
+        return result(PeerIdentityStatus.PERMISSION_DENIED);
+      if (response.status === 404)
+        return result(PeerIdentityStatus.NO_MATCH);
+      if (response.status >= 500 && response.status <= 599)
+        return result(PeerIdentityStatus.UNAVAILABLE);
+      if (response.status !== 200)
+        return result(PeerIdentityStatus.INVALID);
+      const contentTypes = [];
+      for (let index = 0;index < response.rawHeaders.length; index += 2) {
+        if (response.rawHeaders[index].toLowerCase() === "content-type")
+          contentTypes.push(response.rawHeaders[index + 1]);
+      }
+      if (contentTypes.length !== 1 || contentTypes[0].split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+        return result(PeerIdentityStatus.INVALID);
+      }
+      try {
+        const payload = parseStrictJson(response.body, maxBody);
+        if (payload === null || Array.isArray(payload) || typeof payload !== "object")
+          throw new Error("WhoIs must be an object");
+        const payloadObject = payload;
+        const nodeValue = payloadObject.Node;
+        if (nodeValue === null || Array.isArray(nodeValue) || typeof nodeValue !== "object")
+          throw new Error("WhoIs lacks Node");
+        const node = nodeValue;
+        const stableId = optionalString(node, "StableID");
+        const nodeName = optionalString(node, "Name");
+        const rawTags = node.Tags ?? [];
+        if (!Array.isArray(rawTags) || rawTags.some((tag) => typeof tag !== "string" || !tag.startsWith("tag:") || !validText(tag))) {
+          throw new Error("invalid WhoIs tags");
+        }
+        const tags = rawTags;
+        const caps = payloadObject.CapMap == null ? {} : capabilities(payloadObject.CapMap, false, false);
+        const attributes = { tags, capability_target: target };
+        if (stableId)
+          attributes.node_id = stableId;
+        if (nodeName)
+          attributes.node_name = nodeName;
+        let subjectKind;
+        let subjectKey;
+        if (tags.length > 0) {
+          if (!stableId)
+            throw new Error("tagged node lacks StableID");
+          subjectKind = PeerSubjectKind.TAGGED_NODE;
+          subjectKey = `node:${stableId}`;
+        } else {
+          const profileValue = payloadObject.UserProfile;
+          if (profileValue === null || Array.isArray(profileValue) || typeof profileValue !== "object") {
+            throw new Error("untagged node lacks UserProfile");
+          }
+          const profile = profileValue;
+          const id = profile.ID;
+          if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)
+            throw new Error("invalid stable user ID");
+          subjectKind = PeerSubjectKind.USER;
+          subjectKey = `user:${id}`;
+          attributes.user_id = String(id);
+          const login = optionalString(profile, "LoginName");
+          const display = optionalString(profile, "DisplayName");
+          if (login)
+            attributes.user_login = login;
+          if (display)
+            attributes.user_display_name = display;
+        }
+        return result(PeerIdentityStatus.AVAILABLE, new PeerIdentity({
+          provider: PROVIDER2,
+          evidenceSource: "localapi",
+          assurance: IdentityAssurance.LOCAL_DAEMON,
+          issuer: options.issuer,
+          transport: context.transport,
+          subjectKind,
+          subjectKey,
+          subjectStability: SubjectStability.STABLE,
+          subjectVerified: true,
+          attributes,
+          capabilities: caps,
+          capabilitiesVerified: true,
+          sourceAddress: sourceIp(source)
+        }));
+      } catch {
+        return result(PeerIdentityStatus.INVALID);
+      }
+    }
+  };
+}
+function sourceIp(source) {
+  if (source.startsWith("[")) {
+    const closing = source.indexOf("]");
+    if (closing > 1 && /^:\d+$/.test(source.slice(closing + 1)))
+      return source.slice(1, closing);
+  }
+  const firstColon = source.indexOf(":");
+  const lastColon = source.lastIndexOf(":");
+  if (firstColon > 0 && firstColon === lastColon && /^\d+$/.test(source.slice(lastColon + 1))) {
+    return source.slice(0, lastColon);
+  }
+  return source;
+}
 export {
   writeUnaryResult,
   writeRequest,
+  validateSpiffeId,
   unpackStateToken,
   uint82 as uint8,
   uint642 as uint64,
@@ -11313,22 +14039,29 @@ export {
   tryAcquireLock,
   tokenDigest,
   toSchema,
+  tcpConnectSocks5h,
   tcpConnect,
+  tailscaleServeIdentityProvider,
+  tailscaleLocalApiIdentityProvider,
   subprocessConnect,
   str,
   statusRows,
+  spiffeX509HeaderProvider,
   socketPaths,
   serveUnix,
   serveTcp,
   serveStream,
   resolveExternalLocation,
+  requirePeerIdentity,
   redactClaims,
   readUnaryResult,
   readRequest,
   probeSocket,
   pipeConnect,
+  peerIdentityPrimary,
   parseXfcc,
   parseUseIdTokenAsBearer,
+  parseSocks5hProxy,
   parseResourceMetadataUrl,
   parseDeviceCodeClientSecret,
   parseDeviceCodeClientId,
@@ -11336,8 +14069,10 @@ export {
   parseClientSecret,
   parseClientId,
   otelTraceContext,
+  observePeerIdentity,
   oauthResourceMetadataToJson,
   noRedaction,
+  nginxSpiffeProvider,
   mtlsAuthenticateXfcc,
   mtlsAuthenticateSubject,
   mtlsAuthenticateFingerprint,
@@ -11357,15 +14092,21 @@ export {
   httpsOnlyValidator,
   httpOAuthMetadata,
   httpIntrospect,
+  httpConnectSocks5h,
   httpConnect,
+  headersFromNodeRawHeaders,
+  gcpLoadBalancerSpiffeProvider,
   gcStateDir,
   float322 as float32,
   float,
   findStateToken,
   findProtocolVersion,
   fetchOAuthMetadata,
+  envoyXfccSpiffeProvider,
+  dialSocks5h,
   defaultStateDir,
   decodeContentEncoding,
+  createSocks5hFetch,
   createIntrospector,
   createHttpHandler,
   chainAuthenticate,
@@ -11374,6 +14115,10 @@ export {
   bool2 as bool,
   bearerAuthenticateStatic,
   bearerAuthenticate,
+  azureApplicationGatewaySpiffeProvider,
+  awsAlbSpiffeProvider,
+  anyOfPeerIdentities,
+  allOfPeerIdentities,
   acquireLock,
   VgiRpcServer,
   VersionError,
@@ -11381,6 +14126,7 @@ export {
   UPLOAD_URL_PARAMS_SCHEMA,
   UPLOAD_URL_METHOD,
   TransportKind,
+  SubjectStability,
   SessionLostError,
   ServerDrainingError,
   STATE_KEY,
@@ -11394,6 +14140,14 @@ export {
   REDACTED,
   Protocol,
   PipeStreamSession,
+  PeerSubjectKind,
+  PeerResolutionContext,
+  PeerIdentityUnavailableError,
+  PeerIdentityStatus,
+  PeerIdentityResult,
+  PeerIdentityRejectedError,
+  PeerIdentity,
+  PeerEvidenceSet,
   PROTOCOL_NAME_KEY,
   OutputCollector,
   MethodType,
@@ -11402,6 +14156,7 @@ export {
   LOG_MESSAGE_KEY,
   LOG_LEVEL_KEY,
   LOG_EXTRA_KEY,
+  IdentityAssurance,
   INTROSPECT_ENDPOINT,
   INTROSPECT_ENABLED_HEADER,
   HttpStreamSession,
@@ -11425,4 +14180,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=9C660BCBCC04307864756E2164756E21
+//# debugId=3D76F4A8050FEC8B64756E2164756E21

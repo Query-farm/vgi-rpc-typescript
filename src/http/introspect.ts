@@ -310,7 +310,7 @@ async function introspect(
     console.warn("[introspect] unavailable", {
       principal: caller,
       tokenDigest: digest,
-      error: err.message,
+      error: "authentication authority unavailable",
     });
     return new Response(JSON.stringify({ error: "unavailable" }), {
       status: 503,

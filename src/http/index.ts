@@ -46,6 +46,21 @@ export {
   requireProxyProof,
   verifyProof,
 } from "./proof.js";
+export {
+  type AwsAlbSpiffeOptions,
+  awsAlbSpiffeProvider,
+  azureApplicationGatewaySpiffeProvider,
+  type CertificateProxySpiffeOptions,
+  type EnvoyXfccSpiffeOptions,
+  envoyXfccSpiffeProvider,
+  type GcpLoadBalancerSpiffeOptions,
+  gcpLoadBalancerSpiffeProvider,
+  headersFromNodeRawHeaders,
+  nginxSpiffeProvider,
+  type SpiffeX509HeaderProviderOptions,
+  spiffeX509HeaderProvider,
+  validateSpiffeId,
+} from "./spiffe.js";
 export { type UnpackedToken, unpackStateToken } from "./token.js";
 export type {
   ExtraRouteContext,

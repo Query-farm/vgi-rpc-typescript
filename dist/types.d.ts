@@ -1,5 +1,6 @@
 import { type VgiBatch, type VgiSchema } from "./arrow/index.js";
 import { AuthContext } from "./auth.js";
+import { PeerEvidenceSet } from "./identity.js";
 /**
  * Whether an RPC method is request/response or streaming. Mirrors Python's
  * `MethodType` and is carried in the `__describe__` payload.
@@ -98,6 +99,8 @@ export interface CallContext extends LogContext {
     /** Authenticated principal for this call; {@link AuthContext.anonymous} when
      *  the request was not authenticated. */
     readonly auth: AuthContext;
+    /** Immutable, off-wire transport peer identity evidence for this call. */
+    readonly peerEvidence?: PeerEvidenceSet;
     /** Application custom metadata carried by this stream input batch/tick.
      * Framework continuation and cancellation keys are removed on HTTP. */
     readonly inputMetadata?: ReadonlyMap<string, string>;
@@ -354,6 +357,7 @@ export declare class OutputCollector implements CallContext {
     /** Authenticated principal for this call; {@link AuthContext.anonymous} when
      *  the request was not authenticated. */
     readonly auth: AuthContext;
+    readonly peerEvidence: PeerEvidenceSet;
     readonly inputMetadata?: ReadonlyMap<string, string>;
     readonly cookies: ReadonlyMap<string, string>;
     readonly kind?: TransportKind;
@@ -369,6 +373,7 @@ export declare class OutputCollector implements CallContext {
         remainingExternalizedResponseBytes?: number;
         externalizationEnabled?: boolean;
         inputMetadata?: ReadonlyMap<string, string>;
+        peerEvidence?: PeerEvidenceSet;
     });
     /**
      * Mark this collector as able to accept Set-Cookie directives.  Called

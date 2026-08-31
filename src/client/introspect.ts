@@ -142,6 +142,7 @@ export async function httpIntrospect(
     compressionLevel?: number;
     compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;
     decompressFn?: (data: Uint8Array) => Promise<Uint8Array>;
+    fetch?: typeof globalThis.fetch;
   },
 ): Promise<ServiceDescription> {
   // See httpConnect: a base URL ending in "/" would produce "//__describe__".
@@ -169,7 +170,7 @@ export async function httpIntrospect(
   // See connect.ts: states what we can decode, regardless of request compression.
   headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
 
-  const response = await fetch(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
+  const response = await (options?.fetch ?? globalThis.fetch)(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
     method: "POST",
     headers,
     body: sendBody as unknown as BodyInit,

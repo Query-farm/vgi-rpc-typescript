@@ -195,7 +195,10 @@ describe("AuthUnavailableError is not a credential rejection", () => {
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("7");
     expect(res.headers.get("Cache-Control")).toBe("no-store");
-    expect(await res.json()).toEqual({ error: "authentication_unavailable", detail: "token sidecar unreachable" });
+    expect(await res.json()).toEqual({
+      error: "authentication_unavailable",
+      detail: "authentication authority unavailable",
+    });
   });
 
   test("a RESOLVER outage is 503 too, not the endpoint's definitive 404", async () => {
@@ -216,11 +219,15 @@ describe("AuthUnavailableError is not a credential rejection", () => {
       introspectPrincipals: [INTROSPECTOR],
     });
 
+    captured = captureConsole();
     const res = await handler(introspectRequest(SUBJECT_TOKEN));
+    const log = captured.lines.join("\n");
+    captured.restore();
 
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("9");
     expect(await res.text()).not.toContain(SUBJECT_TOKEN);
+    expect(log).not.toContain("mapping store unreachable");
   });
 
   test("a resolver returning null is still the definitive 404", async () => {

@@ -30,6 +30,10 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 - **Authentication** — bearer tokens, JWT, mTLS (PEM-in-header and XFCC), with chainable authenticators
 - **Four client transports** — HTTP, subprocess, raw pipe, and raw TCP (`tcpConnect` / `serveTcp`), all sharing a unified `RpcClient` interface. Raw TCP carries no auth/TLS and defaults to loopback (`127.0.0.1`) — trusted networks only; use HTTP otherwise.
 
+See [SPIFFE identity from trusted HTTP proxies](docs/spiffe-proxy-identity.md)
+for Envoy, nginx, AWS ALB, Google Cloud Load Balancing, and Azure Application
+Gateway deployment profiles.
+
 ## Installation
 
 ```bash

@@ -13,6 +13,7 @@ export { mtlsAuthenticate, mtlsAuthenticateFingerprint, mtlsAuthenticateSubject,
 export { cookieAuthenticate } from "./oauth-pkce.js";
 export type { ProofConfig, ProofMode, ProofSecret } from "./proof.js";
 export { canonicalString, deriveProofSecret, mintProof, NonceCache, PROOF_HEADER, PROOF_REQUIRED_HEADER, ProofError, parseProofSecrets, requireProxyProof, verifyProof, } from "./proof.js";
+export { type AwsAlbSpiffeOptions, awsAlbSpiffeProvider, azureApplicationGatewaySpiffeProvider, type CertificateProxySpiffeOptions, type EnvoyXfccSpiffeOptions, envoyXfccSpiffeProvider, type GcpLoadBalancerSpiffeOptions, gcpLoadBalancerSpiffeProvider, headersFromNodeRawHeaders, nginxSpiffeProvider, type SpiffeX509HeaderProviderOptions, spiffeX509HeaderProvider, validateSpiffeId, } from "./spiffe.js";
 export { type UnpackedToken, unpackStateToken } from "./token.js";
 export type { ExtraRouteContext, ExtraRouteHandler, HttpHandlerOptions, StateSerializer, } from "./types.js";
 export { jsonStateSerializer } from "./types.js";

@@ -48,5 +48,6 @@ export declare function httpIntrospect(rawBaseUrl: string, options?: {
     compressionLevel?: number;
     compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;
     decompressFn?: (data: Uint8Array) => Promise<Uint8Array>;
+    fetch?: typeof globalThis.fetch;
 }): Promise<ServiceDescription>;
 //# sourceMappingURL=introspect.d.ts.map

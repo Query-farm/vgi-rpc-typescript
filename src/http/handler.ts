@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { batchFromColumns, deserializeBatch, schema as makeSchema, type VgiSchema } from "../arrow/index.js";
-import type { AuthContext } from "../auth.js";
+import { AuthContext } from "../auth.js";
 import {
   DESCRIBE_METHOD_NAME,
   PROTOCOL_HASH_KEY,
@@ -12,6 +12,15 @@ import {
 } from "../constants.js";
 import { buildDescribeBatch } from "../dispatch/describe.js";
 import { MethodNotImplementedError, ProtocolVersionError, parseProtocolVersion, SessionLostError } from "../errors.js";
+import {
+  PeerEvidenceSet,
+  PeerIdentityRejectedError,
+  PeerIdentityResult,
+  PeerIdentityStatus,
+  PeerIdentityUnavailableError,
+  PeerResolutionContext,
+  type PeerResolutionOptions,
+} from "../identity.js";
 import type { Protocol } from "../protocol.js";
 import {
   type AccessLogDeferral,
@@ -98,7 +107,8 @@ import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
 import {
   AUTH_PROXY_REQUIRED_HEADER,
   AUTH_REASON_HEADER,
-  type AuthReason,
+  AuthFailure,
+  AuthReason,
   AuthUnavailableError,
   buildProxyHint,
   classifyAuthFailure,
@@ -215,6 +225,27 @@ export function createHttpHandler(
 
   let authenticate = options?.authenticate;
   const oauthMetadata = options?.oauthResourceMetadata;
+  const peerIdentityProviders = [...(options?.peerIdentityProviders ?? [])];
+  const peerAuthenticationPolicy = options?.peerAuthenticationPolicy;
+  const peerResolutionTimeoutMs = options?.peerResolutionTimeoutMs ?? 5000;
+  if (!Number.isFinite(peerResolutionTimeoutMs) || peerResolutionTimeoutMs <= 0) {
+    throw new TypeError("peerResolutionTimeoutMs must be positive");
+  }
+  const peerProviderConcurrency = options?.peerProviderConcurrency ?? 64;
+  if (!Number.isInteger(peerProviderConcurrency) || peerProviderConcurrency <= 0) {
+    throw new TypeError("peerProviderConcurrency must be a positive integer");
+  }
+  let activePeerProviderCalls = 0;
+  const peerProviderNames = new Set<string>();
+  for (const provider of peerIdentityProviders) {
+    if (!provider?.provider || peerProviderNames.has(provider.provider)) {
+      throw new TypeError("peer identity providers must have unique non-empty names");
+    }
+    peerProviderNames.add(provider.provider);
+  }
+  if (peerProviderConcurrency < peerIdentityProviders.length) {
+    throw new TypeError("peerProviderConcurrency must be at least the configured provider fanout");
+  }
 
   // PKCE setup: when both authenticate and oauthMetadata.clientId are present
   let pkceConfig: OAuthPkceConfig | null = null;
@@ -722,6 +753,158 @@ export function createHttpHandler(
     return new Response(unauthorizedEnvelope(reason, detail, proxyHint), { status: 401, headers });
   }
 
+  function authenticationErrorResponse(error: unknown, request: Request): Response {
+    if (error instanceof AuthUnavailableError || error instanceof PeerIdentityUnavailableError) {
+      const headers = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
+      addCorsHeaders(headers);
+      const retryAfter = Number.isFinite(error.retryAfter) && error.retryAfter >= 0 ? Math.ceil(error.retryAfter) : 5;
+      headers.set("Retry-After", String(retryAfter));
+      const detail =
+        error instanceof PeerIdentityUnavailableError
+          ? "peer identity unavailable"
+          : "authentication authority unavailable";
+      return new Response(JSON.stringify({ error: "authentication_unavailable", detail }), { status: 503, headers });
+    }
+    const headers = new Headers();
+    addCorsHeaders(headers);
+    if (oauthMetadata) {
+      const metadataUrl = new URL(request.url);
+      metadataUrl.pathname = wellKnownPath(prefix);
+      metadataUrl.search = "";
+      headers.set(
+        "WWW-Authenticate",
+        buildWwwAuthenticateHeader(
+          metadataUrl.toString(),
+          oauthMetadata.clientId,
+          oauthMetadata.clientSecret,
+          oauthMetadata.useIdTokenAsBearer,
+          oauthMetadata.deviceCodeClientId,
+          oauthMetadata.deviceCodeClientSecret,
+        ),
+      );
+    }
+    const { reason } = classifyAuthFailure(error);
+    return unauthorizedResponse(reason, "authentication rejected", headers);
+  }
+
+  function peerEvidenceBinding(auth: AuthContext | undefined): string | undefined {
+    const value = auth?.claims?.peer_evidence_binding;
+    return typeof value === "string" && value ? value : undefined;
+  }
+
+  async function resolveRequestIdentity(
+    request: Request,
+  ): Promise<{ authContext: AuthContext; peerEvidence: PeerEvidenceSet }> {
+    let authContext = AuthContext.anonymous();
+    let missingCredential: AuthFailure | undefined;
+    if (authenticate) {
+      try {
+        authContext = (await authenticate(request)) ?? AuthContext.anonymous();
+      } catch (error) {
+        if (peerAuthenticationPolicy && error instanceof AuthFailure && error.reason === AuthReason.MissingCredential) {
+          missingCredential = error;
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    let peerEvidence = PeerEvidenceSet.EMPTY;
+    if (peerIdentityProviders.length > 0) {
+      const controller = new AbortController();
+      const deadline = Date.now() + peerResolutionTimeoutMs;
+      const startedAt = performance.now();
+      const timer = setTimeout(() => controller.abort(), peerResolutionTimeoutMs);
+      const timeout = new Promise<never>((_resolve, reject) => {
+        const rejectTimeout = () => reject(new PeerIdentityUnavailableError("peer identity resolution timed out"));
+        if (controller.signal.aborted) rejectTimeout();
+        else controller.signal.addEventListener("abort", rejectTimeout, { once: true });
+      });
+      try {
+        let supplied: PeerResolutionOptions;
+        try {
+          supplied = (await Promise.race([Promise.resolve(options?.peerResolutionContext?.(request)), timeout])) ?? {};
+        } catch (error) {
+          if (error instanceof PeerIdentityRejectedError || error instanceof PeerIdentityUnavailableError) throw error;
+          throw new PeerIdentityUnavailableError("peer identity resolution context failed");
+        }
+        const remainingBudgetMs = peerResolutionTimeoutMs - (performance.now() - startedAt);
+        if (remainingBudgetMs <= 0 || controller.signal.aborted) {
+          throw new PeerIdentityUnavailableError("peer identity resolution timed out");
+        }
+        const resolution = new PeerResolutionContext("http", {
+          authority: new URL(request.url).host,
+          serviceName: options?.peerServiceName,
+          // Fetch Headers irreversibly merges duplicates. Identity-bearing headers are only
+          // accepted when a runtime adapter supplies raw multiplicity-preserving values.
+          headers: new Map<string, readonly string[]>(),
+          ...supplied,
+          deadline,
+          budgetMs: remainingBudgetMs,
+        });
+        const outcomes: Array<PeerIdentityResult | undefined> = new Array(peerIdentityProviders.length);
+        const providerTasks = peerIdentityProviders.map((provider, index) => {
+          if (activePeerProviderCalls >= peerProviderConcurrency) {
+            outcomes[index] = new PeerIdentityResult(provider.provider, PeerIdentityStatus.UNAVAILABLE);
+            return Promise.resolve();
+          }
+          activePeerProviderCalls++;
+          return Promise.resolve()
+            .then(() => provider.resolve(resolution, controller.signal))
+            .then((result) => {
+              outcomes[index] =
+                result && result.provider === provider.provider
+                  ? result
+                  : new PeerIdentityResult(provider.provider, PeerIdentityStatus.INVALID);
+            })
+            .catch((error: unknown) => {
+              outcomes[index] = new PeerIdentityResult(
+                provider.provider,
+                error instanceof PeerIdentityRejectedError
+                  ? PeerIdentityStatus.INVALID
+                  : PeerIdentityStatus.UNAVAILABLE,
+              );
+            })
+            .finally(() => {
+              activePeerProviderCalls--;
+            });
+        });
+        await Promise.race([Promise.all(providerTasks), timeout]).catch((error: unknown) => {
+          if (!(error instanceof PeerIdentityUnavailableError)) throw error;
+        });
+        // Promise reactions for providers that completed in the deadline turn run before
+        // this continuation. Yield once more before classifying only genuinely unfinished
+        // calls, so a completed INVALID result can never be downgraded to UNAVAILABLE.
+        await Promise.resolve();
+        const results = Array.from(
+          { length: peerIdentityProviders.length },
+          (_unused, index) =>
+            outcomes[index] ??
+            new PeerIdentityResult(peerIdentityProviders[index].provider, PeerIdentityStatus.UNAVAILABLE),
+        );
+        peerEvidence = new PeerEvidenceSet(results);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    if (peerAuthenticationPolicy) {
+      try {
+        authContext = await peerAuthenticationPolicy(peerEvidence, authContext);
+      } catch (error) {
+        if (error instanceof PeerIdentityUnavailableError) {
+          throw new PeerIdentityUnavailableError();
+        }
+        if (error instanceof PeerIdentityRejectedError) {
+          throw new PeerIdentityRejectedError("peer identity authentication rejected", error.vgiAuthReason);
+        }
+        throw new PeerIdentityRejectedError("peer identity authentication rejected");
+      }
+    }
+    if (missingCredential && !authContext.authenticated) throw missingCredential;
+    return { authContext, peerEvidence };
+  }
+
   function makeErrorResponse(error: Error, statusCode: number, schema: VgiSchema = EMPTY_SCHEMA): Response {
     const errBatch = buildErrorBatch(schema, error, serverId, null);
     const body = serializeIpcStream(schema, [errBatch]);
@@ -916,28 +1099,26 @@ export function createHttpHandler(
       if (!tokenHeader) {
         return new Response(null, { status: 200, headers });
       }
-      // Optional auth — re-uses the same authenticate path so principal
-      // binding is consistent with the dispatch flow. AAD uses only the
-      // authenticated principal (matching `computeAad` in `token.ts`);
-      // the registry's principalKey compounds domain+principal as
-      // defense-in-depth.
+      // Resolve the same application and transport identity as dispatch so
+      // teardown cannot cross an evidence boundary established at open time.
       let principalKey = sessionPrincipalKey(false, null, null);
       let aadPrincipal: string | null = null;
-      if (authenticate) {
-        try {
-          const auth = await authenticate(request);
-          if (auth?.authenticated) {
-            aadPrincipal = auth.principal ?? "";
-            principalKey = sessionPrincipalKey(true, auth.domain, auth.principal);
-          }
-        } catch {
-          // Anonymous principal — stale / forged tokens already won't
-          // decrypt under a real principal's AAD, so the auth failure
-          // here is harmless; treat as anonymous and let the next steps
-          // 200 out idempotently.
+      let aadDomain: string | null = null;
+      let evidenceBinding: string | undefined;
+      try {
+        const identity = await resolveRequestIdentity(request);
+        const auth = identity.authContext;
+        evidenceBinding = peerEvidenceBinding(auth);
+        if (auth.authenticated) {
+          aadPrincipal = auth.principal ?? "";
+          aadDomain = auth.domain;
         }
+        principalKey = sessionPrincipalKey(auth.authenticated, auth.domain, auth.principal, evidenceBinding);
+      } catch {
+        // Stale, forged, and identity-mismatched tokens all intentionally
+        // collapse to the endpoint's idempotent 200 response.
       }
-      const aad = computeAad(aadPrincipal);
+      const aad = computeAad(aadPrincipal, evidenceBinding, aadDomain);
       let opened: { serverId: string; sessionId: Uint8Array };
       try {
         opened = openSessionToken(tokenHeader, tokenKey, aad);
@@ -982,6 +1163,7 @@ export function createHttpHandler(
     const streamObserver: { streamId?: string; cancelled?: boolean } = {};
     const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress, streamObserver } as typeof baseCtx & {
       authContext?: AuthContext;
+      peerEvidence?: PeerEvidenceSet;
       cookies: ReadonlyMap<string, string>;
       stickyContext?: StickySink;
       streamObserver: { streamId?: string; cancelled?: boolean };
@@ -989,44 +1171,12 @@ export function createHttpHandler(
 
     // Authentication — run before content-type validation so unauthenticated
     // requests get 401 regardless of body shape.
-    if (authenticate) {
-      try {
-        ctx.authContext = await authenticate(request);
-      } catch (error: any) {
-        // "I could not find out whether the credential is bad" is a different
-        // answer from "the credential is bad", and a caller's negative cache
-        // depends on telling them apart: cache an outage and a worker restart
-        // takes the fleet down for the cache's lifetime.
-        if (error instanceof AuthUnavailableError) {
-          const headers = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
-          addCorsHeaders(headers);
-          headers.set("Retry-After", String(error.retryAfter));
-          return new Response(JSON.stringify({ error: "authentication_unavailable", detail: error.detail }), {
-            status: 503,
-            headers,
-          });
-        }
-        const headers = new Headers();
-        addCorsHeaders(headers);
-        if (oauthMetadata) {
-          const metadataUrl = new URL(request.url);
-          metadataUrl.pathname = wellKnownPath(prefix);
-          metadataUrl.search = "";
-          headers.set(
-            "WWW-Authenticate",
-            buildWwwAuthenticateHeader(
-              metadataUrl.toString(),
-              oauthMetadata.clientId,
-              oauthMetadata.clientSecret,
-              oauthMetadata.useIdTokenAsBearer,
-              oauthMetadata.deviceCodeClientId,
-              oauthMetadata.deviceCodeClientSecret,
-            ),
-          );
-        }
-        const { reason, detail } = classifyAuthFailure(error);
-        return unauthorizedResponse(reason, detail, headers);
-      }
+    try {
+      const identity = await resolveRequestIdentity(request);
+      ctx.authContext = identity.authContext;
+      ctx.peerEvidence = identity.peerEvidence;
+    } catch (error) {
+      return authenticationErrorResponse(error, request);
     }
 
     // POST {prefix}/__introspect_token__ — JSON in, JSON out, so it sits ahead
@@ -1058,8 +1208,9 @@ export function createHttpHandler(
     if (stickyEnabled && sessionRegistry) {
       const auth = ctx.authContext;
       const aadPrincipal = auth?.authenticated ? (auth.principal ?? "") : null;
-      const principalKey = sessionPrincipalKey(!!auth?.authenticated, auth?.domain, auth?.principal);
-      const aad = computeAad(aadPrincipal);
+      const evidenceBinding = peerEvidenceBinding(auth);
+      const principalKey = sessionPrincipalKey(!!auth?.authenticated, auth?.domain, auth?.principal, evidenceBinding);
+      const aad = computeAad(aadPrincipal, evidenceBinding, auth?.domain);
       const acceptOpens = (request.headers.get(SESSION_ACCEPT_HEADER) ?? "").trim().toLowerCase() === "true";
       const sessionHeader = (request.headers.get(SESSION_HEADER) ?? "").trim();
 

@@ -89,6 +89,8 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   const compressionLevel = options?.compressionLevel;
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
+  const fetchFn = options?.fetch ?? globalThis.fetch;
+  const effectiveExternalConfig = externalConfig ? { ...externalConfig, fetch: fetchFn } : externalConfig;
 
   let methodCache: Map<string, MethodInfo> | null = options?.description
     ? new Map(options.description.methods.map((method) => [method.name, method]))
@@ -122,6 +124,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       prefix,
       authorization,
       urlValidator: externalConfig?.urlValidator ?? null,
+      fetch: fetchFn,
     });
   }
 
@@ -132,7 +135,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
    */
   async function postWithExternalization(url: string, body: Uint8Array): Promise<Response> {
     const sendBody = await maybeExternalize(body);
-    let resp = await fetch(url, {
+    let resp = await fetchFn(url, {
       method: "POST",
       headers: buildHeaders(),
       body: (await prepareBody(sendBody)) as unknown as BodyInit,
@@ -146,8 +149,9 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         prefix,
         authorization,
         urlValidator: externalConfig?.urlValidator ?? null,
+        fetch: fetchFn,
       });
-      resp = await fetch(url, {
+      resp = await fetchFn(url, {
         method: "POST",
         headers: buildHeaders(),
         body: (await prepareBody(externalized)) as unknown as BodyInit,
@@ -218,6 +222,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       compressionLevel,
       compressFn,
       decompressFn,
+      fetch: fetchFn,
     });
     methodCache = new Map(desc.methods.map((m) => [m.name, m]));
     serverProtocolVersion = desc.protocolVersion;
@@ -249,7 +254,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         if (batch.numRows === 0) {
           // Check for external location pointer batch
           if (isExternalLocationBatch(batch as any)) {
-            batch = (await resolveExternalLocation(batch as any, externalConfig)) as any;
+            batch = (await resolveExternalLocation(batch as any, effectiveExternalConfig)) as any;
           } else {
             dispatchLogOrError(batch, onLog);
             continue;
@@ -457,7 +462,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         compressFn,
         decompressFn,
         authorization,
-        externalConfig,
+        externalConfig: effectiveExternalConfig,
         postFn: postWithExternalization,
       });
     },
@@ -483,7 +488,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         compressFn,
         decompressFn,
         authorization,
-        externalConfig,
+        externalConfig: effectiveExternalConfig,
         postFn: postWithExternalization,
       });
     },
@@ -496,6 +501,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         compressionLevel,
         compressFn,
         decompressFn,
+        fetch: fetchFn,
       });
     },
 

@@ -1,6 +1,14 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+export {
+  createSocks5hFetch,
+  dialSocks5h,
+  httpConnectSocks5h,
+  parseSocks5hProxy,
+  type Socks5hProxy,
+  tcpConnectSocks5h,
+} from "./client/socks5h.js";
 // Node-only raw-TCP client (statically imports `node:net`, so it lives outside
 // the runtime-agnostic core that browser/workerd bundles re-export).
 export { tcpConnect } from "./client/tcp.js";
@@ -31,3 +39,9 @@ export {
   statusRows,
   tryAcquireLock,
 } from "./launcher/index.js";
+export {
+  type TailscaleLocalApiOptions,
+  type TailscaleServeOptions,
+  tailscaleLocalApiIdentityProvider,
+  tailscaleServeIdentityProvider,
+} from "./tailscale.js";

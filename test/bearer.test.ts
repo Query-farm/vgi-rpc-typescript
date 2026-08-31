@@ -224,7 +224,8 @@ describe("bearer + HTTP handler integration", () => {
     );
     expect(resp.status).toBe(401);
     const text = await resp.text();
-    expect(text).toContain("Unknown bearer token");
+    expect(text).toContain("authentication rejected");
+    expect(text).not.toContain("Unknown bearer token");
   });
 
   it("missing authorization header returns 401", async () => {

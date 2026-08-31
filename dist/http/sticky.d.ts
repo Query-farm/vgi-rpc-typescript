@@ -38,7 +38,7 @@ export interface SessionEntry {
  * `domain` / `principal` are the authenticated identity fields, or
  * null/undefined for anonymous.
  */
-export declare function sessionPrincipalKey(authenticated: boolean, domain: string | null | undefined, principal: string | null | undefined): string;
+export declare function sessionPrincipalKey(authenticated: boolean, domain: string | null | undefined, principal: string | null | undefined, evidenceBinding?: string): string;
 /** Hex-encode a session_id Uint8Array (24-char lowercase hex). */
 export declare function sessionIdHex(sessionId: Uint8Array): string;
 /** Per-worker in-process map of live sticky sessions. */

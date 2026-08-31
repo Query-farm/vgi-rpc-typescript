@@ -18,6 +18,7 @@ import {
   maybeExternalizeBatch,
   resolveExternalLocation,
 } from "../external.js";
+import type { PeerEvidenceSet } from "../identity.js";
 import type { MethodDefinition } from "../types.js";
 import { OutputCollector, TransportKind } from "../types.js";
 import { serializeSchema } from "../util/schema.js";
@@ -62,10 +63,22 @@ function dispatchDebug(): boolean {
 const CALL_STATE_CACHE_ENTRIES = 4096;
 const callStates = new Map<string, { expiresAt: number; call: ResolvedCall }>();
 
-function callCacheKey(callId: Uint8Array, principal: string | null | undefined): string {
+function peerEvidenceBinding(auth: AuthContext | undefined): string | undefined {
+  const value = auth?.claims?.peer_evidence_binding;
+  return typeof value === "string" && value ? value : undefined;
+}
+
+/** Preserve the authenticated/anonymous distinction even for authenticators
+ * that deliberately use an empty or null principal. Bound token AAD encodes
+ * empty string as an authenticated identity and null as anonymous. */
+function tokenPrincipal(auth: AuthContext | undefined): string | null {
+  return auth?.authenticated ? (auth.principal ?? "") : null;
+}
+
+function callCacheKey(callId: Uint8Array, auth: AuthContext | undefined): string {
   let hex = "";
   for (const b of callId) hex += b.toString(16).padStart(2, "0");
-  return `${hex}\u0000${principal ?? ""}`;
+  return `${hex}\u0000${auth?.authenticated ? "1" : "0"}\u0000${auth?.domain ?? ""}\u0000${auth?.principal ?? ""}\u0000${peerEvidenceBinding(auth) ?? ""}`;
 }
 
 /** Entries this context lets the shared map hold on its behalf.
@@ -87,7 +100,7 @@ function cacheCall(callId: Uint8Array, ctx: DispatchContext, call: ResolvedCall)
     callStates.clear();
   }
   const ttl = ctx.tokenTtl;
-  callStates.set(callCacheKey(callId, ctx.authContext?.principal), {
+  callStates.set(callCacheKey(callId, ctx.authContext), {
     expiresAt: Math.floor(Date.now() / 1000) + (ttl > 0 ? ttl : 3600),
     call,
   });
@@ -115,8 +128,10 @@ function newCallId(): Uint8Array {
  * named.
  */
 function resolveCall(callId: Uint8Array, callTokenB64: string | null | undefined, ctx: DispatchContext): ResolvedCall {
-  const principal = ctx.authContext?.principal;
-  const key = callCacheKey(callId, principal);
+  const principal = tokenPrincipal(ctx.authContext);
+  const binding = peerEvidenceBinding(ctx.authContext);
+  const domain = ctx.authContext?.domain;
+  const key = callCacheKey(callId, ctx.authContext);
   const hit = cacheEntriesFor(ctx) > 0 ? callStates.get(key) : undefined;
   if (hit) {
     if (Math.floor(Date.now() / 1000) <= hit.expiresAt) return hit.call;
@@ -125,7 +140,14 @@ function resolveCall(callId: Uint8Array, callTokenB64: string | null | undefined
   if (!callTokenB64) {
     throw new HttpRpcError("Missing call token in exchange request", 400);
   }
-  const { callId: tokenCallId, call } = unpackCallToken(callTokenB64, ctx.tokenKey, principal, ctx.tokenTtl);
+  const { callId: tokenCallId, call } = unpackCallToken(
+    callTokenB64,
+    ctx.tokenKey,
+    principal,
+    ctx.tokenTtl,
+    binding,
+    domain,
+  );
   if (tokenCallId.length !== callId.length || !tokenCallId.every((b, i) => b === callId[i])) {
     // The cursor named a different call. Uniform message: reachable only by
     // pairing two tokens the same principal legitimately holds.
@@ -144,14 +166,25 @@ function mintInitTokens(
 ): { callId: Uint8Array; token: string; callToken: string } {
   const callId = newCallId();
   noteStream(ctx, callId);
-  const principal = ctx.authContext?.principal;
-  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal);
+  const principal = tokenPrincipal(ctx.authContext);
+  const binding = peerEvidenceBinding(ctx.authContext);
+  const domain = ctx.authContext?.domain;
+  const callToken = packCallToken(
+    callId,
+    schemaBytes,
+    inputSchemaBytes,
+    ctx.tokenKey,
+    principal,
+    undefined,
+    binding,
+    domain,
+  );
   // Warm the cache with what we already hold, so this stream's first
   // continuation need not open the token it was just handed.
   cacheCall(callId, ctx, { schemaBytes, inputSchemaBytes });
   return {
     callId,
-    token: packStateToken(stateBytes, callId, ctx.tokenKey, principal),
+    token: packStateToken(stateBytes, callId, ctx.tokenKey, principal, undefined, binding, domain),
     callToken,
   };
 }
@@ -204,6 +237,7 @@ export interface DispatchContext {
   callStateCacheEntries?: number;
   stateSerializer: StateSerializer;
   authContext?: AuthContext;
+  peerEvidence?: PeerEvidenceSet;
   externalLocation?: ExternalLocationConfig;
   /** Incoming HTTP request cookies.  Empty/absent on non-HTTP paths. */
   cookies?: ReadonlyMap<string, string>;
@@ -350,6 +384,7 @@ export async function httpDispatchUnary(
       remainingResponseBytes: ctx.maxResponseBytes,
       remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
       externalizationEnabled,
+      peerEvidence: ctx.peerEvidence,
     },
   );
   out.enableCookieSink();
@@ -468,6 +503,7 @@ export async function httpDispatchStreamInit(
         ctx.authContext,
         ctx.cookies,
         ctx.kind ?? TransportKind.HTTP,
+        { peerEvidence: ctx.peerEvidence },
       );
       const headerValues = method.headerInit(parsed.params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, ctx.serverId, parsed.requestId);
@@ -492,7 +528,10 @@ export async function httpDispatchStreamInit(
       serializeSchema(resolvedOutputSchema),
       serializeSchema(resolvedInputSchema),
       ctx.tokenKey,
-      ctx.authContext?.principal,
+      tokenPrincipal(ctx.authContext),
+      undefined,
+      peerEvidenceBinding(ctx.authContext),
+      ctx.authContext?.domain,
     );
     cacheCall(initCallId, ctx, {
       schemaBytes: serializeSchema(resolvedOutputSchema),
@@ -583,7 +622,14 @@ export async function httpDispatchStreamExchange(
   // the caller, so the id is authenticated before it resolves anything.
   let unpacked: import("./token.js").UnpackedToken;
   try {
-    unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, ctx.authContext?.principal);
+    unpacked = unpackStateToken(
+      tokenBase64,
+      ctx.tokenKey,
+      ctx.tokenTtl,
+      tokenPrincipal(ctx.authContext),
+      peerEvidenceBinding(ctx.authContext),
+      ctx.authContext?.domain,
+    );
   } catch (error: any) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
@@ -672,6 +718,7 @@ export async function httpDispatchStreamExchange(
         remainingResponseBytes: ctx.maxResponseBytes,
         remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
         externalizationEnabled,
+        peerEvidence: ctx.peerEvidence,
       },
     );
     if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
@@ -735,7 +782,15 @@ export async function httpDispatchStreamExchange(
     } else {
       // More data may follow — repack state into token for next exchange.
       const stateBytes = ctx.stateSerializer.serialize(state);
-      const token = packStateToken(stateBytes, unpacked.callId, ctx.tokenKey, ctx.authContext?.principal);
+      const token = packStateToken(
+        stateBytes,
+        unpacked.callId,
+        ctx.tokenKey,
+        tokenPrincipal(ctx.authContext),
+        undefined,
+        peerEvidenceBinding(ctx.authContext),
+        ctx.authContext?.domain,
+      );
 
       for (const [idx, emitted] of out.batches.entries()) {
         const batch = emitted.batch;
@@ -830,6 +885,7 @@ async function produceStreamResponse(
       remainingExternalizedResponseBytes: externalizationEnabled ? maxExternalBytes : undefined,
       externalizationEnabled,
       inputMetadata: requestMetadata,
+      peerEvidence: ctx.peerEvidence,
     },
   );
   if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
@@ -887,7 +943,15 @@ async function produceStreamResponse(
     // Every unfinished invocation returns one cursor. A response-size budget
     // never changes the fundamental one request/tick -> one invocation shape.
     const stateBytes = ctx.stateSerializer.serialize(state);
-    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, ctx.authContext?.principal);
+    const token = packStateToken(
+      stateBytes,
+      call.callId,
+      ctx.tokenKey,
+      tokenPrincipal(ctx.authContext),
+      undefined,
+      peerEvidenceBinding(ctx.authContext),
+      ctx.authContext?.domain,
+    );
     const tokenMeta = new Map<string, string>();
     tokenMeta.set(STATE_KEY, token);
     if (call.callToken) tokenMeta.set(CALL_STATE_KEY, call.callToken);

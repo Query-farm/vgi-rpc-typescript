@@ -325,6 +325,7 @@ const client = httpConnect("http://localhost:8080", {
 | `compressionLevel` | `number` | — | zstd compression level (omit to disable) |
 | `authorization` | `string` | — | `Authorization` header value (e.g. `"Bearer <token>"`) sent with every request |
 | `externalLocation` | `ExternalLocationConfig` | — | External storage config for resolving externalized batches |
+| `fetch` | `typeof globalThis.fetch` | global `fetch` | Request implementation for every SDK-owned HTTP operation. Prefer `httpConnectSocks5h` for the built-in strict SOCKS adapter. |
 
 ## PipeConnectOptions
 

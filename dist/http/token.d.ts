@@ -6,7 +6,7 @@ export declare const CALL_ID_LEN = 16;
  * strings, so an anonymous token cannot be opened by a named identity
  * (and vice versa).
  */
-export declare function computeAad(principal: string | null | undefined): Uint8Array;
+export declare function computeAad(principal: string | null | undefined, evidenceBinding?: string, domain?: string | null): Uint8Array;
 /**
  * {@link computeAad}'s counterpart for call tokens. The prefix differs
  * deliberately, so a call token and a cursor token are not interchangeable
@@ -14,7 +14,7 @@ export declare function computeAad(principal: string | null | undefined): Uint8A
  * fails the AEAD tag check rather than decoding into a payload the reader
  * would misinterpret.
  */
-export declare function computeCallAad(principal: string | null | undefined): Uint8Array;
+export declare function computeCallAad(principal: string | null | undefined, evidenceBinding?: string, domain?: string | null): Uint8Array;
 export declare function bytesToBase64(bytes: Uint8Array): string;
 export declare function base64ToBytes(b64: string): Uint8Array;
 /**
@@ -40,13 +40,13 @@ export declare function base64ToBytes(b64: string): Uint8Array;
  * via AEAD associated data so a token minted for one identity fails
  * decryption when presented by another.
  */
-export declare function packStateToken(stateBytes: Uint8Array, callId: Uint8Array, tokenKey: Uint8Array, principal: string | null | undefined, createdAt?: number): string;
+export declare function packStateToken(stateBytes: Uint8Array, callId: Uint8Array, tokenKey: Uint8Array, principal: string | null | undefined, createdAt?: number, evidenceBinding?: string, domain?: string | null): string;
 /**
  * Seal the half of a stream's state that is fixed for the life of the call —
  * the resolved schemas — plus the `callId` binding it to its cursors. Minted
  * once, by `/init`; never re-issued.
  */
-export declare function packCallToken(callId: Uint8Array, schemaBytes: Uint8Array, inputSchemaBytes: Uint8Array, tokenKey: Uint8Array, principal: string | null | undefined, createdAt?: number): string;
+export declare function packCallToken(callId: Uint8Array, schemaBytes: Uint8Array, inputSchemaBytes: Uint8Array, tokenKey: Uint8Array, principal: string | null | undefined, createdAt?: number, evidenceBinding?: string, domain?: string | null): string;
 /** Decrypted payload of a state token, as returned by {@link unpackStateToken}. */
 export interface UnpackedToken {
     /** Serialized stream-state bytes carried by the token. */
@@ -79,12 +79,12 @@ export interface ResolvedCall {
  *
  * Throws on tampered, expired, malformed, or unknown-version tokens.
  */
-export declare function unpackStateToken(tokenBase64: string, tokenKey: Uint8Array, tokenTtl: number, principal: string | null | undefined): UnpackedToken;
+export declare function unpackStateToken(tokenBase64: string, tokenKey: Uint8Array, tokenTtl: number, principal: string | null | undefined, evidenceBinding?: string, domain?: string | null): UnpackedToken;
 /**
  * Open and verify a call token, returning it paired with its embedded
  * `callId` so the caller can check it against the cursor that named it.
  */
-export declare function unpackCallToken(token: string, tokenKey: Uint8Array, principal: string | null | undefined, tokenTtl?: number): {
+export declare function unpackCallToken(token: string, tokenKey: Uint8Array, principal: string | null | undefined, tokenTtl?: number, evidenceBinding?: string, domain?: string | null): {
     callId: Uint8Array;
     call: ResolvedCall;
 };

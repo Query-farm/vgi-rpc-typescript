@@ -68,6 +68,8 @@ export interface ExternalLocationConfig {
   maxDecompressedBytes?: number;
   /** Maximum redirects followed while fetching. Each target is revalidated. Default: 5. */
   maxRedirects?: number;
+  /** Request implementation for external downloads. Defaults to global `fetch`. */
+  fetch?: typeof globalThis.fetch;
 }
 
 const DEFAULT_THRESHOLD = 1_048_576; // 1 MB
@@ -302,7 +304,13 @@ export async function resolveExternalLocation(
       // Bun otherwise transparently decodes Content-Encoding while retaining
       // the header, which would charge decoded bytes to the encoded-body cap
       // and then attempt to decode them a second time.
-      response = await fetch(currentUrl, { redirect: "manual", signal: controller.signal, decompress: false });
+      response = await (config.fetch ?? globalThis.fetch)(currentUrl, {
+        redirect: "manual",
+        signal: controller.signal,
+        // Bun-specific and intentionally harmless to standards-only fetch
+        // implementations.
+        decompress: false,
+      } as RequestInit);
     } catch {
       throw new Error(`External location fetch failed [url: ${redactExternalUrl(currentUrl)}]`);
     }

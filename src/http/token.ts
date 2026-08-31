@@ -16,7 +16,9 @@ const CALL_TOKEN_VERSION = 1;
 export const CALL_ID_LEN = 16;
 
 const AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\0");
+const BOUND_AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v5\0");
 const CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v1\0");
+const BOUND_CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v2\0");
 
 /**
  * Build the AEAD associated data that binds a state token to its issuing
@@ -24,8 +26,14 @@ const CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v1\0");
  * strings, so an anonymous token cannot be opened by a named identity
  * (and vice versa).
  */
-export function computeAad(principal: string | null | undefined): Uint8Array {
-  return aadWith(AAD_PREFIX, principal);
+export function computeAad(
+  principal: string | null | undefined,
+  evidenceBinding?: string,
+  domain?: string | null,
+): Uint8Array {
+  return evidenceBinding
+    ? boundAadWith(BOUND_AAD_PREFIX, principal, domain, evidenceBinding)
+    : aadWith(AAD_PREFIX, principal);
 }
 
 /**
@@ -35,8 +43,35 @@ export function computeAad(principal: string | null | undefined): Uint8Array {
  * fails the AEAD tag check rather than decoding into a payload the reader
  * would misinterpret.
  */
-export function computeCallAad(principal: string | null | undefined): Uint8Array {
-  return aadWith(CALL_AAD_PREFIX, principal);
+export function computeCallAad(
+  principal: string | null | undefined,
+  evidenceBinding?: string,
+  domain?: string | null,
+): Uint8Array {
+  return evidenceBinding
+    ? boundAadWith(BOUND_CALL_AAD_PREFIX, principal, domain, evidenceBinding)
+    : aadWith(CALL_AAD_PREFIX, principal);
+}
+
+function boundAadWith(
+  prefix: Uint8Array,
+  principal: string | null | undefined,
+  domain: string | null | undefined,
+  evidenceBinding: string,
+): Uint8Array {
+  const binding = _UTF8.encode(evidenceBinding);
+  if (principal === null || principal === undefined) {
+    return concatBytes(prefix, _UTF8.encode("\0anonymous\0"), binding);
+  }
+  return concatBytes(
+    prefix,
+    new Uint8Array([1]),
+    _UTF8.encode(domain ?? ""),
+    new Uint8Array([0]),
+    _UTF8.encode(principal),
+    new Uint8Array([0]),
+    binding,
+  );
 }
 
 function aadWith(prefix: Uint8Array, principal: string | null | undefined): Uint8Array {
@@ -130,6 +165,8 @@ export function packStateToken(
   tokenKey: Uint8Array,
   principal: string | null | undefined,
   createdAt?: number,
+  evidenceBinding?: string,
+  domain?: string | null,
 ): string {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
@@ -149,7 +186,10 @@ export function packStateToken(
   offset += 4;
   plaintext.set(stateBytes, offset);
 
-  const wire = sealBytes(plaintext, tokenKey, { aad: computeAad(principal), version: TOKEN_VERSION });
+  const wire = sealBytes(plaintext, tokenKey, {
+    aad: computeAad(principal, evidenceBinding, domain),
+    version: TOKEN_VERSION,
+  });
   return bytesToBase64(wire);
 }
 
@@ -165,6 +205,8 @@ export function packCallToken(
   tokenKey: Uint8Array,
   principal: string | null | undefined,
   createdAt?: number,
+  evidenceBinding?: string,
+  domain?: string | null,
 ): string {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
@@ -190,7 +232,7 @@ export function packCallToken(
   plaintext.set(inputSchemaBytes, offset);
 
   const wire = sealBytes(plaintext, tokenKey, {
-    aad: computeCallAad(principal),
+    aad: computeCallAad(principal, evidenceBinding, domain),
     version: CALL_TOKEN_VERSION,
   });
   return bytesToBase64(wire);
@@ -235,6 +277,8 @@ export function unpackStateToken(
   tokenKey: Uint8Array,
   tokenTtl: number,
   principal: string | null | undefined,
+  evidenceBinding?: string,
+  domain?: string | null,
 ): UnpackedToken {
   let raw: Uint8Array;
   try {
@@ -249,7 +293,10 @@ export function unpackStateToken(
   }
   let plaintext: Uint8Array;
   try {
-    plaintext = openBytes(raw, tokenKey, { aad: computeAad(principal), version: TOKEN_VERSION });
+    plaintext = openBytes(raw, tokenKey, {
+      aad: computeAad(principal, evidenceBinding, domain),
+      version: TOKEN_VERSION,
+    });
   } catch (err) {
     if (err instanceof SealError) {
       throw new Error("State token signature verification failed");
@@ -304,6 +351,8 @@ export function unpackCallToken(
   tokenKey: Uint8Array,
   principal: string | null | undefined,
   tokenTtl = 0,
+  evidenceBinding?: string,
+  domain?: string | null,
 ): { callId: Uint8Array; call: ResolvedCall } {
   const raw = base64ToBytes(token);
   if (raw.length >= 1 && raw[0] !== CALL_TOKEN_VERSION) {
@@ -312,11 +361,11 @@ export function unpackCallToken(
   let plaintext: Uint8Array;
   try {
     plaintext = openBytes(raw, tokenKey, {
-      aad: computeCallAad(principal),
+      aad: computeCallAad(principal, evidenceBinding, domain),
       version: CALL_TOKEN_VERSION,
     });
   } catch (err) {
-    if (err instanceof Error && /decrypt|auth|tag/i.test(err.message)) {
+    if (err instanceof SealError) {
       throw new Error("State token signature verification failed");
     }
     throw err;

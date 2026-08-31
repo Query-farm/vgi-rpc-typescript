@@ -21,6 +21,8 @@ export type {
   HttpConnectOptions,
   LogMessage,
   PipeConnectOptions,
+  Socks5hHttpConnectOptions,
+  Socks5hTcpConnectOptions,
   StreamSession,
   SubprocessConnectOptions,
   TcpConnectOptions,
