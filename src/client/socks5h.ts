@@ -16,8 +16,11 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_HEADER_BYTES = 64 * 1024;
 
+/** Parsed address of a credential-free SOCKS5h proxy. */
 export interface Socks5hProxy {
+  /** Proxy host name or normalized IP literal. */
   readonly host: string;
+  /** Proxy TCP port in the range 1 through 65535. */
   readonly port: number;
 }
 

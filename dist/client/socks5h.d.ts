@@ -2,8 +2,11 @@
 import { type Socket } from "node:net";
 import type { HttpRpcClient, RpcClient } from "./connect.js";
 import type { Socks5hHttpConnectOptions, Socks5hTcpConnectOptions } from "./types.js";
+/** Parsed address of a credential-free SOCKS5h proxy. */
 export interface Socks5hProxy {
+    /** Proxy host name or normalized IP literal. */
     readonly host: string;
+    /** Proxy TCP port in the range 1 through 65535. */
     readonly port: number;
 }
 /** Parse a credential-free `socks5h://host:port` URI. */
