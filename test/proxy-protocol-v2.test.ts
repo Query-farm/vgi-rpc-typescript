@@ -129,6 +129,11 @@ describe("PROXY protocol v2 parser", () => {
     expect(parseIrohProxyProtocolV2(irohHeader())).toEqual({
       endpointId: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     });
+    const extended = Buffer.concat([irohHeader(), Buffer.from([0xee, 0, 1, 7])]);
+    extended.writeUInt16BE(extended.length - 16, 14);
+    expect(parseIrohProxyProtocolV2(extended)).toEqual({
+      endpointId: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    });
     const duplicate = Buffer.concat([irohHeader(), irohHeader().subarray(16)]);
     duplicate.writeUInt16BE(duplicate.length - 16, 14);
     const missing = Buffer.concat([SIGNATURE, Buffer.from([0x21, 0, 0, 0])]);
@@ -147,10 +152,18 @@ describe("serveTcp PROXY protocol v2 admission", () => {
 
   test("requires exact trust and validates bounds at startup", async () => {
     await expect(
-      serveTcp(protocol, { idleTimeout: 0, announcementSink: sink, proxyProtocolV2Required: true }),
+      serveTcp(protocol, {
+        idleTimeout: 0,
+        announcementSink: sink,
+        proxyProtocolV2Required: true,
+      }),
     ).rejects.toThrow("trusted proxy");
     await expect(
-      serveTcp(protocol, { idleTimeout: 0, announcementSink: sink, trustedProxyAddresses: ["127.0.0.0/8"] }),
+      serveTcp(protocol, {
+        idleTimeout: 0,
+        announcementSink: sink,
+        trustedProxyAddresses: ["127.0.0.0/8"],
+      }),
     ).rejects.toThrow("exact IPv4 or IPv6");
     await expect(
       serveTcp(protocol, {
@@ -159,6 +172,15 @@ describe("serveTcp PROXY protocol v2 admission", () => {
         trustedProxyAddresses: ["127.0.0.1", "::ffff:127.0.0.1"],
       }),
     ).rejects.toThrow("duplicate trusted proxy");
+    await expect(
+      serveTcp(protocol, {
+        idleTimeout: 0,
+        announcementSink: sink,
+        proxyProtocolV2Required: true,
+        trustedProxyAddresses: ["127.0.0.1"],
+        irohProxyIssuer: "production\tmesh",
+      }),
+    ).rejects.toThrow("without controls");
   });
 
   test("rejects an untrusted immediate peer before waiting for bytes", async () => {
@@ -269,7 +291,10 @@ describe("serveTcp PROXY protocol v2 admission", () => {
       });
       const backendPort = handle.port;
       relay = createServer((downstream) => {
-        const upstream = createConnection({ host: "127.0.0.1", port: backendPort });
+        const upstream = createConnection({
+          host: "127.0.0.1",
+          port: backendPort,
+        });
         downstream.once("data", (firstRequestBytes) => {
           // Deliberately put the preamble and the first Arrow request in one
           // write. The server must consume only the declared preamble.
@@ -287,8 +312,12 @@ describe("serveTcp PROXY protocol v2 admission", () => {
       const relayPort = await listen(relay);
       const client = tcpConnect("127.0.0.1", relayPort);
       try {
-        expect(await client.call("ping", { value: "first" })).toEqual({ value: "pong:first" });
-        expect(await client.call("ping", { value: "second" })).toEqual({ value: "pong:second" });
+        expect(await client.call("ping", { value: "first" })).toEqual({
+          value: "pong:first",
+        });
+        expect(await client.call("ping", { value: "second" })).toEqual({
+          value: "pong:second",
+        });
       } finally {
         client.close();
       }
@@ -324,7 +353,10 @@ describe("serveTcp PROXY protocol v2 admission", () => {
       });
       const backendPort = handle.port;
       relay = createServer((downstream) => {
-        const upstream = createConnection({ host: "127.0.0.1", port: backendPort });
+        const upstream = createConnection({
+          host: "127.0.0.1",
+          port: backendPort,
+        });
         downstream.once("data", (firstRequestBytes) => {
           upstream.write(Buffer.concat([irohHeader(), firstRequestBytes]));
           downstream.pipe(upstream);
@@ -333,7 +365,48 @@ describe("serveTcp PROXY protocol v2 admission", () => {
       });
       const client = tcpConnect("127.0.0.1", await listen(relay));
       try {
-        expect(await client.call("ping", { value: "iroh" })).toEqual({ value: "pong:iroh" });
+        expect(await client.call("ping", { value: "iroh" })).toEqual({
+          value: "pong:iroh",
+        });
+      } finally {
+        client.close();
+      }
+    } finally {
+      if (relay) await new Promise<void>((resolve) => relay?.close(() => resolve()));
+      if (handle) await handle.stop();
+    }
+  });
+
+  test("keeps ordinary IP PROXY connections compatible when Iroh opt-in is enabled", async () => {
+    let handle: ServeTcpHandle | undefined;
+    let relay: Server | undefined;
+    try {
+      handle = await serveTcp(protocol, {
+        host: "127.0.0.1",
+        port: 0,
+        idleTimeout: 0,
+        announcementSink: sink,
+        proxyProtocolV2Required: true,
+        trustedProxyAddresses: ["127.0.0.1"],
+        irohProxyIssuer: "production-mesh",
+      });
+      const backendPort = handle.port;
+      relay = createServer((downstream) => {
+        const upstream = createConnection({
+          host: "127.0.0.1",
+          port: backendPort,
+        });
+        downstream.once("data", (firstRequestBytes) => {
+          upstream.write(Buffer.concat([ipv4Header(), firstRequestBytes]));
+          downstream.pipe(upstream);
+          upstream.pipe(downstream);
+        });
+      });
+      const client = tcpConnect("127.0.0.1", await listen(relay));
+      try {
+        expect(await client.call("ping", { value: "ip" })).toEqual({
+          value: "pong:ip",
+        });
       } finally {
         client.close();
       }

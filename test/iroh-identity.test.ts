@@ -45,4 +45,34 @@ describe("Iroh forwarded HTTP identity", () => {
       expect((await provider.resolve(context(peer, values))).status).toBe(status);
     }
   });
+
+  test("normalizes exact trust and rejects unsafe local namespaces", async () => {
+    const mapped = irohForwardedHeaderIdentityProvider({
+      issuer: "production-mesh",
+      trustedProxyAddresses: ["::ffff:127.0.0.1"],
+    });
+    expect((await mapped.resolve(context("127.0.0.1", [ENDPOINT]))).status).toBe(PeerIdentityStatus.AVAILABLE);
+    for (const options of [
+      { issuer: "production\tmesh", trustedProxyAddresses: ["127.0.0.1"] },
+      { issuer: "production\ud800mesh", trustedProxyAddresses: ["127.0.0.1"] },
+      { issuer: "production-mesh", trustedProxyAddresses: ["localhost"] },
+      {
+        issuer: "production-mesh",
+        trustedProxyAddresses: ["127.0.0.1", "::ffff:127.0.0.1"],
+      },
+    ]) {
+      expect(() => irohForwardedHeaderIdentityProvider(options)).toThrow(TypeError);
+    }
+    expect(
+      () =>
+        new PeerResolutionContext("http", {
+          immediatePeer: "127.0.0.1",
+          headers: new Map([
+            [IROH_FORWARDED_ENDPOINT_HEADER, [ENDPOINT]],
+            [IROH_FORWARDED_ENDPOINT_HEADER.toLowerCase(), [ENDPOINT]],
+          ]),
+        }),
+    ).toThrow("case-varied duplicate");
+    expect(() => context("127.0.0.1", [`${ENDPOINT}\t`])).toThrow("invalid peer-resolution header value");
+  });
 });

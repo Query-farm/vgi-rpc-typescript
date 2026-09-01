@@ -28,17 +28,34 @@ export interface IrohForwardedHeaderOptions {
   readonly trustedProxyAddresses: Iterable<string>;
 }
 
-/** Resolve a sanitized Iroh EndpointId only from an exact trusted HTTP proxy. */
-export function irohForwardedHeaderIdentityProvider(options: IrohForwardedHeaderOptions): PeerIdentityProvider {
+/** @internal Validate the operator-local namespace shared by HTTP and TCP adapters. */
+export function validateIrohIssuer(issuer: string): void {
+  if (typeof issuer !== "string" || !issuer) {
+    throw new TypeError("Iroh issuer must be non-empty text without controls");
+  }
+  for (let index = 0; index < issuer.length; index++) {
+    const unit = issuer.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = issuer.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new TypeError("Iroh issuer contains an unpaired surrogate");
+      index++;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw new TypeError("Iroh issuer contains an unpaired surrogate");
+    }
+  }
   if (
-    !options.issuer ||
-    Array.from(options.issuer).some((character) => {
+    Array.from(issuer).some((character) => {
       const code = character.codePointAt(0) as number;
       return code <= 0x1f || code === 0x7f;
     })
   ) {
     throw new TypeError("Iroh issuer must be non-empty text without controls");
   }
+}
+
+/** Resolve a sanitized Iroh EndpointId only from an exact trusted HTTP proxy. */
+export function irohForwardedHeaderIdentityProvider(options: IrohForwardedHeaderOptions): PeerIdentityProvider {
+  validateIrohIssuer(options.issuer);
   const trusted = normalizeTrustedProxyAddresses(options.trustedProxyAddresses, "Iroh trustedProxyAddresses");
   const result = (status: PeerIdentityStatus, identity?: PeerIdentity) =>
     new PeerIdentityResult(PROVIDER, status, identity ? [identity] : []);
@@ -63,7 +80,9 @@ export function irohForwardedHeaderIdentityProvider(options: IrohForwardedHeader
             subjectKey: endpointId,
             subjectStability: SubjectStability.STABLE,
             subjectVerified: true,
-            attributes: { original_assurance: IdentityAssurance.CRYPTOGRAPHIC_PEER },
+            attributes: {
+              original_assurance: IdentityAssurance.CRYPTOGRAPHIC_PEER,
+            },
             sourceAddress: endpointId,
             proxyAddress: immediate,
           }),

@@ -47,6 +47,7 @@ import {
   PeerSubjectKind,
   SubjectStability,
 } from "../identity.js";
+import { validateIrohIssuer } from "../iroh.js";
 import type { Protocol } from "../protocol.js";
 import {
   type CallStatistics,
@@ -66,8 +67,8 @@ import {
   normalizeProxyIpAddress,
   ProxyProtocolV2Error,
   proxyIpAddressKey,
-  readIrohProxyProtocolV2,
   readProxyProtocolV2,
+  readProxyProtocolV2AllowingIrohIdentity,
 } from "./proxy-protocol-v2.js";
 
 const EMPTY_SCHEMA = makeSchema([]);
@@ -188,9 +189,7 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     providerNames.add(provider.provider);
   }
   const irohProxyIssuer = options.irohProxyIssuer;
-  if (irohProxyIssuer !== undefined && !irohProxyIssuer) {
-    throw new TypeError("irohProxyIssuer must be non-empty when configured");
-  }
+  if (irohProxyIssuer !== undefined) validateIrohIssuer(irohProxyIssuer);
   if (peerAuthenticationPolicy && peerIdentityProviders.length === 0 && irohProxyIssuer === undefined) {
     throw new TypeError("peerAuthenticationPolicy requires at least one peer identity provider");
   }
@@ -380,15 +379,30 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
         throw new PeerIdentityRejectedError("untrusted PROXY v2 sender", "proxy_required");
       }
       if (irohProxyIssuer !== undefined) {
-        const proxy = await readIrohProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
-        irohEndpointId = proxy.endpointId;
+        const proxy = await readProxyProtocolV2AllowingIrohIdentity(
+          socket,
+          proxyPreambleTimeoutMs,
+          maximumProxyPreambleBytes,
+        );
+        if (proxy.irohIdentity) {
+          irohEndpointId = proxy.irohIdentity.endpointId;
+        } else {
+          assertedEndpoint = formatProxyEndpoint(proxy.address!.source);
+          destinationAddress = formatProxyEndpoint(proxy.address!.destination);
+        }
       } else {
         const proxy = await readProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
         assertedEndpoint = formatProxyEndpoint(proxy.source);
         destinationAddress = formatProxyEndpoint(proxy.destination);
       }
     }
-    return { immediateAddress, immediateEndpoint, assertedEndpoint, destinationAddress, irohEndpointId };
+    return {
+      immediateAddress,
+      immediateEndpoint,
+      assertedEndpoint,
+      destinationAddress,
+      irohEndpointId,
+    };
   }
 
   async function resolveConnectionIdentity(
@@ -406,7 +420,9 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
             subjectKey: peer.irohEndpointId,
             subjectStability: SubjectStability.STABLE,
             subjectVerified: true,
-            attributes: { original_assurance: IdentityAssurance.CRYPTOGRAPHIC_PEER },
+            attributes: {
+              original_assurance: IdentityAssurance.CRYPTOGRAPHIC_PEER,
+            },
             sourceAddress: peer.irohEndpointId,
             proxyAddress: peer.immediateEndpoint,
           }),

@@ -34,6 +34,12 @@ export interface ProxyProtocolV2IrohIdentity {
   readonly endpointId: string;
 }
 
+/** Internal result for a listener accepting ordinary IP or opt-in Iroh forwarding. */
+export interface ProxyProtocolV2ForwardedPeer {
+  readonly address?: ProxyProtocolV2Address;
+  readonly irohIdentity?: ProxyProtocolV2IrohIdentity;
+}
+
 /** A malformed, truncated, oversized, or timed-out PROXY protocol preamble. */
 export class ProxyProtocolV2Error extends Error {
   constructor(message: string) {
@@ -266,6 +272,23 @@ export function readIrohProxyProtocolV2(
 ): Promise<ProxyProtocolV2IrohIdentity> {
   return readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes).then((preamble) =>
     parseIrohProxyProtocolV2(preamble, maximumBytes),
+  );
+}
+
+/** Consume either strict TCP/IP PROXY v2 or the opt-in Iroh PROXY/UNSPEC form. */
+export function readProxyProtocolV2AllowingIrohIdentity(
+  socket: Socket,
+  timeoutMs: number,
+  maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES,
+): Promise<ProxyProtocolV2ForwardedPeer> {
+  return readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes).then((preamble) =>
+    preamble[13] === 0x00
+      ? Object.freeze({
+          irohIdentity: parseIrohProxyProtocolV2(preamble, maximumBytes),
+        })
+      : Object.freeze({
+          address: parseProxyProtocolV2(preamble, maximumBytes),
+        }),
   );
 }
 
