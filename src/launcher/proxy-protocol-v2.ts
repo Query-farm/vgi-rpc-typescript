@@ -11,13 +11,17 @@ export const DEFAULT_MAX_PROXY_V2_BYTES = 536;
 
 /** One TCP endpoint asserted by a trusted PROXY protocol sender. */
 export interface ProxyProtocolV2Endpoint {
+  /** Normalized IPv4 or IPv6 address asserted by the trusted proxy. */
   readonly address: string;
+  /** TCP port asserted by the trusted proxy. */
   readonly port: number;
 }
 
 /** Asserted TCP endpoints from one strictly validated PROXY protocol v2 preamble. */
 export interface ProxyProtocolV2Address {
+  /** Original client endpoint asserted by the trusted proxy. */
   readonly source: ProxyProtocolV2Endpoint;
+  /** Worker destination endpoint asserted by the trusted proxy. */
   readonly destination: ProxyProtocolV2Endpoint;
 }
 
