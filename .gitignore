@@ -16,6 +16,10 @@ dist/client/*
 dist/http/*
 !dist/http/spiffe.d.ts
 !dist/http/spiffe.d.ts.map
+!dist/launcher/
+dist/launcher/*
+!dist/launcher/proxy-protocol-v2.d.ts
+!dist/launcher/proxy-protocol-v2.d.ts.map
 .astro/
 .conformance-bundles/
 .smoke-bundle/

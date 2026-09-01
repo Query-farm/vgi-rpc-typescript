@@ -12890,6 +12890,243 @@ function delay(ms) {
 }
 // src/launcher/serve-tcp.ts
 import { createServer } from "node:net";
+
+// src/launcher/proxy-protocol-v2.ts
+var SIGNATURE = Buffer.from([13, 10, 13, 10, 0, 13, 10, 81, 85, 73, 84, 10]);
+var FIXED_BYTES = 16;
+var DEFAULT_MAX_PROXY_V2_BYTES = 536;
+
+class ProxyProtocolV2Error extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProxyProtocolV2Error";
+  }
+}
+function ipv4Bytes(value) {
+  const parts = value.split(".");
+  if (parts.length !== 4)
+    return;
+  const bytes2 = [];
+  for (const part of parts) {
+    if (!/^(0|[1-9][0-9]{0,2})$/u.test(part))
+      return;
+    const byte = Number(part);
+    if (byte > 255)
+      return;
+    bytes2.push(byte);
+  }
+  return bytes2;
+}
+function ipv6Words(value) {
+  if (!value || value.includes("%") || value.split("::").length > 2)
+    return;
+  const halves = value.split("::");
+  const parseHalf = (half, allowIpv4) => {
+    if (!half)
+      return [];
+    const pieces = half.split(":");
+    const words = [];
+    for (let index = 0;index < pieces.length; index++) {
+      const piece = pieces[index];
+      if (piece.includes(".")) {
+        if (!allowIpv4 || index !== pieces.length - 1)
+          return;
+        const bytes2 = ipv4Bytes(piece);
+        if (!bytes2)
+          return;
+        words.push(bytes2[0] << 8 | bytes2[1], bytes2[2] << 8 | bytes2[3]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/iu.test(piece))
+          return;
+        words.push(Number.parseInt(piece, 16));
+      }
+    }
+    return words;
+  };
+  const left = parseHalf(halves[0], halves.length === 1);
+  const right = parseHalf(halves[1] ?? "", true);
+  if (!left || !right)
+    return;
+  if (halves.length === 1)
+    return left.length === 8 ? left : undefined;
+  const omitted = 8 - left.length - right.length;
+  if (omitted < 1)
+    return;
+  return [...left, ...Array.from({ length: omitted }, () => 0), ...right];
+}
+function formatIpv6(words) {
+  let bestStart = -1;
+  let bestLength = 0;
+  for (let index = 0;index < words.length; ) {
+    if (words[index] !== 0) {
+      index++;
+      continue;
+    }
+    let end = index;
+    while (end < words.length && words[end] === 0)
+      end++;
+    if (end - index > bestLength && end - index >= 2) {
+      bestStart = index;
+      bestLength = end - index;
+    }
+    index = end;
+  }
+  if (bestStart < 0)
+    return words.map((word) => word.toString(16)).join(":");
+  const left = words.slice(0, bestStart).map((word) => word.toString(16)).join(":");
+  const right = words.slice(bestStart + bestLength).map((word) => word.toString(16)).join(":");
+  return `${left}::${right}`;
+}
+function normalizeProxyIpAddress(value) {
+  return normalizedIp(value).address;
+}
+function normalizedIp(value) {
+  const ipv4 = ipv4Bytes(value);
+  if (ipv4)
+    return { address: ipv4.join("."), key: `4:${ipv4.join(".")}` };
+  const words = ipv6Words(value);
+  if (!words)
+    throw new TypeError(`trusted proxy must be an exact IPv4 or IPv6 address: ${JSON.stringify(value)}`);
+  const mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 65535;
+  if (mapped) {
+    const bytes2 = [words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255];
+    return { address: bytes2.join("."), key: `4:${bytes2.join(".")}` };
+  }
+  const key = words.map((word) => word.toString(16).padStart(4, "0")).join("");
+  return { address: formatIpv6(words), key: `6:${key}` };
+}
+function proxyIpAddressKey(value) {
+  return normalizedIp(value).key;
+}
+function endpoint(address, port) {
+  return Object.freeze({ address, port });
+}
+function formatProxyEndpoint(value) {
+  return `${value.address.includes(":") ? `[${value.address}]` : value.address}:${value.port}`;
+}
+function parseProxyProtocolV2(input, maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES) {
+  if (!Number.isInteger(maximumBytes) || maximumBytes < FIXED_BYTES) {
+    throw new TypeError("maximum PROXY v2 bytes must be an integer of at least 16");
+  }
+  const preamble = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  if (preamble.length < FIXED_BYTES)
+    throw new ProxyProtocolV2Error("truncated PROXY v2 fixed preamble");
+  if (preamble.length > maximumBytes)
+    throw new ProxyProtocolV2Error("PROXY v2 preamble exceeds configured limit");
+  if (!preamble.subarray(0, SIGNATURE.length).equals(SIGNATURE)) {
+    throw new ProxyProtocolV2Error("missing PROXY v2 signature");
+  }
+  if (preamble[12] >> 4 !== 2)
+    throw new ProxyProtocolV2Error("unsupported PROXY protocol version");
+  if ((preamble[12] & 15) !== 1)
+    throw new ProxyProtocolV2Error("PROXY v2 LOCAL command is not accepted");
+  const expected = FIXED_BYTES + preamble.readUInt16BE(14);
+  if (preamble.length !== expected)
+    throw new ProxyProtocolV2Error("truncated or overlong PROXY v2 preamble");
+  const body = preamble.subarray(FIXED_BYTES);
+  let source;
+  let destination;
+  let addressBytes;
+  if (preamble[13] === 17) {
+    addressBytes = 12;
+    if (body.length < addressBytes)
+      throw new ProxyProtocolV2Error("truncated PROXY v2 TCP/IPv4 address block");
+    source = endpoint(`${body[0]}.${body[1]}.${body[2]}.${body[3]}`, body.readUInt16BE(8));
+    destination = endpoint(`${body[4]}.${body[5]}.${body[6]}.${body[7]}`, body.readUInt16BE(10));
+  } else if (preamble[13] === 33) {
+    addressBytes = 36;
+    if (body.length < addressBytes)
+      throw new ProxyProtocolV2Error("truncated PROXY v2 TCP/IPv6 address block");
+    const sourceWords = Array.from({ length: 8 }, (_, index) => body.readUInt16BE(index * 2));
+    const destinationWords = Array.from({ length: 8 }, (_, index) => body.readUInt16BE(16 + index * 2));
+    source = endpoint(normalizedIp(formatIpv6(sourceWords)).address, body.readUInt16BE(32));
+    destination = endpoint(normalizedIp(formatIpv6(destinationWords)).address, body.readUInt16BE(34));
+  } else {
+    throw new ProxyProtocolV2Error("PROXY v2 requires TCP over IPv4 or IPv6");
+  }
+  for (let offset = addressBytes;offset < body.length; ) {
+    if (body.length - offset < 3)
+      throw new ProxyProtocolV2Error("truncated PROXY v2 TLV header");
+    const length = body.readUInt16BE(offset + 1);
+    offset += 3;
+    if (length > body.length - offset)
+      throw new ProxyProtocolV2Error("truncated PROXY v2 TLV value");
+    offset += length;
+  }
+  return Object.freeze({ source, destination });
+}
+function readProxyProtocolV2(socket, timeoutMs, maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    throw new TypeError("PROXY preamble timeout must be positive");
+  if (!Number.isInteger(maximumBytes) || maximumBytes < FIXED_BYTES) {
+    throw new TypeError("maximum PROXY v2 bytes must be an integer of at least 16");
+  }
+  return new Promise((resolve, reject) => {
+    const parts = [];
+    let received = 0;
+    let expected = FIXED_BYTES;
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("data", onData);
+      socket.off("end", onEnd);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+    };
+    const fail = (error) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const complete = (excess) => {
+      if (settled)
+        return;
+      settled = true;
+      socket.pause();
+      cleanup();
+      if (excess && excess.length > 0)
+        socket.unshift(excess);
+      try {
+        resolve(parseProxyProtocolV2(Buffer.concat(parts, received), maximumBytes));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    const onData = (chunk) => {
+      let offset = 0;
+      while (offset < chunk.length && received < expected) {
+        const count = Math.min(chunk.length - offset, expected - received);
+        parts.push(chunk.subarray(offset, offset + count));
+        received += count;
+        offset += count;
+        if (received === FIXED_BYTES && expected === FIXED_BYTES) {
+          const fixed = Buffer.concat(parts, FIXED_BYTES);
+          expected = FIXED_BYTES + fixed.readUInt16BE(14);
+          if (expected > maximumBytes) {
+            fail(new ProxyProtocolV2Error("PROXY v2 preamble exceeds configured limit"));
+            return;
+          }
+        }
+      }
+      if (received === expected)
+        complete(offset < chunk.length ? chunk.subarray(offset) : undefined);
+    };
+    const onEnd = () => fail(new ProxyProtocolV2Error("truncated PROXY v2 preamble"));
+    const onClose = () => fail(new ProxyProtocolV2Error("connection closed during PROXY v2 preamble"));
+    const onError = () => fail(new ProxyProtocolV2Error("connection failed during PROXY v2 preamble"));
+    const timer = setTimeout(() => fail(new ProxyProtocolV2Error("PROXY v2 preamble deadline elapsed")), timeoutMs);
+    timer.unref?.();
+    socket.on("data", onData);
+    socket.once("end", onEnd);
+    socket.once("close", onClose);
+    socket.once("error", onError);
+    socket.resume();
+  });
+}
+
+// src/launcher/serve-tcp.ts
 var EMPTY_SCHEMA6 = schema([]);
 async function serveTcp(protocol, options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -12926,6 +13163,27 @@ async function serveTcp(protocol, options = {}) {
   }
   if (peerProviderConcurrency < peerIdentityProviders.length) {
     throw new TypeError("peerProviderConcurrency must be at least the configured provider fanout");
+  }
+  const proxyProtocolV2Required = options.proxyProtocolV2Required ?? false;
+  const proxyPreambleTimeoutMs = options.proxyPreambleTimeoutMs ?? 1000;
+  if (!Number.isFinite(proxyPreambleTimeoutMs) || proxyPreambleTimeoutMs <= 0) {
+    throw new TypeError("proxyPreambleTimeoutMs must be positive");
+  }
+  const maximumProxyPreambleBytes = options.maximumProxyPreambleBytes ?? DEFAULT_MAX_PROXY_V2_BYTES;
+  if (!Number.isInteger(maximumProxyPreambleBytes) || maximumProxyPreambleBytes < 16) {
+    throw new TypeError("maximumProxyPreambleBytes must be an integer of at least 16");
+  }
+  const trustedProxyAddresses = new Map;
+  for (const configured of options.trustedProxyAddresses ?? []) {
+    const address2 = normalizeProxyIpAddress(configured);
+    const key = proxyIpAddressKey(address2);
+    if (trustedProxyAddresses.has(key)) {
+      throw new TypeError(`duplicate trusted proxy address: ${JSON.stringify(configured)}`);
+    }
+    trustedProxyAddresses.set(key, address2);
+  }
+  if (proxyProtocolV2Required && trustedProxyAddresses.size === 0) {
+    throw new TypeError("PROXY v2 requires at least one exact trusted proxy address");
   }
   let activePeerProviderCalls = 0;
   let describePromise = null;
@@ -13008,8 +13266,8 @@ async function serveTcp(protocol, options = {}) {
     activeConnections += 1;
     connections.add(socket);
     disarmIdleTimer();
-    handleConnection(socket, resolveConnectionIdentity(socket), IpcStreamReader.create(socket)).catch((err2) => {
-      const failureClass = err2 instanceof PeerIdentityUnavailableError ? "unavailable" : err2 instanceof PeerIdentityRejectedError ? "rejected" : "failed";
+    handleConnection(socket).catch((err2) => {
+      const failureClass = err2 instanceof PeerIdentityUnavailableError ? "unavailable" : err2 instanceof PeerIdentityRejectedError || err2 instanceof ProxyProtocolV2Error ? "rejected" : "failed";
       process.stderr.write(`vgi-rpc/tcp: connection identity ${failureClass}
 `);
     }).finally(() => {
@@ -13021,19 +13279,45 @@ async function serveTcp(protocol, options = {}) {
       }
     });
   });
-  async function resolveConnectionIdentity(socket) {
+  async function prepareTcpPeer(socket) {
+    let immediateAddress = socket.remoteAddress;
+    let immediateAddressKey;
+    if (immediateAddress) {
+      try {
+        immediateAddress = normalizeProxyIpAddress(immediateAddress);
+        immediateAddressKey = proxyIpAddressKey(immediateAddress);
+      } catch {
+        immediateAddressKey = undefined;
+      }
+    }
+    const immediateEndpoint = immediateAddress ? `${immediateAddress.includes(":") ? `[${immediateAddress}]` : immediateAddress}:${socket.remotePort ?? 0}` : undefined;
+    let destinationAddress = socket.localAddress ? `${socket.localAddress.includes(":") ? `[${socket.localAddress}]` : socket.localAddress}:${socket.localPort ?? 0}` : undefined;
+    let assertedEndpoint;
+    if (proxyProtocolV2Required) {
+      if (!immediateAddressKey || !trustedProxyAddresses.has(immediateAddressKey)) {
+        throw new PeerIdentityRejectedError("untrusted PROXY v2 sender", "proxy_required");
+      }
+      const proxy = await readProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
+      assertedEndpoint = formatProxyEndpoint(proxy.source);
+      destinationAddress = formatProxyEndpoint(proxy.destination);
+    }
+    return { immediateAddress, immediateEndpoint, assertedEndpoint, destinationAddress };
+  }
+  async function resolveConnectionIdentity(peer) {
     if (peerIdentityProviders.length === 0) {
       return { auth: AuthContext.anonymous(), evidence: PeerEvidenceSet.EMPTY };
     }
     const deadline = Date.now() + identityResolutionTimeoutMs;
-    const sourceEndpoint = socket.remoteAddress ? `${socket.remoteAddress.includes(":") ? `[${socket.remoteAddress}]` : socket.remoteAddress}:${socket.remotePort ?? 0}` : undefined;
-    const destinationAddress = socket.localAddress ? `${socket.localAddress.includes(":") ? `[${socket.localAddress}]` : socket.localAddress}:${socket.localPort ?? 0}` : undefined;
     const context = new PeerResolutionContext("tcp", {
-      immediatePeer: socket.remoteAddress,
-      sourceEndpoint,
-      destinationAddress,
+      immediatePeer: peer.immediateAddress,
+      sourceEndpoint: peer.immediateEndpoint,
+      assertedPeer: peer.assertedEndpoint,
+      destinationAddress: peer.destinationAddress,
       serviceName: options.peerServiceName,
-      metadata: sourceEndpoint ? { remote_addr: sourceEndpoint } : {},
+      metadata: {
+        ...peer.immediateEndpoint ? { remote_addr: peer.immediateEndpoint } : {},
+        proxy_protocol_v2: peer.assertedEndpoint !== undefined
+      },
       deadline,
       budgetMs: identityResolutionTimeoutMs
     });
@@ -13078,8 +13362,9 @@ async function serveTcp(protocol, options = {}) {
       return;
     rejectDone(err2);
   });
-  async function handleConnection(socket, identityPromise, readerPromise) {
-    const [identity, reader] = await Promise.all([identityPromise, readerPromise]);
+  async function handleConnection(socket) {
+    const peer = await prepareTcpPeer(socket);
+    const [identity, reader] = await Promise.all([resolveConnectionIdentity(peer), IpcStreamReader.create(socket)]);
     const writer = new IpcStreamWriter(socket);
     try {
       await notifyTransport();
@@ -13967,11 +14252,11 @@ function tailscaleLocalApiIdentityProvider(options) {
   }
   let transport;
   if (options.endpoint) {
-    const endpoint = new URL(options.endpoint);
-    if (endpoint.protocol !== "http:" || !endpoint.host || endpoint.username || endpoint.password || endpoint.pathname !== "" && endpoint.pathname !== "/" || endpoint.search || endpoint.hash) {
+    const endpoint2 = new URL(options.endpoint);
+    if (endpoint2.protocol !== "http:" || !endpoint2.host || endpoint2.username || endpoint2.password || endpoint2.pathname !== "" && endpoint2.pathname !== "/" || endpoint2.search || endpoint2.hash) {
       throw new TypeError("LocalAPI endpoint must be a plain HTTP origin without userinfo or path");
     }
-    transport = { endpoint, password: options.password };
+    transport = { endpoint: endpoint2, password: options.password };
   } else {
     const socket = options.unixSocket ?? (process.platform === "linux" ? DEFAULT_SOCKET : undefined);
     if (!socket) {
@@ -14091,7 +14376,8 @@ function tailscaleLocalApiIdentityProvider(options) {
           attributes,
           capabilities: caps,
           capabilitiesVerified: true,
-          sourceAddress: sourceIp(source)
+          sourceAddress: sourceIp(source),
+          proxyAddress: context.assertedPeer ? context.immediatePeer : undefined
         }));
       } catch {
         return result(PeerIdentityStatus.INVALID);
@@ -14141,6 +14427,7 @@ export {
   redactClaims,
   readUnaryResult,
   readRequest,
+  readProxyProtocolV2,
   probeSocket,
   pipeConnect,
   peerIdentityPrimary,
@@ -14148,6 +14435,7 @@ export {
   parseUseIdTokenAsBearer,
   parseSocks5hProxy,
   parseResourceMetadataUrl,
+  parseProxyProtocolV2,
   parseDeviceCodeClientSecret,
   parseDeviceCodeClientId,
   parseDescribeResponse,
@@ -14156,6 +14444,7 @@ export {
   otelTraceContext,
   observePeerIdentity,
   oauthResourceMetadataToJson,
+  normalizeProxyIpAddress,
   noRedaction,
   nginxSpiffeProvider,
   mtlsAuthenticateXfcc,
@@ -14182,6 +14471,7 @@ export {
   headersFromNodeRawHeaders,
   gcpLoadBalancerSpiffeProvider,
   gcStateDir,
+  formatProxyEndpoint,
   float322 as float32,
   float,
   findStateToken,
@@ -14223,6 +14513,7 @@ export {
   REQUEST_VERSION,
   REQUEST_ID_KEY,
   REDACTED,
+  ProxyProtocolV2Error,
   Protocol,
   PipeStreamSession,
   PeerSubjectKind,
@@ -14253,6 +14544,7 @@ export {
   DESCRIBE_VERSION_KEY,
   DESCRIBE_VERSION,
   DESCRIBE_METHOD_NAME,
+  DEFAULT_MAX_PROXY_V2_BYTES,
   DEFAULT_INTROSPECT_TTL_SECONDS,
   AuthUnavailableError,
   AuthReason,
@@ -14265,4 +14557,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=7060148E96FFD20E64756E2164756E21
+//# debugId=8EF63C9FE5B374F464756E2164756E21

@@ -197,7 +197,9 @@ describe("Tailscale LocalAPI identity", () => {
     const directory = mkdtempSync(join(tmpdir(), "vgi-ts-"));
     const socket = join(directory, "tailscaled.sock");
     const server = createServer((request, response) => {
-      expect(new URL(request.url!, "http://local/").searchParams.get("dst_ip")).toBe("2001:db8::8");
+      const query = new URL(request.url!, "http://local/").searchParams;
+      expect(query.get("addr")).toBe("100.64.0.10:1");
+      expect(query.get("dst_ip")).toBe("2001:db8::8");
       response.setHeader("Content-Type", "application/json");
       response.end(whoIs(true));
     });
@@ -207,6 +209,7 @@ describe("Tailscale LocalAPI identity", () => {
     const provider = tailscaleLocalApiIdentityProvider({ issuer: "tailnet:x", unixSocket: socket });
     const resolved = await provider.resolve(
       context({
+        immediatePeer: "127.0.0.1",
         assertedPeer: "100.64.0.10:1",
         destinationAddress: "[2001:db8::8]:443",
       }),
@@ -215,6 +218,7 @@ describe("Tailscale LocalAPI identity", () => {
     expect(resolved.identities[0].subjectKind).toBe(PeerSubjectKind.TAGGED_NODE);
     expect(resolved.identities[0].subjectKey).toBe("node:n123CNTRL");
     expect(resolved.identities[0].attributes.user_id).toBeUndefined();
+    expect(resolved.identities[0].proxyAddress).toBe("127.0.0.1");
     await new Promise<void>((resolve) => server.close(() => resolve()));
     servers.splice(servers.indexOf(server), 1);
     rmSync(directory, { recursive: true });

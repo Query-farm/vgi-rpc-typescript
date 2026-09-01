@@ -290,7 +290,7 @@ async function runHttpServer(args: readonly string[]): Promise<void> {
   process.once("SIGTERM", close);
 }
 
-function serveTcpProtocol(issuer: string, capability: string, tag: string): Protocol {
+function serveTcpProtocol(issuer: string, capability: string, tag: string, proxyPresent: boolean): Protocol {
   return new Protocol("ConformanceService", { protocolVersion: "2.0.0" }).unary("echo_string", {
     params: { value: str },
     result: { result: str },
@@ -311,6 +311,7 @@ function serveTcpProtocol(issuer: string, capability: string, tag: string): Prot
         !identity.capabilitiesVerified ||
         !(capability in identity.capabilities) ||
         !(identity.attributes.tags as readonly unknown[] | undefined)?.includes(tag) ||
+        (identity.proxyAddress !== undefined) !== proxyPresent ||
         !ctx.auth.authenticated ||
         ctx.auth.domain !== PROVIDER
       ) {
@@ -331,13 +332,21 @@ async function runTcpServer(args: readonly string[]): Promise<void> {
     unixSocket: option(args, "--localapi-socket") ?? "/var/run/tailscale/tailscaled.sock",
     timeoutMs: 5_000,
   });
-  const handle = await serveTcp(serveTcpProtocol(issuer, capability, tag), {
+  const proxyProtocolV2Required = flag(args, "--proxy-protocol-v2");
+  const trustedProxyAddress = option(args, "--trusted-proxy-address");
+  if (proxyProtocolV2Required && !trustedProxyAddress) {
+    throw new Error("--proxy-protocol-v2 requires --trusted-proxy-address");
+  }
+  const handle = await serveTcp(serveTcpProtocol(issuer, capability, tag, proxyProtocolV2Required), {
     host,
     port: port(args, "--port"),
     idleTimeout: 0,
     peerIdentityProviders: [provider],
     peerAuthenticationPolicy: peerIdentityPrimary(PROVIDER),
     identityResolutionTimeoutMs: 5_000,
+    peerServiceName: option(args, "--service-name"),
+    proxyProtocolV2Required,
+    trustedProxyAddresses: trustedProxyAddress ? [trustedProxyAddress] : [],
   });
   const close = () => void handle.stop().then(() => process.exit(0));
   process.once("SIGINT", close);

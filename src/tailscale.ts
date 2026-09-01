@@ -665,6 +665,7 @@ export function tailscaleLocalApiIdentityProvider(options: TailscaleLocalApiOpti
             capabilities: caps,
             capabilitiesVerified: true,
             sourceAddress: sourceIp(source),
+            proxyAddress: context.assertedPeer ? context.immediatePeer : undefined,
           }),
         );
       } catch {

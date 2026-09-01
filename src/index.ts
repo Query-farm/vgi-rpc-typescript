@@ -40,6 +40,16 @@ export {
   tryAcquireLock,
 } from "./launcher/index.js";
 export {
+  DEFAULT_MAX_PROXY_V2_BYTES,
+  formatProxyEndpoint,
+  normalizeProxyIpAddress,
+  type ProxyProtocolV2Address,
+  type ProxyProtocolV2Endpoint,
+  ProxyProtocolV2Error,
+  parseProxyProtocolV2,
+  readProxyProtocolV2,
+} from "./launcher/proxy-protocol-v2.js";
+export {
   type TailscaleLocalApiOptions,
   type TailscaleServeOptions,
   tailscaleLocalApiIdentityProvider,

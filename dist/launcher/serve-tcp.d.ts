@@ -49,6 +49,14 @@ export interface ServeTcpOptions {
     identityResolutionTimeoutMs?: number;
     /** Maximum provider calls that may remain active after connection deadlines. Default: 64. */
     peerProviderConcurrency?: number;
+    /** Require a PROXY protocol v2 preamble on every accepted connection. Default: false. */
+    proxyProtocolV2Required?: boolean;
+    /** Exact IPv4/IPv6 addresses allowed to send PROXY v2. CIDRs and hostnames are rejected. */
+    trustedProxyAddresses?: readonly string[];
+    /** Independent deadline for the complete PROXY v2 preamble. Default: 1000 ms. */
+    proxyPreambleTimeoutMs?: number;
+    /** Maximum complete PROXY v2 preamble size, including bounded unknown TLVs. Default: 536. */
+    maximumProxyPreambleBytes?: number;
 }
 /** Handle returned by {@link serveTcp} for callers that want to stop the server. */
 export interface ServeTcpHandle {

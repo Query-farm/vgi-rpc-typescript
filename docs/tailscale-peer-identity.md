@@ -52,3 +52,30 @@ Only plain HTTP origins without userinfo, path, query, or fragment are accepted.
 - Browser and Worker builds do not export either provider because they cannot safely access the local daemon or a trusted immediate-peer address.
 
 LocalAPI responses are size- and header-bounded, require exactly one JSON content type, and use strict bounded JSON decoding. Cancellation, the provider timeout, `PeerResolutionContext.deadline`, and its monotonic budget all constrain the same request.
+
+## Raw TCP behind an L4 proxy
+
+`serveTcp` can require PROXY protocol v2 before Arrow framing and LocalAPI
+identity resolution. It accepts only TCP over IPv4 or IPv6 from an exact,
+operator-configured immediate proxy address. The asserted source is passed to
+WhoIs, while `proxyAddress` records the immediate sender.
+
+```ts
+const worker = await serveTcp(protocol, {
+  host: "127.0.0.1",
+  port: 9400,
+  proxyProtocolV2Required: true,
+  trustedProxyAddresses: ["127.0.0.1"],
+  proxyPreambleTimeoutMs: 500,
+  maximumProxyPreambleBytes: 536,
+  peerIdentityProviders: [provider],
+  peerAuthenticationPolicy: peerIdentityPrimary("tailscale"),
+});
+```
+
+Trust is checked before any preamble byte is consumed. CIDRs and hostnames are
+not accepted as trusted senders. `LOCAL`, `UNSPEC`, UDP, Unix-family,
+truncated, malformed, and oversized preambles fail closed; bounded unknown
+TLVs are ignored. The backend must be unreachable except through the trusted
+proxy, because PROXY protocol authenticates neither its own header nor VGI
+traffic. Use TLS or a private network for confidentiality and integrity.

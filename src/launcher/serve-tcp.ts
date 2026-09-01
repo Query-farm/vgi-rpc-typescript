@@ -18,11 +18,10 @@
  *   clients; the timer starts ticking only after a `startupGrace` window
  *   so a slow first caller doesn't see the server vanish.
  *
- * SECURITY: raw TCP carries **no authentication or TLS** — it is the bare
- * framing protocol on a socket.  The default host is loopback-only
- * (`127.0.0.1`).  Binding a routable address (e.g. `0.0.0.0`) exposes the
- * unauthenticated protocol on the network and must only be done on a
- * trusted network; use the HTTP transport otherwise.
+ * SECURITY: raw TCP carries no encryption. Peer identity and required PROXY
+ * v2 admission are opt-in; the default remains bare framing on a loopback
+ * socket. Binding a routable address requires a trusted network or another
+ * authenticated/encrypted transport boundary.
  */
 
 import { createServer, type Server, type Socket } from "node:net";
@@ -57,6 +56,14 @@ import { IpcStreamReader } from "../wire/reader.js";
 import { applyDefaults, parseRequest, validateRequestSchema } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { IpcStreamWriter } from "../wire/writer.js";
+import {
+  DEFAULT_MAX_PROXY_V2_BYTES,
+  formatProxyEndpoint,
+  normalizeProxyIpAddress,
+  ProxyProtocolV2Error,
+  proxyIpAddressKey,
+  readProxyProtocolV2,
+} from "./proxy-protocol-v2.js";
 
 const EMPTY_SCHEMA = makeSchema([]);
 
@@ -107,6 +114,14 @@ export interface ServeTcpOptions {
   identityResolutionTimeoutMs?: number;
   /** Maximum provider calls that may remain active after connection deadlines. Default: 64. */
   peerProviderConcurrency?: number;
+  /** Require a PROXY protocol v2 preamble on every accepted connection. Default: false. */
+  proxyProtocolV2Required?: boolean;
+  /** Exact IPv4/IPv6 addresses allowed to send PROXY v2. CIDRs and hostnames are rejected. */
+  trustedProxyAddresses?: readonly string[];
+  /** Independent deadline for the complete PROXY v2 preamble. Default: 1000 ms. */
+  proxyPreambleTimeoutMs?: number;
+  /** Maximum complete PROXY v2 preamble size, including bounded unknown TLVs. Default: 536. */
+  maximumProxyPreambleBytes?: number;
 }
 
 /** Handle returned by {@link serveTcp} for callers that want to stop the server. */
@@ -169,6 +184,27 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
   }
   if (peerProviderConcurrency < peerIdentityProviders.length) {
     throw new TypeError("peerProviderConcurrency must be at least the configured provider fanout");
+  }
+  const proxyProtocolV2Required = options.proxyProtocolV2Required ?? false;
+  const proxyPreambleTimeoutMs = options.proxyPreambleTimeoutMs ?? 1_000;
+  if (!Number.isFinite(proxyPreambleTimeoutMs) || proxyPreambleTimeoutMs <= 0) {
+    throw new TypeError("proxyPreambleTimeoutMs must be positive");
+  }
+  const maximumProxyPreambleBytes = options.maximumProxyPreambleBytes ?? DEFAULT_MAX_PROXY_V2_BYTES;
+  if (!Number.isInteger(maximumProxyPreambleBytes) || maximumProxyPreambleBytes < 16) {
+    throw new TypeError("maximumProxyPreambleBytes must be an integer of at least 16");
+  }
+  const trustedProxyAddresses = new Map<string, string>();
+  for (const configured of options.trustedProxyAddresses ?? []) {
+    const address = normalizeProxyIpAddress(configured);
+    const key = proxyIpAddressKey(address);
+    if (trustedProxyAddresses.has(key)) {
+      throw new TypeError(`duplicate trusted proxy address: ${JSON.stringify(configured)}`);
+    }
+    trustedProxyAddresses.set(key, address);
+  }
+  if (proxyProtocolV2Required && trustedProxyAddresses.size === 0) {
+    throw new TypeError("PROXY v2 requires at least one exact trusted proxy address");
   }
   let activePeerProviderCalls = 0;
 
@@ -266,7 +302,7 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     activeConnections += 1;
     connections.add(socket);
     disarmIdleTimer();
-    handleConnection(socket, resolveConnectionIdentity(socket), IpcStreamReader.create(socket))
+    handleConnection(socket)
       .catch((err) => {
         // Per-connection errors must not take down the server — log to stderr
         // and let the next connection proceed.
@@ -275,7 +311,7 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
         const failureClass =
           err instanceof PeerIdentityUnavailableError
             ? "unavailable"
-            : err instanceof PeerIdentityRejectedError
+            : err instanceof PeerIdentityRejectedError || err instanceof ProxyProtocolV2Error
               ? "rejected"
               : "failed";
         process.stderr.write(`vgi-rpc/tcp: connection identity ${failureClass}\n`);
@@ -290,23 +326,63 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
       });
   });
 
-  async function resolveConnectionIdentity(socket: Socket): Promise<{ auth: AuthContext; evidence: PeerEvidenceSet }> {
+  interface PreparedTcpPeer {
+    immediateAddress?: string;
+    immediateEndpoint?: string;
+    assertedEndpoint?: string;
+    destinationAddress?: string;
+  }
+
+  async function prepareTcpPeer(socket: Socket): Promise<PreparedTcpPeer> {
+    let immediateAddress = socket.remoteAddress;
+    let immediateAddressKey: string | undefined;
+    if (immediateAddress) {
+      try {
+        immediateAddress = normalizeProxyIpAddress(immediateAddress);
+        immediateAddressKey = proxyIpAddressKey(immediateAddress);
+      } catch {
+        // Node may report an IPv6 scope ID for an ordinary direct connection.
+        // It remains observable, but can never cross the exact proxy boundary.
+        immediateAddressKey = undefined;
+      }
+    }
+    const immediateEndpoint = immediateAddress
+      ? `${immediateAddress.includes(":") ? `[${immediateAddress}]` : immediateAddress}:${socket.remotePort ?? 0}`
+      : undefined;
+    let destinationAddress = socket.localAddress
+      ? `${socket.localAddress.includes(":") ? `[${socket.localAddress}]` : socket.localAddress}:${socket.localPort ?? 0}`
+      : undefined;
+    let assertedEndpoint: string | undefined;
+    if (proxyProtocolV2Required) {
+      // Establish the immediate transport trust boundary before attaching a
+      // data listener or consuming one attacker-controlled preamble byte.
+      if (!immediateAddressKey || !trustedProxyAddresses.has(immediateAddressKey)) {
+        throw new PeerIdentityRejectedError("untrusted PROXY v2 sender", "proxy_required");
+      }
+      const proxy = await readProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
+      assertedEndpoint = formatProxyEndpoint(proxy.source);
+      destinationAddress = formatProxyEndpoint(proxy.destination);
+    }
+    return { immediateAddress, immediateEndpoint, assertedEndpoint, destinationAddress };
+  }
+
+  async function resolveConnectionIdentity(
+    peer: PreparedTcpPeer,
+  ): Promise<{ auth: AuthContext; evidence: PeerEvidenceSet }> {
     if (peerIdentityProviders.length === 0) {
       return { auth: AuthContext.anonymous(), evidence: PeerEvidenceSet.EMPTY };
     }
     const deadline = Date.now() + identityResolutionTimeoutMs;
-    const sourceEndpoint = socket.remoteAddress
-      ? `${socket.remoteAddress.includes(":") ? `[${socket.remoteAddress}]` : socket.remoteAddress}:${socket.remotePort ?? 0}`
-      : undefined;
-    const destinationAddress = socket.localAddress
-      ? `${socket.localAddress.includes(":") ? `[${socket.localAddress}]` : socket.localAddress}:${socket.localPort ?? 0}`
-      : undefined;
     const context = new PeerResolutionContext("tcp", {
-      immediatePeer: socket.remoteAddress,
-      sourceEndpoint,
-      destinationAddress,
+      immediatePeer: peer.immediateAddress,
+      sourceEndpoint: peer.immediateEndpoint,
+      assertedPeer: peer.assertedEndpoint,
+      destinationAddress: peer.destinationAddress,
       serviceName: options.peerServiceName,
-      metadata: sourceEndpoint ? { remote_addr: sourceEndpoint } : {},
+      metadata: {
+        ...(peer.immediateEndpoint ? { remote_addr: peer.immediateEndpoint } : {}),
+        proxy_protocol_v2: peer.assertedEndpoint !== undefined,
+      },
       deadline,
       budgetMs: identityResolutionTimeoutMs,
     });
@@ -383,16 +459,11 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     rejectDone(err);
   });
 
-  async function handleConnection(
-    socket: Socket,
-    identityPromise: Promise<{ auth: AuthContext; evidence: PeerEvidenceSet }>,
-    readerPromise: Promise<IpcStreamReader>,
-  ): Promise<void> {
-    // Start framing and identity resolution together. Node's stream adapter
-    // must attach as soon as the socket is accepted or a fast client can fill
-    // the pre-reader buffer while a LocalAPI lookup is in flight. No request
-    // is dispatched until the identity promise has completed.
-    const [identity, reader] = await Promise.all([identityPromise, readerPromise]);
+  async function handleConnection(socket: Socket): Promise<void> {
+    const peer = await prepareTcpPeer(socket);
+    // After optional bounded admission, start framing and identity resolution
+    // together. No request is dispatched until the identity snapshot completes.
+    const [identity, reader] = await Promise.all([resolveConnectionIdentity(peer), IpcStreamReader.create(socket)]);
     // Build the writer over the Socket itself, not its raw fd, so we go
     // through `socket.write` + `'drain'` and yield the event loop while the
     // kernel send buffer drains (see serve-unix.ts for the rationale).
