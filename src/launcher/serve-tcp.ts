@@ -27,12 +27,23 @@
 
 import { createServer, type Server, type Socket } from "node:net";
 import { schema as makeSchema, serializeBatch } from "../arrow/index.js";
+import { AuthContext } from "../auth.js";
 import { DESCRIBE_METHOD_NAME } from "../constants.js";
 import { buildDescribeBatch } from "../dispatch/describe.js";
 import { dispatchStream } from "../dispatch/stream.js";
 import { dispatchUnary } from "../dispatch/unary.js";
 import { RpcError, VersionError } from "../errors.js";
 import type { ExternalLocationConfig } from "../external.js";
+import {
+  type PeerAuthenticationPolicy,
+  PeerEvidenceSet,
+  type PeerIdentityProvider,
+  PeerIdentityRejectedError,
+  PeerIdentityResult,
+  PeerIdentityStatus,
+  PeerIdentityUnavailableError,
+  PeerResolutionContext,
+} from "../identity.js";
 import type { Protocol } from "../protocol.js";
 import {
   type CallStatistics,
@@ -85,6 +96,17 @@ export interface ServeTcpOptions {
   /** Override the stream used for the `TCP:<host>:<port>` line.  Defaults to
    *  `process.stdout`. */
   announcementSink?: NodeJS.WritableStream;
+  /** Resolve peer identity once per accepted connection. Evidence is snapshotted
+   *  for the connection lifetime and never read from VGI request bytes. */
+  peerIdentityProviders?: readonly PeerIdentityProvider[];
+  /** Combine connection evidence with anonymous application authentication. */
+  peerAuthenticationPolicy?: PeerAuthenticationPolicy;
+  /** Logical service destination supplied to destination-aware providers. */
+  peerServiceName?: string;
+  /** Total provider-resolution budget per accepted connection. Default: 1000 ms. */
+  identityResolutionTimeoutMs?: number;
+  /** Maximum provider calls that may remain active after connection deadlines. Default: 64. */
+  peerProviderConcurrency?: number;
 }
 
 /** Handle returned by {@link serveTcp} for callers that want to stop the server. */
@@ -125,10 +147,40 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
   const onServeStart = options.onServeStart ?? null;
   const backlog = options.backlog ?? 128;
   const announcementSink = options.announcementSink ?? process.stdout;
+  const peerIdentityProviders = [...(options.peerIdentityProviders ?? [])];
+  const peerAuthenticationPolicy = options.peerAuthenticationPolicy;
+  const identityResolutionTimeoutMs = options.identityResolutionTimeoutMs ?? 1_000;
+  if (!Number.isFinite(identityResolutionTimeoutMs) || identityResolutionTimeoutMs <= 0) {
+    throw new TypeError("identityResolutionTimeoutMs must be positive");
+  }
+  const peerProviderConcurrency = options.peerProviderConcurrency ?? 64;
+  if (!Number.isInteger(peerProviderConcurrency) || peerProviderConcurrency <= 0) {
+    throw new TypeError("peerProviderConcurrency must be a positive integer");
+  }
+  const providerNames = new Set<string>();
+  for (const provider of peerIdentityProviders) {
+    if (!provider.provider || providerNames.has(provider.provider)) {
+      throw new TypeError("peer identity providers must have unique non-empty names");
+    }
+    providerNames.add(provider.provider);
+  }
+  if (peerAuthenticationPolicy && peerIdentityProviders.length === 0) {
+    throw new TypeError("peerAuthenticationPolicy requires at least one peer identity provider");
+  }
+  if (peerProviderConcurrency < peerIdentityProviders.length) {
+    throw new TypeError("peerProviderConcurrency must be at least the configured provider fanout");
+  }
+  let activePeerProviderCalls = 0;
 
   // Cache for __describe__ — Web-Crypto digest is async, so memoise.
-  let describePromise: Promise<{ batch: import("../arrow/index.js").VgiBatch; protocolHash: string }> | null = null;
-  function describeInfo(): Promise<{ batch: import("../arrow/index.js").VgiBatch; protocolHash: string }> {
+  let describePromise: Promise<{
+    batch: import("../arrow/index.js").VgiBatch;
+    protocolHash: string;
+  }> | null = null;
+  function describeInfo(): Promise<{
+    batch: import("../arrow/index.js").VgiBatch;
+    protocolHash: string;
+  }> {
     if (!describePromise) {
       describePromise = buildDescribeBatch(protocol.name, protocol.getMethods(), serverId).then(
         ({ batch, metadata }) => ({
@@ -166,6 +218,7 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
   const server: Server = createServer({ allowHalfOpen: false });
 
   let activeConnections = 0;
+  const connections = new Set<Socket>();
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let resolveDone: () => void = () => {};
   let rejectDone: (err: unknown) => void = () => {};
@@ -196,6 +249,7 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     if (stopped) return;
     stopped = true;
     disarmIdleTimer();
+    for (const connection of connections) connection.destroy();
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
@@ -210,15 +264,25 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
       // best-effort
     }
     activeConnections += 1;
+    connections.add(socket);
     disarmIdleTimer();
-    handleConnection(socket)
+    handleConnection(socket, resolveConnectionIdentity(socket), IpcStreamReader.create(socket))
       .catch((err) => {
         // Per-connection errors must not take down the server — log to stderr
         // and let the next connection proceed.
-        process.stderr.write(`vgi-rpc/tcp: connection failed: ${(err as Error)?.message ?? err}\n`);
+        // Provider/policy exceptions may contain daemon tokens, certificates,
+        // capabilities, or attacker-controlled input. Keep normal logs generic.
+        const failureClass =
+          err instanceof PeerIdentityUnavailableError
+            ? "unavailable"
+            : err instanceof PeerIdentityRejectedError
+              ? "rejected"
+              : "failed";
+        process.stderr.write(`vgi-rpc/tcp: connection identity ${failureClass}\n`);
       })
       .finally(() => {
         activeConnections -= 1;
+        connections.delete(socket);
         socket.destroy();
         if (activeConnections === 0 && !stopped) {
           armIdleTimer();
@@ -226,14 +290,109 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
       });
   });
 
+  async function resolveConnectionIdentity(socket: Socket): Promise<{ auth: AuthContext; evidence: PeerEvidenceSet }> {
+    if (peerIdentityProviders.length === 0) {
+      return { auth: AuthContext.anonymous(), evidence: PeerEvidenceSet.EMPTY };
+    }
+    const deadline = Date.now() + identityResolutionTimeoutMs;
+    const sourceEndpoint = socket.remoteAddress
+      ? `${socket.remoteAddress.includes(":") ? `[${socket.remoteAddress}]` : socket.remoteAddress}:${socket.remotePort ?? 0}`
+      : undefined;
+    const destinationAddress = socket.localAddress
+      ? `${socket.localAddress.includes(":") ? `[${socket.localAddress}]` : socket.localAddress}:${socket.localPort ?? 0}`
+      : undefined;
+    const context = new PeerResolutionContext("tcp", {
+      immediatePeer: socket.remoteAddress,
+      sourceEndpoint,
+      destinationAddress,
+      serviceName: options.peerServiceName,
+      metadata: sourceEndpoint ? { remote_addr: sourceEndpoint } : {},
+      deadline,
+      budgetMs: identityResolutionTimeoutMs,
+    });
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcomes: Array<PeerIdentityResult | undefined> = new Array(peerIdentityProviders.length);
+      const providerTasks = peerIdentityProviders.map((provider, index) => {
+        if (activePeerProviderCalls >= peerProviderConcurrency) {
+          outcomes[index] = new PeerIdentityResult(provider.provider, PeerIdentityStatus.UNAVAILABLE);
+          return Promise.resolve();
+        }
+        activePeerProviderCalls++;
+        return Promise.resolve()
+          .then(() => provider.resolve(context, controller.signal))
+          .then((result) => {
+            outcomes[index] =
+              result && result.provider === provider.provider
+                ? result
+                : new PeerIdentityResult(provider.provider, PeerIdentityStatus.INVALID);
+          })
+          .catch((error: unknown) => {
+            outcomes[index] = new PeerIdentityResult(
+              provider.provider,
+              error instanceof PeerIdentityUnavailableError || controller.signal.aborted
+                ? PeerIdentityStatus.UNAVAILABLE
+                : PeerIdentityStatus.INVALID,
+            );
+          })
+          .finally(() => {
+            activePeerProviderCalls--;
+          });
+      });
+      const providerResults = Promise.all(providerTasks).then(() =>
+        Array.from(
+          { length: peerIdentityProviders.length },
+          (_unused, index) =>
+            outcomes[index] ??
+            new PeerIdentityResult(peerIdentityProviders[index].provider, PeerIdentityStatus.UNAVAILABLE),
+        ),
+      );
+      const deadlineResults = new Promise<PeerIdentityResult[]>((resolve) => {
+        timeout = setTimeout(() => {
+          controller.abort(new Error("peer identity resolution deadline elapsed"));
+          resolve(
+            peerIdentityProviders.map(
+              (provider) => new PeerIdentityResult(provider.provider, PeerIdentityStatus.UNAVAILABLE),
+            ),
+          );
+        }, identityResolutionTimeoutMs);
+      });
+      await Promise.race([providerResults, deadlineResults]);
+      // Preserve results that completed in the deadline turn. In particular,
+      // INVALID evidence must never be downgraded because a sibling hung.
+      await Promise.resolve();
+      const results = Array.from(
+        { length: peerIdentityProviders.length },
+        (_unused, index) =>
+          outcomes[index] ??
+          new PeerIdentityResult(peerIdentityProviders[index].provider, PeerIdentityStatus.UNAVAILABLE),
+      );
+      const evidence = new PeerEvidenceSet(results);
+      const auth = peerAuthenticationPolicy
+        ? await peerAuthenticationPolicy(evidence, AuthContext.anonymous())
+        : AuthContext.anonymous();
+      return { auth, evidence };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   server.on("error", (err) => {
     if (stopped) return;
     rejectDone(err);
   });
 
-  async function handleConnection(socket: Socket): Promise<void> {
-    // The reader takes any Node Readable; sockets are duplex Readables.
-    const reader = await IpcStreamReader.create(socket);
+  async function handleConnection(
+    socket: Socket,
+    identityPromise: Promise<{ auth: AuthContext; evidence: PeerEvidenceSet }>,
+    readerPromise: Promise<IpcStreamReader>,
+  ): Promise<void> {
+    // Start framing and identity resolution together. Node's stream adapter
+    // must attach as soon as the socket is accepted or a fast client can fill
+    // the pre-reader buffer while a LocalAPI lookup is in flight. No request
+    // is dispatched until the identity promise has completed.
+    const [identity, reader] = await Promise.all([identityPromise, readerPromise]);
     // Build the writer over the Socket itself, not its raw fd, so we go
     // through `socket.write` + `'drain'` and yield the event loop while the
     // kernel send buffer drains (see serve-unix.ts for the rationale).
@@ -245,7 +404,7 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
 
       while (true) {
         try {
-          await serveOnce(reader, writer);
+          await serveOnce(reader, writer, identity);
         } catch (e: unknown) {
           const err = e as { code?: string; message?: string };
           // EOF/closed client → end this connection cleanly.
@@ -272,7 +431,11 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     }
   }
 
-  async function serveOnce(reader: IpcStreamReader, writer: IpcStreamWriter): Promise<void> {
+  async function serveOnce(
+    reader: IpcStreamReader,
+    writer: IpcStreamWriter,
+    identity: { auth: AuthContext; evidence: PeerEvidenceSet },
+  ): Promise<void> {
     const stream = await reader.readStream();
     if (!stream) {
       throw new Error("EOF");
@@ -341,10 +504,10 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
       protocolHash,
       protocolVersion,
       kind: TransportKind.TCP,
-      principal: "",
-      authDomain: "",
-      authenticated: false,
-      remoteAddr: "",
+      principal: identity.auth.principal ?? "",
+      authDomain: identity.auth.domain,
+      authenticated: identity.auth.authenticated,
+      remoteAddr: identity.evidence.identities[0]?.sourceAddress ?? "",
       requestData,
     };
     const stats: CallStatistics = {
@@ -361,9 +524,30 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     applyDefaults(params, method.defaults);
     try {
       if (method.type === MethodType.UNARY) {
-        await dispatchUnary(method, params, writer, serverId, requestId, externalConfig, TransportKind.TCP);
+        await dispatchUnary(
+          method,
+          params,
+          writer,
+          serverId,
+          requestId,
+          externalConfig,
+          TransportKind.TCP,
+          identity.auth,
+          identity.evidence,
+        );
       } else {
-        await dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, TransportKind.TCP);
+        await dispatchStream(
+          method,
+          params,
+          writer,
+          reader,
+          serverId,
+          requestId,
+          externalConfig,
+          TransportKind.TCP,
+          identity.auth,
+          identity.evidence,
+        );
       }
     } catch (e) {
       dispatchError = e instanceof Error ? e : new Error(String(e));

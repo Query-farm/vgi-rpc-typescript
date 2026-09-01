@@ -1,4 +1,5 @@
 import type { ExternalLocationConfig } from "../external.js";
+import { type PeerAuthenticationPolicy, type PeerIdentityProvider } from "../identity.js";
 import type { Protocol } from "../protocol.js";
 import { type DispatchHook, type ServeStartHook } from "../types.js";
 /** Configuration for {@link serveTcp}. */
@@ -37,6 +38,17 @@ export interface ServeTcpOptions {
     /** Override the stream used for the `TCP:<host>:<port>` line.  Defaults to
      *  `process.stdout`. */
     announcementSink?: NodeJS.WritableStream;
+    /** Resolve peer identity once per accepted connection. Evidence is snapshotted
+     *  for the connection lifetime and never read from VGI request bytes. */
+    peerIdentityProviders?: readonly PeerIdentityProvider[];
+    /** Combine connection evidence with anonymous application authentication. */
+    peerAuthenticationPolicy?: PeerAuthenticationPolicy;
+    /** Logical service destination supplied to destination-aware providers. */
+    peerServiceName?: string;
+    /** Total provider-resolution budget per accepted connection. Default: 1000 ms. */
+    identityResolutionTimeoutMs?: number;
+    /** Maximum provider calls that may remain active after connection deadlines. Default: 64. */
+    peerProviderConcurrency?: number;
 }
 /** Handle returned by {@link serveTcp} for callers that want to stop the server. */
 export interface ServeTcpHandle {

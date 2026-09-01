@@ -11998,7 +11998,7 @@ class Protocol {
 }
 // src/dispatch/stream.ts
 var EMPTY_SCHEMA4 = schema([]);
-async function dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, kind) {
+async function dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, kind, authContext, peerEvidence) {
   const isProducer = !!method.producerFn;
   let state;
   try {
@@ -12021,7 +12021,9 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
   const effectiveProducer = state?.__isProducer ?? isProducer;
   if (method.headerSchema && method.headerInit) {
     try {
-      const headerOut = new OutputCollector(method.headerSchema, true, serverId, requestId, undefined, undefined, kind);
+      const headerOut = new OutputCollector(method.headerSchema, true, serverId, requestId, authContext, undefined, kind, {
+        peerEvidence
+      });
       const headerValues = method.headerInit(params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, serverId, requestId);
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
@@ -12068,8 +12070,9 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
           console.debug?.(`Schema conformance skipped: ${e instanceof Error ? e.message : e}`);
         }
       }
-      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId, undefined, undefined, kind, {
-        inputMetadata: inputBatch.metadata ?? undefined
+      const out = new OutputCollector(outputSchema, effectiveProducer, serverId, requestId, authContext, undefined, kind, {
+        inputMetadata: inputBatch.metadata ?? undefined,
+        peerEvidence
       });
       if (isProducer) {
         await method.producerFn(state, out);
@@ -12100,9 +12103,9 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
 }
 
 // src/dispatch/unary.ts
-async function dispatchUnary(method, params, writer, serverId, requestId, externalConfig, kind) {
+async function dispatchUnary(method, params, writer, serverId, requestId, externalConfig, kind, authContext, peerEvidence) {
   const schema2 = method.resultSchema;
-  const out = new OutputCollector(schema2, true, serverId, requestId, undefined, undefined, kind);
+  const out = new OutputCollector(schema2, true, serverId, requestId, authContext, undefined, kind, { peerEvidence });
   try {
     const result = await method.handler(params, out);
     let resultBatch = buildResultBatch(schema2, result, serverId, requestId);
@@ -12901,6 +12904,30 @@ async function serveTcp(protocol, options = {}) {
   const onServeStart = options.onServeStart ?? null;
   const backlog = options.backlog ?? 128;
   const announcementSink = options.announcementSink ?? process.stdout;
+  const peerIdentityProviders = [...options.peerIdentityProviders ?? []];
+  const peerAuthenticationPolicy = options.peerAuthenticationPolicy;
+  const identityResolutionTimeoutMs = options.identityResolutionTimeoutMs ?? 1000;
+  if (!Number.isFinite(identityResolutionTimeoutMs) || identityResolutionTimeoutMs <= 0) {
+    throw new TypeError("identityResolutionTimeoutMs must be positive");
+  }
+  const peerProviderConcurrency = options.peerProviderConcurrency ?? 64;
+  if (!Number.isInteger(peerProviderConcurrency) || peerProviderConcurrency <= 0) {
+    throw new TypeError("peerProviderConcurrency must be a positive integer");
+  }
+  const providerNames = new Set;
+  for (const provider of peerIdentityProviders) {
+    if (!provider.provider || providerNames.has(provider.provider)) {
+      throw new TypeError("peer identity providers must have unique non-empty names");
+    }
+    providerNames.add(provider.provider);
+  }
+  if (peerAuthenticationPolicy && peerIdentityProviders.length === 0) {
+    throw new TypeError("peerAuthenticationPolicy requires at least one peer identity provider");
+  }
+  if (peerProviderConcurrency < peerIdentityProviders.length) {
+    throw new TypeError("peerProviderConcurrency must be at least the configured provider fanout");
+  }
+  let activePeerProviderCalls = 0;
   let describePromise = null;
   function describeInfo() {
     if (!describePromise) {
@@ -12936,6 +12963,7 @@ async function serveTcp(protocol, options = {}) {
   }
   const server = createServer({ allowHalfOpen: false });
   let activeConnections = 0;
+  const connections = new Set;
   let idleTimer = null;
   let resolveDone = () => {};
   let rejectDone = () => {};
@@ -12966,6 +12994,8 @@ async function serveTcp(protocol, options = {}) {
       return;
     stopped = true;
     disarmIdleTimer();
+    for (const connection of connections)
+      connection.destroy();
     await new Promise((resolve) => {
       server.close(() => resolve());
     });
@@ -12976,31 +13006,86 @@ async function serveTcp(protocol, options = {}) {
       socket.setNoDelay(true);
     } catch {}
     activeConnections += 1;
+    connections.add(socket);
     disarmIdleTimer();
-    handleConnection(socket).catch((err2) => {
-      process.stderr.write(`vgi-rpc/tcp: connection failed: ${err2?.message ?? err2}
+    handleConnection(socket, resolveConnectionIdentity(socket), IpcStreamReader.create(socket)).catch((err2) => {
+      const failureClass = err2 instanceof PeerIdentityUnavailableError ? "unavailable" : err2 instanceof PeerIdentityRejectedError ? "rejected" : "failed";
+      process.stderr.write(`vgi-rpc/tcp: connection identity ${failureClass}
 `);
     }).finally(() => {
       activeConnections -= 1;
+      connections.delete(socket);
       socket.destroy();
       if (activeConnections === 0 && !stopped) {
         armIdleTimer();
       }
     });
   });
+  async function resolveConnectionIdentity(socket) {
+    if (peerIdentityProviders.length === 0) {
+      return { auth: AuthContext.anonymous(), evidence: PeerEvidenceSet.EMPTY };
+    }
+    const deadline = Date.now() + identityResolutionTimeoutMs;
+    const sourceEndpoint = socket.remoteAddress ? `${socket.remoteAddress.includes(":") ? `[${socket.remoteAddress}]` : socket.remoteAddress}:${socket.remotePort ?? 0}` : undefined;
+    const destinationAddress = socket.localAddress ? `${socket.localAddress.includes(":") ? `[${socket.localAddress}]` : socket.localAddress}:${socket.localPort ?? 0}` : undefined;
+    const context = new PeerResolutionContext("tcp", {
+      immediatePeer: socket.remoteAddress,
+      sourceEndpoint,
+      destinationAddress,
+      serviceName: options.peerServiceName,
+      metadata: sourceEndpoint ? { remote_addr: sourceEndpoint } : {},
+      deadline,
+      budgetMs: identityResolutionTimeoutMs
+    });
+    const controller = new AbortController;
+    let timeout;
+    try {
+      const outcomes = new Array(peerIdentityProviders.length);
+      const providerTasks = peerIdentityProviders.map((provider, index) => {
+        if (activePeerProviderCalls >= peerProviderConcurrency) {
+          outcomes[index] = new PeerIdentityResult(provider.provider, PeerIdentityStatus.UNAVAILABLE);
+          return Promise.resolve();
+        }
+        activePeerProviderCalls++;
+        return Promise.resolve().then(() => provider.resolve(context, controller.signal)).then((result) => {
+          outcomes[index] = result && result.provider === provider.provider ? result : new PeerIdentityResult(provider.provider, PeerIdentityStatus.INVALID);
+        }).catch((error) => {
+          outcomes[index] = new PeerIdentityResult(provider.provider, error instanceof PeerIdentityUnavailableError || controller.signal.aborted ? PeerIdentityStatus.UNAVAILABLE : PeerIdentityStatus.INVALID);
+        }).finally(() => {
+          activePeerProviderCalls--;
+        });
+      });
+      const providerResults = Promise.all(providerTasks).then(() => Array.from({ length: peerIdentityProviders.length }, (_unused, index) => outcomes[index] ?? new PeerIdentityResult(peerIdentityProviders[index].provider, PeerIdentityStatus.UNAVAILABLE)));
+      const deadlineResults = new Promise((resolve) => {
+        timeout = setTimeout(() => {
+          controller.abort(new Error("peer identity resolution deadline elapsed"));
+          resolve(peerIdentityProviders.map((provider) => new PeerIdentityResult(provider.provider, PeerIdentityStatus.UNAVAILABLE)));
+        }, identityResolutionTimeoutMs);
+      });
+      await Promise.race([providerResults, deadlineResults]);
+      await Promise.resolve();
+      const results = Array.from({ length: peerIdentityProviders.length }, (_unused, index) => outcomes[index] ?? new PeerIdentityResult(peerIdentityProviders[index].provider, PeerIdentityStatus.UNAVAILABLE));
+      const evidence = new PeerEvidenceSet(results);
+      const auth = peerAuthenticationPolicy ? await peerAuthenticationPolicy(evidence, AuthContext.anonymous()) : AuthContext.anonymous();
+      return { auth, evidence };
+    } finally {
+      if (timeout)
+        clearTimeout(timeout);
+    }
+  }
   server.on("error", (err2) => {
     if (stopped)
       return;
     rejectDone(err2);
   });
-  async function handleConnection(socket) {
-    const reader = await IpcStreamReader.create(socket);
+  async function handleConnection(socket, identityPromise, readerPromise) {
+    const [identity, reader] = await Promise.all([identityPromise, readerPromise]);
     const writer = new IpcStreamWriter(socket);
     try {
       await notifyTransport();
       while (true) {
         try {
-          await serveOnce(reader, writer);
+          await serveOnce(reader, writer, identity);
         } catch (e) {
           const err2 = e;
           if (err2?.message?.includes("closed") || err2?.message?.includes("Expected Schema Message") || err2?.message?.includes("null or length 0") || err2?.message?.includes("EOF") || err2?.code === "EPIPE" || err2?.code === "ERR_STREAM_PREMATURE_CLOSE" || err2?.code === "ERR_STREAM_DESTROYED") {
@@ -13015,7 +13100,7 @@ async function serveTcp(protocol, options = {}) {
       } catch {}
     }
   }
-  async function serveOnce(reader, writer) {
+  async function serveOnce(reader, writer, identity) {
     const stream = await reader.readStream();
     if (!stream) {
       throw new Error("EOF");
@@ -13079,10 +13164,10 @@ async function serveTcp(protocol, options = {}) {
       protocolHash,
       protocolVersion,
       kind: "tcp" /* TCP */,
-      principal: "",
-      authDomain: "",
-      authenticated: false,
-      remoteAddr: "",
+      principal: identity.auth.principal ?? "",
+      authDomain: identity.auth.domain,
+      authenticated: identity.auth.authenticated,
+      remoteAddr: identity.evidence.identities[0]?.sourceAddress ?? "",
       requestData
     };
     const stats = {
@@ -13098,9 +13183,9 @@ async function serveTcp(protocol, options = {}) {
     applyDefaults(params, method.defaults);
     try {
       if (method.type === "unary" /* UNARY */) {
-        await dispatchUnary(method, params, writer, serverId, requestId, externalConfig, "tcp" /* TCP */);
+        await dispatchUnary(method, params, writer, serverId, requestId, externalConfig, "tcp" /* TCP */, identity.auth, identity.evidence);
       } else {
-        await dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, "tcp" /* TCP */);
+        await dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, "tcp" /* TCP */, identity.auth, identity.evidence);
       }
     } catch (e) {
       dispatchError = e instanceof Error ? e : new Error(String(e));
@@ -14180,4 +14265,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=3D76F4A8050FEC8B64756E2164756E21
+//# debugId=7060148E96FFD20E64756E2164756E21

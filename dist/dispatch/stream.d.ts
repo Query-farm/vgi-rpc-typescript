@@ -1,4 +1,6 @@
+import type { AuthContext } from "../auth.js";
 import { type ExternalLocationConfig } from "../external.js";
+import type { PeerEvidenceSet } from "../identity.js";
 import type { MethodDefinition, TransportKind } from "../types.js";
 import type { IpcStreamReader } from "../wire/reader.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
@@ -17,5 +19,5 @@ import type { IpcStreamWriter } from "../wire/writer.js";
  * - Server writes output batch(es) for each input
  * - Stream ends when client closes input (EOS)
  */
-export declare function dispatchStream(method: MethodDefinition, params: Record<string, any>, writer: IpcStreamWriter, reader: IpcStreamReader, serverId: string, requestId: string | null, externalConfig?: ExternalLocationConfig, kind?: TransportKind): Promise<void>;
+export declare function dispatchStream(method: MethodDefinition, params: Record<string, any>, writer: IpcStreamWriter, reader: IpcStreamReader, serverId: string, requestId: string | null, externalConfig?: ExternalLocationConfig, kind?: TransportKind, authContext?: AuthContext, peerEvidence?: PeerEvidenceSet): Promise<void>;
 //# sourceMappingURL=stream.d.ts.map

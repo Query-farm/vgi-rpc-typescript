@@ -15,8 +15,11 @@ import {
   PeerIdentityStatus,
   type PeerResolutionOptions,
   Protocol,
+  peerIdentityPrimary,
   requirePeerIdentity,
+  serveTcp,
   str,
+  tailscaleLocalApiIdentityProvider,
   tailscaleServeIdentityProvider,
   tcpConnect,
   tcpConnectSocks5h,
@@ -287,12 +290,68 @@ async function runHttpServer(args: readonly string[]): Promise<void> {
   process.once("SIGTERM", close);
 }
 
+function serveTcpProtocol(issuer: string, capability: string, tag: string): Protocol {
+  return new Protocol("ConformanceService", { protocolVersion: "2.0.0" }).unary("echo_string", {
+    params: { value: str },
+    result: { result: str },
+    handler: ({ value }, context) => {
+      const ctx = context as CallContext;
+      const identities = ctx.peerEvidence.forProvider(PROVIDER);
+      const identity = identities[0];
+      if (
+        ctx.peerEvidence.status(PROVIDER) !== PeerIdentityStatus.AVAILABLE ||
+        identities.length !== 1 ||
+        !identity ||
+        identity.evidenceSource !== "localapi" ||
+        identity.assurance !== "local_daemon" ||
+        identity.issuer !== issuer ||
+        identity.subjectKind !== "tagged_node" ||
+        identity.subjectStability !== "stable" ||
+        !identity.subjectVerified ||
+        !identity.capabilitiesVerified ||
+        !(capability in identity.capabilities) ||
+        !(identity.attributes.tags as readonly unknown[] | undefined)?.includes(tag) ||
+        !ctx.auth.authenticated ||
+        ctx.auth.domain !== PROVIDER
+      ) {
+        throw new Error("unexpected Tailscale identity or authentication context");
+      }
+      return { result: value };
+    },
+  });
+}
+
+async function runTcpServer(args: readonly string[]): Promise<void> {
+  const host = option(args, "--host") ?? "0.0.0.0";
+  const issuer = required(args, "--issuer");
+  const capability = required(args, "--expected-capability");
+  const tag = required(args, "--expected-tag");
+  const provider = tailscaleLocalApiIdentityProvider({
+    issuer,
+    unixSocket: option(args, "--localapi-socket") ?? "/var/run/tailscale/tailscaled.sock",
+    timeoutMs: 5_000,
+  });
+  const handle = await serveTcp(serveTcpProtocol(issuer, capability, tag), {
+    host,
+    port: port(args, "--port"),
+    idleTimeout: 0,
+    peerIdentityProviders: [provider],
+    peerAuthenticationPolicy: peerIdentityPrimary(PROVIDER),
+    identityResolutionTimeoutMs: 5_000,
+  });
+  const close = () => void handle.stop().then(() => process.exit(0));
+  process.once("SIGINT", close);
+  process.once("SIGTERM", close);
+  await handle.done;
+}
+
 async function main(): Promise<void> {
   const [mode, ...args] = process.argv.slice(2);
   if (mode === "client-http") await runHttpClient(args);
   else if (mode === "client-tcp") await runTcpClient(args);
   else if (mode === "server-http") await runHttpServer(args);
-  else throw new Error("usage: tailnet.ts client-http|client-tcp|server-http [options]");
+  else if (mode === "server-tcp") await runTcpServer(args);
+  else throw new Error("usage: tailnet.ts client-http|client-tcp|server-http|server-tcp [options]");
 }
 
 if (import.meta.main) {

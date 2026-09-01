@@ -1,7 +1,9 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import type { AuthContext } from "../auth.js";
 import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
+import type { PeerEvidenceSet } from "../identity.js";
 import type { MethodDefinition, TransportKind } from "../types.js";
 import { OutputCollector } from "../types.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
@@ -20,9 +22,11 @@ export async function dispatchUnary(
   requestId: string | null,
   externalConfig?: ExternalLocationConfig,
   kind?: TransportKind,
+  authContext?: AuthContext,
+  peerEvidence?: PeerEvidenceSet,
 ): Promise<void> {
   const schema = method.resultSchema;
-  const out = new OutputCollector(schema, true, serverId, requestId, undefined, undefined, kind);
+  const out = new OutputCollector(schema, true, serverId, requestId, authContext, undefined, kind, { peerEvidence });
 
   try {
     const result = await method.handler!(params, out);

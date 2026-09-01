@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { conformBatchToSchema, schema as makeSchema, withBatchMetadata } from "../arrow/index.js";
+import type { AuthContext } from "../auth.js";
 import { CANCEL_KEY } from "../constants.js";
 import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
+import type { PeerEvidenceSet } from "../identity.js";
 import type { MethodDefinition, TransportKind } from "../types.js";
 import { OutputCollector } from "../types.js";
 import type { IpcStreamReader } from "../wire/reader.js";
@@ -36,6 +38,8 @@ export async function dispatchStream(
   requestId: string | null,
   externalConfig?: ExternalLocationConfig,
   kind?: TransportKind,
+  authContext?: AuthContext,
+  peerEvidence?: PeerEvidenceSet,
 ): Promise<void> {
   const isProducer = !!method.producerFn;
 
@@ -72,7 +76,18 @@ export async function dispatchStream(
   // Write header IPC stream if method has a header schema
   if (method.headerSchema && method.headerInit) {
     try {
-      const headerOut = new OutputCollector(method.headerSchema, true, serverId, requestId, undefined, undefined, kind);
+      const headerOut = new OutputCollector(
+        method.headerSchema,
+        true,
+        serverId,
+        requestId,
+        authContext,
+        undefined,
+        kind,
+        {
+          peerEvidence,
+        },
+      );
       const headerValues = method.headerInit(params, state, headerOut);
       const headerBatch = buildResultBatch(method.headerSchema, headerValues, serverId, requestId);
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
@@ -154,11 +169,12 @@ export async function dispatchStream(
         effectiveProducer,
         serverId,
         requestId,
-        undefined,
+        authContext,
         undefined,
         kind,
         {
           inputMetadata: inputBatch.metadata ?? undefined,
+          peerEvidence,
         },
       );
 
