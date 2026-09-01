@@ -46,8 +46,12 @@ export {
   type ProxyProtocolV2Address,
   type ProxyProtocolV2Endpoint,
   ProxyProtocolV2Error,
+  type ProxyProtocolV2IrohIdentity,
+  parseIrohProxyProtocolV2,
   parseProxyProtocolV2,
+  readIrohProxyProtocolV2,
   readProxyProtocolV2,
+  VGI_IROH_ENDPOINT_TLV,
 } from "./launcher/proxy-protocol-v2.js";
 export {
   type TailscaleLocalApiOptions,

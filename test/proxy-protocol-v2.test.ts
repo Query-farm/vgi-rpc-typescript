@@ -4,11 +4,13 @@
 import { describe, expect, test } from "bun:test";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tcpConnect } from "../src/client/tcp.js";
-import { PeerIdentityResult, PeerIdentityStatus } from "../src/identity.js";
+import { PeerIdentityResult, PeerIdentityStatus, peerIdentityPrimary } from "../src/identity.js";
 import {
   normalizeProxyIpAddress,
   ProxyProtocolV2Error,
+  parseIrohProxyProtocolV2,
   parseProxyProtocolV2,
+  VGI_IROH_ENDPOINT_TLV,
 } from "../src/launcher/proxy-protocol-v2.js";
 import { type ServeTcpHandle, serveTcp } from "../src/launcher/serve-tcp.js";
 import { Protocol } from "../src/protocol.js";
@@ -36,6 +38,11 @@ function ipv6Header(): Buffer {
   address.writeUInt16BE(12345, 32);
   address.writeUInt16BE(9400, 34);
   return Buffer.concat([SIGNATURE, Buffer.from([0x21, 0x21, 0, address.length]), address]);
+}
+
+function irohHeader(endpoint = Buffer.from(Array.from({ length: 32 }, (_unused, index) => index))): Buffer {
+  const tlv = Buffer.concat([Buffer.from([VGI_IROH_ENDPOINT_TLV, 0, 33, 1]), endpoint]);
+  return Buffer.concat([SIGNATURE, Buffer.from([0x21, 0, 0, tlv.length]), tlv]);
 }
 
 async function listen(server: Server): Promise<number> {
@@ -114,6 +121,23 @@ describe("PROXY protocol v2 parser", () => {
   test("rejects non-exact trusted proxy address syntax", () => {
     for (const value of ["127.0.0.1/32", "localhost", "[::1]", "fe80::1%lo0", "01.2.3.4"]) {
       expect(() => normalizeProxyIpAddress(value)).toThrow(TypeError);
+    }
+  });
+
+  test("accepts Iroh identity only through the dedicated PROXY/UNSPEC parser", () => {
+    expect(() => parseProxyProtocolV2(irohHeader())).toThrow(ProxyProtocolV2Error);
+    expect(parseIrohProxyProtocolV2(irohHeader())).toEqual({
+      endpointId: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    });
+    const duplicate = Buffer.concat([irohHeader(), irohHeader().subarray(16)]);
+    duplicate.writeUInt16BE(duplicate.length - 16, 14);
+    const missing = Buffer.concat([SIGNATURE, Buffer.from([0x21, 0, 0, 0])]);
+    const wrongVersion = irohHeader();
+    wrongVersion[19] = 2;
+    const ipFamily = irohHeader();
+    ipFamily[13] = 0x11;
+    for (const value of [duplicate, missing, wrongVersion, ipFamily]) {
+      expect(() => parseIrohProxyProtocolV2(value)).toThrow(ProxyProtocolV2Error);
     }
   });
 });
@@ -278,6 +302,41 @@ describe("serveTcp PROXY protocol v2 admission", () => {
           proxyProtocol: true,
         },
       ]);
+    } finally {
+      if (relay) await new Promise<void>((resolve) => relay?.close(() => resolve()));
+      if (handle) await handle.stop();
+    }
+  });
+
+  test("promotes one bridge-verified Iroh EndpointId for the connection", async () => {
+    let handle: ServeTcpHandle | undefined;
+    let relay: Server | undefined;
+    try {
+      handle = await serveTcp(protocol, {
+        host: "127.0.0.1",
+        port: 0,
+        idleTimeout: 0,
+        announcementSink: sink,
+        proxyProtocolV2Required: true,
+        trustedProxyAddresses: ["127.0.0.1"],
+        irohProxyIssuer: "production-mesh",
+        peerAuthenticationPolicy: peerIdentityPrimary("iroh"),
+      });
+      const backendPort = handle.port;
+      relay = createServer((downstream) => {
+        const upstream = createConnection({ host: "127.0.0.1", port: backendPort });
+        downstream.once("data", (firstRequestBytes) => {
+          upstream.write(Buffer.concat([irohHeader(), firstRequestBytes]));
+          downstream.pipe(upstream);
+          upstream.pipe(downstream);
+        });
+      });
+      const client = tcpConnect("127.0.0.1", await listen(relay));
+      try {
+        expect(await client.call("ping", { value: "iroh" })).toEqual({ value: "pong:iroh" });
+      } finally {
+        client.close();
+      }
     } finally {
       if (relay) await new Promise<void>((resolve) => relay?.close(() => resolve()));
       if (handle) await handle.stop();

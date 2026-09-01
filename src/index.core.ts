@@ -141,6 +141,11 @@ export {
   requirePeerIdentity,
   SubjectStability,
 } from "./identity.js";
+export {
+  IROH_FORWARDED_ENDPOINT_HEADER,
+  type IrohForwardedHeaderOptions,
+  irohForwardedHeaderIdentityProvider,
+} from "./iroh.js";
 export { Protocol } from "./protocol.js";
 export {
   bool,

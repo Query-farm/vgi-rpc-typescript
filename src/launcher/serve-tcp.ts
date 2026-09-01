@@ -34,14 +34,18 @@ import { dispatchUnary } from "../dispatch/unary.js";
 import { RpcError, VersionError } from "../errors.js";
 import type { ExternalLocationConfig } from "../external.js";
 import {
+  IdentityAssurance,
   type PeerAuthenticationPolicy,
   PeerEvidenceSet,
+  PeerIdentity,
   type PeerIdentityProvider,
   PeerIdentityRejectedError,
   PeerIdentityResult,
   PeerIdentityStatus,
   PeerIdentityUnavailableError,
   PeerResolutionContext,
+  PeerSubjectKind,
+  SubjectStability,
 } from "../identity.js";
 import type { Protocol } from "../protocol.js";
 import {
@@ -62,6 +66,7 @@ import {
   normalizeProxyIpAddress,
   ProxyProtocolV2Error,
   proxyIpAddressKey,
+  readIrohProxyProtocolV2,
   readProxyProtocolV2,
 } from "./proxy-protocol-v2.js";
 
@@ -122,6 +127,9 @@ export interface ServeTcpOptions {
   proxyPreambleTimeoutMs?: number;
   /** Maximum complete PROXY v2 preamble size, including bounded unknown TLVs. Default: 536. */
   maximumProxyPreambleBytes?: number;
+  /** Locally configured issuer enabling the fixed Iroh EndpointId TLV on
+   * trusted PROXY/UNSPEC connections. */
+  irohProxyIssuer?: string;
 }
 
 /** Handle returned by {@link serveTcp} for callers that want to stop the server. */
@@ -179,7 +187,11 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     }
     providerNames.add(provider.provider);
   }
-  if (peerAuthenticationPolicy && peerIdentityProviders.length === 0) {
+  const irohProxyIssuer = options.irohProxyIssuer;
+  if (irohProxyIssuer !== undefined && !irohProxyIssuer) {
+    throw new TypeError("irohProxyIssuer must be non-empty when configured");
+  }
+  if (peerAuthenticationPolicy && peerIdentityProviders.length === 0 && irohProxyIssuer === undefined) {
     throw new TypeError("peerAuthenticationPolicy requires at least one peer identity provider");
   }
   if (peerProviderConcurrency < peerIdentityProviders.length) {
@@ -205,6 +217,12 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
   }
   if (proxyProtocolV2Required && trustedProxyAddresses.size === 0) {
     throw new TypeError("PROXY v2 requires at least one exact trusted proxy address");
+  }
+  if (irohProxyIssuer !== undefined && !proxyProtocolV2Required) {
+    throw new TypeError("irohProxyIssuer requires proxyProtocolV2Required");
+  }
+  if (irohProxyIssuer !== undefined && providerNames.has("iroh")) {
+    throw new TypeError("forwarded Iroh identity conflicts with another iroh provider");
   }
   let activePeerProviderCalls = 0;
 
@@ -331,6 +349,7 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     immediateEndpoint?: string;
     assertedEndpoint?: string;
     destinationAddress?: string;
+    irohEndpointId?: string;
   }
 
   async function prepareTcpPeer(socket: Socket): Promise<PreparedTcpPeer> {
@@ -353,24 +372,52 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
       ? `${socket.localAddress.includes(":") ? `[${socket.localAddress}]` : socket.localAddress}:${socket.localPort ?? 0}`
       : undefined;
     let assertedEndpoint: string | undefined;
+    let irohEndpointId: string | undefined;
     if (proxyProtocolV2Required) {
       // Establish the immediate transport trust boundary before attaching a
       // data listener or consuming one attacker-controlled preamble byte.
       if (!immediateAddressKey || !trustedProxyAddresses.has(immediateAddressKey)) {
         throw new PeerIdentityRejectedError("untrusted PROXY v2 sender", "proxy_required");
       }
-      const proxy = await readProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
-      assertedEndpoint = formatProxyEndpoint(proxy.source);
-      destinationAddress = formatProxyEndpoint(proxy.destination);
+      if (irohProxyIssuer !== undefined) {
+        const proxy = await readIrohProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
+        irohEndpointId = proxy.endpointId;
+      } else {
+        const proxy = await readProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
+        assertedEndpoint = formatProxyEndpoint(proxy.source);
+        destinationAddress = formatProxyEndpoint(proxy.destination);
+      }
     }
-    return { immediateAddress, immediateEndpoint, assertedEndpoint, destinationAddress };
+    return { immediateAddress, immediateEndpoint, assertedEndpoint, destinationAddress, irohEndpointId };
   }
 
   async function resolveConnectionIdentity(
     peer: PreparedTcpPeer,
   ): Promise<{ auth: AuthContext; evidence: PeerEvidenceSet }> {
+    const forwardedIroh = peer.irohEndpointId
+      ? PeerIdentityResult.available(
+          new PeerIdentity({
+            provider: "iroh",
+            evidenceSource: "proxy_protocol_v2",
+            assurance: IdentityAssurance.CONFIGURED_PROXY,
+            issuer: irohProxyIssuer as string,
+            transport: "tcp",
+            subjectKind: PeerSubjectKind.ENDPOINT,
+            subjectKey: peer.irohEndpointId,
+            subjectStability: SubjectStability.STABLE,
+            subjectVerified: true,
+            attributes: { original_assurance: IdentityAssurance.CRYPTOGRAPHIC_PEER },
+            sourceAddress: peer.irohEndpointId,
+            proxyAddress: peer.immediateEndpoint,
+          }),
+        )
+      : undefined;
     if (peerIdentityProviders.length === 0) {
-      return { auth: AuthContext.anonymous(), evidence: PeerEvidenceSet.EMPTY };
+      const evidence = forwardedIroh ? new PeerEvidenceSet([forwardedIroh]) : PeerEvidenceSet.EMPTY;
+      const auth = peerAuthenticationPolicy
+        ? await peerAuthenticationPolicy(evidence, AuthContext.anonymous())
+        : AuthContext.anonymous();
+      return { auth, evidence };
     }
     const deadline = Date.now() + identityResolutionTimeoutMs;
     const context = new PeerResolutionContext("tcp", {
@@ -444,7 +491,7 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
           outcomes[index] ??
           new PeerIdentityResult(peerIdentityProviders[index].provider, PeerIdentityStatus.UNAVAILABLE),
       );
-      const evidence = new PeerEvidenceSet(results);
+      const evidence = new PeerEvidenceSet(forwardedIroh ? [forwardedIroh, ...results] : results);
       const auth = peerAuthenticationPolicy
         ? await peerAuthenticationPolicy(evidence, AuthContext.anonymous())
         : AuthContext.anonymous();

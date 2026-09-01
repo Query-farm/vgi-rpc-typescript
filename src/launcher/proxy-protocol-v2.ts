@@ -9,6 +9,9 @@ const FIXED_BYTES = 16;
 /** Default bound for a complete PROXY protocol v2 preamble, including TLVs. */
 export const DEFAULT_MAX_PROXY_V2_BYTES = 536;
 
+/** Fixed VGI identity TLV used only by an explicitly trusted Iroh bridge. */
+export const VGI_IROH_ENDPOINT_TLV = 0xe0;
+
 /** One TCP endpoint asserted by a trusted PROXY protocol sender. */
 export interface ProxyProtocolV2Endpoint {
   /** Normalized IPv4 or IPv6 address asserted by the trusted proxy. */
@@ -23,6 +26,12 @@ export interface ProxyProtocolV2Address {
   readonly source: ProxyProtocolV2Endpoint;
   /** Worker destination endpoint asserted by the trusted proxy. */
   readonly destination: ProxyProtocolV2Endpoint;
+}
+
+/** Non-IP peer identity carried by a trusted Iroh bridge. */
+export interface ProxyProtocolV2IrohIdentity {
+  /** Canonical lowercase hexadecimal encoding of the 32-byte EndpointId. */
+  readonly endpointId: string;
 }
 
 /** A malformed, truncated, oversized, or timed-out PROXY protocol preamble. */
@@ -197,6 +206,44 @@ export function parseProxyProtocolV2(
   return Object.freeze({ source, destination });
 }
 
+/** Parse the dedicated PROXY/UNSPEC form emitted by a trusted Iroh bridge. */
+export function parseIrohProxyProtocolV2(
+  input: Uint8Array,
+  maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES,
+): ProxyProtocolV2IrohIdentity {
+  if (!Number.isInteger(maximumBytes) || maximumBytes < FIXED_BYTES) {
+    throw new TypeError("maximum PROXY v2 bytes must be an integer of at least 16");
+  }
+  const preamble = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  if (preamble.length < FIXED_BYTES) throw new ProxyProtocolV2Error("truncated PROXY v2 fixed preamble");
+  if (preamble.length > maximumBytes) throw new ProxyProtocolV2Error("PROXY v2 preamble exceeds configured limit");
+  if (!preamble.subarray(0, SIGNATURE.length).equals(SIGNATURE)) {
+    throw new ProxyProtocolV2Error("missing PROXY v2 signature");
+  }
+  if (preamble[12] !== 0x21) throw new ProxyProtocolV2Error("Iroh identity requires PROXY command version 2");
+  if (preamble[13] !== 0x00) throw new ProxyProtocolV2Error("VGI Iroh identity requires PROXY/UNSPEC");
+  const expected = FIXED_BYTES + preamble.readUInt16BE(14);
+  if (preamble.length !== expected) throw new ProxyProtocolV2Error("truncated or overlong PROXY v2 preamble");
+
+  const body = preamble.subarray(FIXED_BYTES);
+  let endpointId: string | undefined;
+  for (let offset = 0; offset < body.length; ) {
+    if (body.length - offset < 3) throw new ProxyProtocolV2Error("truncated PROXY v2 TLV header");
+    const type = body[offset];
+    const length = body.readUInt16BE(offset + 1);
+    offset += 3;
+    if (length > body.length - offset) throw new ProxyProtocolV2Error("truncated PROXY v2 TLV value");
+    if (type === VGI_IROH_ENDPOINT_TLV) {
+      if (endpointId !== undefined) throw new ProxyProtocolV2Error("duplicate VGI Iroh identity TLV");
+      if (length !== 33 || body[offset] !== 1) throw new ProxyProtocolV2Error("invalid VGI Iroh identity TLV");
+      endpointId = body.subarray(offset + 1, offset + 33).toString("hex");
+    }
+    offset += length;
+  }
+  if (endpointId === undefined) throw new ProxyProtocolV2Error("PROXY/UNSPEC requires one VGI Iroh identity TLV");
+  return Object.freeze({ endpointId });
+}
+
 /**
  * Consume exactly one preamble under a single independent deadline.
  * Bytes received after its declared length are pushed back for Arrow IPC.
@@ -206,6 +253,23 @@ export function readProxyProtocolV2(
   timeoutMs: number,
   maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES,
 ): Promise<ProxyProtocolV2Address> {
+  return readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes).then((preamble) =>
+    parseProxyProtocolV2(preamble, maximumBytes),
+  );
+}
+
+/** Consume and parse the dedicated trusted Iroh PROXY/UNSPEC preamble. */
+export function readIrohProxyProtocolV2(
+  socket: Socket,
+  timeoutMs: number,
+  maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES,
+): Promise<ProxyProtocolV2IrohIdentity> {
+  return readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes).then((preamble) =>
+    parseIrohProxyProtocolV2(preamble, maximumBytes),
+  );
+}
+
+function readProxyProtocolV2Preamble(socket: Socket, timeoutMs: number, maximumBytes: number): Promise<Buffer> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError("PROXY preamble timeout must be positive");
   if (!Number.isInteger(maximumBytes) || maximumBytes < FIXED_BYTES) {
     throw new TypeError("maximum PROXY v2 bytes must be an integer of at least 16");
@@ -235,7 +299,7 @@ export function readProxyProtocolV2(
       cleanup();
       if (excess && excess.length > 0) socket.unshift(excess);
       try {
-        resolve(parseProxyProtocolV2(Buffer.concat(parts, received), maximumBytes));
+        resolve(Buffer.concat(parts, received));
       } catch (error) {
         reject(error);
       }
