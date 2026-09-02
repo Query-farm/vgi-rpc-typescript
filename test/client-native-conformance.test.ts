@@ -83,7 +83,20 @@ async function readPort(proc: Subprocess): Promise<string> {
     const match = output.match(/PORT:(\d+)/);
     if (match) {
       reader.releaseLock();
-      return `http://127.0.0.1:${match[1]}`;
+      const baseUrl = `http://127.0.0.1:${match[1]}`;
+      // The Python launcher publishes the bound port immediately before
+      // Waitress starts accepting connections. A fast CI runner can observe
+      // that narrow window, so do not release the fixture until HTTP is live.
+      while (Date.now() < deadline) {
+        try {
+          const response = await fetch(`${baseUrl}/health`);
+          await response.arrayBuffer();
+          return baseUrl;
+        } catch {
+          await Bun.sleep(25);
+        }
+      }
+      throw new Error(`Python native-client worker did not accept HTTP connections at ${baseUrl}`);
     }
   }
   reader.releaseLock();
