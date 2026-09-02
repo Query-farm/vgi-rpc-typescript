@@ -18,7 +18,6 @@ const handler = createHttpHandler(protocol, {
   serverId: "conformance-http-zstd",
   protocolName: "ConformanceService",
   compressionLevel: 3,
-  maxStreamResponseBytes: 1,
 });
 
 const server = Bun.serve({ port: 0, fetch: handler });

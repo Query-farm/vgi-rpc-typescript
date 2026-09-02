@@ -116,6 +116,11 @@ export interface CallContext extends LogContext {
      * configured or the transport doesn't expose one (stdio).
      */
     readonly remainingResponseBytes?: number;
+    /** Effective hard response limit after application, hosting, and client
+     * limits are combined. Preferred over the legacy remaining* alias. */
+    readonly responseLimitBytes?: number;
+    /** Application sizing target clamped to responseLimitBytes. */
+    readonly preferredResponseBytes?: number;
     /**
      * External-channel bytes left this iteration.  Always a hard cap —
      * externalised uploads have no escape valve like producer
@@ -362,6 +367,8 @@ export declare class OutputCollector implements CallContext {
     readonly cookies: ReadonlyMap<string, string>;
     readonly kind?: TransportKind;
     readonly remainingResponseBytes?: number;
+    readonly responseLimitBytes?: number;
+    readonly preferredResponseBytes?: number;
     readonly remainingExternalizedResponseBytes?: number;
     readonly externalizationEnabled?: boolean;
     constructor(outputSchema: VgiSchema, producerMode?: boolean, serverId?: string, requestId?: string | null, authContext?: AuthContext, cookies?: ReadonlyMap<string, string>, kind?: TransportKind, 
@@ -370,6 +377,8 @@ export declare class OutputCollector implements CallContext {
      *  remain source-compatible. */
     budgets?: {
         remainingResponseBytes?: number;
+        responseLimitBytes?: number;
+        preferredResponseBytes?: number;
         remainingExternalizedResponseBytes?: number;
         externalizationEnabled?: boolean;
         inputMetadata?: ReadonlyMap<string, string>;

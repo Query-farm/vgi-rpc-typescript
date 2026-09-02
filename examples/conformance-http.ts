@@ -60,6 +60,9 @@ let rejectLocalhostRedirects = false;
 let compression: ExternalLocationConfig["compression"] | undefined;
 let strictMode = false;
 let maxResponseBytesArg: number | undefined;
+let hostingMaxRequestBytesArg: number | undefined;
+let hostingMaxResponseBytesArg: number | undefined;
+let preferredResponseBytesArg: number | undefined;
 let maxExternalizedResponseBytesArg: number | undefined;
 // `undefined` keeps the library default (response compression ON at zstd
 // level 1); `--response-compression off` passes an explicit `null`, the only
@@ -123,6 +126,8 @@ for (let i = 0; i < args.length; i++) {
     externalizeThreshold = Number.parseInt(args[++i], 10);
   } else if (a === "--max-request-bytes" && i + 1 < args.length) {
     maxRequestBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--hosting-max-request-bytes" && i + 1 < args.length) {
+    hostingMaxRequestBytesArg = Number.parseInt(args[++i], 10);
   } else if (a === "--max-fetch-bytes" && i + 1 < args.length) {
     maxFetchBytesArg = Number.parseInt(args[++i], 10);
   } else if (a === "--max-decompressed-fetch-bytes" && i + 1 < args.length) {
@@ -136,6 +141,10 @@ for (let i = 0; i < args.length; i++) {
     strictMode = true;
   } else if (a === "--max-response-bytes" && i + 1 < args.length) {
     maxResponseBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--hosting-max-response-bytes" && i + 1 < args.length) {
+    hostingMaxResponseBytesArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--preferred-response-bytes" && i + 1 < args.length) {
+    preferredResponseBytesArg = Number.parseInt(args[++i], 10);
   } else if (a === "--max-externalized-response-bytes" && i + 1 < args.length) {
     maxExternalizedResponseBytesArg = Number.parseInt(args[++i], 10);
   } else if (a === "--access-log" && i + 1 < args.length) {
@@ -392,16 +401,18 @@ const handler = createHttpHandler(protocol, {
   // runs on the library default (zstd level 1, gzip fallback on runtimes
   // without a zstd encoder).
   ...(responseCompressionLevel !== undefined ? { compressionLevel: responseCompressionLevel } : {}),
-  // Advertise a small producer response budget for the legacy-cap test path.
-  // Producer dispatch is always lock-step: exactly one invocation per request,
-  // regardless of this value. In strict-cap mode use the configured budget so
-  // workers can size their single turn to it.
+  // Strict response caps are configured only in the dedicated fixture. The
+  // former plain-worker `maxStreamResponseBytes: 1` soft hint is deliberately
+  // gone: producer turns now obey the same hard cap and would all fail.
   ...(capsConfigured
     ? {
         maxResponseBytes,
         maxExternalizedResponseBytes,
       }
-    : { maxStreamResponseBytes: 1 }),
+    : {}),
+  ...(hostingMaxRequestBytesArg !== undefined ? { hostingMaxRequestBytes: hostingMaxRequestBytesArg } : {}),
+  ...(hostingMaxResponseBytesArg !== undefined ? { hostingMaxResponseBytes: hostingMaxResponseBytesArg } : {}),
+  ...(preferredResponseBytesArg !== undefined ? { preferredResponseBytes: preferredResponseBytesArg } : {}),
   ...(dispatchHook ? { dispatchHook } : {}),
   ...(externalLocation ? { externalLocation } : {}),
   ...(failServeStartOnce

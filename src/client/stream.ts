@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
+import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { CALL_STATE_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
-import { decodeResponseBody } from "./decode.js";
+import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
+import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
+import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
 import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
 import type { ExchangeInput, LogMessage, StreamSession } from "./types.js";
 
@@ -103,6 +106,8 @@ export class HttpStreamSession implements StreamSession {
   private _authorization?: string;
   private _externalConfig?: ExternalLocationConfig;
   private _postFn?: PostFn;
+  private _acceptedMaxResponseBytes: number;
+  private _responseBudgetSupport: Promise<void> | null = null;
 
   constructor(opts: {
     baseUrl: string;
@@ -122,6 +127,7 @@ export class HttpStreamSession implements StreamSession {
     authorization?: string;
     externalConfig?: ExternalLocationConfig;
     postFn?: PostFn;
+    acceptedMaxResponseBytes?: number;
   }) {
     this._baseUrl = opts.baseUrl;
     this._prefix = opts.prefix;
@@ -140,6 +146,8 @@ export class HttpStreamSession implements StreamSession {
     this._authorization = opts.authorization;
     this._externalConfig = opts.externalConfig;
     this._postFn = opts.postFn;
+    this._acceptedMaxResponseBytes = opts.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+    optionalResponseBudget(this._acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
     const pendingData = opts.pendingBatches.filter((batch) => batch.numRows > 0 || isExternalLocationBatch(batch));
     if (pendingData.length > 1) {
       throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
@@ -148,11 +156,36 @@ export class HttpStreamSession implements StreamSession {
 
   private async _post(url: string, body: Uint8Array): Promise<Response> {
     if (this._postFn) return this._postFn(url, body);
-    return fetch(url, {
+    if (!this._responseBudgetSupport) {
+      this._responseBudgetSupport = discoverHttpCapabilities(
+        this._baseUrl,
+        this._prefix,
+        this._authorization,
+        this._acceptedMaxResponseBytes,
+      ).then((capabilities) => {
+        if (!capabilities.acceptMaxResponseBytesSupport) {
+          throw new RpcError(
+            "ProtocolError",
+            "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true before RPC dispatch",
+            "",
+          );
+        }
+        this._acceptedMaxResponseBytes =
+          minPositive(this._acceptedMaxResponseBytes, capabilities.maxResponseBytes ?? undefined) ??
+          this._acceptedMaxResponseBytes;
+      });
+    }
+    await this._responseBudgetSupport;
+    const response = await fetch(url, {
       method: "POST",
       headers: this._buildHeaders(),
       body: (await this._prepareBody(body)) as unknown as BodyInit,
     });
+    const responseCapabilities = requireResponseBudgetSupport(response.headers);
+    this._acceptedMaxResponseBytes =
+      minPositive(this._acceptedMaxResponseBytes, responseCapabilities.maxResponseBytes ?? undefined) ??
+      this._acceptedMaxResponseBytes;
+    return response;
   }
 
   /** The stream's one-time header row, or `null` if the method declares no header. */
@@ -194,6 +227,7 @@ export class HttpStreamSession implements StreamSession {
     }
     // See connect.ts: states what we can decode, regardless of request compression.
     headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(this._decompressFn != null);
+    headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(this._acceptedMaxResponseBytes);
     if (this._authorization) {
       headers.Authorization = this._authorization;
     }
@@ -208,8 +242,18 @@ export class HttpStreamSession implements StreamSession {
   }
 
   private async _readResponse(resp: Response): Promise<Uint8Array<ArrayBuffer>> {
-    const body = new Uint8Array(await resp.arrayBuffer());
-    return new Uint8Array(await decodeResponseBody(resp.headers, body, this._decompressFn));
+    const body = await readResponseBodyBounded(resp, this._acceptedMaxResponseBytes);
+    const decoded = new Uint8Array(
+      await decodeResponseBody(resp.headers, body, this._decompressFn, this._acceptedMaxResponseBytes),
+    );
+    if (decoded.byteLength > this._acceptedMaxResponseBytes) {
+      throw new RpcError(
+        "TransportError",
+        `Decoded HTTP response exceeds accepted limit (${decoded.byteLength} > ${this._acceptedMaxResponseBytes})`,
+        "",
+      );
+    }
+    return decoded;
   }
 
   /**

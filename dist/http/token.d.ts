@@ -46,7 +46,10 @@ export declare function packStateToken(stateBytes: Uint8Array, callId: Uint8Arra
  * the resolved schemas — plus the `callId` binding it to its cursors. Minted
  * once, by `/init`; never re-issued.
  */
-export declare function packCallToken(callId: Uint8Array, schemaBytes: Uint8Array, inputSchemaBytes: Uint8Array, tokenKey: Uint8Array, principal: string | null | undefined, createdAt?: number, evidenceBinding?: string, domain?: string | null): string;
+export declare function packCallToken(callId: Uint8Array, schemaBytes: Uint8Array, inputSchemaBytes: Uint8Array, tokenKey: Uint8Array, principal: string | null | undefined, createdAt?: number, evidenceBinding?: string, domain?: string | null, responseBudget?: {
+    responseLimitBytes?: number;
+    preferredResponseBytes?: number;
+}): string;
 /** Decrypted payload of a state token, as returned by {@link unpackStateToken}. */
 export interface UnpackedToken {
     /** Serialized stream-state bytes carried by the token. */
@@ -69,6 +72,10 @@ export interface ResolvedCall {
     schemaBytes: Uint8Array;
     /** Serialized input-schema IPC bytes (exchange streams). */
     inputSchemaBytes: Uint8Array;
+    /** Initial authenticated hard response cap; zero/undefined on no cap. */
+    responseLimitBytes?: number;
+    /** Initial advisory batching target, sealed with the hard cap. */
+    preferredResponseBytes?: number;
 }
 /**
  * Open and verify a state token. Decryption (which checks the Poly1305

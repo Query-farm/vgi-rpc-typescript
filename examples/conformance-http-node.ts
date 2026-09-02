@@ -29,7 +29,6 @@ const handler = createHttpHandler(protocol, {
   serverId: compressionLevel ? "conformance-node-zstd" : "conformance-node",
   protocolName: "ConformanceService",
   ...(compressionLevel !== undefined ? { compressionLevel } : {}),
-  maxStreamResponseBytes: 1,
 });
 
 /** Collect request body into a single Uint8Array. */

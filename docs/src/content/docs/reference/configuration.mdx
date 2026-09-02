@@ -102,7 +102,7 @@ Cap on the post-decompression size of a `Content-Encoding: zstd` request body, i
 - **Type:** `number`
 - **Default:** `undefined` (unbounded)
 
-HTTP body cap. Hard for unary and stream-exchange responses (overshoot surfaces as `200` + an `X-VGI-RPC-Error` EXCEPTION batch). For producer streams it is a worker-visible soft budget for one invocation; producer dispatch remains lock-step and never invokes the handler more than once per request. Externalized payloads do not count toward this. Advertised via `VGI-Max-Response-Bytes`.
+Hard HTTP response-body cap for unary, exchange, and each producer turn. Values must be at least 64 KiB. Overshoot is replaced by an Arrow `ResponseTooLargeError` response with HTTP status 200; an oversized producer turn never returns a resumable cursor. Externalized payloads do not count toward this. The effective cap is the minimum of the application, hosting, and client-advertised limits and is advertised via `VGI-Max-Response-Bytes`.
 
 #### `maxStreamResponseBytes`
 
@@ -113,7 +113,15 @@ HTTP body cap. Hard for unary and stream-exchange responses (overshoot surfaces 
 Use `maxResponseBytes` instead. The cap now governs all HTTP method responses (unary, exchange, producer), not just producer streams.
 :::
 
-For compatibility this value takes precedence over `maxResponseBytes` as the worker-visible producer budget. It does not change the one-request/one-invocation stream shape.
+For compatibility this value is treated as an application hard response cap when `maxResponseBytes` is not set. It does not change the one-request/one-invocation stream shape.
+
+#### `hostingMaxRequestBytes` / `hostingMaxResponseBytes`
+
+Optional hosting-platform limits. Each is combined with its application limit by taking the minimum, so capability discovery advertises the limit the worker can actually enforce.
+
+#### `preferredResponseBytes`
+
+Optional worker sizing target exposed off-wire as `CallContext.preferredResponseBytes`. It is clamped to the effective hard response limit. `CallContext.responseLimitBytes` exposes that effective hard limit.
 
 #### `maxExternalizedResponseBytes`
 

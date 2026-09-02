@@ -27,7 +27,6 @@ const handler = createHttpHandler(protocol, {
   serverId: compressionLevel ? "conformance-deno-zstd" : "conformance-deno",
   protocolName: "ConformanceService",
   ...(compressionLevel !== undefined ? { compressionLevel } : {}),
-  maxStreamResponseBytes: 1,
 });
 
 Deno.serve(

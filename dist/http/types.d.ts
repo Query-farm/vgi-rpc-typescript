@@ -19,6 +19,9 @@ export interface HttpHandlerOptions {
     corsMaxAge?: number | null;
     /** Maximum request body size in bytes. Advertised via VGI-Max-Request-Bytes header. */
     maxRequestBytes?: number;
+    /** Optional hosting-platform request cap. The effective advertised and
+     * enforced limit is the minimum of this and maxRequestBytes. */
+    hostingMaxRequestBytes?: number;
     /** Cap on the post-decompression size of a `Content-Encoding: zstd`
      *  request body, in bytes.  Defends against zstd decompression bombs:
      *  a tiny compressed frame can declare a huge decompressed size and
@@ -32,13 +35,18 @@ export interface HttpHandlerOptions {
      *  HTTP method responses (unary, exchange, producer), not just producer streams.
      */
     maxStreamResponseBytes?: number;
-    /** HTTP body cap. Hard for unary and stream-exchange (overshoot surfaces
-     *  as 200 + X-VGI-RPC-Error EXCEPTION batch). For producer streams it is a
-     *  worker-visible soft budget; every invocation returns independently.
-     *  Externalised payloads do not
+    /** Hard HTTP response body cap for unary, exchange, and producer turns.
+     *  Overshoot is replaced by an error-only response and producer cursors are
+     *  discarded. Externalised payloads do not
      *  count toward this — they leave only tiny pointer batches on the wire.
      *  Advertised via VGI-Max-Response-Bytes.  Undefined = unbounded. */
     maxResponseBytes?: number;
+    /** Optional hosting-platform response cap. Combined with the application
+     * cap and the client's VGI-Accept-Max-Response-Bytes value. */
+    hostingMaxResponseBytes?: number;
+    /** Worker sizing target, clamped to the effective hard response limit and
+     * exposed off-wire on CallContext/OutputCollector. */
+    preferredResponseBytes?: number;
     /** Cap on bytes uploaded to external storage during one HTTP response.
      *  Always hard — externalised uploads have no escape valve. Advertised via
      *  VGI-Max-Externalized-Response-Bytes.  Undefined = unbounded. */

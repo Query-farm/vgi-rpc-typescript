@@ -79,7 +79,7 @@ const handler = createHttpHandler(protocol, {
   corsMaxAge: 300,                   // Access-Control-Max-Age for preflight (default: 300; null omits)
   maxRequestBytes: 10_000_000,       // max request body size
   maxDecompressedRequestBytes: 160_000_000, // cap on decompressed request size (zstd-bomb defense)
-  maxResponseBytes: 5_000_000,       // response body cap (hard for unary/exchange, soft for producer)
+  maxResponseBytes: 5_000_000,       // hard response-body cap for every RPC shape
   maxExternalizedResponseBytes: 50_000_000, // cap on externalized payload bytes per response
   compressionLevel: 1,              // zstd level for responses (default: 1; null disables)
   authenticate: myAuthFn,            // authentication callback (see Authentication)
@@ -98,7 +98,7 @@ Key options:
 | `corsMaxAge` | `Access-Control-Max-Age` for preflight responses. Default `300`; `null` omits it. |
 | `maxRequestBytes` | Max request body size. Advertised via `VGI-Max-Request-Bytes`. |
 | `maxDecompressedRequestBytes` | Cap on post-decompression request size (zstd/gzip bomb defense). Defaults to `maxRequestBytes * 16` when that is set. |
-| `maxResponseBytes` | Response body cap. Hard for unary/exchange; a worker-visible per-invocation soft budget for lock-step producers. |
+| `maxResponseBytes` | Hard response-body cap for unary, exchange, and every lock-step producer turn. Overshoot is an in-band Arrow `ResponseTooLargeError` with no cursor. |
 | `maxExternalizedResponseBytes` | Hard cap on bytes uploaded to external storage during one response. |
 | `compressionLevel` | zstd level for response compression. Default `1` (compression is **on** by default); `null` disables it. |
 | `authenticate` | Per-request authentication callback. |

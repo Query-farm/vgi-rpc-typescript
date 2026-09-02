@@ -1,6 +1,12 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+export {
+  discoverHttpCapabilities,
+  type HttpServerCapabilities,
+  isCapabilitySnapshotFresh,
+  parseCapabilitiesFromHeaders,
+} from "./capabilities.js";
 export { type HttpRpcClient, httpConnect, type RpcClient } from "./connect.js";
 export { httpIntrospect, type MethodInfo, parseDescribeResponse, type ServiceDescription } from "./introspect.js";
 export type { OAuthResourceMetadataResponse } from "./oauth.js";

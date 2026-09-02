@@ -15,10 +15,14 @@
  */
 
 import { Field, Int64, RecordBatchReader, Schema } from "@query-farm/apache-arrow";
+import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { makeExternalLocationBatch } from "../external.js";
 import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
+import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
+import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
+import { readResponseBodyBounded } from "./decode.js";
 import { buildRequestIpc } from "./ipc.js";
 
 const UPLOAD_URL_METHOD = "__upload_url__";
@@ -41,10 +45,33 @@ export async function requestUploadUrls(
   count: number,
   authorization?: string,
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  acceptedMaxResponseBytes = DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
+  responseBudgetVerified = false,
 ): Promise<UploadUrlPair[]> {
+  optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
+  let responseLimit = acceptedMaxResponseBytes;
+  if (!responseBudgetVerified) {
+    const capabilities = await discoverHttpCapabilities(
+      baseUrl,
+      prefix,
+      authorization,
+      acceptedMaxResponseBytes,
+      fetchFn,
+    );
+    if (!capabilities.acceptMaxResponseBytesSupport) {
+      throw new RpcError(
+        "ProtocolError",
+        "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true before RPC dispatch",
+        "",
+      );
+    }
+    responseLimit =
+      minPositive(acceptedMaxResponseBytes, capabilities.maxResponseBytes ?? undefined) ?? acceptedMaxResponseBytes;
+  }
   const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA, { count: BigInt(count) }, UPLOAD_URL_METHOD);
   const headers: Record<string, string> = { "Content-Type": ARROW_CONTENT_TYPE };
   if (authorization) headers.Authorization = authorization;
+  headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(acceptedMaxResponseBytes);
 
   const resp = await fetchFn(`${baseUrl}${prefix}/${UPLOAD_URL_METHOD}/init`, {
     method: "POST",
@@ -60,8 +87,10 @@ export async function requestUploadUrls(
   if (!resp.ok) {
     throw new RpcError("HttpError", `__upload_url__/init failed: HTTP ${resp.status}`, "");
   }
+  const responseCapabilities = requireResponseBudgetSupport(resp.headers);
+  responseLimit = minPositive(responseLimit, responseCapabilities.maxResponseBytes ?? undefined) ?? responseLimit;
 
-  const respBody = new Uint8Array(await resp.arrayBuffer());
+  const respBody = await readResponseBodyBounded(resp, responseLimit);
   const reader = await RecordBatchReader.from(respBody);
   await reader.open();
 
@@ -142,6 +171,9 @@ export interface ExternalizeOptions {
   /** Optional per-URL validator; throw to reject. */
   urlValidator?: ((url: string) => void) | null;
   fetch?: typeof globalThis.fetch;
+  acceptedMaxResponseBytes?: number;
+  /** @internal Owning client already completed response-budget discovery. */
+  responseBudgetVerified?: boolean;
 }
 
 /**
@@ -151,7 +183,15 @@ export interface ExternalizeOptions {
  */
 export async function externalizeRequestBody(body: Uint8Array, opts: ExternalizeOptions): Promise<Uint8Array> {
   const fetchFn = opts.fetch ?? globalThis.fetch;
-  const pairs = await requestUploadUrls(opts.baseUrl, opts.prefix, 1, opts.authorization, fetchFn);
+  const pairs = await requestUploadUrls(
+    opts.baseUrl,
+    opts.prefix,
+    1,
+    opts.authorization,
+    fetchFn,
+    opts.acceptedMaxResponseBytes,
+    opts.responseBudgetVerified,
+  );
   const pair = pairs[0];
 
   if (opts.urlValidator) {

@@ -33,6 +33,10 @@ export interface HttpConnectOptions {
    * `httpConnectSocks5h` instead of setting this directly.
    */
   fetch?: typeof globalThis.fetch;
+  /** Decoded response bytes accepted by this client and advertised on every
+   * HTTP request. Minimum 64 KiB. Defaults to 64 MiB in browser/workerd builds
+   * and 256 MiB in native builds. */
+  acceptedMaxResponseBytes?: number;
 }
 
 /** A log or error message delivered to an {@link HttpConnectOptions.onLog} callback. */

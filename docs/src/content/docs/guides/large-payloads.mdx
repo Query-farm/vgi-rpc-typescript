@@ -5,7 +5,7 @@ description: Cap response sizes, offload big batches to external storage, and up
 
 Arrow batches can get big. vgi-rpc gives you three cooperating mechanisms for keeping large payloads off the inline wire:
 
-- **Response size caps** — refuse (or, for producers, split) responses that exceed a byte budget.
+- **Response size caps** — externalize a batch when configured, or refuse any response that still exceeds its byte budget.
 - **External-location offloading** — replace an oversized batch with a tiny zero-row "pointer" batch that the peer resolves out-of-band from object storage.
 - **Request upload URLs** — let a client upload a large request payload to a pre-signed URL and send the server a pointer instead.
 
@@ -17,7 +17,7 @@ Two `HttpHandlerOptions` cap how much a single response may produce:
 
 | Option | Applies to | Behavior |
 |--------|------------|----------|
-| `maxResponseBytes` | unary, stream-exchange (**hard**); producer streams (**soft**) | Hard: overshoot replaces the response with an `EXCEPTION` batch. Soft: exposes a per-invocation sizing budget; every unfinished producer turn receives a continuation token. |
+| `maxResponseBytes` | unary, stream-exchange, and each producer turn | **Always hard**: overshoot replaces the response with an `EXCEPTION` batch and never returns a continuation cursor. |
 | `maxExternalizedResponseBytes` | every response that externalizes | **Always hard** — externalized uploads have no continuation-token escape valve. |
 
 ```typescript
@@ -29,14 +29,14 @@ const handler = createHttpHandler(protocol, {
 });
 ```
 
-When a **hard** cap is exceeded the handler discards the data it had built and returns a stream carrying only an `EXCEPTION` batch (surfaced to the client as an `RpcError`). For unary and exchange this is the `maxResponseBytes` body cap; for any transport it is the `maxExternalizedResponseBytes` upload cap, which is pre-flighted *before* the upload is incurred so the bytes never leave the server.
+When a **hard** cap is exceeded the handler discards the data it had built and returns a stream carrying only an `EXCEPTION` batch (surfaced to the client as an `RpcError`). `maxResponseBytes` applies to unary, exchange, and every producer turn. An oversized producer turn does not carry a cursor. `maxExternalizedResponseBytes` is pre-flighted *before* an upload is incurred so rejected bytes never leave the server.
 
-For **producer** streams, `maxResponseBytes` is a soft, worker-visible budget for the current invocation. Producer dispatch is always lock-step: one HTTP request invokes the producer exactly once. If that invocation leaves the stream unfinished, the response carries a zero-row continuation-token batch and the client resumes by calling `/{method}/exchange` with that token. A single emitted batch may exceed the soft budget; it is not converted into a hard failure.
+Producer dispatch remains lock-step: one HTTP request invokes the producer exactly once. If an invocation stays within its limit and leaves the stream unfinished, the response carries a zero-row continuation-token batch and the client resumes by calling `/{method}/exchange` with that token.
 
-The handler advertises these caps to clients via response headers `VGI-Max-Response-Bytes` and `VGI-Max-Externalized-Response-Bytes`. Undefined means unbounded.
+The handler advertises these caps to clients via response headers `VGI-Max-Response-Bytes` and `VGI-Max-Externalized-Response-Bytes`. Clients first issue a cached `OPTIONS /health`, require exactly `VGI-Accept-Max-Response-Bytes-Support: true`, and send `VGI-Accept-Max-Response-Bytes` on every RPC. They also require the exact support header on every RPC response and locally enforce the minimum of their accepted maximum and the advertised server cap while incrementally reading the decoded Fetch stream. Browser/workerd clients default to 64 MiB; native clients default to 256 MiB. Configured and accepted response limits have a 64 KiB minimum. Undefined server limits remain unbounded, subject to the client's limit.
 
 :::note
-`maxStreamResponseBytes` is the deprecated, producer-only predecessor of `maxResponseBytes`. If both are set, the worker-visible producer budget prefers `maxStreamResponseBytes`; otherwise it falls through to `maxResponseBytes`. Neither setting permits the dispatcher to coalesce producer invocations. Prefer `maxResponseBytes` for new code.
+`maxStreamResponseBytes` is the deprecated, producer-only predecessor of `maxResponseBytes`. It is now a compatibility alias for the application hard cap when `maxResponseBytes` is absent. Prefer `maxResponseBytes` for new code.
 :::
 
 ## External-location offloading

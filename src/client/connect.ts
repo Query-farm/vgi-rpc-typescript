@@ -2,17 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type RecordBatch, Schema } from "@query-farm/apache-arrow";
+import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { CALL_STATE_KEY, LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
+import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import {
+  discoverHttpCapabilities,
   type HttpServerCapabilities,
   isCapabilitySnapshotFresh,
-  parseCapabilitiesFromHeaders,
+  requireResponseBudgetSupport,
 } from "./capabilities.js";
-import { decodeResponseBody } from "./decode.js";
+import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
 import { httpIntrospect, type MethodInfo, type ServiceDescription } from "./introspect.js";
 import {
   buildRequestIpc,
@@ -90,6 +93,8 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
   const fetchFn = options?.fetch ?? globalThis.fetch;
+  const acceptedMaxResponseBytes = options?.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+  optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
   const effectiveExternalConfig = externalConfig ? { ...externalConfig, fetch: fetchFn } : externalConfig;
 
   let methodCache: Map<string, MethodInfo> | null = options?.description
@@ -104,14 +109,60 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   let decompressFn: DecompressFn | undefined;
   let compressionLoaded = false;
   let capabilities: HttpServerCapabilities | null = null;
+  let responseBudgetSupport: Promise<void> | null = null;
 
   function updateCapabilitiesFromResponse(resp: Response): void {
-    const next = parseCapabilitiesFromHeaders(resp.headers);
+    const next = requireResponseBudgetSupport(resp.headers);
     // Only treat the snapshot as authoritative when the server actually
     // emitted capability hints. Otherwise leave any prior cache in place.
-    if (next.maxRequestBytes != null || next.uploadUrlSupport) {
-      capabilities = next;
+    if (
+      next.maxRequestBytes != null ||
+      next.maxResponseBytes != null ||
+      next.uploadUrlSupport ||
+      next.acceptMaxResponseBytesSupport
+    ) {
+      capabilities = capabilities
+        ? {
+            ...next,
+            maxRequestBytes: next.maxRequestBytes ?? capabilities.maxRequestBytes,
+            maxResponseBytes: next.maxResponseBytes ?? capabilities.maxResponseBytes,
+            maxUploadBytes: next.maxUploadBytes ?? capabilities.maxUploadBytes,
+          }
+        : next;
     }
+  }
+
+  async function ensureResponseBudgetSupport(): Promise<void> {
+    if (!responseBudgetSupport) {
+      responseBudgetSupport = discoverHttpCapabilities(
+        baseUrl,
+        prefix,
+        authorization,
+        acceptedMaxResponseBytes,
+        fetchFn,
+      )
+        .then((snapshot) => {
+          if (!snapshot.acceptMaxResponseBytesSupport) {
+            throw new RpcError(
+              "ProtocolError",
+              "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true before RPC dispatch",
+              "",
+            );
+          }
+          capabilities = snapshot;
+        })
+        .catch((error) => {
+          responseBudgetSupport = null;
+          throw error;
+        });
+    }
+    await responseBudgetSupport;
+  }
+
+  function responseReadLimit(): number {
+    return (
+      minPositive(acceptedMaxResponseBytes, capabilities?.maxResponseBytes ?? undefined) ?? acceptedMaxResponseBytes
+    );
   }
 
   async function maybeExternalize(body: Uint8Array): Promise<Uint8Array> {
@@ -125,6 +176,8 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       authorization,
       urlValidator: externalConfig?.urlValidator ?? null,
       fetch: fetchFn,
+      acceptedMaxResponseBytes,
+      responseBudgetVerified: true,
     });
   }
 
@@ -134,6 +187,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
    * support. Mirrors Python's 413 fallback in `_HttpProxy._post_with_externalization`.
    */
   async function postWithExternalization(url: string, body: Uint8Array): Promise<Response> {
+    await ensureResponseBudgetSupport();
     const sendBody = await maybeExternalize(body);
     let resp = await fetchFn(url, {
       method: "POST",
@@ -150,6 +204,8 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         authorization,
         urlValidator: externalConfig?.urlValidator ?? null,
         fetch: fetchFn,
+        acceptedMaxResponseBytes,
+        responseBudgetVerified: true,
       });
       resp = await fetchFn(url, {
         method: "POST",
@@ -189,6 +245,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
     // decode on the way back. A server that cannot trust `Accept-Encoding` (see
     // clientAcceptEncoding) otherwise has to assume the worst and send identity.
     headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
+    headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(acceptedMaxResponseBytes);
     if (authorization) {
       headers.Authorization = authorization;
     }
@@ -209,12 +266,22 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   }
 
   async function readResponse(resp: Response): Promise<Uint8Array<ArrayBuffer>> {
-    const body = new Uint8Array(await resp.arrayBuffer());
-    return new Uint8Array(await decodeResponseBody(resp.headers, body, decompressFn));
+    const limit = responseReadLimit();
+    const body = await readResponseBodyBounded(resp, limit);
+    const decoded = new Uint8Array(await decodeResponseBody(resp.headers, body, decompressFn, limit));
+    if (decoded.byteLength > limit) {
+      throw new RpcError(
+        "TransportError",
+        `Decoded HTTP response exceeds accepted limit (${decoded.byteLength} > ${limit})`,
+        "",
+      );
+    }
+    return decoded;
   }
 
   async function ensureMethodCache(): Promise<Map<string, MethodInfo>> {
     if (methodCache) return methodCache;
+    await ensureResponseBudgetSupport();
     await ensureCompression();
     const desc = await httpIntrospect(baseUrl, {
       prefix,
@@ -222,7 +289,9 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       compressionLevel,
       compressFn,
       decompressFn,
+      acceptedMaxResponseBytes: responseReadLimit(),
       fetch: fetchFn,
+      responseBudgetVerified: true,
     });
     methodCache = new Map(desc.methods.map((m) => [m.name, m]));
     serverProtocolVersion = desc.protocolVersion;
@@ -463,6 +532,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         decompressFn,
         authorization,
         externalConfig: effectiveExternalConfig,
+        acceptedMaxResponseBytes: responseReadLimit(),
         postFn: postWithExternalization,
       });
     },
@@ -472,6 +542,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       // stream. ensureCompression is memoized and only probes when a
       // compressionLevel was requested and no call has run yet.
       await ensureCompression();
+      await ensureResponseBudgetSupport();
       const { cursor, callToken } = unpackResumeToken(token);
       return new HttpStreamSession({
         baseUrl,
@@ -489,19 +560,23 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         decompressFn,
         authorization,
         externalConfig: effectiveExternalConfig,
+        acceptedMaxResponseBytes: responseReadLimit(),
         postFn: postWithExternalization,
       });
     },
 
     async describe(): Promise<ServiceDescription> {
       await ensureCompression();
+      await ensureResponseBudgetSupport();
       return httpIntrospect(baseUrl, {
         prefix,
         authorization,
         compressionLevel,
         compressFn,
         decompressFn,
+        acceptedMaxResponseBytes: responseReadLimit(),
         fetch: fetchFn,
+        responseBudgetVerified: true,
       });
     },
 

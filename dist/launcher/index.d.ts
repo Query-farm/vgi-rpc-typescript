@@ -18,7 +18,7 @@
 export { computeHash } from "./hash.js";
 export { type LaunchConfig, launch } from "./launch.js";
 export { acquireLock, type FileLockHandle, tryAcquireLock } from "./lock.js";
-export { DEFAULT_MAX_PROXY_V2_BYTES, formatProxyEndpoint, normalizeProxyIpAddress, type ProxyProtocolV2Address, type ProxyProtocolV2Endpoint, ProxyProtocolV2Error, parseProxyProtocolV2, readProxyProtocolV2, } from "./proxy-protocol-v2.js";
+export { DEFAULT_MAX_PROXY_V2_BYTES, formatProxyEndpoint, normalizeProxyIpAddress, type ProxyProtocolV2Address, type ProxyProtocolV2Endpoint, ProxyProtocolV2Error, type ProxyProtocolV2IrohIdentity, parseIrohProxyProtocolV2, parseProxyProtocolV2, readIrohProxyProtocolV2, readProxyProtocolV2, VGI_IROH_ENDPOINT_TLV, } from "./proxy-protocol-v2.js";
 export { type ServeTcpHandle, type ServeTcpOptions, serveTcp } from "./serve-tcp.js";
 export { type ServeUnixHandle, type ServeUnixOptions, serveUnix } from "./serve-unix.js";
 export { defaultStateDir, type GcResult, gcStateDir, probeSocket, type SocketPaths, type StatusRow, socketPaths, statusRows, } from "./state.js";

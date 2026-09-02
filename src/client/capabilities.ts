@@ -1,6 +1,15 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
+import { RpcError } from "../errors.js";
+import {
+  ACCEPT_MAX_RESPONSE_BYTES_HEADER,
+  optionalResponseBudget,
+  parsePositiveSafeDecimal,
+  parseResponseBudgetDecimal,
+} from "../http/response-budget.js";
+
 /**
  * HTTP server capability discovery.
  *
@@ -9,6 +18,8 @@
  *   - `VGI-Max-Request-Bytes`  — server-enforced inline request cap
  *   - `VGI-Upload-URL-Support` — "true" when the server vends upload URLs
  *   - `VGI-Max-Upload-Bytes`   — cap on out-of-band upload size
+ *   - `VGI-Max-Response-Bytes` — server-side response cap
+ *   - `VGI-Accept-Max-Response-Bytes-Support` — negotiated client cap support
  *
  * Honours `Cache-Control: max-age=N` for refresh scheduling.
  */
@@ -20,6 +31,10 @@ export interface HttpServerCapabilities {
   uploadUrlSupport: boolean;
   /** Cap on the size of an externalized upload (bytes). */
   maxUploadBytes: number | null;
+  /** Server/hosting maximum response bytes, when advertised. */
+  maxResponseBytes: number | null;
+  /** Whether the server honors VGI-Accept-Max-Response-Bytes. */
+  acceptMaxResponseBytesSupport: boolean;
   /** Monotonic-time-ish epoch (ms) at which this snapshot should be re-probed. */
   cacheExpiresAt: number | null;
 }
@@ -27,12 +42,13 @@ export interface HttpServerCapabilities {
 const MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes";
 const UPLOAD_URL_HEADER = "VGI-Upload-URL-Support";
 const MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes";
+const MAX_RESPONSE_BYTES_HEADER = "VGI-Max-Response-Bytes";
+const ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER = "VGI-Accept-Max-Response-Bytes-Support";
 
-function parseHeaderInt(headers: Headers, name: string): number | null {
+function parseHeaderInt(headers: Headers, name: string, responseBudget = false): number | null {
   const raw = headers.get(name) ?? headers.get(name.toLowerCase());
   if (raw == null) return null;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : null;
+  return responseBudget ? parseResponseBudgetDecimal(raw) : parsePositiveSafeDecimal(raw);
 }
 
 export function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabilities {
@@ -58,22 +74,47 @@ export function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabi
     maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
     uploadUrlSupport,
     maxUploadBytes: parseHeaderInt(headers, MAX_UPLOAD_BYTES_HEADER),
+    maxResponseBytes: parseHeaderInt(headers, MAX_RESPONSE_BYTES_HEADER, true),
+    acceptMaxResponseBytesSupport:
+      (headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER) ??
+        headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER.toLowerCase())) === "true",
     cacheExpiresAt,
   };
+}
+
+/** Every VGI HTTP response, not only discovery, must repeat exact support. */
+export function requireResponseBudgetSupport(headers: Headers): HttpServerCapabilities {
+  const capabilities = parseCapabilitiesFromHeaders(headers);
+  if (!capabilities.acceptMaxResponseBytesSupport) {
+    throw new RpcError(
+      "ProtocolError",
+      "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true on every RPC response",
+      "",
+    );
+  }
+  return capabilities;
 }
 
 export async function discoverHttpCapabilities(
   baseUrl: string,
   prefix: string,
   authorization?: string,
+  acceptedMaxResponseBytes?: number,
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<HttpServerCapabilities> {
   const headers: Record<string, string> = {};
   if (authorization) headers.Authorization = authorization;
-  const resp = await fetch(`${baseUrl}${prefix}/health`, {
+  const accepted = acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+  optionalResponseBudget(accepted, "acceptedMaxResponseBytes");
+  headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(accepted);
+  const resp = await fetchFn(`${baseUrl}${prefix}/health`, {
     method: "OPTIONS",
     headers,
   });
-  // Capability headers are advertised on every response; we don't require 200.
+  if (!resp.ok) {
+    throw new RpcError("TransportError", `Capability discovery failed: HTTP ${resp.status}`, "");
+  }
+  // OPTIONS commonly answers 204; any successful 2xx status is valid.
   return parseCapabilitiesFromHeaders(resp.headers);
 }
 

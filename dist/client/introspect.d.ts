@@ -49,5 +49,8 @@ export declare function httpIntrospect(rawBaseUrl: string, options?: {
     compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;
     decompressFn?: (data: Uint8Array) => Promise<Uint8Array>;
     fetch?: typeof globalThis.fetch;
+    acceptedMaxResponseBytes?: number;
+    /** @internal The owning HttpRpcClient already completed discovery. */
+    responseBudgetVerified?: boolean;
 }): Promise<ServiceDescription>;
 //# sourceMappingURL=introspect.d.ts.map

@@ -731,6 +731,9 @@ import { domainToASCII } from "node:url";
 // src/client/connect.ts
 import { Schema as Schema3 } from "@query-farm/apache-arrow";
 
+// src/client/default-response-budget.ts
+var DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
+
 // src/constants.ts
 var RPC_METHOD_KEY = "vgi_rpc.method";
 var LOG_LEVEL_KEY = "vgi_rpc.log_level";
@@ -1380,13 +1383,13 @@ function serializeBatchToIpc(batch) {
 function batchByteSize(batch) {
   return serializeBatch(batch).byteLength;
 }
-async function maybeExternalizeBatch(batch, config, onUpload) {
+async function maybeExternalizeBatch(batch, config, onUpload, force = false) {
   if (!config?.storage)
     return batch;
   if (batch.numRows === 0)
     return batch;
   const threshold = config.externalizeThresholdBytes ?? DEFAULT_THRESHOLD;
-  if (batchByteSize(batch) < threshold)
+  if (!force && batchByteSize(batch) < threshold)
     return batch;
   let ipcData = serializeBatchToIpc(batch);
   const checksum = await sha256Hex(ipcData);
@@ -1662,16 +1665,62 @@ async function readRequestFromBody(body) {
   return { schema: batch.schema, batch };
 }
 
+// src/http/response-budget.ts
+var ACCEPT_MAX_RESPONSE_BYTES_HEADER = "VGI-Accept-Max-Response-Bytes";
+var ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER = "VGI-Accept-Max-Response-Bytes-Support";
+var MAX_SAFE_RESPONSE_BYTES = Number.MAX_SAFE_INTEGER;
+var MIN_RESPONSE_BYTES = 64 * 1024;
+function parsePositiveSafeDecimal(raw) {
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    throw new TypeError("must be a positive decimal integer");
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > MAX_SAFE_RESPONSE_BYTES) {
+    throw new TypeError(`must not exceed ${MAX_SAFE_RESPONSE_BYTES}`);
+  }
+  return value;
+}
+function optionalPositiveSafeInteger(value, name) {
+  if (value === undefined)
+    return;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+  return value;
+}
+function parseResponseBudgetDecimal(raw) {
+  const value = parsePositiveSafeDecimal(raw);
+  if (value < MIN_RESPONSE_BYTES)
+    throw new TypeError(`must be at least ${MIN_RESPONSE_BYTES}`);
+  return value;
+}
+function optionalResponseBudget(value, name) {
+  const parsed = optionalPositiveSafeInteger(value, name);
+  if (parsed !== undefined && parsed < MIN_RESPONSE_BYTES) {
+    throw new TypeError(`${name} must be at least ${MIN_RESPONSE_BYTES}`);
+  }
+  return parsed;
+}
+function minPositive(...values) {
+  let result;
+  for (const value of values) {
+    if (value !== undefined && value > 0 && (result === undefined || value < result))
+      result = value;
+  }
+  return result;
+}
+
 // src/client/capabilities.ts
 var MAX_REQUEST_BYTES_HEADER = "VGI-Max-Request-Bytes";
 var UPLOAD_URL_HEADER = "VGI-Upload-URL-Support";
 var MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes";
-function parseHeaderInt(headers, name) {
+var MAX_RESPONSE_BYTES_HEADER = "VGI-Max-Response-Bytes";
+var ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER2 = "VGI-Accept-Max-Response-Bytes-Support";
+function parseHeaderInt(headers, name, responseBudget = false) {
   const raw = headers.get(name) ?? headers.get(name.toLowerCase());
   if (raw == null)
     return null;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : null;
+  return responseBudget ? parseResponseBudgetDecimal(raw) : parsePositiveSafeDecimal(raw);
 }
 function parseCapabilitiesFromHeaders(headers) {
   const uploadRaw = headers.get(UPLOAD_URL_HEADER) ?? headers.get(UPLOAD_URL_HEADER.toLowerCase());
@@ -1694,8 +1743,33 @@ function parseCapabilitiesFromHeaders(headers) {
     maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
     uploadUrlSupport,
     maxUploadBytes: parseHeaderInt(headers, MAX_UPLOAD_BYTES_HEADER),
+    maxResponseBytes: parseHeaderInt(headers, MAX_RESPONSE_BYTES_HEADER, true),
+    acceptMaxResponseBytesSupport: (headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER2) ?? headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER2.toLowerCase())) === "true",
     cacheExpiresAt
   };
+}
+function requireResponseBudgetSupport(headers) {
+  const capabilities = parseCapabilitiesFromHeaders(headers);
+  if (!capabilities.acceptMaxResponseBytesSupport) {
+    throw new RpcError("ProtocolError", "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true on every RPC response", "");
+  }
+  return capabilities;
+}
+async function discoverHttpCapabilities(baseUrl, prefix, authorization, acceptedMaxResponseBytes, fetchFn = globalThis.fetch) {
+  const headers = {};
+  if (authorization)
+    headers.Authorization = authorization;
+  const accepted = acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+  optionalResponseBudget(accepted, "acceptedMaxResponseBytes");
+  headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(accepted);
+  const resp = await fetchFn(`${baseUrl}${prefix}/health`, {
+    method: "OPTIONS",
+    headers
+  });
+  if (!resp.ok) {
+    throw new RpcError("TransportError", `Capability discovery failed: HTTP ${resp.status}`, "");
+  }
+  return parseCapabilitiesFromHeaders(resp.headers);
 }
 function isCapabilitySnapshotFresh(snapshot) {
   if (!snapshot)
@@ -1706,6 +1780,42 @@ function isCapabilitySnapshotFresh(snapshot) {
 }
 
 // src/client/decode.ts
+async function readResponseBodyBounded(response, maxBytes) {
+  const declared = response.headers.get("Content-Length");
+  if (declared != null && /^[0-9]+$/.test(declared)) {
+    const length = Number(declared);
+    if (Number.isSafeInteger(length) && length > maxBytes) {
+      throw new RpcError("TransportError", `HTTP response exceeds accepted limit (${length} > ${maxBytes})`, "");
+    }
+  }
+  if (!response.body)
+    return new Uint8Array;
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done)
+        break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("response limit exceeded");
+        throw new RpcError("TransportError", `HTTP response exceeds accepted limit (${total} > ${maxBytes})`, "");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
 function resolveResponseEncoding(headers) {
   const custom = headers.get(VGI_CONTENT_ENCODING_HEADER)?.trim().toLowerCase();
   if (custom && custom !== "identity") {
@@ -1717,18 +1827,22 @@ function resolveResponseEncoding(headers) {
   }
   return { codec: null, custom: false };
 }
-async function decodeResponseBody(headers, body, zstdDecompress2) {
+async function decodeResponseBody(headers, body, zstdDecompress2, maxDecodedBytes) {
   const { codec, custom } = resolveResponseEncoding(headers);
   if (!codec)
     return body;
   if (codec === "gzip") {
-    return new Uint8Array(await gzipDecompress(body));
+    return new Uint8Array(await gzipDecompress(body, maxDecodedBytes));
   }
   if (codec === "zstd") {
     if (!zstdDecompress2) {
       throw new RpcError("ProtocolError", "Server sent a zstd-encoded response but this client has no zstd decoder. " + "Install the optional zstd dependency, or configure the server not to negotiate zstd.", "");
     }
-    return new Uint8Array(await zstdDecompress2(body));
+    const decoded = new Uint8Array(await zstdDecompress2(body, maxDecodedBytes));
+    if (maxDecodedBytes != null && decoded.byteLength > maxDecodedBytes) {
+      throw new RpcError("TransportError", `Decoded HTTP response exceeds accepted limit (${decoded.byteLength} > ${maxDecodedBytes})`, "");
+    }
+    return decoded;
   }
   throw new RpcError("ProtocolError", `Unsupported response encoding '${codec}'` + `${custom ? ` (${VGI_CONTENT_ENCODING_HEADER})` : ` (${CONTENT_ENCODING_HEADER})`}.`, "");
 }
@@ -2037,6 +2151,17 @@ async function httpIntrospect(rawBaseUrl, options) {
     headers["Accept-Encoding"] = "zstd";
   }
   headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
+  const maxResponse = options?.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+  optionalResponseBudget(maxResponse, "acceptedMaxResponseBytes");
+  let responseLimit = maxResponse;
+  if (!options?.responseBudgetVerified) {
+    const capabilities = await discoverHttpCapabilities(baseUrl, prefix, options?.authorization, maxResponse, options?.fetch ?? globalThis.fetch);
+    if (!capabilities.acceptMaxResponseBytesSupport) {
+      throw new RpcError("ProtocolError", "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true before RPC dispatch", "");
+    }
+    responseLimit = minPositive(maxResponse, capabilities.maxResponseBytes ?? undefined) ?? maxResponse;
+  }
+  headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(maxResponse);
   const response = await (options?.fetch ?? globalThis.fetch)(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
     method: "POST",
     headers,
@@ -2045,8 +2170,10 @@ async function httpIntrospect(rawBaseUrl, options) {
   if (response.status === 401) {
     throw new RpcError("AuthenticationError", "Authentication required", "");
   }
-  const rawBody = new Uint8Array(await response.arrayBuffer());
-  const responseBody = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn));
+  const responseCapabilities = requireResponseBudgetSupport(response.headers);
+  responseLimit = minPositive(responseLimit, responseCapabilities.maxResponseBytes ?? undefined) ?? responseLimit;
+  const rawBody = await readResponseBodyBounded(response, responseLimit);
+  const responseBody = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn, responseLimit));
   const { batches } = await readResponseBatches(responseBody);
   return parseDescribeResponse(batches);
 }
@@ -2088,6 +2215,8 @@ class HttpStreamSession {
   _authorization;
   _externalConfig;
   _postFn;
+  _acceptedMaxResponseBytes;
+  _responseBudgetSupport = null;
   constructor(opts) {
     this._baseUrl = opts.baseUrl;
     this._prefix = opts.prefix;
@@ -2106,6 +2235,8 @@ class HttpStreamSession {
     this._authorization = opts.authorization;
     this._externalConfig = opts.externalConfig;
     this._postFn = opts.postFn;
+    this._acceptedMaxResponseBytes = opts.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+    optionalResponseBudget(this._acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
     const pendingData = opts.pendingBatches.filter((batch) => batch.numRows > 0 || isExternalLocationBatch(batch));
     if (pendingData.length > 1) {
       throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
@@ -2114,11 +2245,23 @@ class HttpStreamSession {
   async _post(url, body) {
     if (this._postFn)
       return this._postFn(url, body);
-    return fetch(url, {
+    if (!this._responseBudgetSupport) {
+      this._responseBudgetSupport = discoverHttpCapabilities(this._baseUrl, this._prefix, this._authorization, this._acceptedMaxResponseBytes).then((capabilities) => {
+        if (!capabilities.acceptMaxResponseBytesSupport) {
+          throw new RpcError("ProtocolError", "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true before RPC dispatch", "");
+        }
+        this._acceptedMaxResponseBytes = minPositive(this._acceptedMaxResponseBytes, capabilities.maxResponseBytes ?? undefined) ?? this._acceptedMaxResponseBytes;
+      });
+    }
+    await this._responseBudgetSupport;
+    const response = await fetch(url, {
       method: "POST",
       headers: this._buildHeaders(),
       body: await this._prepareBody(body)
     });
+    const responseCapabilities = requireResponseBudgetSupport(response.headers);
+    this._acceptedMaxResponseBytes = minPositive(this._acceptedMaxResponseBytes, responseCapabilities.maxResponseBytes ?? undefined) ?? this._acceptedMaxResponseBytes;
+    return response;
   }
   get header() {
     return this._header;
@@ -2145,6 +2288,7 @@ class HttpStreamSession {
       headers["Accept-Encoding"] = "zstd";
     }
     headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(this._decompressFn != null);
+    headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(this._acceptedMaxResponseBytes);
     if (this._authorization) {
       headers.Authorization = this._authorization;
     }
@@ -2157,8 +2301,12 @@ class HttpStreamSession {
     return content;
   }
   async _readResponse(resp) {
-    const body = new Uint8Array(await resp.arrayBuffer());
-    return new Uint8Array(await decodeResponseBody(resp.headers, body, this._decompressFn));
+    const body = await readResponseBodyBounded(resp, this._acceptedMaxResponseBytes);
+    const decoded = new Uint8Array(await decodeResponseBody(resp.headers, body, this._decompressFn, this._acceptedMaxResponseBytes));
+    if (decoded.byteLength > this._acceptedMaxResponseBytes) {
+      throw new RpcError("TransportError", `Decoded HTTP response exceeds accepted limit (${decoded.byteLength} > ${this._acceptedMaxResponseBytes})`, "");
+    }
+    return decoded;
   }
   async exchange(input) {
     if (this._stateToken === null) {
@@ -2423,11 +2571,21 @@ class HttpStreamSession {
 import { Field as Field2, Int64 as Int642, RecordBatchReader as RecordBatchReader4, Schema as Schema2 } from "@query-farm/apache-arrow";
 var UPLOAD_URL_METHOD2 = "__upload_url__";
 var UPLOAD_URL_PARAMS_SCHEMA2 = new Schema2([new Field2("count", new Int642, false)]);
-async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn = globalThis.fetch) {
+async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn = globalThis.fetch, acceptedMaxResponseBytes = DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES, responseBudgetVerified = false) {
+  optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
+  let responseLimit = acceptedMaxResponseBytes;
+  if (!responseBudgetVerified) {
+    const capabilities = await discoverHttpCapabilities(baseUrl, prefix, authorization, acceptedMaxResponseBytes, fetchFn);
+    if (!capabilities.acceptMaxResponseBytesSupport) {
+      throw new RpcError("ProtocolError", "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true before RPC dispatch", "");
+    }
+    responseLimit = minPositive(acceptedMaxResponseBytes, capabilities.maxResponseBytes ?? undefined) ?? acceptedMaxResponseBytes;
+  }
   const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA2, { count: BigInt(count) }, UPLOAD_URL_METHOD2);
   const headers = { "Content-Type": ARROW_CONTENT_TYPE };
   if (authorization)
     headers.Authorization = authorization;
+  headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(acceptedMaxResponseBytes);
   const resp = await fetchFn(`${baseUrl}${prefix}/${UPLOAD_URL_METHOD2}/init`, {
     method: "POST",
     headers,
@@ -2442,7 +2600,9 @@ async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn 
   if (!resp.ok) {
     throw new RpcError("HttpError", `__upload_url__/init failed: HTTP ${resp.status}`, "");
   }
-  const respBody = new Uint8Array(await resp.arrayBuffer());
+  const responseCapabilities = requireResponseBudgetSupport(resp.headers);
+  responseLimit = minPositive(responseLimit, responseCapabilities.maxResponseBytes ?? undefined) ?? responseLimit;
+  const respBody = await readResponseBodyBounded(resp, responseLimit);
   const reader = await RecordBatchReader4.from(respBody);
   await reader.open();
   const pairs = [];
@@ -2501,7 +2661,7 @@ async function buildPointerRequestBody(originalBody, downloadUrl) {
 }
 async function externalizeRequestBody(body, opts) {
   const fetchFn = opts.fetch ?? globalThis.fetch;
-  const pairs = await requestUploadUrls(opts.baseUrl, opts.prefix, 1, opts.authorization, fetchFn);
+  const pairs = await requestUploadUrls(opts.baseUrl, opts.prefix, 1, opts.authorization, fetchFn, opts.acceptedMaxResponseBytes, opts.responseBudgetVerified);
   const pair = pairs[0];
   if (opts.urlValidator) {
     opts.urlValidator(pair.uploadUrl);
@@ -2527,6 +2687,8 @@ function httpConnect(rawBaseUrl, options) {
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
   const fetchFn = options?.fetch ?? globalThis.fetch;
+  const acceptedMaxResponseBytes = options?.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+  optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
   const effectiveExternalConfig = externalConfig ? { ...externalConfig, fetch: fetchFn } : externalConfig;
   let methodCache = options?.description ? new Map(options.description.methods.map((method) => [method.name, method])) : null;
   let serverProtocolVersion = options?.description?.protocolVersion ?? "";
@@ -2534,11 +2696,34 @@ function httpConnect(rawBaseUrl, options) {
   let decompressFn;
   let compressionLoaded = false;
   let capabilities = null;
+  let responseBudgetSupport = null;
   function updateCapabilitiesFromResponse(resp) {
-    const next = parseCapabilitiesFromHeaders(resp.headers);
-    if (next.maxRequestBytes != null || next.uploadUrlSupport) {
-      capabilities = next;
+    const next = requireResponseBudgetSupport(resp.headers);
+    if (next.maxRequestBytes != null || next.maxResponseBytes != null || next.uploadUrlSupport || next.acceptMaxResponseBytesSupport) {
+      capabilities = capabilities ? {
+        ...next,
+        maxRequestBytes: next.maxRequestBytes ?? capabilities.maxRequestBytes,
+        maxResponseBytes: next.maxResponseBytes ?? capabilities.maxResponseBytes,
+        maxUploadBytes: next.maxUploadBytes ?? capabilities.maxUploadBytes
+      } : next;
     }
+  }
+  async function ensureResponseBudgetSupport() {
+    if (!responseBudgetSupport) {
+      responseBudgetSupport = discoverHttpCapabilities(baseUrl, prefix, authorization, acceptedMaxResponseBytes, fetchFn).then((snapshot) => {
+        if (!snapshot.acceptMaxResponseBytesSupport) {
+          throw new RpcError("ProtocolError", "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true before RPC dispatch", "");
+        }
+        capabilities = snapshot;
+      }).catch((error) => {
+        responseBudgetSupport = null;
+        throw error;
+      });
+    }
+    await responseBudgetSupport;
+  }
+  function responseReadLimit() {
+    return minPositive(acceptedMaxResponseBytes, capabilities?.maxResponseBytes ?? undefined) ?? acceptedMaxResponseBytes;
   }
   async function maybeExternalize(body) {
     const caps = isCapabilitySnapshotFresh(capabilities) ? capabilities : null;
@@ -2553,10 +2738,13 @@ function httpConnect(rawBaseUrl, options) {
       prefix,
       authorization,
       urlValidator: externalConfig?.urlValidator ?? null,
-      fetch: fetchFn
+      fetch: fetchFn,
+      acceptedMaxResponseBytes,
+      responseBudgetVerified: true
     });
   }
   async function postWithExternalization(url, body) {
+    await ensureResponseBudgetSupport();
     const sendBody = await maybeExternalize(body);
     let resp = await fetchFn(url, {
       method: "POST",
@@ -2570,7 +2758,9 @@ function httpConnect(rawBaseUrl, options) {
         prefix,
         authorization,
         urlValidator: externalConfig?.urlValidator ?? null,
-        fetch: fetchFn
+        fetch: fetchFn,
+        acceptedMaxResponseBytes,
+        responseBudgetVerified: true
       });
       resp = await fetchFn(url, {
         method: "POST",
@@ -2602,6 +2792,7 @@ function httpConnect(rawBaseUrl, options) {
       headers["Accept-Encoding"] = "zstd";
     }
     headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
+    headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(acceptedMaxResponseBytes);
     if (authorization) {
       headers.Authorization = authorization;
     }
@@ -2619,12 +2810,18 @@ function httpConnect(rawBaseUrl, options) {
     }
   }
   async function readResponse(resp) {
-    const body = new Uint8Array(await resp.arrayBuffer());
-    return new Uint8Array(await decodeResponseBody(resp.headers, body, decompressFn));
+    const limit = responseReadLimit();
+    const body = await readResponseBodyBounded(resp, limit);
+    const decoded = new Uint8Array(await decodeResponseBody(resp.headers, body, decompressFn, limit));
+    if (decoded.byteLength > limit) {
+      throw new RpcError("TransportError", `Decoded HTTP response exceeds accepted limit (${decoded.byteLength} > ${limit})`, "");
+    }
+    return decoded;
   }
   async function ensureMethodCache() {
     if (methodCache)
       return methodCache;
+    await ensureResponseBudgetSupport();
     await ensureCompression();
     const desc = await httpIntrospect(baseUrl, {
       prefix,
@@ -2632,7 +2829,9 @@ function httpConnect(rawBaseUrl, options) {
       compressionLevel,
       compressFn,
       decompressFn,
-      fetch: fetchFn
+      acceptedMaxResponseBytes: responseReadLimit(),
+      fetch: fetchFn,
+      responseBudgetVerified: true
     });
     methodCache = new Map(desc.methods.map((m) => [m.name, m]));
     serverProtocolVersion = desc.protocolVersion;
@@ -2817,11 +3016,13 @@ function httpConnect(rawBaseUrl, options) {
         decompressFn,
         authorization,
         externalConfig: effectiveExternalConfig,
+        acceptedMaxResponseBytes: responseReadLimit(),
         postFn: postWithExternalization
       });
     },
     async resumeStream(method, token, outputSchema) {
       await ensureCompression();
+      await ensureResponseBudgetSupport();
       const { cursor, callToken } = unpackResumeToken(token);
       return new HttpStreamSession({
         baseUrl,
@@ -2839,18 +3040,22 @@ function httpConnect(rawBaseUrl, options) {
         decompressFn,
         authorization,
         externalConfig: effectiveExternalConfig,
+        acceptedMaxResponseBytes: responseReadLimit(),
         postFn: postWithExternalization
       });
     },
     async describe() {
       await ensureCompression();
+      await ensureResponseBudgetSupport();
       return httpIntrospect(baseUrl, {
         prefix,
         authorization,
         compressionLevel,
         compressFn,
         decompressFn,
-        fetch: fetchFn
+        acceptedMaxResponseBytes: responseReadLimit(),
+        fetch: fetchFn,
+        responseBudgetVerified: true
       });
     },
     close() {}
@@ -5663,6 +5868,8 @@ class OutputCollector {
   cookies;
   kind;
   remainingResponseBytes;
+  responseLimitBytes;
+  preferredResponseBytes;
   remainingExternalizedResponseBytes;
   externalizationEnabled;
   constructor(outputSchema, producerMode = true, serverId = "", requestId = null, authContext, cookies, kind, budgets) {
@@ -5676,6 +5883,8 @@ class OutputCollector {
     this.cookies = cookies ?? EMPTY_COOKIES;
     this.kind = kind;
     this.remainingResponseBytes = budgets?.remainingResponseBytes;
+    this.responseLimitBytes = budgets?.responseLimitBytes ?? budgets?.remainingResponseBytes;
+    this.preferredResponseBytes = budgets?.preferredResponseBytes;
     this.remainingExternalizedResponseBytes = budgets?.remainingExternalizedResponseBytes;
     this.externalizationEnabled = budgets?.externalizationEnabled;
   }
@@ -6697,7 +6906,7 @@ function openBytes(envelope, key, opts) {
 // src/http/token.ts
 var _UTF8 = new TextEncoder;
 var TOKEN_VERSION = 5;
-var CALL_TOKEN_VERSION = 1;
+var CALL_TOKEN_VERSION = 2;
 var CALL_ID_LEN = 16;
 var AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\x00");
 var BOUND_AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v5\x00");
@@ -6786,12 +6995,12 @@ function packStateToken(stateBytes, callId, tokenKey, principal, createdAt, evid
   });
   return bytesToBase64(wire);
 }
-function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principal, createdAt, evidenceBinding, domain) {
+function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principal, createdAt, evidenceBinding, domain, responseBudget) {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
   const now = createdAt ?? Math.floor(Date.now() / 1000);
-  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 4 + schemaBytes.length + 4 + inputSchemaBytes.length);
+  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 4 + schemaBytes.length + 4 + inputSchemaBytes.length + 16);
   const view = new DataView(plaintext.buffer);
   let offset = 0;
   writeU64LE(view, offset, BigInt(now));
@@ -6805,6 +7014,10 @@ function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principa
   writeU32LE(view, offset, inputSchemaBytes.length);
   offset += 4;
   plaintext.set(inputSchemaBytes, offset);
+  offset += inputSchemaBytes.length;
+  writeU64LE(view, offset, BigInt(responseBudget?.responseLimitBytes ?? 0));
+  offset += 8;
+  writeU64LE(view, offset, BigInt(responseBudget?.preferredResponseBytes ?? 0));
   const wire = sealBytes(plaintext, tokenKey, {
     aad: computeCallAad(principal, evidenceBinding, domain),
     version: CALL_TOKEN_VERSION
@@ -6911,7 +7124,19 @@ function unpackCallToken(token, tokenKey, principal, tokenTtl = 0, evidenceBindi
     throw new Error("State token truncated (input schema)");
   }
   const inputSchemaBytes = copyAligned(offset, inputSchemaLen);
-  return { callId, call: { schemaBytes, inputSchemaBytes } };
+  offset += inputSchemaLen;
+  if (offset + 16 !== plaintext.length) {
+    throw new Error("State token truncated (response budget)");
+  }
+  const responseLimitRaw = readU64LE(view, offset);
+  offset += 8;
+  const preferredResponseRaw = readU64LE(view, offset);
+  if (responseLimitRaw > BigInt(Number.MAX_SAFE_INTEGER) || preferredResponseRaw > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("State token contains an unsafe response budget");
+  }
+  const responseLimitBytes = Number(responseLimitRaw) || undefined;
+  const preferredResponseBytes = Number(preferredResponseRaw) || undefined;
+  return { callId, call: { schemaBytes, inputSchemaBytes, responseLimitBytes, preferredResponseBytes } };
 }
 
 // src/http/dispatch.ts
@@ -6982,8 +7207,13 @@ function mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx) {
   const principal = tokenPrincipal(ctx.authContext);
   const binding = peerEvidenceBinding(ctx.authContext);
   const domain = ctx.authContext?.domain;
-  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal, undefined, binding, domain);
-  cacheCall(callId, ctx, { schemaBytes, inputSchemaBytes });
+  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal, undefined, binding, domain, { responseLimitBytes: ctx.maxResponseBytes, preferredResponseBytes: ctx.preferredResponseBytes });
+  cacheCall(callId, ctx, {
+    schemaBytes,
+    inputSchemaBytes,
+    responseLimitBytes: ctx.maxResponseBytes,
+    preferredResponseBytes: ctx.preferredResponseBytes
+  });
   return {
     callId,
     token: packStateToken(stateBytes, callId, ctx.tokenKey, principal, undefined, binding, domain),
@@ -7045,6 +7275,30 @@ function predictExternalizeBytes(batch, config) {
     return 0;
   return size;
 }
+function runtimeCapError(message) {
+  const error = new Error(message);
+  error.name = "RuntimeError";
+  return error;
+}
+function responseTooLargeError(message) {
+  const error = new Error(message);
+  error.name = "ResponseTooLargeError";
+  return error;
+}
+async function externalizeForResponseBudget(batch, ctx, methodName) {
+  if (!ctx.externalLocation?.storage || batch.numRows === 0)
+    return batch;
+  const exactBytes = serializeIpcStream(batch.schema, [batch]).byteLength;
+  const normalExternalization = predictExternalizeBytes(batch, ctx.externalLocation) > 0;
+  const target = ctx.preferredResponseBytes ?? ctx.maxResponseBytes;
+  const force = target != null && exactBytes > target;
+  if (!normalExternalization && !force)
+    return batch;
+  if (ctx.maxExternalizedResponseBytes != null && exactBytes > ctx.maxExternalizedResponseBytes) {
+    throw runtimeCapError(`Externalised payload exceeds max_externalized_response_bytes (${exactBytes} > ${ctx.maxExternalizedResponseBytes}) for method '${methodName}'`);
+  }
+  return maybeExternalizeBatch(batch, ctx.externalLocation, countExternalized(ctx), force);
+}
 function makeCapErrorResponse(schema2, error, ctx) {
   const errBatch = buildErrorBatch(schema2, error, ctx.serverId, null);
   const response = arrowResponse(serializeIpcStream(schema2, [errBatch]), 500);
@@ -7075,6 +7329,8 @@ async function httpDispatchUnary(method, body, ctx) {
   const externalizationEnabled = !!ctx.externalLocation?.storage;
   const out = new OutputCollector(schema2, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
     remainingResponseBytes: ctx.maxResponseBytes,
+    responseLimitBytes: ctx.maxResponseBytes,
+    preferredResponseBytes: ctx.preferredResponseBytes,
     remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
     externalizationEnabled,
     peerEvidence: ctx.peerEvidence
@@ -7085,22 +7341,12 @@ async function httpDispatchUnary(method, body, ctx) {
   try {
     const result = await method.handler(parsed.params, out);
     let resultBatch = buildResultBatch(schema2, result, ctx.serverId, parsed.requestId);
-    if (ctx.externalLocation) {
-      const predicted = predictExternalizeBytes(resultBatch, ctx.externalLocation);
-      if (ctx.maxExternalizedResponseBytes != null && predicted > ctx.maxExternalizedResponseBytes) {
-        const overshoot = new Error(`Externalised payload exceeds max_externalized_response_bytes (${predicted} > ${ctx.maxExternalizedResponseBytes}) for method '${method.name}'`);
-        overshoot.name = "RuntimeError";
-        const response2 = makeCapErrorResponse(schema2, overshoot, ctx);
-        appendCookieHeaders(response2.headers, out.drainResponseCookies());
-        return response2;
-      }
-      resultBatch = await maybeExternalizeBatch(resultBatch, ctx.externalLocation, countExternalized(ctx));
-    }
+    resultBatch = await externalizeForResponseBudget(resultBatch, ctx, method.name);
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
     const body2 = serializeIpcStream(schema2, batches);
     if (ctx.maxResponseBytes != null && body2.byteLength > ctx.maxResponseBytes) {
       const overshoot = new Error(`HTTP body exceeds max_response_bytes (${body2.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`);
-      overshoot.name = "RuntimeError";
+      overshoot.name = "ResponseTooLargeError";
       const response2 = makeCapErrorResponse(schema2, overshoot, ctx);
       appendCookieHeaders(response2.headers, out.drainResponseCookies());
       return response2;
@@ -7169,10 +7415,12 @@ async function httpDispatchStreamInit(method, body, ctx) {
   if (effectiveProducer) {
     const initCallId = newCallId();
     noteStream(ctx, initCallId);
-    const initCallToken = packCallToken(initCallId, serializeSchema2(resolvedOutputSchema), serializeSchema2(resolvedInputSchema), ctx.tokenKey, tokenPrincipal(ctx.authContext), undefined, peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain);
+    const initCallToken = packCallToken(initCallId, serializeSchema2(resolvedOutputSchema), serializeSchema2(resolvedInputSchema), ctx.tokenKey, tokenPrincipal(ctx.authContext), undefined, peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain, { responseLimitBytes: ctx.maxResponseBytes, preferredResponseBytes: ctx.preferredResponseBytes });
     cacheCall(initCallId, ctx, {
       schemaBytes: serializeSchema2(resolvedOutputSchema),
-      inputSchemaBytes: serializeSchema2(resolvedInputSchema)
+      inputSchemaBytes: serializeSchema2(resolvedInputSchema),
+      responseLimitBytes: ctx.maxResponseBytes,
+      preferredResponseBytes: ctx.preferredResponseBytes
     });
     return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes, { callId: initCallId, callToken: initCallToken }, stripFrameworkTickMetadata(reqBatch.metadata));
   } else {
@@ -7223,6 +7471,14 @@ async function httpDispatchStreamExchange(method, body, ctx) {
   }
   noteStream(ctx, unpacked.callId);
   const resolvedCall = resolveCall(unpacked.callId, reqBatch.metadata?.get(CALL_STATE_KEY), ctx);
+  ctx = {
+    ...ctx,
+    maxResponseBytes: minPositive(ctx.maxResponseBytes, resolvedCall.responseLimitBytes),
+    preferredResponseBytes: minPositive(ctx.preferredResponseBytes, resolvedCall.preferredResponseBytes)
+  };
+  if (ctx.preferredResponseBytes != null && ctx.maxResponseBytes != null && ctx.preferredResponseBytes > ctx.maxResponseBytes) {
+    ctx.preferredResponseBytes = ctx.maxResponseBytes;
+  }
   let state;
   try {
     state = ctx.stateSerializer.deserialize(unpacked.stateBytes);
@@ -7261,6 +7517,8 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     const externalizationEnabled = !!ctx.externalLocation?.storage;
     const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
       remainingResponseBytes: ctx.maxResponseBytes,
+      responseLimitBytes: ctx.maxResponseBytes,
+      preferredResponseBytes: ctx.preferredResponseBytes,
       remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
       externalizationEnabled,
       peerEvidence: ctx.peerEvidence
@@ -7293,7 +7551,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
       response.__dispatchError = error;
       return response;
     }
-    const batches = [];
+    let batches = [];
     if (out.finished) {
       for (const emitted of out.batches) {
         if (emitted.metadata && emitted.metadata.size > 0) {
@@ -7327,10 +7585,15 @@ async function httpDispatchStreamExchange(method, body, ctx) {
         batches.push(buildEmptyBatch(outputSchema, tokenMeta));
       }
     }
+    try {
+      batches = await Promise.all(batches.map((batch, index) => index === out.dataBatchIdx ? externalizeForResponseBudget(batch, ctx, method.name) : batch));
+    } catch (error) {
+      return makeCapErrorResponse(outputSchema, error, ctx);
+    }
     const body2 = serializeIpcStream(outputSchema, batches);
     if (ctx.maxResponseBytes != null && body2.byteLength > ctx.maxResponseBytes) {
       const overshoot = new Error(`HTTP body exceeds max_response_bytes (${body2.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`);
-      overshoot.name = "RuntimeError";
+      overshoot.name = "ResponseTooLargeError";
       return makeCapErrorResponse(outputSchema, overshoot, ctx);
     }
     return arrowResponse(body2);
@@ -7345,6 +7608,8 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
   let externalOvershoot;
   const out = new OutputCollector(outputSchema, true, ctx.serverId, requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
     remainingResponseBytes: maxBytes,
+    responseLimitBytes: maxBytes,
+    preferredResponseBytes: ctx.preferredResponseBytes,
     remainingExternalizedResponseBytes: externalizationEnabled ? maxExternalBytes : undefined,
     externalizationEnabled,
     inputMetadata: requestMetadata,
@@ -7371,14 +7636,11 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
     for (const emitted of out.batches) {
       let batch = emitted.batch;
       if (externalizationEnabled && ctx.externalLocation) {
-        const predicted = predictExternalizeBytes(batch, ctx.externalLocation);
-        if (predicted > 0 && maxExternalBytes != null && predicted > maxExternalBytes) {
-          externalOvershoot = new Error(`Externalised payload exceeds max_externalized_response_bytes (${predicted} > ${maxExternalBytes}) for method '${method.name}'`);
-          externalOvershoot.name = "RuntimeError";
+        try {
+          batch = await externalizeForResponseBudget(batch, ctx, method.name);
+        } catch (error) {
+          externalOvershoot = error;
           break;
-        }
-        if (predicted > 0) {
-          batch = await maybeExternalizeBatch(batch, ctx.externalLocation, countExternalized(ctx));
         }
       }
       if (emitted.metadata && emitted.metadata.size > 0) {
@@ -7403,14 +7665,23 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
       tokenMeta.set(CALL_STATE_KEY, call.callToken);
     allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));
   }
-  const dataBytes = serializeIpcStream(outputSchema, allBatches);
+  let dataBytes = serializeIpcStream(outputSchema, allBatches);
+  let responseOvershoot;
+  if (maxBytes != null && dataBytes.byteLength + (headerBytes?.byteLength ?? 0) > maxBytes) {
+    responseOvershoot = responseTooLargeError(`HTTP body exceeds max_response_bytes (${dataBytes.byteLength + (headerBytes?.byteLength ?? 0)} > ${maxBytes}) for method '${method.name}'`);
+    allBatches.length = 0;
+    allBatches.push(buildErrorBatch(outputSchema, responseOvershoot, ctx.serverId, requestId));
+    dataBytes = serializeIpcStream(outputSchema, allBatches);
+    headerBytes = null;
+    producerError = responseOvershoot;
+  }
   let responseBody;
   if (headerBytes) {
     responseBody = concatBytes3(headerBytes, dataBytes);
   } else {
     responseBody = dataBytes;
   }
-  const status = externalOvershoot ? 500 : 200;
+  const status = externalOvershoot || responseOvershoot ? 500 : 200;
   const response = arrowResponse(responseBody, status);
   if (producerError) {
     response.__dispatchError = producerError;
@@ -8839,11 +9110,11 @@ function createHttpHandler(protocol, options) {
   const tokenTtl = options?.tokenTtl ?? 3600;
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 300 : options.corsMaxAge;
-  const maxRequestBytes = options?.maxRequestBytes;
+  const maxRequestBytes = minPositive(optionalPositiveSafeInteger(options?.maxRequestBytes, "maxRequestBytes"), optionalPositiveSafeInteger(options?.hostingMaxRequestBytes, "hostingMaxRequestBytes"));
   const configuredDecompressedCap = options?.maxDecompressedRequestBytes;
   const maxDecompressedRequestBytes = maxRequestBytes == null ? configuredDecompressedCap : configuredDecompressedCap == null ? maxRequestBytes : Math.min(maxRequestBytes, configuredDecompressedCap);
-  const maxStreamResponseBytes = options?.maxStreamResponseBytes;
-  const maxResponseBytes = options?.maxResponseBytes;
+  const maxResponseBytes = minPositive(optionalResponseBudget(options?.maxResponseBytes ?? options?.maxStreamResponseBytes, "maxResponseBytes"), optionalResponseBudget(options?.hostingMaxResponseBytes, "hostingMaxResponseBytes"));
+  const configuredPreferredResponseBytes = optionalResponseBudget(options?.preferredResponseBytes, "preferredResponseBytes");
   const maxExternalizedResponseBytes = options?.maxExternalizedResponseBytes;
   const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
   let authenticate = options?.authenticate;
@@ -9012,6 +9283,7 @@ function createHttpHandler(protocol, options) {
     if (maxResponseBytes != null) {
       headers.set("VGI-Max-Response-Bytes", String(maxResponseBytes));
     }
+    headers.set(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER, "true");
     if (maxExternalizedResponseBytes != null) {
       headers.set("VGI-Max-Externalized-Response-Bytes", String(maxExternalizedResponseBytes));
     }
@@ -9035,7 +9307,7 @@ function createHttpHandler(protocol, options) {
         headers.set(STICKY_ECHO_HEADERS_HEADER, stickyEchoHeadersArr.map(([k]) => k).join(", "));
       }
     }
-    if (isOptions && (maxRequestBytes != null || uploadUrlProvider || stickyEnabled)) {
+    if (isOptions) {
       if (!headers.has("Cache-Control")) {
         headers.set("Cache-Control", "public, max-age=300");
       }
@@ -9045,8 +9317,8 @@ function createHttpHandler(protocol, options) {
     tokenKey,
     tokenTtl,
     serverId,
-    maxStreamResponseBytes,
     maxResponseBytes,
+    preferredResponseBytes: configuredPreferredResponseBytes,
     maxExternalizedResponseBytes,
     stateSerializer,
     externalLocation,
@@ -9061,6 +9333,7 @@ function createHttpHandler(protocol, options) {
     "VGI-Max-Response-Bytes",
     "VGI-Max-Externalized-Response-Bytes",
     "VGI-Externalization-Enabled",
+    ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     ...maxRequestBytes != null ? ["VGI-Max-Request-Bytes"] : [],
     ...uploadUrlProvider ? ["VGI-Upload-URL-Support", ...maxUploadBytes != null ? ["VGI-Max-Upload-Bytes"] : []] : [],
@@ -9081,7 +9354,7 @@ function createHttpHandler(protocol, options) {
     if (corsOrigins) {
       headers.set("Access-Control-Allow-Origin", corsOrigins);
       headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
-      headers.set("Access-Control-Allow-Headers", requestedHeaders && requestedHeaders.length > 0 ? requestedHeaders : "Content-Type, Authorization");
+      headers.set("Access-Control-Allow-Headers", requestedHeaders && requestedHeaders.length > 0 ? requestedHeaders : `Content-Type, Authorization, ${ACCEPT_MAX_RESPONSE_BYTES_HEADER}`);
       headers.set("Access-Control-Expose-Headers", corsExposeHeaders);
       headers.set("Cross-Origin-Resource-Policy", "cross-origin");
       if (isOptions && corsMaxAge != null) {
@@ -9105,13 +9378,25 @@ function createHttpHandler(protocol, options) {
   function negotiateResponseEncoding(request) {
     return pickResponseEncoding(stampCustomContentEncoding ? null : request.headers.get("Accept-Encoding"), request.headers.get(VGI_ACCEPT_ENCODING_HEADER), canProduceEncoding);
   }
-  async function compressIfAccepted(response, negotiated) {
-    if (compressionLevel == null)
-      return response;
+  async function compressIfAccepted(response, negotiated, responseLimitBytes) {
     const { codec, usedCustom } = negotiated;
-    if (!codec)
-      return response;
     const responseBody = new Uint8Array(await response.arrayBuffer());
+    if (responseLimitBytes != null && responseBody.byteLength > responseLimitBytes) {
+      const headers2 = new Headers(response.headers);
+      headers2.delete(CONTENT_ENCODING_HEADER);
+      headers2.delete(VGI_CONTENT_ENCODING_HEADER);
+      const error = new Error(`HTTP body exceeds max_response_bytes (${responseBody.byteLength} > ${responseLimitBytes})`);
+      error.name = "ResponseTooLargeError";
+      const errorBatch = buildErrorBatch(EMPTY_SCHEMA2, error, serverId, null);
+      const errorBody = serializeIpcStream(EMPTY_SCHEMA2, [errorBatch]);
+      headers2.set("Content-Type", ARROW_CONTENT_TYPE);
+      headers2.set(RPC_ERROR_HEADER, "true");
+      headers2.set("Content-Length", String(errorBody.byteLength));
+      return new Response(errorBody, { status: 200, headers: headers2 });
+    }
+    if (compressionLevel == null || !codec) {
+      return new Response(responseBody, { status: response.status, headers: response.headers });
+    }
     const compressed = codec === "zstd" ? await zstdCompress(responseBody, compressionLevel) : await gzipCompress(responseBody);
     const headers = new Headers(response.headers);
     const useCustomHeader = usedCustom || stampCustomContentEncoding;
@@ -9358,8 +9643,8 @@ function createHttpHandler(protocol, options) {
       let aadDomain = null;
       let evidenceBinding;
       try {
-        const identity = await resolveRequestIdentity(request);
-        const auth2 = identity.authContext;
+        const identity2 = await resolveRequestIdentity(request);
+        const auth2 = identity2.authContext;
         evidenceBinding = peerEvidenceBinding2(auth2);
         if (auth2.authenticated) {
           aadPrincipal = auth2.principal ?? "";
@@ -9399,14 +9684,39 @@ function createHttpHandler(protocol, options) {
       return response;
     }
     const streamObserver = {};
-    const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress, streamObserver };
+    let identity;
     try {
-      const identity = await resolveRequestIdentity(request);
-      ctx.authContext = identity.authContext;
-      ctx.peerEvidence = identity.peerEvidence;
+      identity = await resolveRequestIdentity(request);
     } catch (error) {
       return authenticationErrorResponse(error, request);
     }
+    let acceptedMaxResponseBytes;
+    const acceptedRaw = request.headers.get(ACCEPT_MAX_RESPONSE_BYTES_HEADER);
+    if (acceptedRaw !== null) {
+      try {
+        acceptedMaxResponseBytes = parseResponseBudgetDecimal(acceptedRaw);
+      } catch (error) {
+        const headers = new Headers({ "Content-Type": "text/plain" });
+        addCorsHeaders(headers);
+        addCapabilityHeaders(headers);
+        return new Response(`Invalid ${ACCEPT_MAX_RESPONSE_BYTES_HEADER}: ${error.message}`, {
+          status: 400,
+          headers
+        });
+      }
+    }
+    const responseLimitBytes = minPositive(maxResponseBytes, acceptedMaxResponseBytes);
+    const preferredResponseBytes = configuredPreferredResponseBytes == null ? undefined : minPositive(configuredPreferredResponseBytes, responseLimitBytes);
+    const ctx = {
+      ...baseCtx,
+      maxResponseBytes: responseLimitBytes,
+      preferredResponseBytes,
+      authContext: identity.authContext,
+      peerEvidence: identity.peerEvidence,
+      cookies: parseRequestCookies(request),
+      egress,
+      streamObserver
+    };
     if (introspector && path === introspectPath) {
       const response = await introspector.handle(request, ctx.authContext);
       addCorsHeaders(response.headers);
@@ -9437,13 +9747,13 @@ function createHttpHandler(protocol, options) {
           const e = err2 instanceof Error ? err2 : new Error(String(err2));
           const r = makeErrorResponse(e, 500);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, responseEncoding);
+          return compressIfAccepted(r, responseEncoding, responseLimitBytes);
         }
         const entry = sessionRegistry.get(opened.sessionId, principalKey);
         if (!entry) {
           const r = makeErrorResponse(new SessionLostError("session not found, expired, or principal mismatch"), 500);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, responseEncoding);
+          return compressIfAccepted(r, responseEncoding, responseLimitBytes);
         }
         stickyLockRelease = await entry.lock.acquire();
         resumeState = entry.state;
@@ -9496,7 +9806,7 @@ function createHttpHandler(protocol, options) {
           stickyLockRelease();
         const available = [...methods.keys()].sort();
         const err2 = new MethodNotImplementedError(`Unknown method: '${route.methodName}'. Available methods: [${available.join(", ")}]`);
-        return compressIfAccepted(makeErrorResponse(err2, 404), responseEncoding);
+        return compressIfAccepted(makeErrorResponse(err2, 404), responseEncoding, responseLimitBytes);
       }
     }
     const contentType = request.headers.get("Content-Type");
@@ -9573,25 +9883,25 @@ function createHttpHandler(protocol, options) {
         const response = arrowResponse(responseBody);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, responseEncoding);
+        return compressIfAccepted(response, responseEncoding, responseLimitBytes);
       } catch (error) {
         if (error instanceof HttpRpcError) {
           const r2 = makeErrorResponse(error, error.statusCode, UPLOAD_URL_RESPONSE_SCHEMA);
           addCapabilityHeaders(r2.headers);
-          return compressIfAccepted(r2, responseEncoding);
+          return compressIfAccepted(r2, responseEncoding, responseLimitBytes);
         }
         const r = makeErrorResponse(error, 500, UPLOAD_URL_RESPONSE_SCHEMA);
         addCapabilityHeaders(r.headers);
-        return compressIfAccepted(r, responseEncoding);
+        return compressIfAccepted(r, responseEncoding, responseLimitBytes);
       }
     }
     if (path === `${prefix}/${DESCRIBE_METHOD_NAME}`) {
       try {
         const response = await httpDispatchDescribe(protocol.name, methods, serverId, protocol.protocolVersion || undefined);
         addCorsHeaders(response.headers);
-        return compressIfAccepted(response, responseEncoding);
+        return compressIfAccepted(response, responseEncoding, responseLimitBytes);
       } catch (error) {
-        return compressIfAccepted(makeErrorResponse(error, 500), responseEncoding);
+        return compressIfAccepted(makeErrorResponse(error, 500), responseEncoding, responseLimitBytes);
       }
     }
     const { methodName, action } = route;
@@ -9611,7 +9921,7 @@ function createHttpHandler(protocol, options) {
         const response = arrowResponse(errBody, 400);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, responseEncoding);
+        return compressIfAccepted(response, responseEncoding, responseLimitBytes);
       }
     }
     await notifyTransport(transportKind);
@@ -9671,7 +9981,7 @@ function createHttpHandler(protocol, options) {
       addCapabilityHeaders(response.headers);
       applyStickyResponseHeaders(response.headers, stickySink);
       info.httpStatus = response.status;
-      return compressIfAccepted(response, responseEncoding);
+      return compressIfAccepted(response, responseEncoding, responseLimitBytes);
     } catch (error) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
       if (error instanceof HttpRpcError) {
@@ -9679,13 +9989,13 @@ function createHttpHandler(protocol, options) {
         addCapabilityHeaders(r2.headers);
         applyStickyResponseHeaders(r2.headers, stickySink);
         info.httpStatus = r2.status;
-        return compressIfAccepted(r2, responseEncoding);
+        return compressIfAccepted(r2, responseEncoding, responseLimitBytes);
       }
       const r = makeErrorResponse(error, 500);
       addCapabilityHeaders(r.headers);
       applyStickyResponseHeaders(r.headers, stickySink);
       info.httpStatus = r.status;
-      return compressIfAccepted(r, responseEncoding);
+      return compressIfAccepted(r, responseEncoding, responseLimitBytes);
     } finally {
       if (stickySink) {
         if (stickySink.sessionId)
@@ -9711,6 +10021,7 @@ function createHttpHandler(protocol, options) {
     const requestId = resolveRequestId(request);
     if (!dispatchHook) {
       const plain = await dispatchRequest(request, undefined, undefined, requestId);
+      stampResponseBudgetSupport(plain);
       stampRequestId(plain, requestId);
       return plain;
     }
@@ -9719,6 +10030,7 @@ function createHttpHandler(protocol, options) {
     const egress = { externalizedBytes: 0 };
     let response = await dispatchRequest(request, deferral, egress, requestId);
     if (pending.length === 0) {
+      stampResponseBudgetSupport(response);
       stampRequestId(response, requestId);
       return response;
     }
@@ -9730,9 +10042,15 @@ function createHttpHandler(protocol, options) {
     } catch {}
     for (const emit of pending)
       emit(responseBytes);
+    stampResponseBudgetSupport(response);
     stampRequestId(response, requestId);
     return response;
   };
+  function stampResponseBudgetSupport(response) {
+    try {
+      response.headers.set(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER, "true");
+    } catch {}
+  }
   function resolveRequestId(request) {
     const inbound = request.headers.get(REQUEST_ID_HEADER);
     const trimmed = inbound?.trim();
@@ -11844,6 +12162,70 @@ function envoyXfccSpiffeProvider(options) {
     }
   };
 }
+// src/iroh.ts
+var PROVIDER2 = "iroh";
+var CANONICAL_ENDPOINT = /^[0-9a-f]{64}$/u;
+var IROH_FORWARDED_ENDPOINT_HEADER = "VGI-Forwarded-Iroh-Endpoint";
+function validateIrohIssuer(issuer) {
+  if (typeof issuer !== "string" || !issuer) {
+    throw new TypeError("Iroh issuer must be non-empty text without controls");
+  }
+  for (let index = 0;index < issuer.length; index++) {
+    const unit = issuer.charCodeAt(index);
+    if (unit >= 55296 && unit <= 56319) {
+      const next = issuer.charCodeAt(index + 1);
+      if (!(next >= 56320 && next <= 57343))
+        throw new TypeError("Iroh issuer contains an unpaired surrogate");
+      index++;
+    } else if (unit >= 56320 && unit <= 57343) {
+      throw new TypeError("Iroh issuer contains an unpaired surrogate");
+    }
+  }
+  if (Array.from(issuer).some((character) => {
+    const code = character.codePointAt(0);
+    return code <= 31 || code === 127;
+  })) {
+    throw new TypeError("Iroh issuer must be non-empty text without controls");
+  }
+}
+function irohForwardedHeaderIdentityProvider(options) {
+  validateIrohIssuer(options.issuer);
+  const trusted = normalizeTrustedProxyAddresses(options.trustedProxyAddresses, "Iroh trustedProxyAddresses");
+  const result = (status, identity) => new PeerIdentityResult(PROVIDER2, status, identity ? [identity] : []);
+  return {
+    provider: PROVIDER2,
+    resolve(context) {
+      const immediate = context ? normalizeIpLiteral(context.immediatePeer ?? "") : null;
+      if (!immediate || !trusted.has(immediate))
+        return result(PeerIdentityStatus.UNTRUSTED_PROXY);
+      try {
+        const endpointId = context.header(IROH_FORWARDED_ENDPOINT_HEADER);
+        if (endpointId === undefined)
+          return result(PeerIdentityStatus.NO_MATCH);
+        if (!CANONICAL_ENDPOINT.test(endpointId))
+          return result(PeerIdentityStatus.INVALID);
+        return result(PeerIdentityStatus.AVAILABLE, new PeerIdentity({
+          provider: PROVIDER2,
+          evidenceSource: "http_proxy",
+          assurance: IdentityAssurance.CONFIGURED_PROXY,
+          issuer: options.issuer,
+          transport: "http",
+          subjectKind: PeerSubjectKind.ENDPOINT,
+          subjectKey: endpointId,
+          subjectStability: SubjectStability.STABLE,
+          subjectVerified: true,
+          attributes: {
+            original_assurance: IdentityAssurance.CRYPTOGRAPHIC_PEER
+          },
+          sourceAddress: endpointId,
+          proxyAddress: immediate
+        }));
+      } catch {
+        return result(PeerIdentityStatus.INVALID);
+      }
+    }
+  };
+}
 // src/schema.ts
 var str = utf8();
 var bytes = binary();
@@ -12895,6 +13277,7 @@ import { createServer } from "node:net";
 var SIGNATURE = Buffer.from([13, 10, 13, 10, 0, 13, 10, 81, 85, 73, 84, 10]);
 var FIXED_BYTES = 16;
 var DEFAULT_MAX_PROXY_V2_BYTES = 536;
+var VGI_IROH_ENDPOINT_TLV = 224;
 
 class ProxyProtocolV2Error extends Error {
   constructor(message) {
@@ -13055,7 +13438,62 @@ function parseProxyProtocolV2(input, maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES) 
   }
   return Object.freeze({ source, destination });
 }
+function parseIrohProxyProtocolV2(input, maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES) {
+  if (!Number.isInteger(maximumBytes) || maximumBytes < FIXED_BYTES) {
+    throw new TypeError("maximum PROXY v2 bytes must be an integer of at least 16");
+  }
+  const preamble = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  if (preamble.length < FIXED_BYTES)
+    throw new ProxyProtocolV2Error("truncated PROXY v2 fixed preamble");
+  if (preamble.length > maximumBytes)
+    throw new ProxyProtocolV2Error("PROXY v2 preamble exceeds configured limit");
+  if (!preamble.subarray(0, SIGNATURE.length).equals(SIGNATURE)) {
+    throw new ProxyProtocolV2Error("missing PROXY v2 signature");
+  }
+  if (preamble[12] !== 33)
+    throw new ProxyProtocolV2Error("Iroh identity requires PROXY command version 2");
+  if (preamble[13] !== 0)
+    throw new ProxyProtocolV2Error("VGI Iroh identity requires PROXY/UNSPEC");
+  const expected = FIXED_BYTES + preamble.readUInt16BE(14);
+  if (preamble.length !== expected)
+    throw new ProxyProtocolV2Error("truncated or overlong PROXY v2 preamble");
+  const body = preamble.subarray(FIXED_BYTES);
+  let endpointId;
+  for (let offset = 0;offset < body.length; ) {
+    if (body.length - offset < 3)
+      throw new ProxyProtocolV2Error("truncated PROXY v2 TLV header");
+    const type = body[offset];
+    const length = body.readUInt16BE(offset + 1);
+    offset += 3;
+    if (length > body.length - offset)
+      throw new ProxyProtocolV2Error("truncated PROXY v2 TLV value");
+    if (type === VGI_IROH_ENDPOINT_TLV) {
+      if (endpointId !== undefined)
+        throw new ProxyProtocolV2Error("duplicate VGI Iroh identity TLV");
+      if (length !== 33 || body[offset] !== 1)
+        throw new ProxyProtocolV2Error("invalid VGI Iroh identity TLV");
+      endpointId = body.subarray(offset + 1, offset + 33).toString("hex");
+    }
+    offset += length;
+  }
+  if (endpointId === undefined)
+    throw new ProxyProtocolV2Error("PROXY/UNSPEC requires one VGI Iroh identity TLV");
+  return Object.freeze({ endpointId });
+}
 function readProxyProtocolV2(socket, timeoutMs, maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES) {
+  return readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes).then((preamble) => parseProxyProtocolV2(preamble, maximumBytes));
+}
+function readIrohProxyProtocolV2(socket, timeoutMs, maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES) {
+  return readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes).then((preamble) => parseIrohProxyProtocolV2(preamble, maximumBytes));
+}
+function readProxyProtocolV2AllowingIrohIdentity(socket, timeoutMs, maximumBytes = DEFAULT_MAX_PROXY_V2_BYTES) {
+  return readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes).then((preamble) => preamble[13] === 0 ? Object.freeze({
+    irohIdentity: parseIrohProxyProtocolV2(preamble, maximumBytes)
+  }) : Object.freeze({
+    address: parseProxyProtocolV2(preamble, maximumBytes)
+  }));
+}
+function readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
     throw new TypeError("PROXY preamble timeout must be positive");
   if (!Number.isInteger(maximumBytes) || maximumBytes < FIXED_BYTES) {
@@ -13089,7 +13527,7 @@ function readProxyProtocolV2(socket, timeoutMs, maximumBytes = DEFAULT_MAX_PROXY
       if (excess && excess.length > 0)
         socket.unshift(excess);
       try {
-        resolve(parseProxyProtocolV2(Buffer.concat(parts, received), maximumBytes));
+        resolve(Buffer.concat(parts, received));
       } catch (error) {
         reject(error);
       }
@@ -13158,7 +13596,10 @@ async function serveTcp(protocol, options = {}) {
     }
     providerNames.add(provider.provider);
   }
-  if (peerAuthenticationPolicy && peerIdentityProviders.length === 0) {
+  const irohProxyIssuer = options.irohProxyIssuer;
+  if (irohProxyIssuer !== undefined)
+    validateIrohIssuer(irohProxyIssuer);
+  if (peerAuthenticationPolicy && peerIdentityProviders.length === 0 && irohProxyIssuer === undefined) {
     throw new TypeError("peerAuthenticationPolicy requires at least one peer identity provider");
   }
   if (peerProviderConcurrency < peerIdentityProviders.length) {
@@ -13184,6 +13625,12 @@ async function serveTcp(protocol, options = {}) {
   }
   if (proxyProtocolV2Required && trustedProxyAddresses.size === 0) {
     throw new TypeError("PROXY v2 requires at least one exact trusted proxy address");
+  }
+  if (irohProxyIssuer !== undefined && !proxyProtocolV2Required) {
+    throw new TypeError("irohProxyIssuer requires proxyProtocolV2Required");
+  }
+  if (irohProxyIssuer !== undefined && providerNames.has("iroh")) {
+    throw new TypeError("forwarded Iroh identity conflicts with another iroh provider");
   }
   let activePeerProviderCalls = 0;
   let describePromise = null;
@@ -13293,19 +13740,54 @@ async function serveTcp(protocol, options = {}) {
     const immediateEndpoint = immediateAddress ? `${immediateAddress.includes(":") ? `[${immediateAddress}]` : immediateAddress}:${socket.remotePort ?? 0}` : undefined;
     let destinationAddress = socket.localAddress ? `${socket.localAddress.includes(":") ? `[${socket.localAddress}]` : socket.localAddress}:${socket.localPort ?? 0}` : undefined;
     let assertedEndpoint;
+    let irohEndpointId;
     if (proxyProtocolV2Required) {
       if (!immediateAddressKey || !trustedProxyAddresses.has(immediateAddressKey)) {
         throw new PeerIdentityRejectedError("untrusted PROXY v2 sender", "proxy_required");
       }
-      const proxy = await readProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
-      assertedEndpoint = formatProxyEndpoint(proxy.source);
-      destinationAddress = formatProxyEndpoint(proxy.destination);
+      if (irohProxyIssuer !== undefined) {
+        const proxy = await readProxyProtocolV2AllowingIrohIdentity(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
+        if (proxy.irohIdentity) {
+          irohEndpointId = proxy.irohIdentity.endpointId;
+        } else {
+          assertedEndpoint = formatProxyEndpoint(proxy.address.source);
+          destinationAddress = formatProxyEndpoint(proxy.address.destination);
+        }
+      } else {
+        const proxy = await readProxyProtocolV2(socket, proxyPreambleTimeoutMs, maximumProxyPreambleBytes);
+        assertedEndpoint = formatProxyEndpoint(proxy.source);
+        destinationAddress = formatProxyEndpoint(proxy.destination);
+      }
     }
-    return { immediateAddress, immediateEndpoint, assertedEndpoint, destinationAddress };
+    return {
+      immediateAddress,
+      immediateEndpoint,
+      assertedEndpoint,
+      destinationAddress,
+      irohEndpointId
+    };
   }
   async function resolveConnectionIdentity(peer) {
+    const forwardedIroh = peer.irohEndpointId ? PeerIdentityResult.available(new PeerIdentity({
+      provider: "iroh",
+      evidenceSource: "proxy_protocol_v2",
+      assurance: IdentityAssurance.CONFIGURED_PROXY,
+      issuer: irohProxyIssuer,
+      transport: "tcp",
+      subjectKind: PeerSubjectKind.ENDPOINT,
+      subjectKey: peer.irohEndpointId,
+      subjectStability: SubjectStability.STABLE,
+      subjectVerified: true,
+      attributes: {
+        original_assurance: IdentityAssurance.CRYPTOGRAPHIC_PEER
+      },
+      sourceAddress: peer.irohEndpointId,
+      proxyAddress: peer.immediateEndpoint
+    })) : undefined;
     if (peerIdentityProviders.length === 0) {
-      return { auth: AuthContext.anonymous(), evidence: PeerEvidenceSet.EMPTY };
+      const evidence = forwardedIroh ? new PeerEvidenceSet([forwardedIroh]) : PeerEvidenceSet.EMPTY;
+      const auth = peerAuthenticationPolicy ? await peerAuthenticationPolicy(evidence, AuthContext.anonymous()) : AuthContext.anonymous();
+      return { auth, evidence };
     }
     const deadline = Date.now() + identityResolutionTimeoutMs;
     const context = new PeerResolutionContext("tcp", {
@@ -13349,7 +13831,7 @@ async function serveTcp(protocol, options = {}) {
       await Promise.race([providerResults, deadlineResults]);
       await Promise.resolve();
       const results = Array.from({ length: peerIdentityProviders.length }, (_unused, index) => outcomes[index] ?? new PeerIdentityResult(peerIdentityProviders[index].provider, PeerIdentityStatus.UNAVAILABLE));
-      const evidence = new PeerEvidenceSet(results);
+      const evidence = new PeerEvidenceSet(forwardedIroh ? [forwardedIroh, ...results] : results);
       const auth = peerAuthenticationPolicy ? await peerAuthenticationPolicy(evidence, AuthContext.anonymous()) : AuthContext.anonymous();
       return { auth, evidence };
     } finally {
@@ -13756,13 +14238,13 @@ async function serveUnix(protocol, options) {
 }
 // src/tailscale.ts
 import { connect as tcpConnect2 } from "node:net";
-var PROVIDER2 = "tailscale";
+var PROVIDER3 = "tailscale";
 var LOCALAPI_HOST = "local-tailscaled.sock";
 var DEFAULT_SOCKET = "/var/run/tailscale/tailscaled.sock";
 var SERVICE_NAME = /^svc:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
 var ENCODED_WORDS = /^=\?[Uu][Tt][Ff]-8\?[Qq]\?[^?]*\?=(?: +=\?[Uu][Tt][Ff]-8\?[Qq]\?[^?]*\?=)*$/u;
 function result(status, identity) {
-  return new PeerIdentityResult(PROVIDER2, status, identity ? [identity] : []);
+  return new PeerIdentityResult(PROVIDER3, status, identity ? [identity] : []);
 }
 function hasControl2(value) {
   return Array.from(value).some((character) => {
@@ -13971,7 +14453,7 @@ function tailscaleServeIdentityProvider(options) {
   if (!Number.isSafeInteger(maxHeaderBytes) || maxHeaderBytes <= 0)
     throw new TypeError("maxHeaderBytes must be positive");
   return {
-    provider: PROVIDER2,
+    provider: PROVIDER3,
     resolve(context) {
       const immediate = context ? normalizeIpLiteral(context.immediatePeer ?? "") : null;
       if (!immediate || !trusted.has(immediate))
@@ -14000,7 +14482,7 @@ function tailscaleServeIdentityProvider(options) {
         if (displayName)
           attributes.user_display_name = displayName;
         const identity = new PeerIdentity({
-          provider: PROVIDER2,
+          provider: PROVIDER3,
           evidenceSource: "serve_proxy",
           assurance: IdentityAssurance.CONFIGURED_PROXY,
           issuer: options.issuer,
@@ -14267,7 +14749,7 @@ function tailscaleLocalApiIdentityProvider(options) {
     transport = { socket };
   }
   return {
-    provider: PROVIDER2,
+    provider: PROVIDER3,
     async resolve(context, signal2) {
       if (!context)
         return result(PeerIdentityStatus.INVALID);
@@ -14364,7 +14846,7 @@ function tailscaleLocalApiIdentityProvider(options) {
             attributes.user_display_name = display;
         }
         return result(PeerIdentityStatus.AVAILABLE, new PeerIdentity({
-          provider: PROVIDER2,
+          provider: PROVIDER3,
           evidenceSource: "localapi",
           assurance: IdentityAssurance.LOCAL_DAEMON,
           issuer: options.issuer,
@@ -14428,6 +14910,7 @@ export {
   readUnaryResult,
   readRequest,
   readProxyProtocolV2,
+  readIrohProxyProtocolV2,
   probeSocket,
   pipeConnect,
   peerIdentityPrimary,
@@ -14436,11 +14919,13 @@ export {
   parseSocks5hProxy,
   parseResourceMetadataUrl,
   parseProxyProtocolV2,
+  parseIrohProxyProtocolV2,
   parseDeviceCodeClientSecret,
   parseDeviceCodeClientId,
   parseDescribeResponse,
   parseClientSecret,
   parseClientId,
+  parseCapabilitiesFromHeaders,
   otelTraceContext,
   observePeerIdentity,
   oauthResourceMetadataToJson,
@@ -14458,6 +14943,8 @@ export {
   jwtAuthenticate,
   jsonStateSerializer,
   isExternalLocationBatch,
+  isCapabilitySnapshotFresh,
+  irohForwardedHeaderIdentityProvider,
   int82 as int8,
   int322 as int32,
   int162 as int16,
@@ -14478,6 +14965,7 @@ export {
   findProtocolVersion,
   fetchOAuthMetadata,
   envoyXfccSpiffeProvider,
+  discoverHttpCapabilities,
   dialSocks5h,
   defaultStateDir,
   decodeContentEncoding,
@@ -14497,6 +14985,7 @@ export {
   acquireLock,
   VgiRpcServer,
   VersionError,
+  VGI_IROH_ENDPOINT_TLV,
   UPLOAD_URL_RESPONSE_SCHEMA,
   UPLOAD_URL_PARAMS_SCHEMA,
   UPLOAD_URL_METHOD,
@@ -14533,6 +15022,7 @@ export {
   LOG_LEVEL_KEY,
   LOG_EXTRA_KEY,
   IdentityAssurance,
+  IROH_FORWARDED_ENDPOINT_HEADER,
   INTROSPECT_ENDPOINT,
   INTROSPECT_ENABLED_HEADER,
   HttpStreamSession,
@@ -14557,4 +15047,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=8EF63C9FE5B374F464756E2164756E21
+//# debugId=CA1F11ED8657699464756E2164756E21

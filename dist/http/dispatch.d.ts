@@ -8,11 +8,13 @@ export interface DispatchContext {
     tokenKey: Uint8Array;
     tokenTtl: number;
     serverId: string;
-    /** Producer-only soft wire budget (deprecated alias). Unary/exchange ignore this. */
+    /** Deprecated compatibility alias for the hard response budget. */
     maxStreamResponseBytes?: number;
-    /** Soft wire-cap for producer streams; hard wire-cap for unary/exchange.
+    /** Hard wire cap for unary, exchange, and each producer turn.
      *  Externalised payloads do not count toward this. */
     maxResponseBytes?: number;
+    /** Worker sizing target clamped by the handler to maxResponseBytes. */
+    preferredResponseBytes?: number;
     /** Hard cap on bytes uploaded to external storage during one HTTP response. */
     maxExternalizedResponseBytes?: number;
     /** Entries the resolved-call cache may hold; `0` disables it so every

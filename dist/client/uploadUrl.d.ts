@@ -8,7 +8,7 @@ export interface UploadUrlPair {
  * URL pairs. Server must have an `uploadUrlProvider` configured; otherwise
  * the route returns 404 and we surface that as `RpcError("NotSupported")`.
  */
-export declare function requestUploadUrls(baseUrl: string, prefix: string, count: number, authorization?: string, fetchFn?: typeof globalThis.fetch): Promise<UploadUrlPair[]>;
+export declare function requestUploadUrls(baseUrl: string, prefix: string, count: number, authorization?: string, fetchFn?: typeof globalThis.fetch, acceptedMaxResponseBytes?: number, responseBudgetVerified?: boolean): Promise<UploadUrlPair[]>;
 export interface ExternalizeOptions {
     baseUrl: string;
     prefix: string;
@@ -16,6 +16,9 @@ export interface ExternalizeOptions {
     /** Optional per-URL validator; throw to reject. */
     urlValidator?: ((url: string) => void) | null;
     fetch?: typeof globalThis.fetch;
+    acceptedMaxResponseBytes?: number;
+    /** @internal Owning client already completed response-budget discovery. */
+    responseBudgetVerified?: boolean;
 }
 /**
  * Upload *body* via a server-vended URL and return the pointer-batch body

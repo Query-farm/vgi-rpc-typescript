@@ -229,21 +229,22 @@ function batchByteSize(batch: VgiBatch): number {
 /**
  * Maybe externalize a batch if it exceeds the threshold.
  * Returns the original batch unchanged if below threshold or no config.
+ * @param onUpload Called with bytes actually uploaded. Keeping accounting at
+ * this common path prevents new upload call sites from bypassing the total.
+ * @param force Bypass only the configured threshold when a negotiated
+ * response budget would otherwise reject a batch external storage can rescue.
  */
 export async function maybeExternalizeBatch(
   batch: VgiBatch,
   config?: ExternalLocationConfig | null,
-  /** Called with the number of bytes actually uploaded. Counted here rather
-   *  than at the call sites: this is the one function every externalised
-   *  payload passes through, so the total cannot drift from reality by
-   *  someone adding a new upload path. */
   onUpload?: (bytes: number) => void,
+  force = false,
 ): Promise<VgiBatch> {
   if (!config?.storage) return batch;
   if (batch.numRows === 0) return batch;
 
   const threshold = config.externalizeThresholdBytes ?? DEFAULT_THRESHOLD;
-  if (batchByteSize(batch) < threshold) return batch;
+  if (!force && batchByteSize(batch) < threshold) return batch;
 
   // Serialize to IPC
   let ipcData = serializeBatchToIpc(batch);

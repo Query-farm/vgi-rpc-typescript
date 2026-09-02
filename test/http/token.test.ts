@@ -14,6 +14,24 @@ import { jsonStateSerializer } from "../../src/http/types.js";
 import { randomBytes } from "../../src/util/web-crypto.js";
 
 describe("State Token", () => {
+  test("call tokens seal response budgets", () => {
+    const tokenKey = new Uint8Array(32).fill(7);
+    const callId = new Uint8Array(16).fill(3);
+    const token = packCallToken(
+      callId,
+      new Uint8Array([1]),
+      new Uint8Array([2]),
+      tokenKey,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      { responseLimitBytes: 65_536, preferredResponseBytes: 65_536 },
+    );
+    const { call } = unpackCallToken(token, tokenKey, null);
+    expect(call.responseLimitBytes).toBe(65_536);
+    expect(call.preferredResponseBytes).toBe(65_536);
+  });
   test("bound authenticated empty principals remain domain-separated", () => {
     expect(computeAad("", "binding", "domain-a")).not.toEqual(computeAad("", "binding", "domain-b"));
     expect(computeCallAad("", "binding", "domain-a")).not.toEqual(computeCallAad("", "binding", "domain-b"));

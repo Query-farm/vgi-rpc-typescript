@@ -80,6 +80,8 @@ export declare class HttpStreamSession implements StreamSession {
     private _authorization?;
     private _externalConfig?;
     private _postFn?;
+    private _acceptedMaxResponseBytes;
+    private _responseBudgetSupport;
     constructor(opts: {
         baseUrl: string;
         prefix: string;
@@ -98,6 +100,7 @@ export declare class HttpStreamSession implements StreamSession {
         authorization?: string;
         externalConfig?: ExternalLocationConfig;
         postFn?: PostFn;
+        acceptedMaxResponseBytes?: number;
     });
     private _post;
     /** The stream's one-time header row, or `null` if the method declares no header. */

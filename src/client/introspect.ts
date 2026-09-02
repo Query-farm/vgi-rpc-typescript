@@ -3,11 +3,14 @@
 
 import { Schema as ArrowSchema, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
 import { deserializeSchema as deserializeSchemaImpl } from "#vgi-rpc-arrow";
+import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY, PROTOCOL_VERSION_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
 import { ARROW_CONTENT_TYPE } from "../http/common.js";
-import { decodeResponseBody } from "./decode.js";
+import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
+import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
+import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
 import { buildRequestIpc, dispatchLogOrError, readResponseBatches } from "./ipc.js";
 import type { LogMessage } from "./types.js";
 
@@ -143,6 +146,9 @@ export async function httpIntrospect(
     compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;
     decompressFn?: (data: Uint8Array) => Promise<Uint8Array>;
     fetch?: typeof globalThis.fetch;
+    acceptedMaxResponseBytes?: number;
+    /** @internal The owning HttpRpcClient already completed discovery. */
+    responseBudgetVerified?: boolean;
   },
 ): Promise<ServiceDescription> {
   // See httpConnect: a base URL ending in "/" would produce "//__describe__".
@@ -169,6 +175,27 @@ export async function httpIntrospect(
   }
   // See connect.ts: states what we can decode, regardless of request compression.
   headers[VGI_ACCEPT_ENCODING_HEADER] = clientAcceptEncoding(decompressFn != null);
+  const maxResponse = options?.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+  optionalResponseBudget(maxResponse, "acceptedMaxResponseBytes");
+  let responseLimit = maxResponse;
+  if (!options?.responseBudgetVerified) {
+    const capabilities = await discoverHttpCapabilities(
+      baseUrl,
+      prefix,
+      options?.authorization,
+      maxResponse,
+      options?.fetch ?? globalThis.fetch,
+    );
+    if (!capabilities.acceptMaxResponseBytesSupport) {
+      throw new RpcError(
+        "ProtocolError",
+        "Server must advertise VGI-Accept-Max-Response-Bytes-Support: true before RPC dispatch",
+        "",
+      );
+    }
+    responseLimit = minPositive(maxResponse, capabilities.maxResponseBytes ?? undefined) ?? maxResponse;
+  }
+  headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(maxResponse);
 
   const response = await (options?.fetch ?? globalThis.fetch)(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
     method: "POST",
@@ -178,9 +205,11 @@ export async function httpIntrospect(
   if (response.status === 401) {
     throw new RpcError("AuthenticationError", "Authentication required", "");
   }
+  const responseCapabilities = requireResponseBudgetSupport(response.headers);
+  responseLimit = minPositive(responseLimit, responseCapabilities.maxResponseBytes ?? undefined) ?? responseLimit;
 
-  const rawBody = new Uint8Array(await response.arrayBuffer());
-  const responseBody = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn));
+  const rawBody = await readResponseBodyBounded(response, responseLimit);
+  const responseBody = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn, responseLimit));
   const { batches } = await readResponseBatches(responseBody);
 
   return parseDescribeResponse(batches);

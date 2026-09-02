@@ -57,6 +57,9 @@ export interface ServeTcpOptions {
     proxyPreambleTimeoutMs?: number;
     /** Maximum complete PROXY v2 preamble size, including bounded unknown TLVs. Default: 536. */
     maximumProxyPreambleBytes?: number;
+    /** Locally configured issuer enabling the fixed Iroh EndpointId TLV on
+     * trusted PROXY/UNSPEC connections. */
+    irohProxyIssuer?: string;
 }
 /** Handle returned by {@link serveTcp} for callers that want to stop the server. */
 export interface ServeTcpHandle {

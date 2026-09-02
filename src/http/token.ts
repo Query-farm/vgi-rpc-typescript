@@ -10,7 +10,7 @@ const _UTF8 = new TextEncoder();
 // the schemas, which moved into the call token; a v4 reader would mis-frame
 // it, so the bump turns a rolling deploy's stale token into a clean failure.
 const TOKEN_VERSION = 5;
-const CALL_TOKEN_VERSION = 1;
+const CALL_TOKEN_VERSION = 2;
 
 /** Length of the random per-stream id minted at `/init`. */
 export const CALL_ID_LEN = 16;
@@ -207,13 +207,14 @@ export function packCallToken(
   createdAt?: number,
   evidenceBinding?: string,
   domain?: string | null,
+  responseBudget?: { responseLimitBytes?: number; preferredResponseBytes?: number },
 ): string {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
   const now = createdAt ?? Math.floor(Date.now() / 1000);
 
-  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 4 + schemaBytes.length + 4 + inputSchemaBytes.length);
+  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 4 + schemaBytes.length + 4 + inputSchemaBytes.length + 16);
   const view = new DataView(plaintext.buffer);
   let offset = 0;
 
@@ -230,6 +231,11 @@ export function packCallToken(
   writeU32LE(view, offset, inputSchemaBytes.length);
   offset += 4;
   plaintext.set(inputSchemaBytes, offset);
+  offset += inputSchemaBytes.length;
+
+  writeU64LE(view, offset, BigInt(responseBudget?.responseLimitBytes ?? 0));
+  offset += 8;
+  writeU64LE(view, offset, BigInt(responseBudget?.preferredResponseBytes ?? 0));
 
   const wire = sealBytes(plaintext, tokenKey, {
     aad: computeCallAad(principal, evidenceBinding, domain),
@@ -261,6 +267,10 @@ export interface ResolvedCall {
   schemaBytes: Uint8Array;
   /** Serialized input-schema IPC bytes (exchange streams). */
   inputSchemaBytes: Uint8Array;
+  /** Initial authenticated hard response cap; zero/undefined on no cap. */
+  responseLimitBytes?: number;
+  /** Initial advisory batching target, sealed with the hard cap. */
+  preferredResponseBytes?: number;
 }
 
 /**
@@ -408,6 +418,18 @@ export function unpackCallToken(
     throw new Error("State token truncated (input schema)");
   }
   const inputSchemaBytes = copyAligned(offset, inputSchemaLen);
+  offset += inputSchemaLen;
+  if (offset + 16 !== plaintext.length) {
+    throw new Error("State token truncated (response budget)");
+  }
+  const responseLimitRaw = readU64LE(view, offset);
+  offset += 8;
+  const preferredResponseRaw = readU64LE(view, offset);
+  if (responseLimitRaw > BigInt(Number.MAX_SAFE_INTEGER) || preferredResponseRaw > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("State token contains an unsafe response budget");
+  }
+  const responseLimitBytes = Number(responseLimitRaw) || undefined;
+  const preferredResponseBytes = Number(preferredResponseRaw) || undefined;
 
-  return { callId, call: { schemaBytes, inputSchemaBytes } };
+  return { callId, call: { schemaBytes, inputSchemaBytes, responseLimitBytes, preferredResponseBytes } };
 }

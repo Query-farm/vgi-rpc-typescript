@@ -51,6 +51,12 @@
   ],
   "//imports": "`browser` must resolve to the JS emit under dist/browser, not ./src — the browser export condition serves transpiled JS and a `#vgi-rpc-arrow` specifier inside it is re-resolved with the consumer's conditions, so pointing it at a .ts file would drag TypeScript back into a loader-less bundler. Keep `browser` AFTER `workerd`/`worker`: conditions match in key order and a workerd build sets both, so it must reach flechette first.",
   "imports": {
+    "#vgi-rpc-client-response-budget": {
+      "workerd": "./dist/browser/client/default-response-budget.browser.js",
+      "worker": "./dist/browser/client/default-response-budget.browser.js",
+      "browser": "./dist/browser/client/default-response-budget.browser.js",
+      "default": "./src/client/default-response-budget.ts"
+    },
     "#vgi-rpc-arrow": {
       "flechette": "./src/arrow/impl-flechette/index.ts",
       "workerd": "./src/arrow/impl-flechette/index.ts",

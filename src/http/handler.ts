@@ -93,6 +93,14 @@ import {
 import { buildDescribePage, buildLandingPage, buildNotFoundPage } from "./pages.js";
 import { PROOF_HEADER, PROOF_REQUIRED_HEADER } from "./proof.js";
 import {
+  ACCEPT_MAX_RESPONSE_BYTES_HEADER,
+  ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER,
+  minPositive,
+  optionalPositiveSafeInteger,
+  optionalResponseBudget,
+  parseResponseBudgetDecimal,
+} from "./response-budget.js";
+import {
   makeDrainHandle,
   openSessionToken,
   SessionRegistry,
@@ -202,7 +210,10 @@ export function createHttpHandler(
   const tokenTtl = options?.tokenTtl ?? 3600;
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 300 : options.corsMaxAge;
-  const maxRequestBytes = options?.maxRequestBytes;
+  const maxRequestBytes = minPositive(
+    optionalPositiveSafeInteger(options?.maxRequestBytes, "maxRequestBytes"),
+    optionalPositiveSafeInteger(options?.hostingMaxRequestBytes, "hostingMaxRequestBytes"),
+  );
   // The advertised request cap applies independently to encoded and decoded
   // bytes. Keeping the decoded default equal to maxRequestBytes prevents a
   // small compressed request from bypassing the capability clients use to
@@ -214,12 +225,16 @@ export function createHttpHandler(
       : configuredDecompressedCap == null
         ? maxRequestBytes
         : Math.min(maxRequestBytes, configuredDecompressedCap);
-  // ``maxStreamResponseBytes`` was the producer-only soft budget. Keep it
-  // distinct from ``maxResponseBytes`` (the hard cap for unary/exchange).
-  // Producer dispatch is lock-step regardless: either value is only a sizing
-  // hint exposed to that request's single producer invocation.
-  const maxStreamResponseBytes = options?.maxStreamResponseBytes;
-  const maxResponseBytes = options?.maxResponseBytes;
+  // Fold the deprecated producer-only option into the application hard cap.
+  // A producer turn is no longer allowed to overshoot and export a cursor.
+  const maxResponseBytes = minPositive(
+    optionalResponseBudget(options?.maxResponseBytes ?? options?.maxStreamResponseBytes, "maxResponseBytes"),
+    optionalResponseBudget(options?.hostingMaxResponseBytes, "hostingMaxResponseBytes"),
+  );
+  const configuredPreferredResponseBytes = optionalResponseBudget(
+    options?.preferredResponseBytes,
+    "preferredResponseBytes",
+  );
   const maxExternalizedResponseBytes = options?.maxExternalizedResponseBytes;
   const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
@@ -544,6 +559,7 @@ export function createHttpHandler(
     if (maxResponseBytes != null) {
       headers.set("VGI-Max-Response-Bytes", String(maxResponseBytes));
     }
+    headers.set(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER, "true");
     if (maxExternalizedResponseBytes != null) {
       headers.set("VGI-Max-Externalized-Response-Bytes", String(maxExternalizedResponseBytes));
     }
@@ -573,7 +589,7 @@ export function createHttpHandler(
         headers.set(STICKY_ECHO_HEADERS_HEADER, stickyEchoHeadersArr.map(([k]) => k).join(", "));
       }
     }
-    if (isOptions && (maxRequestBytes != null || uploadUrlProvider || stickyEnabled)) {
+    if (isOptions) {
       // Match Python: cache discovery results for 5 minutes.
       if (!headers.has("Cache-Control")) {
         headers.set("Cache-Control", "public, max-age=300");
@@ -586,8 +602,8 @@ export function createHttpHandler(
     tokenKey,
     tokenTtl,
     serverId,
-    maxStreamResponseBytes,
     maxResponseBytes,
+    preferredResponseBytes: configuredPreferredResponseBytes,
     maxExternalizedResponseBytes,
     stateSerializer,
     externalLocation,
@@ -606,6 +622,7 @@ export function createHttpHandler(
     "VGI-Max-Response-Bytes",
     "VGI-Max-Externalized-Response-Bytes",
     "VGI-Externalization-Enabled",
+    ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     ...(maxRequestBytes != null ? ["VGI-Max-Request-Bytes"] : []),
     ...(uploadUrlProvider
@@ -644,7 +661,9 @@ export function createHttpHandler(
       // echoes Access-Control-Request-Headers. Falls back to the common pair.
       headers.set(
         "Access-Control-Allow-Headers",
-        requestedHeaders && requestedHeaders.length > 0 ? requestedHeaders : "Content-Type, Authorization",
+        requestedHeaders && requestedHeaders.length > 0
+          ? requestedHeaders
+          : `Content-Type, Authorization, ${ACCEPT_MAX_RESPONSE_BYTES_HEADER}`,
       );
       headers.set("Access-Control-Expose-Headers", corsExposeHeaders);
       // A server that has opted into serving cross-origin callers has, by
@@ -707,11 +726,31 @@ export function createHttpHandler(
     );
   }
 
-  async function compressIfAccepted(response: Response, negotiated: NegotiatedEncoding): Promise<Response> {
-    if (compressionLevel == null) return response;
+  async function compressIfAccepted(
+    response: Response,
+    negotiated: NegotiatedEncoding,
+    responseLimitBytes?: number,
+  ): Promise<Response> {
     const { codec, usedCustom } = negotiated;
-    if (!codec) return response;
     const responseBody = new Uint8Array(await response.arrayBuffer());
+    if (responseLimitBytes != null && responseBody.byteLength > responseLimitBytes) {
+      const headers = new Headers(response.headers);
+      headers.delete(CONTENT_ENCODING_HEADER);
+      headers.delete(VGI_CONTENT_ENCODING_HEADER);
+      const error = new Error(
+        `HTTP body exceeds max_response_bytes (${responseBody.byteLength} > ${responseLimitBytes})`,
+      );
+      error.name = "ResponseTooLargeError";
+      const errorBatch = buildErrorBatch(EMPTY_SCHEMA, error, serverId, null);
+      const errorBody = serializeIpcStream(EMPTY_SCHEMA, [errorBatch]);
+      headers.set("Content-Type", ARROW_CONTENT_TYPE);
+      headers.set(RPC_ERROR_HEADER, "true");
+      headers.set("Content-Length", String(errorBody.byteLength));
+      return new Response(errorBody as unknown as BodyInit, { status: 200, headers });
+    }
+    if (compressionLevel == null || !codec) {
+      return new Response(responseBody as unknown as BodyInit, { status: response.status, headers: response.headers });
+    }
     const compressed =
       codec === "zstd" ? await zstdCompress(responseBody, compressionLevel) : await gzipCompress(responseBody);
     const headers = new Headers(response.headers);
@@ -913,6 +952,27 @@ export function createHttpHandler(
     return resp;
   }
 
+  function invalidAcceptedResponseBudget(
+    error: unknown,
+    request: Request,
+    isOptions = false,
+  ): Response {
+    const valueError = new Error(
+      `Invalid ${ACCEPT_MAX_RESPONSE_BYTES_HEADER}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    valueError.name = "ValueError";
+    const response = makeErrorResponse(valueError, 400);
+    // Malformed request-budget syntax is an Arrow RPC error even though its
+    // HTTP status remains 400. The support marker lets a capability-aware
+    // client distinguish validation from a legacy intermediary response.
+    response.headers.set(RPC_ERROR_HEADER, "true");
+    if (isOptions) {
+      addCorsHeaders(response.headers, true, request.headers.get("Access-Control-Request-Headers"));
+    }
+    addCapabilityHeaders(response.headers, isOptions);
+    return response;
+  }
+
   const enableHealthEndpoint = options?.enableHealthEndpoint ?? true;
   const healthPath = `${prefix}/health`;
   const healthBody = enableHealthEndpoint
@@ -995,6 +1055,14 @@ export function createHttpHandler(
 
     // CORS preflight + capability discovery
     if (request.method === "OPTIONS") {
+      const acceptedRaw = request.headers.get(ACCEPT_MAX_RESPONSE_BYTES_HEADER);
+      if (acceptedRaw !== null) {
+        try {
+          parseResponseBudgetDecimal(acceptedRaw);
+        } catch (error) {
+          return invalidAcceptedResponseBudget(error, request, true);
+        }
+      }
       const headers = new Headers();
       addCorsHeaders(headers, true, request.headers.get("Access-Control-Request-Headers"));
       addCapabilityHeaders(headers, true);
@@ -1161,23 +1229,46 @@ export function createHttpHandler(
     // itself — the chain id sealed inside the tokens, and a cancel flag that
     // rides in request-batch metadata.
     const streamObserver: { streamId?: string; cancelled?: boolean } = {};
-    const ctx = { ...baseCtx, cookies: parseRequestCookies(request), egress, streamObserver } as typeof baseCtx & {
+    // Authentication — run before content-type validation so unauthenticated
+    // requests get 401 regardless of body shape or response-budget syntax.
+    let identity: { authContext: AuthContext; peerEvidence?: PeerEvidenceSet };
+    try {
+      identity = await resolveRequestIdentity(request);
+    } catch (error) {
+      return authenticationErrorResponse(error, request);
+    }
+
+    let acceptedMaxResponseBytes: number | undefined;
+    const acceptedRaw = request.headers.get(ACCEPT_MAX_RESPONSE_BYTES_HEADER);
+    if (acceptedRaw !== null) {
+      try {
+        acceptedMaxResponseBytes = parseResponseBudgetDecimal(acceptedRaw);
+      } catch (error) {
+        return invalidAcceptedResponseBudget(error, request);
+      }
+    }
+    const responseLimitBytes = minPositive(maxResponseBytes, acceptedMaxResponseBytes);
+    const preferredResponseBytes =
+      configuredPreferredResponseBytes == null
+        ? undefined
+        : minPositive(configuredPreferredResponseBytes, responseLimitBytes);
+
+    const ctx = {
+      ...baseCtx,
+      maxResponseBytes: responseLimitBytes,
+      preferredResponseBytes,
+      authContext: identity.authContext,
+      peerEvidence: identity.peerEvidence,
+      cookies: parseRequestCookies(request),
+      egress,
+      streamObserver,
+    } as typeof baseCtx & {
       authContext?: AuthContext;
       peerEvidence?: PeerEvidenceSet;
       cookies: ReadonlyMap<string, string>;
       stickyContext?: StickySink;
       streamObserver: { streamId?: string; cancelled?: boolean };
     };
-
-    // Authentication — run before content-type validation so unauthenticated
-    // requests get 401 regardless of body shape.
-    try {
-      const identity = await resolveRequestIdentity(request);
-      ctx.authContext = identity.authContext;
-      ctx.peerEvidence = identity.peerEvidence;
-    } catch (error) {
-      return authenticationErrorResponse(error, request);
-    }
 
     // POST {prefix}/__introspect_token__ — JSON in, JSON out, so it sits ahead
     // of the Arrow media-type gate. It needs the caller's identity (the
@@ -1229,13 +1320,13 @@ export function createHttpHandler(
           const e = err instanceof Error ? err : new Error(String(err));
           const r = makeErrorResponse(e, 500);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, responseEncoding);
+          return compressIfAccepted(r, responseEncoding, responseLimitBytes);
         }
         const entry = sessionRegistry.get(opened.sessionId, principalKey);
         if (!entry) {
           const r = makeErrorResponse(new SessionLostError("session not found, expired, or principal mismatch"), 500);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, responseEncoding);
+          return compressIfAccepted(r, responseEncoding, responseLimitBytes);
         }
         stickyLockRelease = await entry.lock.acquire();
         resumeState = entry.state;
@@ -1299,7 +1390,7 @@ export function createHttpHandler(
         const err = new MethodNotImplementedError(
           `Unknown method: '${route.methodName}'. Available methods: [${available.join(", ")}]`,
         );
-        return compressIfAccepted(makeErrorResponse(err, 404), responseEncoding);
+        return compressIfAccepted(makeErrorResponse(err, 404), responseEncoding, responseLimitBytes);
       }
     }
 
@@ -1404,16 +1495,16 @@ export function createHttpHandler(
         const response = arrowResponse(responseBody);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, responseEncoding);
+        return compressIfAccepted(response, responseEncoding, responseLimitBytes);
       } catch (error: any) {
         if (error instanceof HttpRpcError) {
           const r = makeErrorResponse(error, error.statusCode, UPLOAD_URL_RESPONSE_SCHEMA);
           addCapabilityHeaders(r.headers);
-          return compressIfAccepted(r, responseEncoding);
+          return compressIfAccepted(r, responseEncoding, responseLimitBytes);
         }
         const r = makeErrorResponse(error, 500, UPLOAD_URL_RESPONSE_SCHEMA);
         addCapabilityHeaders(r.headers);
-        return compressIfAccepted(r, responseEncoding);
+        return compressIfAccepted(r, responseEncoding, responseLimitBytes);
       }
     }
 
@@ -1427,9 +1518,9 @@ export function createHttpHandler(
           protocol.protocolVersion || undefined,
         );
         addCorsHeaders(response.headers);
-        return compressIfAccepted(response, responseEncoding);
+        return compressIfAccepted(response, responseEncoding, responseLimitBytes);
       } catch (error: any) {
-        return compressIfAccepted(makeErrorResponse(error, 500), responseEncoding);
+        return compressIfAccepted(makeErrorResponse(error, 500), responseEncoding, responseLimitBytes);
       }
     }
 
@@ -1466,7 +1557,7 @@ export function createHttpHandler(
         const response = arrowResponse(errBody, 400);
         addCorsHeaders(response.headers);
         addCapabilityHeaders(response.headers);
-        return compressIfAccepted(response, responseEncoding);
+        return compressIfAccepted(response, responseEncoding, responseLimitBytes);
       }
     }
 
@@ -1551,7 +1642,7 @@ export function createHttpHandler(
       addCapabilityHeaders(response.headers);
       applyStickyResponseHeaders(response.headers, stickySink);
       info.httpStatus = response.status;
-      return compressIfAccepted(response, responseEncoding);
+      return compressIfAccepted(response, responseEncoding, responseLimitBytes);
     } catch (error: any) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
       if (error instanceof HttpRpcError) {
@@ -1559,13 +1650,13 @@ export function createHttpHandler(
         addCapabilityHeaders(r.headers);
         applyStickyResponseHeaders(r.headers, stickySink);
         info.httpStatus = r.status;
-        return compressIfAccepted(r, responseEncoding);
+        return compressIfAccepted(r, responseEncoding, responseLimitBytes);
       }
       const r = makeErrorResponse(error, 500);
       addCapabilityHeaders(r.headers);
       applyStickyResponseHeaders(r.headers, stickySink);
       info.httpStatus = r.status;
-      return compressIfAccepted(r, responseEncoding);
+      return compressIfAccepted(r, responseEncoding, responseLimitBytes);
     } finally {
       // Surface sticky lifecycle on the access log.
       if (stickySink) {
@@ -1603,6 +1694,7 @@ export function createHttpHandler(
 
     if (!dispatchHook) {
       const plain = await dispatchRequest(request, undefined, undefined, requestId);
+      stampResponseBudgetSupport(plain);
       stampRequestId(plain, requestId);
       return plain;
     }
@@ -1619,6 +1711,7 @@ export function createHttpHandler(
     const egress = { externalizedBytes: 0 };
     let response = await dispatchRequest(request, deferral, egress, requestId);
     if (pending.length === 0) {
+      stampResponseBudgetSupport(response);
       stampRequestId(response, requestId);
       return response;
     }
@@ -1631,9 +1724,19 @@ export function createHttpHandler(
       // Unmeasurable body — the spec says omit the field rather than guess.
     }
     for (const emit of pending) emit(responseBytes);
+    stampResponseBudgetSupport(response);
     stampRequestId(response, requestId);
     return response;
   };
+
+  function stampResponseBudgetSupport(response: Response): void {
+    try {
+      response.headers.set(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER, "true");
+    } catch {
+      // Upstream fetch responses may expose immutable headers. Those are not
+      // VGI RPC responses generated by this handler.
+    }
+  }
 
   /**
    * Echo the caller's `X-Request-ID`, or mint one.

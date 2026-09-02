@@ -31,7 +31,68 @@ import { CONTENT_ENCODING_HEADER, VGI_CONTENT_ENCODING_HEADER } from "../http/co
 import { gzipDecompress } from "../util/gzip.js";
 
 /** Decompressor for a codec the platform will not undo for us. */
-export type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
+export type DecompressFn = (data: Uint8Array, maxOutputSize?: number) => Promise<Uint8Array>;
+
+/** Independent cap for bytes that are still compressed/encoded after Fetch.
+ * The accepted response budget applies to decoded Arrow bytes; this ceiling
+ * only prevents an attacker from filling memory with an enormous compressed
+ * representation before bounded decompression begins. */
+export const DEFAULT_MAX_RESPONSE_REPRESENTATION_BYTES = 256 * 1024 * 1024;
+
+/** Read a Fetch response incrementally. Identity/already-decoded bytes are
+ * bounded by the advertised decoded limit. A custom-encoded or surviving zstd
+ * representation uses the independent representation ceiling instead. */
+export async function readResponseBodyBounded(
+  response: Response,
+  maxDecodedBytes: number,
+  maxRepresentationBytes = DEFAULT_MAX_RESPONSE_REPRESENTATION_BYTES,
+): Promise<Uint8Array> {
+  const resolved = resolveResponseEncoding(response.headers);
+  const custom = response.headers.get(VGI_CONTENT_ENCODING_HEADER)?.trim().toLowerCase();
+  const standard = response.headers.get(CONTENT_ENCODING_HEADER)?.trim().toLowerCase();
+  const encodedRepresentation = resolved.codec !== null;
+  const fetchDecodedStandard =
+    !custom && standard !== undefined && standard !== null && ["gzip", "deflate", "br"].includes(standard);
+  const readLimit = encodedRepresentation ? maxRepresentationBytes : maxDecodedBytes;
+  const declared = response.headers.get("Content-Length");
+  // Fetch commonly leaves the encoded Content-Length after transparently
+  // decoding standard gzip/deflate/br. It is not a decoded-size claim and
+  // must not be compared to the accepted decoded budget.
+  if (!fetchDecodedStandard && declared != null && /^[0-9]+$/.test(declared)) {
+    const length = Number(declared);
+    if (Number.isSafeInteger(length) && length > readLimit) {
+      await response.body?.cancel("response limit exceeded");
+      const kind = encodedRepresentation ? "representation safety" : "accepted";
+      throw new RpcError("TransportError", `HTTP response exceeds ${kind} limit (${length} > ${readLimit})`, "");
+    }
+  }
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > readLimit) {
+        await reader.cancel("response limit exceeded");
+        const kind = encodedRepresentation ? "representation safety" : "accepted";
+        throw new RpcError("TransportError", `HTTP response exceeds ${kind} limit (${total} > ${readLimit})`, "");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
 
 /** How the body reached us, and therefore what is left for the client to do. */
 export interface ResolvedResponseEncoding {
@@ -59,6 +120,9 @@ export function resolveResponseEncoding(headers: Headers): ResolvedResponseEncod
   if (standard === "zstd") {
     return { codec: "zstd", custom: false };
   }
+  if (standard && standard !== "identity" && !["gzip", "deflate", "br"].includes(standard)) {
+    return { codec: standard, custom: false };
+  }
   return { codec: null, custom: false };
 }
 
@@ -74,12 +138,13 @@ export async function decodeResponseBody(
   headers: Headers,
   body: Uint8Array,
   zstdDecompress?: DecompressFn,
+  maxDecodedBytes?: number,
 ): Promise<Uint8Array> {
   const { codec, custom } = resolveResponseEncoding(headers);
   if (!codec) return body;
 
   if (codec === "gzip") {
-    return new Uint8Array(await gzipDecompress(body));
+    return new Uint8Array(await gzipDecompress(body, maxDecodedBytes));
   }
   if (codec === "zstd") {
     if (!zstdDecompress) {
@@ -90,7 +155,15 @@ export async function decodeResponseBody(
         "",
       );
     }
-    return new Uint8Array(await zstdDecompress(body));
+    const decoded = new Uint8Array(await zstdDecompress(body, maxDecodedBytes));
+    if (maxDecodedBytes != null && decoded.byteLength > maxDecodedBytes) {
+      throw new RpcError(
+        "TransportError",
+        `Decoded HTTP response exceeds accepted limit (${decoded.byteLength} > ${maxDecodedBytes})`,
+        "",
+      );
+    }
+    return decoded;
   }
 
   // An unknown codec is not recoverable, and handing the still-encoded bytes to
