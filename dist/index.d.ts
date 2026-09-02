@@ -1,3 +1,4 @@
+export { IROH_ARROW_MUX_ALPN, IROH_HTTP_ALPN, type IrohConnectOptions, type IrohDispatchCertainty, type IrohEndpoint, type IrohErrorCategory, type IrohErrorStage, type IrohNativeBinding, IrohTransportError, IrohUriError, irohConnect, parseIrohEndpoint, } from "./client/iroh.js";
 export { createSocks5hFetch, dialSocks5h, httpConnectSocks5h, parseSocks5hProxy, type Socks5hProxy, tcpConnectSocks5h, } from "./client/socks5h.js";
 export { tcpConnect } from "./client/tcp.js";
 export * from "./index.core.js";

@@ -12,6 +12,8 @@ dist/*
 dist/client/*
 !dist/client/socks5h.d.ts
 !dist/client/socks5h.d.ts.map
+!dist/client/iroh.d.ts
+!dist/client/iroh.d.ts.map
 !dist/http/
 dist/http/*
 !dist/http/spiffe.d.ts
