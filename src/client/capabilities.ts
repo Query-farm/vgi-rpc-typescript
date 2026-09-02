@@ -51,6 +51,7 @@ function parseHeaderInt(headers: Headers, name: string, responseBudget = false):
   return responseBudget ? parseResponseBudgetDecimal(raw) : parsePositiveSafeDecimal(raw);
 }
 
+/** Parse one HTTP response's VGI capability headers into a validated snapshot. */
 export function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabilities {
   const uploadRaw = headers.get(UPLOAD_URL_HEADER) ?? headers.get(UPLOAD_URL_HEADER.toLowerCase());
   const uploadUrlSupport = uploadRaw === "true";
@@ -95,6 +96,7 @@ export function requireResponseBudgetSupport(headers: Headers): HttpServerCapabi
   return capabilities;
 }
 
+/** Probe the server's auth-exempt OPTIONS endpoint for HTTP transport capabilities. */
 export async function discoverHttpCapabilities(
   baseUrl: string,
   prefix: string,
@@ -118,6 +120,7 @@ export async function discoverHttpCapabilities(
   return parseCapabilitiesFromHeaders(resp.headers);
 }
 
+/** Return whether a cached capability snapshot remains usable without another probe. */
 export function isCapabilitySnapshotFresh(snapshot: HttpServerCapabilities | null): boolean {
   if (!snapshot) return false;
   if (snapshot.cacheExpiresAt == null) return true;

@@ -141,9 +141,7 @@ describe("HTTP client response budgets", () => {
     const overSafety = new Response(new Uint8Array(70_001), {
       headers: { "X-VGI-Content-Encoding": "zstd" },
     });
-    await expect(readResponseBodyBounded(overSafety, 65_536, 70_000)).rejects.toThrow(
-      "representation safety limit",
-    );
+    await expect(readResponseBodyBounded(overSafety, 65_536, 70_000)).rejects.toThrow("representation safety limit");
   });
 
   test("transparent compression ignores encoded Content-Length while bounding decoded bytes", async () => {

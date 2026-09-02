@@ -28,8 +28,8 @@ import {
   STATE_KEY,
 } from "../../src/constants.js";
 import type { ExternalLocationConfig, ExternalStorage } from "../../src/external.js";
-import { AuthFailure, AuthReason } from "../../src/http/unauthorized.js";
 import { parseResponseBudgetDecimal } from "../../src/http/response-budget.js";
+import { AuthFailure, AuthReason } from "../../src/http/unauthorized.js";
 import { ARROW_CONTENT_TYPE, bytes, createHttpHandler, Protocol, str } from "../../src/index.js";
 
 function buildRequestIpc(

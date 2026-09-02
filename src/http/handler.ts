@@ -952,11 +952,7 @@ export function createHttpHandler(
     return resp;
   }
 
-  function invalidAcceptedResponseBudget(
-    error: unknown,
-    request: Request,
-    isOptions = false,
-  ): Response {
+  function invalidAcceptedResponseBudget(error: unknown, request: Request, isOptions = false): Response {
     const valueError = new Error(
       `Invalid ${ACCEPT_MAX_RESPONSE_BYTES_HEADER}: ${error instanceof Error ? error.message : String(error)}`,
     );
