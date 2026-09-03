@@ -2,6 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export {
+  type HttpiConnectOptions,
+  httpiConnect,
+  type IrohHttpBinding,
+  type IrohHttpFetchInit,
+  type IrohHttpNode,
+  type IrohHttpNodeOptions,
+} from "./client/httpi.js";
+export {
   IROH_ARROW_MUX_ALPN,
   IROH_HTTP_ALPN,
   type IrohConnectOptions,

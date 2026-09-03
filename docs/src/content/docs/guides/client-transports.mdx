@@ -1,9 +1,9 @@
 ---
 title: Client Transports
-description: Connect to vgi-rpc servers over HTTP, subprocess pipes, or raw streams.
+description: Connect to vgi-rpc servers over HTTP, Iroh, subprocess pipes, or raw streams.
 ---
 
-The vgi-rpc client library provides HTTP, subprocess, pipe, and raw-TCP connect functions that all return the same `RpcClient` interface. Pick the transport that fits your deployment and use `call()`, `stream()`, `describe()`, and `close()` identically across all of them.
+The vgi-rpc client library provides HTTP, HTTP-over-Iroh, raw Iroh, subprocess, pipe, and raw-TCP connect functions that all return the same `RpcClient` interface. Pick the transport that fits your deployment and use `call()`, `stream()`, `describe()`, and `close()` identically across all of them.
 
 :::note
 This page covers the client-side connect functions. To **serve** over an AF_UNIX socket via the launcher (`serveUnix`), see the [Unix Socket Launcher](/guides/launcher/) guide.
@@ -47,6 +47,56 @@ client.close();
 HTTP transport is stateless — stream continuity is managed via XChaCha20-Poly1305 AEAD-sealed state tokens exchanged in batch metadata.
 
 The `authorization` option (HTTP only) sets the `Authorization` request header. All three connect functions also accept an `externalLocation` option for configuring out-of-band data transfer locations.
+
+## HTTP over Iroh (Node/Bun)
+
+`httpiConnect` runs the complete VGI HTTP client over the `iroh-http/2` ALPN.
+Install the optional native binding first:
+
+```bash
+bun add @momics/iroh-http-node
+```
+
+Then connect with the worker's canonical 64-lowercase-hex EndpointId:
+
+```typescript
+import { httpiConnect } from "@query-farm/vgi-rpc";
+
+const client = await httpiConnect(
+  "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/vgi",
+  {
+    directAddresses: ["192.0.2.10:4433"], // optional discovery hints
+    remoteRelayUrl: "https://relay.example",
+    requestTimeoutMs: 30_000,
+    authorization: "Bearer <token>",
+  },
+);
+
+const result = await client.call("add", { a: 2, b: 3 });
+client.close();
+```
+
+The connector converts the canonical hex EndpointId to iroh-http's native
+base-32 hostname internally. OPTIONS capability discovery, VGI continuations,
+authorization, compression, response-size negotiation, and external-location
+fetches all remain handled by the ordinary HTTP client. The native adapter
+limits each HTTP response to 256 MiB, so `acceptedMaxResponseBytes` cannot be
+configured above that value.
+
+By default the connector creates, owns, and closes an Iroh node. Pass `node` to
+reuse an application-owned node; it remains open unless `closeNode: true` is
+set. Use `externalFetch` when external-location URLs need a custom non-Iroh
+fetch implementation.
+
+This binding targets Node/Bun. It is not bundled into browser entry points;
+browser Iroh support uses the Rust/WASM connector.
+
+## Raw Iroh (Node/Bun)
+
+Use `irohConnect("iroh://<64-hex-endpoint-id>")` with the optional
+`@number0/iroh` native binding when both peers speak VGI Arrow mux directly.
+Unlike HTTP-over-Iroh, this is connection-stateful and does not use the HTTP
+OPTIONS or continuation protocol.
 
 ## SOCKS5h (Node/Bun)
 

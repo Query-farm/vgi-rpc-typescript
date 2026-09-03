@@ -242,15 +242,14 @@ async function loadBinding(): Promise<IrohNativeBinding> {
 
 /**
  * Connect the ordinary VGI raw client over a native Iroh bidirectional stream.
- * HTTP-over-Iroh is deliberately not routed through this function: it needs an
- * iroh-http/2 codec, not raw Arrow-mux framing. The httpi scheme is therefore
- * parsed for the shared endpoint contract but explicitly unsupported here.
+ * HTTP-over-Iroh is available separately through `httpiConnect`; it uses the
+ * iroh-http/2 codec rather than raw Arrow-mux framing.
  */
 export async function irohConnect(rawEndpoint: string, options: IrohConnectOptions = {}): Promise<RpcClient> {
   const target = parseIrohEndpoint(rawEndpoint);
   if (target.scheme !== "iroh") {
     throw new IrohTransportError(
-      "irohConnect only accepts iroh:// endpoints; httpi:// requires an iroh-http/2 client",
+      "irohConnect only accepts iroh:// endpoints; use httpiConnect for HTTP-over-Iroh",
       "bind",
       "unsupported",
       "not_sent",

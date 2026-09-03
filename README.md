@@ -28,7 +28,7 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 - **Runtime introspection** — opt-in `__describe__` method for dynamic service discovery via the CLI
 - **Result validation** — missing required fields in handler results throw descriptive errors at emit time
 - **Authentication** — bearer tokens, JWT, mTLS (PEM-in-header and XFCC), with chainable authenticators
-- **Four client transports** — HTTP, subprocess, raw pipe, and raw TCP (`tcpConnect` / `serveTcp`), all sharing a unified `RpcClient` interface. Raw TCP carries no auth/TLS and defaults to loopback (`127.0.0.1`) — trusted networks only; use HTTP otherwise.
+- **Six client transports** — HTTP, HTTP-over-Iroh (`httpiConnect`), raw Iroh (`irohConnect`), subprocess, raw pipe, and raw TCP, all sharing a unified `RpcClient` interface. Raw TCP carries no auth/TLS and defaults to loopback (`127.0.0.1`) — trusted networks only; use HTTP otherwise.
 
 See [SPIFFE identity from trusted HTTP proxies](docs/spiffe-proxy-identity.md)
 for Envoy, nginx, AWS ALB, Google Cloud Load Balancing, and Azure Application
@@ -110,6 +110,42 @@ client2.close();
 ```
 
 All transports share the same `RpcClient` interface: `call()`, `stream()`, `describe()`, `close()`.
+
+### HTTP over Iroh (Node/Bun)
+
+Install the optional native adapter and connect to the worker's canonical
+64-hex Iroh EndpointId:
+
+```bash
+bun add @momics/iroh-http-node
+```
+
+```typescript
+import { httpiConnect } from "@query-farm/vgi-rpc";
+
+const client = await httpiConnect(
+  "httpi://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/vgi",
+  {
+    // Optional discovery hints when the endpoint is not discoverable by relay.
+    directAddresses: ["192.0.2.10:4433"],
+    requestTimeoutMs: 30_000,
+    authorization: "Bearer <token>",
+  },
+);
+const result = await client.call("add", { a: 2, b: 3 });
+client.close();
+```
+
+`httpiConnect` carries the ordinary VGI HTTP protocol over the `iroh-http/2`
+ALPN. It therefore retains OPTIONS capability discovery, authorization,
+compression, continuations, response budgets, and external-location handling.
+The adapter accepts at most 256 MiB per HTTP response, matching its native
+transport limit. The client owns and closes a node it creates. Pass `node` to
+share an application-owned node; it remains open unless `closeNode: true` is
+set.
+
+This native adapter is for Node/Bun, not browser bundles. Browser Iroh clients
+use the separately packaged Rust/WASM connector.
 
 ## Testing with the Python CLI
 

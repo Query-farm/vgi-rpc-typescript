@@ -46,7 +46,7 @@ jobs:
         run: bun --conditions=flechette test test/batch-metadata.test.ts
 
       - name: Run client tests (bun transports only)
-        run: timeout 120 bun test test/client.test.ts test/client-native-conformance.test.ts
+        run: timeout 180 bun test test/client.test.ts test/client-native-conformance.test.ts test/iroh-client.test.ts
 
   build:
     runs-on: ubuntu-latest

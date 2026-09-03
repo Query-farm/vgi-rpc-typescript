@@ -77,6 +77,7 @@
     "@aws-sdk/client-s3": ">=3.0.0",
     "@aws-sdk/s3-request-presigner": ">=3.0.0",
     "@google-cloud/storage": ">=7.0.0",
+    "@momics/iroh-http-node": ">=0.6.2 <1",
     "@number0/iroh": ">=1.1.0 <2"
   },
   "peerDependenciesMeta": {
@@ -92,21 +93,25 @@
     "@google-cloud/storage": {
       "optional": true
     },
+    "@momics/iroh-http-node": {
+      "optional": true
+    },
     "@number0/iroh": {
       "optional": true
     }
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1059.0",
+    "@aws-sdk/s3-request-presigner": "^3.1059.0",
     "@biomejs/biome": "^2.4.16",
+    "@google-cloud/storage": "^7.19.0",
+    "@momics/iroh-http-node": "0.6.2",
+    "@number0/iroh": "1.1.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-metrics": "^2.7.1",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@opentelemetry/semantic-conventions": "^1.41.1",
-    "@aws-sdk/client-s3": "^3.1059.0",
-    "@aws-sdk/s3-request-presigner": "^3.1059.0",
-    "@google-cloud/storage": "^7.19.0",
-    "@number0/iroh": "1.1.0",
     "@types/bun": "latest"
   },
   "scripts": {
