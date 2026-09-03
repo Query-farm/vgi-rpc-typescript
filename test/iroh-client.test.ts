@@ -13,12 +13,19 @@ import {
   parseIrohEndpoint,
 } from "../src/client/iroh.js";
 import {
+  AuthContext,
+  bearerAuthenticateStatic,
+  type CallContext,
   createHttpHandler,
   float,
   httpiConnect,
+  IROH_FORWARDED_ENDPOINT_HEADER,
   type IrohHttpFetchInit,
   type IrohHttpNode,
+  irohForwardedHeaderIdentityProvider,
   Protocol,
+  requirePeerIdentity,
+  str,
 } from "../src/index.js";
 
 const ID = "0123456789abcdef".repeat(4);
@@ -224,11 +231,41 @@ describe("Iroh endpoint contract", () => {
 
 describe("HTTP-over-Iroh client", () => {
   function addProtocol(): Protocol {
-    return new Protocol("IrohHttpTest").unary("add", {
-      params: { a: float, b: float },
-      result: { result: float },
-      handler: ({ a, b }) => ({ result: a + b }),
-    });
+    return new Protocol("IrohHttpTest")
+      .unary("add", {
+        params: { a: float, b: float },
+        result: { result: float },
+        handler: ({ a, b }) => ({ result: a + b }),
+      })
+      .unary("identity", {
+        params: {},
+        result: {
+          domain: str,
+          principal: str,
+          endpointId: str,
+          issuer: str,
+          evidenceSource: str,
+          assurance: str,
+          originalAssurance: str,
+          evidenceBinding: str,
+        },
+        handler: (_params, rawContext) => {
+          const context = rawContext as CallContext;
+          context.auth.requireAuthenticated();
+          const identity = context.peerEvidence?.uniqueVerifiedSubject("iroh");
+          if (!identity) throw new Error("missing Iroh peer identity");
+          return {
+            domain: context.auth.domain,
+            principal: context.auth.principal ?? "",
+            endpointId: identity.subjectKey ?? "",
+            issuer: identity.issuer,
+            evidenceSource: identity.evidenceSource,
+            assurance: identity.assurance,
+            originalAssurance: String(identity.attributes.original_assurance ?? ""),
+            evidenceBinding: String(context.auth.claims.peer_evidence_binding ?? ""),
+          };
+        },
+      });
   }
 
   test("routes the complete VGI HTTP client through typed iroh-http fetch", async () => {
@@ -317,18 +354,53 @@ describe("HTTP-over-Iroh client", () => {
   test("performs a real iroh-http/2 VGI request over native Iroh", async () => {
     const serverNode = await createNode({ relay: { mode: "disabled" } });
     const clientNode = await createNode({ relay: { mode: "disabled" } });
-    const server = serverNode.serve(createHttpHandler(addProtocol(), { prefix: "/vgi", serverId: "httpi-live" }));
+    const server = serverNode.serve(
+      createHttpHandler(addProtocol(), {
+        prefix: "/vgi",
+        serverId: "httpi-live",
+        authenticate: bearerAuthenticateStatic({
+          tokens: { "hosted-native-token": new AuthContext("bearer", true, "typescript-ci") },
+        }),
+        peerIdentityProviders: [
+          irohForwardedHeaderIdentityProvider({
+            issuer: "typescript-hosted-ci",
+            trustedProxyAddresses: ["127.0.0.1"],
+          }),
+        ],
+        peerAuthenticationPolicy: requirePeerIdentity("iroh"),
+        peerResolutionContext(request) {
+          const peerId = request.headers.get("Peer-Id");
+          const endpointId = peerId ? Buffer.from(PublicKey.fromPeerId(peerId).bytes).toString("hex") : "";
+          return {
+            immediatePeer: "127.0.0.1",
+            headers: new Map([[IROH_FORWARDED_ENDPOINT_HEADER, [endpointId]]]),
+          };
+        },
+      }),
+    );
     try {
       const discovery = await serverNode.discoveryInfo();
       expect(discovery.directAddresses.length).toBeGreaterThan(0);
       const endpointHex = Buffer.from(serverNode.publicKey.bytes).toString("hex");
+      const clientEndpointHex = Buffer.from(clientNode.publicKey.bytes).toString("hex");
       const client = await httpiConnect(`httpi://${endpointHex}/vgi`, {
         node: clientNode,
         directAddresses: discovery.directAddresses,
         requestTimeoutMs: 10_000,
+        authorization: "Bearer hosted-native-token",
       });
       try {
         expect(await client.call("add", { a: 19, b: 23 })).toEqual({ result: 42 });
+        expect(await client.call("identity", {})).toEqual({
+          domain: "bearer",
+          principal: "typescript-ci",
+          endpointId: clientEndpointHex,
+          issuer: "typescript-hosted-ci",
+          evidenceSource: "http_proxy",
+          assurance: "configured_proxy",
+          originalAssurance: "cryptographic_peer",
+          evidenceBinding: expect.stringMatching(/^[0-9a-f]{64}$/),
+        });
       } finally {
         client.close();
       }
