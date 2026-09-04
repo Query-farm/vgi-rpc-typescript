@@ -25,9 +25,12 @@ export interface HttpServerCapabilities {
     /** Monotonic-time-ish epoch (ms) at which this snapshot should be re-probed. */
     cacheExpiresAt: number | null;
 }
+/** Parse one HTTP response's VGI capability headers into a validated snapshot. */
 export declare function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabilities;
 /** Every VGI HTTP response, not only discovery, must repeat exact support. */
 export declare function requireResponseBudgetSupport(headers: Headers): HttpServerCapabilities;
+/** Probe the server's auth-exempt OPTIONS endpoint for HTTP transport capabilities. */
 export declare function discoverHttpCapabilities(baseUrl: string, prefix: string, authorization?: string, acceptedMaxResponseBytes?: number, fetchFn?: typeof globalThis.fetch): Promise<HttpServerCapabilities>;
+/** Return whether a cached capability snapshot remains usable without another probe. */
 export declare function isCapabilitySnapshotFresh(snapshot: HttpServerCapabilities | null): boolean;
 //# sourceMappingURL=capabilities.d.ts.map

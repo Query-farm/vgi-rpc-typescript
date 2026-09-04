@@ -723,19 +723,56 @@ var init_zstd = __esm(() => {
   isBun = typeof globalThis.Bun !== "undefined";
 });
 
-// src/client/iroh.ts
-import { randomBytes } from "node:crypto";
+// src/client/default-response-budget.ts
+var DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
 
-// src/client/pipe.ts
-import {
-  Field,
-  makeData,
-  RecordBatch,
-  RecordBatchStreamWriter as RecordBatchStreamWriter2,
-  Schema,
-  Struct,
-  vectorFromArray
-} from "@query-farm/apache-arrow";
+// src/http/response-budget.ts
+var ACCEPT_MAX_RESPONSE_BYTES_HEADER = "VGI-Accept-Max-Response-Bytes";
+var ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER = "VGI-Accept-Max-Response-Bytes-Support";
+var MAX_SAFE_RESPONSE_BYTES = Number.MAX_SAFE_INTEGER;
+var MIN_RESPONSE_BYTES = 64 * 1024;
+function parsePositiveSafeDecimal(raw) {
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    throw new TypeError("must be a positive decimal integer");
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > MAX_SAFE_RESPONSE_BYTES) {
+    throw new TypeError(`must not exceed ${MAX_SAFE_RESPONSE_BYTES}`);
+  }
+  return value;
+}
+function optionalPositiveSafeInteger(value, name) {
+  if (value === undefined)
+    return;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+  return value;
+}
+function parseResponseBudgetDecimal(raw) {
+  const value = parsePositiveSafeDecimal(raw);
+  if (value < MIN_RESPONSE_BYTES)
+    throw new TypeError(`must be at least ${MIN_RESPONSE_BYTES}`);
+  return value;
+}
+function optionalResponseBudget(value, name) {
+  const parsed = optionalPositiveSafeInteger(value, name);
+  if (parsed !== undefined && parsed < MIN_RESPONSE_BYTES) {
+    throw new TypeError(`${name} must be at least ${MIN_RESPONSE_BYTES}`);
+  }
+  return parsed;
+}
+function minPositive(...values) {
+  let result;
+  for (const value of values) {
+    if (value !== undefined && value > 0 && (result === undefined || value < result))
+      result = value;
+  }
+  return result;
+}
+
+// src/client/connect.ts
+import { Schema as Schema3 } from "@query-farm/apache-arrow";
 
 // src/constants.ts
 var RPC_METHOD_KEY = "vgi_rpc.method";
@@ -1488,6 +1525,54 @@ async function resolveExternalLocation(batch, config) {
   return resolved;
 }
 
+// src/http/codec.ts
+var DEFAULT_COMPRESSION_LEVEL = 1;
+var COMPRESSION_ENCODINGS = ["zstd", "gzip"];
+var IDENTITY_ENCODING = "identity";
+var KNOWN_ENCODINGS = [...COMPRESSION_ENCODINGS, IDENTITY_ENCODING];
+function parseEncodingList(headerValue) {
+  if (!headerValue)
+    return [];
+  const out = [];
+  const seen = new Set;
+  for (const raw of headerValue.split(",")) {
+    let token = raw.trim().toLowerCase();
+    if (!token)
+      continue;
+    const semi = token.indexOf(";");
+    if (semi >= 0)
+      token = token.slice(0, semi).trim();
+    if (!KNOWN_ENCODINGS.includes(token))
+      continue;
+    if (seen.has(token))
+      continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+function pickResponseEncoding(standardHeader, customHeader, canProduce) {
+  const standard = parseEncodingList(standardHeader);
+  const custom = parseEncodingList(customHeader);
+  const merged = [...custom, ...standard.filter((e) => !custom.includes(e))];
+  for (const enc of merged) {
+    if (enc === IDENTITY_ENCODING) {
+      return { codec: null, usedCustom: false };
+    }
+    if (canProduce(enc)) {
+      return { codec: enc, usedCustom: custom.includes(enc) && !standard.includes(enc) };
+    }
+  }
+  return { codec: null, usedCustom: custom.length > 0 };
+}
+var CONTENT_ENCODING_HEADER = "Content-Encoding";
+var VGI_CONTENT_ENCODING_HEADER = "X-VGI-Content-Encoding";
+var VGI_ACCEPT_ENCODING_HEADER = "X-VGI-Accept-Encoding";
+function clientAcceptEncoding(hasZstdDecoder) {
+  return hasZstdDecoder ? "zstd, gzip" : "gzip";
+}
+var SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings";
+
 // src/util/gzip.ts
 async function streamThrough(data, transform, maxOutputSize) {
   const ws = transform.writable.getWriter();
@@ -1618,347 +1703,6 @@ async function readRequestFromBody(body) {
     throw new HttpRpcError("Empty IPC stream: no schema", 400);
   }
   return { schema: batch.schema, batch };
-}
-
-// src/wire/reader.ts
-import { RecordBatchReader as RecordBatchReader2 } from "@query-farm/apache-arrow";
-var MAX_READ_CHUNK = 1 << 26;
-function isNodeReadable(input) {
-  const s = input;
-  return typeof s?.read === "function" && typeof s?.pipe === "function";
-}
-function clampReads(stream) {
-  return new Proxy(stream, {
-    get(target, prop) {
-      if (prop === "read") {
-        return (size) => target.read(typeof size === "number" ? Math.min(size, MAX_READ_CHUNK) : size);
-      }
-      const value = Reflect.get(target, prop, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    }
-  });
-}
-
-class IpcStreamReader {
-  reader;
-  initialized = false;
-  streamEnded = false;
-  constructor(reader) {
-    this.reader = reader;
-  }
-  static async create(input) {
-    const source = isNodeReadable(input) ? clampReads(input) : input;
-    const reader = await RecordBatchReader2.from(source);
-    await reader.open({ autoDestroy: false });
-    if (reader.closed) {
-      throw new Error("Input stream closed before first IPC message");
-    }
-    return new IpcStreamReader(reader);
-  }
-  async readStream() {
-    if (this.initialized) {
-      await this.reader.reset().open();
-      if (this.reader.closed) {
-        return null;
-      }
-    }
-    this.initialized = true;
-    const schema2 = this.reader.schema;
-    if (!schema2) {
-      return null;
-    }
-    const batches = [];
-    while (true) {
-      const result = await this.reader.next();
-      if (result.done)
-        break;
-      if (result.value.constructor.name === "_InternalEmptyPlaceholderRecordBatch")
-        break;
-      batches.push(result.value);
-    }
-    return { schema: schema2, batches };
-  }
-  async openNextStream() {
-    if (this.initialized) {
-      await this.reader.reset().open();
-      if (this.reader.closed) {
-        return null;
-      }
-    }
-    this.initialized = true;
-    this.streamEnded = false;
-    return this.reader.schema ?? null;
-  }
-  async readNextBatch() {
-    if (this.streamEnded)
-      return null;
-    const result = await this.reader.next();
-    if (result.done) {
-      this.streamEnded = true;
-      return null;
-    }
-    if (result.value.constructor.name === "_InternalEmptyPlaceholderRecordBatch") {
-      this.streamEnded = true;
-      return null;
-    }
-    return result.value;
-  }
-  async cancel() {
-    await this.reader.cancel();
-  }
-}
-
-// src/wire/writer.ts
-var STDOUT_FD = 1;
-var RESOLVED = Promise.resolve();
-var _NODE_FS_MOD = "node:fs";
-var _writeSync = null;
-function _loadWriteSync() {
-  if (_writeSync)
-    return _writeSync;
-  const getBuiltin = globalThis.process?.getBuiltinModule;
-  if (typeof getBuiltin === "function") {
-    const fs2 = getBuiltin.call(globalThis.process, _NODE_FS_MOD);
-    if (fs2?.writeSync) {
-      _writeSync = fs2.writeSync.bind(fs2);
-      return _writeSync;
-    }
-  }
-  const req = import.meta.require ?? globalThis.require ?? null;
-  if (!req) {
-    throw new Error("IpcStreamWriter needs synchronous node:fs.writeSync, reached via " + "import.meta.require (Bun), globalThis.require (Node CJS), or " + "process.getBuiltinModule (Node >= 20.16). This runtime offers none of " + "them, so the subprocess transport is unavailable. On an older Node ESM, " + "either upgrade or set globalThis.require = createRequire(import.meta.url).");
-  }
-  const fs = req(_NODE_FS_MOD);
-  _writeSync = fs.writeSync.bind(fs);
-  return _writeSync;
-}
-var MAX_WRITE_CHUNK = 1 << 30;
-var MAX_STREAM_CHUNK = 128 * 1024;
-function writeAll(fd, data) {
-  const writeSync = _loadWriteSync();
-  let offset = 0;
-  let spins = 0;
-  while (offset < data.length) {
-    try {
-      const written = writeSync(fd, data, offset, Math.min(data.length - offset, MAX_WRITE_CHUNK));
-      if (written <= 0)
-        throw new Error(`writeSync returned ${written}`);
-      offset += written;
-      spins = 0;
-    } catch (e) {
-      if (e.code === "EAGAIN") {
-        if (++spins < 8192)
-          continue;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
-        spins = 0;
-        continue;
-      }
-      throw e;
-    }
-  }
-}
-async function socketWriteAll(socket, data) {
-  let offset = 0;
-  do {
-    const end = Math.min(offset + MAX_STREAM_CHUNK, data.length);
-    await socketWriteChunk(socket, data.subarray(offset, end));
-    offset = end;
-  } while (offset < data.length);
-}
-async function socketWriteChunk(socket, data) {
-  if (socket.destroyed || socket.writableEnded) {
-    throw new Error("socketWriteAll: socket is already closed");
-  }
-  const ok = socket.write(data);
-  if (ok)
-    return;
-  await new Promise((resolve, reject) => {
-    const cleanup = () => {
-      socket.off("drain", onDrain);
-      socket.off("error", onError);
-      socket.off("close", onClose);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err2) => {
-      cleanup();
-      reject(err2);
-    };
-    const onClose = () => {
-      cleanup();
-      resolve();
-    };
-    socket.once("drain", onDrain);
-    socket.once("error", onError);
-    socket.once("close", onClose);
-  });
-}
-
-class IpcStreamWriter {
-  target;
-  constructor(fdOrSocketOrSink = STDOUT_FD) {
-    if (typeof fdOrSocketOrSink === "number") {
-      this.target = { kind: "fd", fd: fdOrSocketOrSink };
-    } else if (typeof fdOrSocketOrSink.write === "function" && !("writable" in fdOrSocketOrSink)) {
-      this.target = { kind: "sink", sink: fdOrSocketOrSink };
-    } else {
-      this.target = { kind: "socket", socket: fdOrSocketOrSink };
-    }
-  }
-  async writeStream(schema2, batches) {
-    const bytes = serializeBatches(schema2, batches);
-    if (this.target.kind === "fd") {
-      writeAll(this.target.fd, bytes);
-    } else if (this.target.kind === "sink") {
-      await this.target.sink.write(bytes);
-    } else {
-      await socketWriteAll(this.target.socket, bytes);
-    }
-  }
-  openStream(schema2) {
-    return new IncrementalStream(this.target, schema2);
-  }
-}
-
-class IncrementalStream {
-  encoder;
-  target;
-  closed = false;
-  writeChain = Promise.resolve();
-  constructor(target, schema2) {
-    this.target = target;
-    this.encoder = createIncrementalEncoder(schema2);
-    this.enqueue(this.encoder.start());
-  }
-  async write(batch) {
-    if (this.closed)
-      throw new Error("Stream already closed");
-    return this.enqueue(this.encoder.writeBatch(batch));
-  }
-  async close() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    return this.enqueue(this.encoder.finish());
-  }
-  enqueue(bytes) {
-    const target = this.target;
-    if (target.kind === "fd") {
-      writeAll(target.fd, bytes);
-      return RESOLVED;
-    }
-    const next = this.writeChain.then(() => {
-      if (target.kind === "sink") {
-        return target.sink.write(bytes);
-      }
-      return socketWriteAll(target.socket, bytes);
-    });
-    this.writeChain = next.catch(() => {
-      return;
-    });
-    return next;
-  }
-}
-
-// src/client/introspect.ts
-import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
-
-// src/client/default-response-budget.ts
-var DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
-
-// src/http/codec.ts
-var DEFAULT_COMPRESSION_LEVEL = 1;
-var COMPRESSION_ENCODINGS = ["zstd", "gzip"];
-var IDENTITY_ENCODING = "identity";
-var KNOWN_ENCODINGS = [...COMPRESSION_ENCODINGS, IDENTITY_ENCODING];
-function parseEncodingList(headerValue) {
-  if (!headerValue)
-    return [];
-  const out = [];
-  const seen = new Set;
-  for (const raw of headerValue.split(",")) {
-    let token = raw.trim().toLowerCase();
-    if (!token)
-      continue;
-    const semi = token.indexOf(";");
-    if (semi >= 0)
-      token = token.slice(0, semi).trim();
-    if (!KNOWN_ENCODINGS.includes(token))
-      continue;
-    if (seen.has(token))
-      continue;
-    seen.add(token);
-    out.push(token);
-  }
-  return out;
-}
-function pickResponseEncoding(standardHeader, customHeader, canProduce) {
-  const standard = parseEncodingList(standardHeader);
-  const custom = parseEncodingList(customHeader);
-  const merged = [...custom, ...standard.filter((e) => !custom.includes(e))];
-  for (const enc of merged) {
-    if (enc === IDENTITY_ENCODING) {
-      return { codec: null, usedCustom: false };
-    }
-    if (canProduce(enc)) {
-      return { codec: enc, usedCustom: custom.includes(enc) && !standard.includes(enc) };
-    }
-  }
-  return { codec: null, usedCustom: custom.length > 0 };
-}
-var CONTENT_ENCODING_HEADER = "Content-Encoding";
-var VGI_CONTENT_ENCODING_HEADER = "X-VGI-Content-Encoding";
-var VGI_ACCEPT_ENCODING_HEADER = "X-VGI-Accept-Encoding";
-function clientAcceptEncoding(hasZstdDecoder) {
-  return hasZstdDecoder ? "zstd, gzip" : "gzip";
-}
-var SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings";
-
-// src/http/response-budget.ts
-var ACCEPT_MAX_RESPONSE_BYTES_HEADER = "VGI-Accept-Max-Response-Bytes";
-var ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER = "VGI-Accept-Max-Response-Bytes-Support";
-var MAX_SAFE_RESPONSE_BYTES = Number.MAX_SAFE_INTEGER;
-var MIN_RESPONSE_BYTES = 64 * 1024;
-function parsePositiveSafeDecimal(raw) {
-  if (!/^[1-9][0-9]*$/.test(raw)) {
-    throw new TypeError("must be a positive decimal integer");
-  }
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value > MAX_SAFE_RESPONSE_BYTES) {
-    throw new TypeError(`must not exceed ${MAX_SAFE_RESPONSE_BYTES}`);
-  }
-  return value;
-}
-function optionalPositiveSafeInteger(value, name) {
-  if (value === undefined)
-    return;
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new TypeError(`${name} must be a positive safe integer`);
-  }
-  return value;
-}
-function parseResponseBudgetDecimal(raw) {
-  const value = parsePositiveSafeDecimal(raw);
-  if (value < MIN_RESPONSE_BYTES)
-    throw new TypeError(`must be at least ${MIN_RESPONSE_BYTES}`);
-  return value;
-}
-function optionalResponseBudget(value, name) {
-  const parsed = optionalPositiveSafeInteger(value, name);
-  if (parsed !== undefined && parsed < MIN_RESPONSE_BYTES) {
-    throw new TypeError(`${name} must be at least ${MIN_RESPONSE_BYTES}`);
-  }
-  return parsed;
-}
-function minPositive(...values) {
-  let result;
-  for (const value of values) {
-    if (value !== undefined && value > 0 && (result === undefined || value < result))
-      result = value;
-  }
-  return result;
 }
 
 // src/client/capabilities.ts
@@ -2111,6 +1855,9 @@ async function decodeResponseBody(headers, body, zstdDecompress2, maxDecodedByte
   throw new RpcError("ProtocolError", `Unsupported response encoding '${codec}'` + `${custom ? ` (${VGI_CONTENT_ENCODING_HEADER})` : ` (${CONTENT_ENCODING_HEADER})`}.`, "");
 }
 
+// src/client/introspect.ts
+import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
+
 // src/client/ipc.ts
 import {
   Binary,
@@ -2121,6 +1868,96 @@ import {
   RecordBatchReader as RecordBatchReader3,
   Utf8
 } from "@query-farm/apache-arrow";
+
+// src/wire/reader.ts
+import { RecordBatchReader as RecordBatchReader2 } from "@query-farm/apache-arrow";
+var MAX_READ_CHUNK = 1 << 26;
+function isNodeReadable(input) {
+  const s = input;
+  return typeof s?.read === "function" && typeof s?.pipe === "function";
+}
+function clampReads(stream) {
+  return new Proxy(stream, {
+    get(target, prop) {
+      if (prop === "read") {
+        return (size) => target.read(typeof size === "number" ? Math.min(size, MAX_READ_CHUNK) : size);
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
+class IpcStreamReader {
+  reader;
+  initialized = false;
+  streamEnded = false;
+  constructor(reader) {
+    this.reader = reader;
+  }
+  static async create(input) {
+    const source = isNodeReadable(input) ? clampReads(input) : input;
+    const reader = await RecordBatchReader2.from(source);
+    await reader.open({ autoDestroy: false });
+    if (reader.closed) {
+      throw new Error("Input stream closed before first IPC message");
+    }
+    return new IpcStreamReader(reader);
+  }
+  async readStream() {
+    if (this.initialized) {
+      await this.reader.reset().open();
+      if (this.reader.closed) {
+        return null;
+      }
+    }
+    this.initialized = true;
+    const schema2 = this.reader.schema;
+    if (!schema2) {
+      return null;
+    }
+    const batches = [];
+    while (true) {
+      const result = await this.reader.next();
+      if (result.done)
+        break;
+      if (result.value.constructor.name === "_InternalEmptyPlaceholderRecordBatch")
+        break;
+      batches.push(result.value);
+    }
+    return { schema: schema2, batches };
+  }
+  async openNextStream() {
+    if (this.initialized) {
+      await this.reader.reset().open();
+      if (this.reader.closed) {
+        return null;
+      }
+    }
+    this.initialized = true;
+    this.streamEnded = false;
+    return this.reader.schema ?? null;
+  }
+  async readNextBatch() {
+    if (this.streamEnded)
+      return null;
+    const result = await this.reader.next();
+    if (result.done) {
+      this.streamEnded = true;
+      return null;
+    }
+    if (result.value.constructor.name === "_InternalEmptyPlaceholderRecordBatch") {
+      this.streamEnded = true;
+      return null;
+    }
+    return result.value;
+  }
+  async cancel() {
+    await this.reader.cancel();
+  }
+}
+
+// src/client/ipc.ts
 function inferArrowType(value) {
   if (typeof value === "string")
     return new Utf8;
@@ -2349,742 +2186,8 @@ async function httpIntrospect(rawBaseUrl, options) {
   return parseDescribeResponse(batches);
 }
 
-// src/client/pipe.ts
-function fieldsMatch(left, right) {
-  if (left.name !== right.name || left.nullable !== right.nullable || String(left.type) !== String(right.type)) {
-    return false;
-  }
-  const leftChildren = left.type.children;
-  const rightChildren = right.type.children;
-  return leftChildren.length === rightChildren.length && leftChildren.every((child, index) => fieldsMatch(child, rightChildren[index]));
-}
-function schemasMatch(left, right) {
-  return left.fields.length === right.fields.length && left.fields.every((field2, index) => fieldsMatch(field2, right.fields[index]));
-}
-
-class PipeIncrementalWriter {
-  writer;
-  writeFn;
-  closed = false;
-  constructor(writeFn, schema2) {
-    this.writeFn = writeFn;
-    this.writer = new RecordBatchStreamWriter2;
-    this.writer.reset(undefined, schema2);
-    this.drain();
-  }
-  write(batch) {
-    if (this.closed)
-      throw new Error("PipeIncrementalWriter already closed");
-    this.writer._writeRecordBatch(batch);
-    this.drain();
-  }
-  close() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    const eos = new Uint8Array(new Int32Array([-1, 0]).buffer);
-    this.writeFn(eos);
-  }
-  drain() {
-    const values = this.writer._sink._values;
-    for (const chunk of values) {
-      this.writeFn(chunk);
-    }
-    values.length = 0;
-  }
-}
-
-class PipeStreamSession {
-  _reader;
-  _writeFn;
-  _onLog;
-  _header;
-  _inputWriter = null;
-  _inputSchema = null;
-  _outputStreamOpened = false;
-  _closed = false;
-  _outputSchema;
-  _releaseBusy;
-  _setDrainPromise;
-  _externalConfig;
-  constructor(opts) {
-    this._reader = opts.reader;
-    this._writeFn = opts.writeFn;
-    this._onLog = opts.onLog;
-    this._header = opts.header;
-    this._outputSchema = opts.outputSchema;
-    this._releaseBusy = opts.releaseBusy;
-    this._setDrainPromise = opts.setDrainPromise;
-    this._externalConfig = opts.externalConfig;
-  }
-  get header() {
-    return this._header;
-  }
-  async _readOutputBatch() {
-    while (true) {
-      const batch = await this._reader.readNextBatch();
-      if (batch === null)
-        return null;
-      if (batch.numRows === 0) {
-        if (isExternalLocationBatch(batch)) {
-          return await resolveExternalLocation(batch, this._externalConfig);
-        }
-        if (dispatchLogOrError(batch, this._onLog)) {
-          continue;
-        }
-      }
-      return batch;
-    }
-  }
-  async _ensureOutputStream() {
-    if (this._outputStreamOpened)
-      return;
-    this._outputStreamOpened = true;
-    const schema2 = await this._reader.openNextStream();
-    if (!schema2) {
-      throw new RpcError("ProtocolError", "Expected output stream but got EOF", "");
-    }
-  }
-  async tick(metadata) {
-    if (this._closed) {
-      throw new RpcError("ProtocolError", "Stream session is closed", "");
-    }
-    const tickSchema = new Schema([]);
-    if (!this._inputWriter) {
-      this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
-    }
-    const tickData = makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
-    const tickBatch = new RecordBatch(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
-    this._inputWriter.write(tickBatch);
-    await this._ensureOutputStream();
-    const outputBatch = await this._readOutputBatch();
-    if (outputBatch === null) {
-      this._closed = true;
-      this._inputWriter.close();
-      this._inputWriter = null;
-      this._releaseBusy();
-      return [];
-    }
-    return extractBatchRows(outputBatch);
-  }
-  async exchange(input) {
-    if (this._closed) {
-      throw new RpcError("ProtocolError", "Stream session is closed", "");
-    }
-    let inputSchema;
-    let batch;
-    if (!Array.isArray(input)) {
-      inputSchema = input.schema;
-      batch = input;
-      if (this._inputSchema && !schemasMatch(this._inputSchema, inputSchema)) {
-        throw new RpcError("ProtocolError", `Exchange input schema changed: expected ${this._inputSchema}, got ${inputSchema}`, "");
-      }
-      this._inputSchema ??= inputSchema;
-    } else if (input.length === 0) {
-      inputSchema = this._inputSchema ?? this._outputSchema;
-      const children = inputSchema.fields.map((f) => {
-        return makeData({ type: f.type, length: 0, nullCount: 0 });
-      });
-      const structType = new Struct(inputSchema.fields);
-      const data = makeData({
-        type: structType,
-        length: 0,
-        children,
-        nullCount: 0
-      });
-      batch = new RecordBatch(inputSchema, data);
-    } else {
-      const keys = Object.keys(input[0]);
-      const fields = keys.map((key) => {
-        let sample;
-        for (const row of input) {
-          if (row[key] != null) {
-            sample = row[key];
-            break;
-          }
-        }
-        const arrowType = inferArrowType(sample);
-        return new Field(key, arrowType, true);
-      });
-      inputSchema = new Schema(fields);
-      if (this._inputSchema) {
-        const cached = this._inputSchema;
-        if (cached.fields.length !== inputSchema.fields.length || cached.fields.some((f, i) => f.name !== inputSchema.fields[i].name)) {
-          throw new RpcError("ProtocolError", `Exchange input schema changed: expected [${cached.fields.map((f) => f.name).join(", ")}] ` + `but got [${inputSchema.fields.map((f) => f.name).join(", ")}]`, "");
-        }
-      } else {
-        this._inputSchema = inputSchema;
-      }
-      const children = inputSchema.fields.map((f) => {
-        const values = input.map((row) => row[f.name]);
-        return vectorFromArray(values, f.type).data[0];
-      });
-      const structType = new Struct(inputSchema.fields);
-      const data = makeData({
-        type: structType,
-        length: input.length,
-        children,
-        nullCount: 0
-      });
-      batch = new RecordBatch(inputSchema, data);
-    }
-    if (!this._inputWriter) {
-      this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
-    }
-    this._inputWriter.write(batch);
-    await this._ensureOutputStream();
-    try {
-      const outputBatch = await this._readOutputBatch();
-      if (outputBatch === null) {
-        return [];
-      }
-      return extractBatchRows(outputBatch);
-    } catch (e) {
-      await this._cleanup();
-      throw e;
-    }
-  }
-  async _cleanup() {
-    if (this._closed)
-      return;
-    this._closed = true;
-    if (this._inputWriter) {
-      this._inputWriter.close();
-      this._inputWriter = null;
-    }
-    try {
-      if (this._outputStreamOpened) {
-        while (await this._reader.readNextBatch() !== null) {}
-      }
-    } catch {}
-    this._releaseBusy();
-  }
-  async* [Symbol.asyncIterator]() {
-    if (this._closed)
-      return;
-    try {
-      const tickSchema = new Schema([]);
-      this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
-      while (true) {
-        const rows = await this.tick();
-        if (this._closed) {
-          break;
-        }
-        yield rows;
-      }
-    } finally {
-      if (this._inputWriter) {
-        this._inputWriter.close();
-        this._inputWriter = null;
-      }
-      try {
-        if (this._outputStreamOpened) {
-          while (await this._reader.readNextBatch() !== null) {}
-        }
-      } catch {}
-      this._closed = true;
-      this._releaseBusy();
-    }
-  }
-  close() {
-    if (this._closed)
-      return;
-    this._closed = true;
-    if (this._inputWriter) {
-      this._inputWriter.close();
-      this._inputWriter = null;
-    } else {
-      const emptySchema = new Schema([]);
-      const ipc = serializeIpcStream(emptySchema, []);
-      this._writeFn(ipc);
-    }
-    const drainPromise = (async () => {
-      try {
-        if (!this._outputStreamOpened) {
-          const schema2 = await this._reader.openNextStream();
-          if (schema2) {
-            while (await this._reader.readNextBatch() !== null) {}
-          }
-        } else {
-          while (await this._reader.readNextBatch() !== null) {}
-        }
-      } catch {} finally {
-        this._releaseBusy();
-      }
-    })();
-    this._setDrainPromise(drainPromise);
-  }
-}
-function pipeConnect(readable, writable, options) {
-  const onLog = options?.onLog;
-  const externalConfig = options?.externalLocation;
-  let reader = null;
-  let readerPromise = null;
-  let methodCache = null;
-  let protocolName = "";
-  let serverProtocolVersion = "";
-  let _busy = false;
-  let _drainPromise = null;
-  let closed = false;
-  const writeFn = (bytes) => {
-    let offset = 0;
-    do {
-      const end = Math.min(offset + MAX_STREAM_CHUNK, bytes.length);
-      writable.write(bytes.subarray(offset, end));
-      offset = end;
-    } while (offset < bytes.length);
-    writable.flush?.();
-  };
-  async function ensureReader() {
-    if (reader)
-      return reader;
-    if (!readerPromise) {
-      readerPromise = IpcStreamReader.create(readable);
-    }
-    reader = await readerPromise;
-    return reader;
-  }
-  async function acquireBusy() {
-    if (_drainPromise) {
-      await _drainPromise;
-      _drainPromise = null;
-    }
-    if (_busy) {
-      throw new Error("Pipe transport is busy — another call or stream is in progress. " + "Pipe connections are single-threaded; wait for the current operation to complete.");
-    }
-    _busy = true;
-  }
-  function releaseBusy() {
-    _busy = false;
-  }
-  function setDrainPromise(p) {
-    _drainPromise = p;
-  }
-  async function ensureMethodCache() {
-    if (methodCache)
-      return methodCache;
-    await acquireBusy();
-    try {
-      const emptySchema = new Schema([]);
-      const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
-      writeFn(body);
-      const r = await ensureReader();
-      const response = await r.readStream();
-      if (!response) {
-        throw new Error("EOF reading __describe__ response");
-      }
-      const desc = await parseDescribeResponse(response.batches, onLog);
-      protocolName = desc.protocolName;
-      serverProtocolVersion = desc.protocolVersion;
-      methodCache = new Map(desc.methods.map((m) => [m.name, m]));
-      return methodCache;
-    } finally {
-      releaseBusy();
-    }
-  }
-  return {
-    async call(method, params) {
-      const methods = await ensureMethodCache();
-      await acquireBusy();
-      try {
-        const info = methods.get(method);
-        if (!info) {
-          throw new Error(`Unknown method: '${method}'`);
-        }
-        const r = await ensureReader();
-        const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
-        writeFn(body);
-        const response = await r.readStream();
-        if (!response) {
-          throw new Error("EOF reading response");
-        }
-        let resultBatch = null;
-        for (let batch of response.batches) {
-          if (batch.numRows === 0) {
-            if (isExternalLocationBatch(batch)) {
-              batch = await resolveExternalLocation(batch, externalConfig);
-            } else {
-              dispatchLogOrError(batch, onLog);
-              continue;
-            }
-          }
-          if (resultBatch !== null) {
-            throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
-          }
-          resultBatch = batch;
-        }
-        if (!resultBatch) {
-          return null;
-        }
-        const rows = extractBatchRows(resultBatch);
-        if (rows.length === 0)
-          return null;
-        if (info.resultSchema.fields.length === 0)
-          return null;
-        return rows[0];
-      } finally {
-        releaseBusy();
-      }
-    },
-    async stream(method, params) {
-      const methods = await ensureMethodCache();
-      await acquireBusy();
-      try {
-        const info = methods.get(method);
-        if (!info) {
-          throw new Error(`Unknown method: '${method}'`);
-        }
-        const r = await ensureReader();
-        const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
-        writeFn(body);
-        let header = null;
-        if (info.headerSchema) {
-          const headerStream = await r.readStream();
-          if (headerStream) {
-            for (const batch of headerStream.batches) {
-              if (batch.numRows === 0) {
-                dispatchLogOrError(batch, onLog);
-                continue;
-              }
-              const rows = extractBatchRows(batch);
-              if (rows.length > 0) {
-                header = rows[0];
-              }
-            }
-          }
-        }
-        const outputSchema = info.outputSchema ?? info.resultSchema;
-        return new PipeStreamSession({
-          reader: r,
-          writeFn,
-          onLog,
-          header,
-          outputSchema,
-          releaseBusy,
-          setDrainPromise,
-          externalConfig
-        });
-      } catch (e) {
-        try {
-          const r = await ensureReader();
-          const emptySchema = new Schema([]);
-          const ipc = serializeIpcStream(emptySchema, []);
-          writeFn(ipc);
-          const outStream = await r.readStream();
-        } catch {}
-        releaseBusy();
-        throw e;
-      }
-    },
-    async describe() {
-      const methods = await ensureMethodCache();
-      return {
-        protocolName,
-        protocolVersion: serverProtocolVersion,
-        methods: [...methods.values()]
-      };
-    },
-    close() {
-      if (closed)
-        return;
-      closed = true;
-      writable.end();
-    }
-  };
-}
-function subprocessConnect(cmd, options) {
-  const proc = Bun.spawn(cmd, {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: options?.stderr ?? "ignore",
-    cwd: options?.cwd,
-    env: options?.env ? { ...process.env, ...options.env } : undefined
-  });
-  const stdout = proc.stdout;
-  const writable = {
-    write(data) {
-      proc.stdin.write(data);
-    },
-    flush() {
-      proc.stdin.flush();
-    },
-    end() {
-      proc.stdin.end();
-    }
-  };
-  const client = pipeConnect(stdout, writable, {
-    onLog: options?.onLog,
-    externalLocation: options?.externalLocation
-  });
-  const originalClose = client.close;
-  client.close = () => {
-    originalClose.call(client);
-    try {
-      proc.kill();
-    } catch {}
-  };
-  return client;
-}
-
-// src/client/iroh.ts
-var IROH_ARROW_MUX_ALPN = "vgi-rpc/arrow-mux/1";
-var IROH_HTTP_ALPN = "iroh-http/2";
-var processEphemeralSecretKey = randomBytes(32);
-
-class IrohTransportError extends Error {
-  stage;
-  category;
-  dispatchCertainty;
-  constructor(message, stage, category, dispatchCertainty, options) {
-    super(message, options);
-    this.name = "IrohTransportError";
-    this.stage = stage;
-    this.category = category;
-    this.dispatchCertainty = dispatchCertainty;
-  }
-}
-
-class IrohUriError extends IrohTransportError {
-  constructor(message) {
-    super(message, "parse", "invalid_input", "not_sent");
-    this.name = "IrohUriError";
-  }
-}
-function transportError(error, stage, category, dispatchCertainty) {
-  if (error instanceof IrohTransportError)
-    return error;
-  const aborted = error instanceof DOMException && error.name === "AbortError";
-  return new IrohTransportError(error instanceof Error ? error.message : String(error), aborted ? "cancel" : stage, aborted ? "cancelled" : category, dispatchCertainty, { cause: error });
-}
-function decodeEndpointId(value) {
-  const bytes = new Uint8Array(32);
-  for (let i = 0;i < bytes.length; i++)
-    bytes[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
-  return bytes;
-}
-function parseIrohEndpoint(raw) {
-  if (typeof raw !== "string" || raw.length === 0 || raw.includes("\\") || raw.includes("?") || raw.includes("#") || [...raw].some((value) => value.charCodeAt(0) <= 32 || value.charCodeAt(0) === 127)) {
-    throw new IrohUriError("invalid VGI Iroh endpoint URI");
-  }
-  const match = /^(iroh|httpi):\/\/([0-9a-f]{64})(\/.*)?$/.exec(raw);
-  if (!match)
-    throw new IrohUriError("Iroh endpoint ID must be exactly 64 lowercase hexadecimal characters");
-  const scheme = match[1];
-  const path = match[3] ?? "";
-  if (scheme === "iroh" && path !== "")
-    throw new IrohUriError("iroh:// endpoints cannot contain a path");
-  if (path.length > 1 && path.endsWith("/")) {
-    throw new IrohUriError("httpi:// base paths cannot have a trailing empty segment");
-  }
-  if (path.includes("//") || path.split("/").some((part) => part === "." || part === "..")) {
-    throw new IrohUriError("httpi:// base paths must be canonical and cannot contain empty or dot segments");
-  }
-  for (let i = 0;i < path.length; i++) {
-    if (path[i] === "%" && !/^[0-9A-Fa-f]{2}$/.test(path.slice(i + 1, i + 3))) {
-      throw new IrohUriError("httpi:// base path contains an invalid percent escape");
-    }
-    if (path[i] === "%") {
-      const decoded = Number.parseInt(path.slice(i + 1, i + 3), 16);
-      if (decoded === 46 || decoded === 47 || decoded === 92 || decoded <= 32 || decoded === 127) {
-        throw new IrohUriError("httpi:// base path contains an encoded dot, separator, or control");
-      }
-      i += 2;
-    }
-  }
-  return {
-    scheme,
-    endpointId: match[2],
-    endpointIdBytes: decodeEndpointId(match[2]),
-    basePath: path === "/" ? "" : path,
-    alpn: scheme === "iroh" ? IROH_ARROW_MUX_ALPN : IROH_HTTP_ALPN
-  };
-}
-async function loadBinding() {
-  try {
-    const packageName = "@number0/iroh";
-    const loaded = await import(packageName);
-    return loaded.default ?? loaded;
-  } catch (error) {
-    throw new IrohTransportError("iroh:// requires the optional @number0/iroh native package; install a supported platform build or pass options.binding", "bind", "unsupported", "not_sent", { cause: error });
-  }
-}
-async function irohConnect(rawEndpoint, options = {}) {
-  const target = parseIrohEndpoint(rawEndpoint);
-  if (target.scheme !== "iroh") {
-    throw new IrohTransportError("irohConnect only accepts iroh:// endpoints; httpi:// requires an iroh-http/2 client", "bind", "unsupported", "not_sent");
-  }
-  if (options.noRelay && options.relayUrls && options.relayUrls.length !== 0) {
-    throw new IrohTransportError("noRelay and relayUrls are mutually exclusive", "parse", "invalid_input", "not_sent");
-  }
-  if (options.secretKey && options.secretKey.byteLength !== 32) {
-    throw new IrohTransportError("Iroh secretKey must contain exactly 32 bytes", "parse", "invalid_input", "not_sent");
-  }
-  const connectTimeoutMs = options.connectTimeoutMs ?? 30000;
-  if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) {
-    throw new IrohTransportError("connectTimeoutMs must be positive and finite", "parse", "invalid_input", "not_sent");
-  }
-  const ioTimeoutMs = options.ioTimeoutMs ?? 300000;
-  if (!Number.isFinite(ioTimeoutMs) || ioTimeoutMs <= 0) {
-    throw new IrohTransportError("ioTimeoutMs must be positive and finite", "parse", "invalid_input", "not_sent");
-  }
-  if (options.signal?.aborted) {
-    throw new IrohTransportError("Iroh connection aborted", "cancel", "cancelled", "not_sent", {
-      cause: options.signal.reason
-    });
-  }
-  const native = options.binding ?? await loadBinding();
-  const builder = native.Endpoint.builder();
-  if (options.noRelay)
-    builder.applyN0DisableRelay();
-  else
-    builder.applyN0();
-  builder.secretKey(Array.from(options.secretKey ?? processEphemeralSecretKey));
-  if (options.relayUrls)
-    builder.relayMode(native.RelayMode.customFromUrls([...options.relayUrls]));
-  let setupTimer;
-  let rejectSetup;
-  let setupStage = "bind";
-  const setupCancelled = new Promise((_, reject) => {
-    rejectSetup = reject;
-    setupTimer = setTimeout(() => reject(new IrohTransportError(`Iroh connection timed out after ${connectTimeoutMs} ms`, setupStage, "timeout", "not_sent")), connectTimeoutMs);
-  });
-  const onSetupAbort = () => rejectSetup(new IrohTransportError("Iroh connection aborted", "cancel", "cancelled", "not_sent", {
-    cause: options.signal?.reason
-  }));
-  options.signal?.addEventListener("abort", onSetupAbort, { once: true });
-  let endpoint;
-  let connection;
-  let recv;
-  let send;
-  try {
-    const binding = builder.bind();
-    try {
-      endpoint = await Promise.race([binding, setupCancelled]);
-    } catch (error) {
-      binding.then((lateEndpoint) => lateEndpoint.close()).catch(() => {});
-      throw transportError(error, "bind", "unavailable", "not_sent");
-    }
-    const id = native.EndpointId.fromBytes(Array.from(target.endpointIdBytes));
-    setupStage = "connect";
-    try {
-      connection = await Promise.race([
-        endpoint.connect(new native.EndpointAddr(id, options.remoteRelayUrl ?? null, options.directAddresses ? [...options.directAddresses] : null), Array.from(new TextEncoder().encode(target.alpn))),
-        setupCancelled
-      ]);
-    } catch (error) {
-      throw transportError(error, "connect", "unavailable", "not_sent");
-    }
-    setupStage = "open_stream";
-    try {
-      ({ recv, send } = await Promise.race([connection.openBi(), setupCancelled]));
-    } catch (error) {
-      throw transportError(error, "open_stream", "unavailable", "not_sent");
-    }
-  } catch (error) {
-    await endpoint?.close().catch(() => {});
-    throw error;
-  } finally {
-    if (setupTimer)
-      clearTimeout(setupTimer);
-    options.signal?.removeEventListener("abort", onSetupAbort);
-  }
-  if (!endpoint || !connection || !recv || !send)
-    throw new Error("Iroh connection setup did not produce a stream");
-  const onActiveAbort = () => {
-    recv.stop(0n).catch(() => {});
-    connection.close(0n, []);
-    endpoint.close();
-  };
-  options.signal?.addEventListener("abort", onActiveAbort, { once: true });
-  async function activeIo(operation, stage, certainty, cancel) {
-    let timer;
-    try {
-      return await Promise.race([
-        operation,
-        new Promise((_, reject) => {
-          timer = setTimeout(() => {
-            cancel();
-            reject(new IrohTransportError(`Iroh ${stage} timed out after ${ioTimeoutMs} ms`, stage, "timeout", certainty));
-          }, ioTimeoutMs);
-        })
-      ]);
-    } catch (error) {
-      if (options.signal?.aborted) {
-        throw new IrohTransportError("Iroh operation cancelled", "cancel", "cancelled", certainty, { cause: error });
-      }
-      throw transportError(error, stage, "connection_reset", certainty);
-    } finally {
-      if (timer)
-        clearTimeout(timer);
-    }
-  }
-  let writeQueue = Promise.resolve();
-  let firstWriteResolve;
-  const firstWrite = new Promise((resolve) => {
-    firstWriteResolve = resolve;
-  });
-  const readable = new ReadableStream({
-    async pull(controller) {
-      try {
-        await firstWrite;
-        await writeQueue;
-        const chunk = await activeIo(recv.read(67108864), "read", "sent", () => {
-          recv.stop(0n).catch(() => {});
-        });
-        if (chunk.length === 0)
-          controller.close();
-        else
-          controller.enqueue(Uint8Array.from(chunk));
-      } catch (error) {
-        controller.error(error);
-      }
-    },
-    async cancel() {
-      await recv.stop(0n).catch(() => {});
-    }
-  });
-  const writable = {
-    write(bytes) {
-      const owned = Array.from(bytes);
-      writeQueue = writeQueue.then(() => activeIo(send.writeAll(owned), "write", "unknown", () => {
-        send.reset(0n).catch(() => {});
-      }));
-      firstWriteResolve();
-    },
-    end() {
-      writeQueue = writeQueue.then(() => activeIo(send.finish(), "write", "unknown", () => {
-        send.reset(0n).catch(() => {});
-      }));
-      firstWriteResolve();
-    }
-  };
-  const client = pipeConnect(readable, writable, options);
-  const close = client.close;
-  client.close = () => {
-    options.signal?.removeEventListener("abort", onActiveAbort);
-    close.call(client);
-    writeQueue.then(() => {
-      connection.close(0n, []);
-      endpoint.close();
-    }, () => {
-      connection.close(0n, []);
-      endpoint.close();
-    });
-  };
-  return client;
-}
-// src/client/socks5h.ts
-import { isIP, connect as tcpDial } from "node:net";
-import { connect as tlsDial } from "node:tls";
-import { domainToASCII } from "node:url";
-
-// src/client/connect.ts
-import { Schema as Schema4 } from "@query-farm/apache-arrow";
-
 // src/client/stream.ts
-import { Field as Field2, makeData as makeData2, RecordBatch as RecordBatch2, Schema as Schema2, Struct as Struct2, vectorFromArray as vectorFromArray2 } from "@query-farm/apache-arrow";
+import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
 function packResumeToken(cursor, callToken) {
   return callToken === null ? cursor : `${cursor.length}:${cursor}${callToken}`;
 }
@@ -3222,13 +2325,13 @@ class HttpStreamSession {
       for (const [key, value] of this._tokenMetadata(this._stateToken)) {
         metadata.set(key, value);
       }
-      const batch2 = new RecordBatch2(input.schema, input.data, metadata);
+      const batch2 = new RecordBatch(input.schema, input.data, metadata);
       return this._doExchange(input.schema, [batch2]);
     }
     if (input.length === 0) {
       const zeroSchema = this._inputSchema ?? this._outputSchema;
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
-      const batchWithMeta = new RecordBatch2(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
+      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
       return this._doExchange(zeroSchema, [batchWithMeta]);
     }
     let inputSchema = this._inputSchema;
@@ -3244,22 +2347,22 @@ class HttpStreamSession {
         }
         const arrowType = inferArrowType(sample);
         const nullable = input.some((row) => row[key] == null);
-        return new Field2(key, arrowType, nullable);
+        return new Field(key, arrowType, nullable);
       });
-      inputSchema = new Schema2(fields);
+      inputSchema = new Schema(fields);
     }
     const children = inputSchema.fields.map((f) => {
       const values = input.map((row) => row[f.name]);
-      return vectorFromArray2(values, f.type).data[0];
+      return vectorFromArray(values, f.type).data[0];
     });
-    const structType = new Struct2(inputSchema.fields);
-    const data = makeData2({
+    const structType = new Struct(inputSchema.fields);
+    const data = makeData({
       type: structType,
       length: input.length,
       children,
       nullCount: 0
     });
-    const batch = new RecordBatch2(inputSchema, data, this._tokenMetadata(this._stateToken));
+    const batch = new RecordBatch(inputSchema, data, this._tokenMetadata(this._stateToken));
     return this._doExchange(inputSchema, [batch]);
   }
   async tick(metadata) {
@@ -3329,16 +2432,16 @@ class HttpStreamSession {
   }
   _buildEmptyBatch(schema2) {
     const children = schema2.fields.map((f) => {
-      return makeData2({ type: f.type, length: 0, nullCount: 0 });
+      return makeData({ type: f.type, length: 0, nullCount: 0 });
     });
-    const structType = new Struct2(schema2.fields);
-    const data = makeData2({
+    const structType = new Struct(schema2.fields);
+    const data = makeData({
       type: structType,
       length: 0,
       children,
       nullCount: 0
     });
-    return new RecordBatch2(schema2, data);
+    return new RecordBatch(schema2, data);
   }
   async* [Symbol.asyncIterator]() {
     for (let batch of this._pendingBatches) {
@@ -3450,18 +2553,18 @@ class HttpStreamSession {
     this._finished = false;
   }
   async _sendContinuation(token, applicationMetadata) {
-    const emptySchema = new Schema2([]);
+    const emptySchema = new Schema([]);
     const metadata = new Map(applicationMetadata ?? []);
     for (const [key, value] of this._tokenMetadata(token))
       metadata.set(key, value);
-    const structType = new Struct2(emptySchema.fields);
-    const data = makeData2({
+    const structType = new Struct(emptySchema.fields);
+    const data = makeData({
       type: structType,
       length: 1,
       children: [],
       nullCount: 0
     });
-    const batch = new RecordBatch2(emptySchema, data, metadata);
+    const batch = new RecordBatch(emptySchema, data, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
     const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
     if (resp.status === 401) {
@@ -3473,9 +2576,9 @@ class HttpStreamSession {
 }
 
 // src/client/uploadUrl.ts
-import { Field as Field3, Int64 as Int642, RecordBatchReader as RecordBatchReader4, Schema as Schema3 } from "@query-farm/apache-arrow";
+import { Field as Field2, Int64 as Int642, RecordBatchReader as RecordBatchReader4, Schema as Schema2 } from "@query-farm/apache-arrow";
 var UPLOAD_URL_METHOD2 = "__upload_url__";
-var UPLOAD_URL_PARAMS_SCHEMA2 = new Schema3([new Field3("count", new Int642, false)]);
+var UPLOAD_URL_PARAMS_SCHEMA2 = new Schema2([new Field2("count", new Int642, false)]);
 async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn = globalThis.fetch, acceptedMaxResponseBytes = DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES, responseBudgetVerified = false) {
   optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
   let responseLimit = acceptedMaxResponseBytes;
@@ -3560,8 +2663,8 @@ async function buildPointerRequestBody(originalBody, downloadUrl) {
     if (!merged.has(k))
       merged.set(k, v);
   }
-  const { RecordBatch: RecordBatch3 } = await import("@query-farm/apache-arrow");
-  const pointerWithMeta = new RecordBatch3(schema2, pointer.data, merged);
+  const { RecordBatch: RecordBatch2 } = await import("@query-farm/apache-arrow");
+  const pointerWithMeta = new RecordBatch2(schema2, pointer.data, merged);
   return serializeIpcStream(schema2, [pointerWithMeta]);
 }
 async function externalizeRequestBody(body, opts) {
@@ -3935,7 +3038,7 @@ function httpConnect(rawBaseUrl, options) {
         method,
         stateToken: cursor,
         callStateToken: callToken,
-        outputSchema: outputSchema ?? new Schema4([]),
+        outputSchema: outputSchema ?? new Schema3([]),
         onLog,
         pendingBatches: [],
         finished: false,
@@ -3967,7 +3070,1028 @@ function httpConnect(rawBaseUrl, options) {
   };
 }
 
+// src/client/iroh.ts
+import { randomBytes } from "node:crypto";
+
+// src/client/pipe.ts
+import {
+  Field as Field3,
+  makeData as makeData2,
+  RecordBatch as RecordBatch2,
+  RecordBatchStreamWriter as RecordBatchStreamWriter2,
+  Schema as Schema4,
+  Struct as Struct2,
+  vectorFromArray as vectorFromArray2
+} from "@query-farm/apache-arrow";
+
+// src/wire/writer.ts
+var STDOUT_FD = 1;
+var RESOLVED = Promise.resolve();
+var _NODE_FS_MOD = "node:fs";
+var _writeSync = null;
+function _loadWriteSync() {
+  if (_writeSync)
+    return _writeSync;
+  const getBuiltin = globalThis.process?.getBuiltinModule;
+  if (typeof getBuiltin === "function") {
+    const fs2 = getBuiltin.call(globalThis.process, _NODE_FS_MOD);
+    if (fs2?.writeSync) {
+      _writeSync = fs2.writeSync.bind(fs2);
+      return _writeSync;
+    }
+  }
+  const req = import.meta.require ?? globalThis.require ?? null;
+  if (!req) {
+    throw new Error("IpcStreamWriter needs synchronous node:fs.writeSync, reached via " + "import.meta.require (Bun), globalThis.require (Node CJS), or " + "process.getBuiltinModule (Node >= 20.16). This runtime offers none of " + "them, so the subprocess transport is unavailable. On an older Node ESM, " + "either upgrade or set globalThis.require = createRequire(import.meta.url).");
+  }
+  const fs = req(_NODE_FS_MOD);
+  _writeSync = fs.writeSync.bind(fs);
+  return _writeSync;
+}
+var MAX_WRITE_CHUNK = 1 << 30;
+var MAX_STREAM_CHUNK = 128 * 1024;
+function writeAll(fd, data) {
+  const writeSync = _loadWriteSync();
+  let offset = 0;
+  let spins = 0;
+  while (offset < data.length) {
+    try {
+      const written = writeSync(fd, data, offset, Math.min(data.length - offset, MAX_WRITE_CHUNK));
+      if (written <= 0)
+        throw new Error(`writeSync returned ${written}`);
+      offset += written;
+      spins = 0;
+    } catch (e) {
+      if (e.code === "EAGAIN") {
+        if (++spins < 8192)
+          continue;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        spins = 0;
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+async function socketWriteAll(socket, data) {
+  let offset = 0;
+  do {
+    const end = Math.min(offset + MAX_STREAM_CHUNK, data.length);
+    await socketWriteChunk(socket, data.subarray(offset, end));
+    offset = end;
+  } while (offset < data.length);
+}
+async function socketWriteChunk(socket, data) {
+  if (socket.destroyed || socket.writableEnded) {
+    throw new Error("socketWriteAll: socket is already closed");
+  }
+  const ok = socket.write(data);
+  if (ok)
+    return;
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      socket.off("drain", onDrain);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err2) => {
+      cleanup();
+      reject(err2);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    socket.once("drain", onDrain);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+  });
+}
+
+class IpcStreamWriter {
+  target;
+  constructor(fdOrSocketOrSink = STDOUT_FD) {
+    if (typeof fdOrSocketOrSink === "number") {
+      this.target = { kind: "fd", fd: fdOrSocketOrSink };
+    } else if (typeof fdOrSocketOrSink.write === "function" && !("writable" in fdOrSocketOrSink)) {
+      this.target = { kind: "sink", sink: fdOrSocketOrSink };
+    } else {
+      this.target = { kind: "socket", socket: fdOrSocketOrSink };
+    }
+  }
+  async writeStream(schema2, batches) {
+    const bytes = serializeBatches(schema2, batches);
+    if (this.target.kind === "fd") {
+      writeAll(this.target.fd, bytes);
+    } else if (this.target.kind === "sink") {
+      await this.target.sink.write(bytes);
+    } else {
+      await socketWriteAll(this.target.socket, bytes);
+    }
+  }
+  openStream(schema2) {
+    return new IncrementalStream(this.target, schema2);
+  }
+}
+
+class IncrementalStream {
+  encoder;
+  target;
+  closed = false;
+  writeChain = Promise.resolve();
+  constructor(target, schema2) {
+    this.target = target;
+    this.encoder = createIncrementalEncoder(schema2);
+    this.enqueue(this.encoder.start());
+  }
+  async write(batch) {
+    if (this.closed)
+      throw new Error("Stream already closed");
+    return this.enqueue(this.encoder.writeBatch(batch));
+  }
+  async close() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    return this.enqueue(this.encoder.finish());
+  }
+  enqueue(bytes) {
+    const target = this.target;
+    if (target.kind === "fd") {
+      writeAll(target.fd, bytes);
+      return RESOLVED;
+    }
+    const next = this.writeChain.then(() => {
+      if (target.kind === "sink") {
+        return target.sink.write(bytes);
+      }
+      return socketWriteAll(target.socket, bytes);
+    });
+    this.writeChain = next.catch(() => {
+      return;
+    });
+    return next;
+  }
+}
+
+// src/client/pipe.ts
+function fieldsMatch(left, right) {
+  if (left.name !== right.name || left.nullable !== right.nullable || String(left.type) !== String(right.type)) {
+    return false;
+  }
+  const leftChildren = left.type.children;
+  const rightChildren = right.type.children;
+  return leftChildren.length === rightChildren.length && leftChildren.every((child, index) => fieldsMatch(child, rightChildren[index]));
+}
+function schemasMatch(left, right) {
+  return left.fields.length === right.fields.length && left.fields.every((field2, index) => fieldsMatch(field2, right.fields[index]));
+}
+
+class PipeIncrementalWriter {
+  writer;
+  writeFn;
+  closed = false;
+  constructor(writeFn, schema2) {
+    this.writeFn = writeFn;
+    this.writer = new RecordBatchStreamWriter2;
+    this.writer.reset(undefined, schema2);
+    this.drain();
+  }
+  write(batch) {
+    if (this.closed)
+      throw new Error("PipeIncrementalWriter already closed");
+    this.writer._writeRecordBatch(batch);
+    this.drain();
+  }
+  close() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    const eos = new Uint8Array(new Int32Array([-1, 0]).buffer);
+    this.writeFn(eos);
+  }
+  drain() {
+    const values = this.writer._sink._values;
+    for (const chunk of values) {
+      this.writeFn(chunk);
+    }
+    values.length = 0;
+  }
+}
+
+class PipeStreamSession {
+  _reader;
+  _writeFn;
+  _onLog;
+  _header;
+  _inputWriter = null;
+  _inputSchema = null;
+  _outputStreamOpened = false;
+  _closed = false;
+  _outputSchema;
+  _releaseBusy;
+  _setDrainPromise;
+  _externalConfig;
+  constructor(opts) {
+    this._reader = opts.reader;
+    this._writeFn = opts.writeFn;
+    this._onLog = opts.onLog;
+    this._header = opts.header;
+    this._outputSchema = opts.outputSchema;
+    this._releaseBusy = opts.releaseBusy;
+    this._setDrainPromise = opts.setDrainPromise;
+    this._externalConfig = opts.externalConfig;
+  }
+  get header() {
+    return this._header;
+  }
+  async _readOutputBatch() {
+    while (true) {
+      const batch = await this._reader.readNextBatch();
+      if (batch === null)
+        return null;
+      if (batch.numRows === 0) {
+        if (isExternalLocationBatch(batch)) {
+          return await resolveExternalLocation(batch, this._externalConfig);
+        }
+        if (dispatchLogOrError(batch, this._onLog)) {
+          continue;
+        }
+      }
+      return batch;
+    }
+  }
+  async _ensureOutputStream() {
+    if (this._outputStreamOpened)
+      return;
+    this._outputStreamOpened = true;
+    const schema2 = await this._reader.openNextStream();
+    if (!schema2) {
+      throw new RpcError("ProtocolError", "Expected output stream but got EOF", "");
+    }
+  }
+  async tick(metadata) {
+    if (this._closed) {
+      throw new RpcError("ProtocolError", "Stream session is closed", "");
+    }
+    const tickSchema = new Schema4([]);
+    if (!this._inputWriter) {
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
+    }
+    const tickData = makeData2({ type: new Struct2([]), length: 0, children: [], nullCount: 0 });
+    const tickBatch = new RecordBatch2(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
+    this._inputWriter.write(tickBatch);
+    await this._ensureOutputStream();
+    const outputBatch = await this._readOutputBatch();
+    if (outputBatch === null) {
+      this._closed = true;
+      this._inputWriter.close();
+      this._inputWriter = null;
+      this._releaseBusy();
+      return [];
+    }
+    return extractBatchRows(outputBatch);
+  }
+  async exchange(input) {
+    if (this._closed) {
+      throw new RpcError("ProtocolError", "Stream session is closed", "");
+    }
+    let inputSchema;
+    let batch;
+    if (!Array.isArray(input)) {
+      inputSchema = input.schema;
+      batch = input;
+      if (this._inputSchema && !schemasMatch(this._inputSchema, inputSchema)) {
+        throw new RpcError("ProtocolError", `Exchange input schema changed: expected ${this._inputSchema}, got ${inputSchema}`, "");
+      }
+      this._inputSchema ??= inputSchema;
+    } else if (input.length === 0) {
+      inputSchema = this._inputSchema ?? this._outputSchema;
+      const children = inputSchema.fields.map((f) => {
+        return makeData2({ type: f.type, length: 0, nullCount: 0 });
+      });
+      const structType = new Struct2(inputSchema.fields);
+      const data = makeData2({
+        type: structType,
+        length: 0,
+        children,
+        nullCount: 0
+      });
+      batch = new RecordBatch2(inputSchema, data);
+    } else {
+      const keys = Object.keys(input[0]);
+      const fields = keys.map((key) => {
+        let sample;
+        for (const row of input) {
+          if (row[key] != null) {
+            sample = row[key];
+            break;
+          }
+        }
+        const arrowType = inferArrowType(sample);
+        return new Field3(key, arrowType, true);
+      });
+      inputSchema = new Schema4(fields);
+      if (this._inputSchema) {
+        const cached = this._inputSchema;
+        if (cached.fields.length !== inputSchema.fields.length || cached.fields.some((f, i) => f.name !== inputSchema.fields[i].name)) {
+          throw new RpcError("ProtocolError", `Exchange input schema changed: expected [${cached.fields.map((f) => f.name).join(", ")}] ` + `but got [${inputSchema.fields.map((f) => f.name).join(", ")}]`, "");
+        }
+      } else {
+        this._inputSchema = inputSchema;
+      }
+      const children = inputSchema.fields.map((f) => {
+        const values = input.map((row) => row[f.name]);
+        return vectorFromArray2(values, f.type).data[0];
+      });
+      const structType = new Struct2(inputSchema.fields);
+      const data = makeData2({
+        type: structType,
+        length: input.length,
+        children,
+        nullCount: 0
+      });
+      batch = new RecordBatch2(inputSchema, data);
+    }
+    if (!this._inputWriter) {
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
+    }
+    this._inputWriter.write(batch);
+    await this._ensureOutputStream();
+    try {
+      const outputBatch = await this._readOutputBatch();
+      if (outputBatch === null) {
+        return [];
+      }
+      return extractBatchRows(outputBatch);
+    } catch (e) {
+      await this._cleanup();
+      throw e;
+    }
+  }
+  async _cleanup() {
+    if (this._closed)
+      return;
+    this._closed = true;
+    if (this._inputWriter) {
+      this._inputWriter.close();
+      this._inputWriter = null;
+    }
+    try {
+      if (this._outputStreamOpened) {
+        while (await this._reader.readNextBatch() !== null) {}
+      }
+    } catch {}
+    this._releaseBusy();
+  }
+  async* [Symbol.asyncIterator]() {
+    if (this._closed)
+      return;
+    try {
+      const tickSchema = new Schema4([]);
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
+      while (true) {
+        const rows = await this.tick();
+        if (this._closed) {
+          break;
+        }
+        yield rows;
+      }
+    } finally {
+      if (this._inputWriter) {
+        this._inputWriter.close();
+        this._inputWriter = null;
+      }
+      try {
+        if (this._outputStreamOpened) {
+          while (await this._reader.readNextBatch() !== null) {}
+        }
+      } catch {}
+      this._closed = true;
+      this._releaseBusy();
+    }
+  }
+  close() {
+    if (this._closed)
+      return;
+    this._closed = true;
+    if (this._inputWriter) {
+      this._inputWriter.close();
+      this._inputWriter = null;
+    } else {
+      const emptySchema = new Schema4([]);
+      const ipc = serializeIpcStream(emptySchema, []);
+      this._writeFn(ipc);
+    }
+    const drainPromise = (async () => {
+      try {
+        if (!this._outputStreamOpened) {
+          const schema2 = await this._reader.openNextStream();
+          if (schema2) {
+            while (await this._reader.readNextBatch() !== null) {}
+          }
+        } else {
+          while (await this._reader.readNextBatch() !== null) {}
+        }
+      } catch {} finally {
+        this._releaseBusy();
+      }
+    })();
+    this._setDrainPromise(drainPromise);
+  }
+}
+function pipeConnect(readable, writable, options) {
+  const onLog = options?.onLog;
+  const externalConfig = options?.externalLocation;
+  let reader = null;
+  let readerPromise = null;
+  let methodCache = null;
+  let protocolName = "";
+  let serverProtocolVersion = "";
+  let _busy = false;
+  let _drainPromise = null;
+  let closed = false;
+  const writeFn = (bytes) => {
+    let offset = 0;
+    do {
+      const end = Math.min(offset + MAX_STREAM_CHUNK, bytes.length);
+      writable.write(bytes.subarray(offset, end));
+      offset = end;
+    } while (offset < bytes.length);
+    writable.flush?.();
+  };
+  async function ensureReader() {
+    if (reader)
+      return reader;
+    if (!readerPromise) {
+      readerPromise = IpcStreamReader.create(readable);
+    }
+    reader = await readerPromise;
+    return reader;
+  }
+  async function acquireBusy() {
+    if (_drainPromise) {
+      await _drainPromise;
+      _drainPromise = null;
+    }
+    if (_busy) {
+      throw new Error("Pipe transport is busy — another call or stream is in progress. " + "Pipe connections are single-threaded; wait for the current operation to complete.");
+    }
+    _busy = true;
+  }
+  function releaseBusy() {
+    _busy = false;
+  }
+  function setDrainPromise(p) {
+    _drainPromise = p;
+  }
+  async function ensureMethodCache() {
+    if (methodCache)
+      return methodCache;
+    await acquireBusy();
+    try {
+      const emptySchema = new Schema4([]);
+      const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
+      writeFn(body);
+      const r = await ensureReader();
+      const response = await r.readStream();
+      if (!response) {
+        throw new Error("EOF reading __describe__ response");
+      }
+      const desc = await parseDescribeResponse(response.batches, onLog);
+      protocolName = desc.protocolName;
+      serverProtocolVersion = desc.protocolVersion;
+      methodCache = new Map(desc.methods.map((m) => [m.name, m]));
+      return methodCache;
+    } finally {
+      releaseBusy();
+    }
+  }
+  return {
+    async call(method, params) {
+      const methods = await ensureMethodCache();
+      await acquireBusy();
+      try {
+        const info = methods.get(method);
+        if (!info) {
+          throw new Error(`Unknown method: '${method}'`);
+        }
+        const r = await ensureReader();
+        const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+        writeFn(body);
+        const response = await r.readStream();
+        if (!response) {
+          throw new Error("EOF reading response");
+        }
+        let resultBatch = null;
+        for (let batch of response.batches) {
+          if (batch.numRows === 0) {
+            if (isExternalLocationBatch(batch)) {
+              batch = await resolveExternalLocation(batch, externalConfig);
+            } else {
+              dispatchLogOrError(batch, onLog);
+              continue;
+            }
+          }
+          if (resultBatch !== null) {
+            throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
+          }
+          resultBatch = batch;
+        }
+        if (!resultBatch) {
+          return null;
+        }
+        const rows = extractBatchRows(resultBatch);
+        if (rows.length === 0)
+          return null;
+        if (info.resultSchema.fields.length === 0)
+          return null;
+        return rows[0];
+      } finally {
+        releaseBusy();
+      }
+    },
+    async stream(method, params) {
+      const methods = await ensureMethodCache();
+      await acquireBusy();
+      try {
+        const info = methods.get(method);
+        if (!info) {
+          throw new Error(`Unknown method: '${method}'`);
+        }
+        const r = await ensureReader();
+        const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+        writeFn(body);
+        let header = null;
+        if (info.headerSchema) {
+          const headerStream = await r.readStream();
+          if (headerStream) {
+            for (const batch of headerStream.batches) {
+              if (batch.numRows === 0) {
+                dispatchLogOrError(batch, onLog);
+                continue;
+              }
+              const rows = extractBatchRows(batch);
+              if (rows.length > 0) {
+                header = rows[0];
+              }
+            }
+          }
+        }
+        const outputSchema = info.outputSchema ?? info.resultSchema;
+        return new PipeStreamSession({
+          reader: r,
+          writeFn,
+          onLog,
+          header,
+          outputSchema,
+          releaseBusy,
+          setDrainPromise,
+          externalConfig
+        });
+      } catch (e) {
+        try {
+          const r = await ensureReader();
+          const emptySchema = new Schema4([]);
+          const ipc = serializeIpcStream(emptySchema, []);
+          writeFn(ipc);
+          const outStream = await r.readStream();
+        } catch {}
+        releaseBusy();
+        throw e;
+      }
+    },
+    async describe() {
+      const methods = await ensureMethodCache();
+      return {
+        protocolName,
+        protocolVersion: serverProtocolVersion,
+        methods: [...methods.values()]
+      };
+    },
+    close() {
+      if (closed)
+        return;
+      closed = true;
+      writable.end();
+    }
+  };
+}
+function subprocessConnect(cmd, options) {
+  const proc = Bun.spawn(cmd, {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: options?.stderr ?? "ignore",
+    cwd: options?.cwd,
+    env: options?.env ? { ...process.env, ...options.env } : undefined
+  });
+  const stdout = proc.stdout;
+  const writable = {
+    write(data) {
+      proc.stdin.write(data);
+    },
+    flush() {
+      proc.stdin.flush();
+    },
+    end() {
+      proc.stdin.end();
+    }
+  };
+  const client = pipeConnect(stdout, writable, {
+    onLog: options?.onLog,
+    externalLocation: options?.externalLocation
+  });
+  const originalClose = client.close;
+  client.close = () => {
+    originalClose.call(client);
+    try {
+      proc.kill();
+    } catch {}
+  };
+  return client;
+}
+
+// src/client/iroh.ts
+var IROH_ARROW_MUX_ALPN = "vgi-rpc/arrow-mux/1";
+var IROH_HTTP_ALPN = "iroh-http/2";
+var processEphemeralSecretKey = randomBytes(32);
+
+class IrohTransportError extends Error {
+  stage;
+  category;
+  dispatchCertainty;
+  constructor(message, stage, category, dispatchCertainty, options) {
+    super(message, options);
+    this.name = "IrohTransportError";
+    this.stage = stage;
+    this.category = category;
+    this.dispatchCertainty = dispatchCertainty;
+  }
+}
+
+class IrohUriError extends IrohTransportError {
+  constructor(message) {
+    super(message, "parse", "invalid_input", "not_sent");
+    this.name = "IrohUriError";
+  }
+}
+function transportError(error, stage, category, dispatchCertainty) {
+  if (error instanceof IrohTransportError)
+    return error;
+  const aborted = error instanceof DOMException && error.name === "AbortError";
+  return new IrohTransportError(error instanceof Error ? error.message : String(error), aborted ? "cancel" : stage, aborted ? "cancelled" : category, dispatchCertainty, { cause: error });
+}
+function decodeEndpointId(value) {
+  const bytes = new Uint8Array(32);
+  for (let i = 0;i < bytes.length; i++)
+    bytes[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
+  return bytes;
+}
+function parseIrohEndpoint(raw) {
+  if (typeof raw !== "string" || raw.length === 0 || raw.includes("\\") || raw.includes("?") || raw.includes("#") || [...raw].some((value) => value.charCodeAt(0) <= 32 || value.charCodeAt(0) === 127)) {
+    throw new IrohUriError("invalid VGI Iroh endpoint URI");
+  }
+  const match = /^(iroh|httpi):\/\/([0-9a-f]{64})(\/.*)?$/.exec(raw);
+  if (!match)
+    throw new IrohUriError("Iroh endpoint ID must be exactly 64 lowercase hexadecimal characters");
+  const scheme = match[1];
+  const path = match[3] ?? "";
+  if (scheme === "iroh" && path !== "")
+    throw new IrohUriError("iroh:// endpoints cannot contain a path");
+  if (path.length > 1 && path.endsWith("/")) {
+    throw new IrohUriError("httpi:// base paths cannot have a trailing empty segment");
+  }
+  if (path.includes("//") || path.split("/").some((part) => part === "." || part === "..")) {
+    throw new IrohUriError("httpi:// base paths must be canonical and cannot contain empty or dot segments");
+  }
+  for (let i = 0;i < path.length; i++) {
+    if (path[i] === "%" && !/^[0-9A-Fa-f]{2}$/.test(path.slice(i + 1, i + 3))) {
+      throw new IrohUriError("httpi:// base path contains an invalid percent escape");
+    }
+    if (path[i] === "%") {
+      const decoded = Number.parseInt(path.slice(i + 1, i + 3), 16);
+      if (decoded === 46 || decoded === 47 || decoded === 92 || decoded <= 32 || decoded === 127) {
+        throw new IrohUriError("httpi:// base path contains an encoded dot, separator, or control");
+      }
+      i += 2;
+    }
+  }
+  return {
+    scheme,
+    endpointId: match[2],
+    endpointIdBytes: decodeEndpointId(match[2]),
+    basePath: path === "/" ? "" : path,
+    alpn: scheme === "iroh" ? IROH_ARROW_MUX_ALPN : IROH_HTTP_ALPN
+  };
+}
+async function loadBinding() {
+  try {
+    const packageName = "@number0/iroh";
+    const loaded = await import(packageName);
+    return loaded.default ?? loaded;
+  } catch (error) {
+    throw new IrohTransportError("iroh:// requires the optional @number0/iroh native package; install a supported platform build or pass options.binding", "bind", "unsupported", "not_sent", { cause: error });
+  }
+}
+async function irohConnect(rawEndpoint, options = {}) {
+  const target = parseIrohEndpoint(rawEndpoint);
+  if (target.scheme !== "iroh") {
+    throw new IrohTransportError("irohConnect only accepts iroh:// endpoints; use httpiConnect for HTTP-over-Iroh", "bind", "unsupported", "not_sent");
+  }
+  if (options.noRelay && options.relayUrls && options.relayUrls.length !== 0) {
+    throw new IrohTransportError("noRelay and relayUrls are mutually exclusive", "parse", "invalid_input", "not_sent");
+  }
+  if (options.secretKey && options.secretKey.byteLength !== 32) {
+    throw new IrohTransportError("Iroh secretKey must contain exactly 32 bytes", "parse", "invalid_input", "not_sent");
+  }
+  const connectTimeoutMs = options.connectTimeoutMs ?? 30000;
+  if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) {
+    throw new IrohTransportError("connectTimeoutMs must be positive and finite", "parse", "invalid_input", "not_sent");
+  }
+  const ioTimeoutMs = options.ioTimeoutMs ?? 300000;
+  if (!Number.isFinite(ioTimeoutMs) || ioTimeoutMs <= 0) {
+    throw new IrohTransportError("ioTimeoutMs must be positive and finite", "parse", "invalid_input", "not_sent");
+  }
+  if (options.signal?.aborted) {
+    throw new IrohTransportError("Iroh connection aborted", "cancel", "cancelled", "not_sent", {
+      cause: options.signal.reason
+    });
+  }
+  const native = options.binding ?? await loadBinding();
+  const builder = native.Endpoint.builder();
+  if (options.noRelay)
+    builder.applyN0DisableRelay();
+  else
+    builder.applyN0();
+  builder.secretKey(Array.from(options.secretKey ?? processEphemeralSecretKey));
+  if (options.relayUrls)
+    builder.relayMode(native.RelayMode.customFromUrls([...options.relayUrls]));
+  let setupTimer;
+  let rejectSetup;
+  let setupStage = "bind";
+  const setupCancelled = new Promise((_, reject) => {
+    rejectSetup = reject;
+    setupTimer = setTimeout(() => reject(new IrohTransportError(`Iroh connection timed out after ${connectTimeoutMs} ms`, setupStage, "timeout", "not_sent")), connectTimeoutMs);
+  });
+  const onSetupAbort = () => rejectSetup(new IrohTransportError("Iroh connection aborted", "cancel", "cancelled", "not_sent", {
+    cause: options.signal?.reason
+  }));
+  options.signal?.addEventListener("abort", onSetupAbort, { once: true });
+  let endpoint;
+  let connection;
+  let recv;
+  let send;
+  try {
+    const binding = builder.bind();
+    try {
+      endpoint = await Promise.race([binding, setupCancelled]);
+    } catch (error) {
+      binding.then((lateEndpoint) => lateEndpoint.close()).catch(() => {});
+      throw transportError(error, "bind", "unavailable", "not_sent");
+    }
+    const id = native.EndpointId.fromBytes(Array.from(target.endpointIdBytes));
+    setupStage = "connect";
+    try {
+      connection = await Promise.race([
+        endpoint.connect(new native.EndpointAddr(id, options.remoteRelayUrl ?? null, options.directAddresses ? [...options.directAddresses] : null), Array.from(new TextEncoder().encode(target.alpn))),
+        setupCancelled
+      ]);
+    } catch (error) {
+      throw transportError(error, "connect", "unavailable", "not_sent");
+    }
+    setupStage = "open_stream";
+    try {
+      ({ recv, send } = await Promise.race([connection.openBi(), setupCancelled]));
+    } catch (error) {
+      throw transportError(error, "open_stream", "unavailable", "not_sent");
+    }
+  } catch (error) {
+    await endpoint?.close().catch(() => {});
+    throw error;
+  } finally {
+    if (setupTimer)
+      clearTimeout(setupTimer);
+    options.signal?.removeEventListener("abort", onSetupAbort);
+  }
+  if (!endpoint || !connection || !recv || !send)
+    throw new Error("Iroh connection setup did not produce a stream");
+  const onActiveAbort = () => {
+    recv.stop(0n).catch(() => {});
+    connection.close(0n, []);
+    endpoint.close();
+  };
+  options.signal?.addEventListener("abort", onActiveAbort, { once: true });
+  async function activeIo(operation, stage, certainty, cancel) {
+    let timer;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            cancel();
+            reject(new IrohTransportError(`Iroh ${stage} timed out after ${ioTimeoutMs} ms`, stage, "timeout", certainty));
+          }, ioTimeoutMs);
+        })
+      ]);
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw new IrohTransportError("Iroh operation cancelled", "cancel", "cancelled", certainty, { cause: error });
+      }
+      throw transportError(error, stage, "connection_reset", certainty);
+    } finally {
+      if (timer)
+        clearTimeout(timer);
+    }
+  }
+  let writeQueue = Promise.resolve();
+  let firstWriteResolve;
+  const firstWrite = new Promise((resolve) => {
+    firstWriteResolve = resolve;
+  });
+  const readable = new ReadableStream({
+    async pull(controller) {
+      try {
+        await firstWrite;
+        await writeQueue;
+        const chunk = await activeIo(recv.read(67108864), "read", "sent", () => {
+          recv.stop(0n).catch(() => {});
+        });
+        if (chunk.length === 0)
+          controller.close();
+        else
+          controller.enqueue(Uint8Array.from(chunk));
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel() {
+      await recv.stop(0n).catch(() => {});
+    }
+  });
+  const writable = {
+    write(bytes) {
+      const owned = Array.from(bytes);
+      writeQueue = writeQueue.then(() => activeIo(send.writeAll(owned), "write", "unknown", () => {
+        send.reset(0n).catch(() => {});
+      }));
+      firstWriteResolve();
+    },
+    end() {
+      writeQueue = writeQueue.then(() => activeIo(send.finish(), "write", "unknown", () => {
+        send.reset(0n).catch(() => {});
+      }));
+      firstWriteResolve();
+    }
+  };
+  const client = pipeConnect(readable, writable, options);
+  const close = client.close;
+  client.close = () => {
+    options.signal?.removeEventListener("abort", onActiveAbort);
+    close.call(client);
+    writeQueue.then(() => {
+      connection.close(0n, []);
+      endpoint.close();
+    }, () => {
+      connection.close(0n, []);
+      endpoint.close();
+    });
+  };
+  return client;
+}
+
+// src/client/httpi.ts
+var BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
+var IROH_HTTP_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
+function encodeIrohNodeId(bytes) {
+  let accumulator = 0;
+  let bits = 0;
+  let encoded = "";
+  for (const byte of bytes) {
+    accumulator = accumulator << 8 | byte;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      encoded += BASE32_ALPHABET[accumulator >>> bits & 31];
+      accumulator &= (1 << bits) - 1;
+    }
+  }
+  if (bits !== 0)
+    encoded += BASE32_ALPHABET[accumulator << 5 - bits & 31];
+  return encoded;
+}
+function nativeHttpiUrl(raw) {
+  const parsed = new URL(raw);
+  const endpoint = parseIrohEndpoint(`httpi://${parsed.hostname}`);
+  parsed.hostname = encodeIrohNodeId(endpoint.endpointIdBytes);
+  return parsed.href;
+}
+function positiveMilliseconds(value, name) {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+    throw new IrohTransportError(`${name} must be a positive safe integer`, "parse", "invalid_input", "not_sent");
+  }
+}
+async function loadHttpBinding() {
+  try {
+    const packageName = "@momics/iroh-http-node";
+    return await import(packageName);
+  } catch (error) {
+    throw new IrohTransportError("httpi:// requires the optional @momics/iroh-http-node package; install a supported native build or pass options.node", "bind", "unsupported", "not_sent", { cause: error });
+  }
+}
+async function httpiConnect(rawBaseUrl, options = {}) {
+  const target = parseIrohEndpoint(rawBaseUrl);
+  if (target.scheme !== "httpi") {
+    throw new IrohTransportError("httpiConnect only accepts httpi:// endpoints", "parse", "invalid_input", "not_sent");
+  }
+  if (options.node && options.nodeOptions) {
+    throw new IrohTransportError("nodeOptions cannot be used with an application-owned Iroh node", "parse", "invalid_input", "not_sent");
+  }
+  positiveMilliseconds(options.requestTimeoutMs, "requestTimeoutMs");
+  const acceptedMaxResponseBytes = options.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
+  optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
+  if (acceptedMaxResponseBytes > IROH_HTTP_MAX_RESPONSE_BYTES) {
+    throw new IrohTransportError(`acceptedMaxResponseBytes must not exceed the iroh-http limit of ${IROH_HTTP_MAX_RESPONSE_BYTES}`, "parse", "invalid_input", "not_sent");
+  }
+  if (options.signal?.aborted) {
+    throw new IrohTransportError("Iroh connection aborted", "cancel", "cancelled", "not_sent", {
+      cause: options.signal.reason
+    });
+  }
+  const ownsNode = options.node === undefined;
+  let node;
+  try {
+    node = options.node ?? await (options.binding ?? await loadHttpBinding()).createNode(options.nodeOptions);
+  } catch (error) {
+    if (error instanceof IrohTransportError)
+      throw error;
+    throw new IrohTransportError(error instanceof Error ? error.message : String(error), "bind", "unavailable", "not_sent", { cause: error });
+  }
+  const externalFetch = options.externalFetch ?? globalThis.fetch;
+  const routeFetch = async (input, init) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (!raw.startsWith("httpi://"))
+      return externalFetch(input, init);
+    try {
+      return await node.fetch(nativeHttpiUrl(raw), {
+        ...init,
+        directAddrs: options.directAddresses ? [...options.directAddresses] : undefined,
+        relayUrl: options.remoteRelayUrl,
+        requestTimeout: options.requestTimeoutMs,
+        decompress: false,
+        maxResponseBodyBytes: acceptedMaxResponseBytes,
+        signal: init?.signal ?? options.signal
+      });
+    } catch (error) {
+      const cancelled = options.signal?.aborted || error instanceof DOMException && error.name === "AbortError";
+      throw new IrohTransportError(error instanceof Error ? error.message : String(error), cancelled ? "cancel" : "read", cancelled ? "cancelled" : "connection_reset", "unknown", { cause: error });
+    }
+  };
+  let client;
+  try {
+    const {
+      node: _node,
+      nodeOptions: _nodeOptions,
+      binding: _binding,
+      directAddresses: _directAddresses,
+      remoteRelayUrl: _remoteRelayUrl,
+      requestTimeoutMs: _requestTimeoutMs,
+      signal: _signal,
+      externalFetch: _externalFetch,
+      closeNode: _closeNode,
+      ...httpOptions
+    } = options;
+    client = httpConnect(rawBaseUrl, {
+      ...httpOptions,
+      acceptedMaxResponseBytes,
+      fetch: routeFetch
+    });
+  } catch (error) {
+    if (ownsNode)
+      await node.close({ force: true }).catch(() => {});
+    throw error;
+  }
+  const closeHttp = client.close;
+  let closed = false;
+  client.close = () => {
+    if (closed)
+      return;
+    closed = true;
+    closeHttp.call(client);
+    if (ownsNode || options.closeNode === true)
+      node.close();
+  };
+  return client;
+}
 // src/client/socks5h.ts
+import { isIP, connect as tcpDial } from "node:net";
+import { connect as tlsDial } from "node:tls";
+import { domainToASCII } from "node:url";
 var DEFAULT_CONNECT_TIMEOUT_MS = 5000;
 var DEFAULT_REQUEST_TIMEOUT_MS = 300000;
 var DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
@@ -15227,6 +15351,7 @@ export {
   int,
   inferParamTypes,
   httpsOnlyValidator,
+  httpiConnect,
   httpOAuthMetadata,
   httpIntrospect,
   httpConnectSocks5h,
@@ -15327,4 +15452,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=CDA88DF9CC07722064756E2164756E21
+//# debugId=3759E3A1C13BA14D64756E2164756E21
