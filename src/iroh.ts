@@ -3,13 +3,16 @@
 
 /** Trusted forwarding of bridge-verified Iroh EndpointIds. */
 
+import type { HttpHandlerOptions } from "./http/types.js";
 import {
   IdentityAssurance,
+  observePeerIdentity,
   PeerIdentity,
   type PeerIdentityProvider,
   PeerIdentityResult,
   PeerIdentityStatus,
   PeerSubjectKind,
+  peerIdentityPrimary,
   SubjectStability,
 } from "./identity.js";
 import { normalizeIpLiteral, normalizeTrustedProxyAddresses } from "./ip.js";
@@ -26,6 +29,41 @@ export interface IrohForwardedHeaderOptions {
   readonly issuer: string;
   /** Exact bridge IP addresses; no CIDRs, hostnames, or implicit loopback. */
   readonly trustedProxyAddresses: Iterable<string>;
+}
+
+/** High-level HTTP worker trust settings for {@link irohHttpBridgeOptions}. */
+export interface IrohHttpBridgeOptions {
+  /** Operator-controlled identity namespace. */
+  readonly issuer: string;
+  /** Exact immediate bridge addresses. Defaults to IPv4 loopback. */
+  readonly trustedProxyAddresses?: Iterable<string>;
+  /** Promote the verified EndpointId to AuthContext. Defaults to true. */
+  readonly authenticate?: boolean;
+  /** Runtime adapter supplying the immediate socket peer and raw header list. */
+  readonly peerResolutionContext: NonNullable<HttpHandlerOptions["peerResolutionContext"]>;
+}
+
+/** Identity fields to spread directly into {@code createHttpHandler}. */
+export type IrohHttpHandlerOptions = Pick<
+  HttpHandlerOptions,
+  "peerIdentityProviders" | "peerAuthenticationPolicy" | "peerResolutionContext"
+>;
+
+/**
+ * Build the strict HTTP identity boundary for a worker behind
+ * {@code vgi-iroh-bridge}. The explicit runtime callback is required because a
+ * Fetch Request alone has already lost the raw duplicate-header evidence.
+ */
+export function irohHttpBridgeOptions(options: IrohHttpBridgeOptions): IrohHttpHandlerOptions {
+  const provider = irohForwardedHeaderIdentityProvider({
+    issuer: options.issuer,
+    trustedProxyAddresses: options.trustedProxyAddresses ?? ["127.0.0.1"],
+  });
+  return {
+    peerIdentityProviders: [provider],
+    peerAuthenticationPolicy: options.authenticate === false ? observePeerIdentity : peerIdentityPrimary("iroh"),
+    peerResolutionContext: options.peerResolutionContext,
+  };
 }
 
 /** @internal Validate the operator-local namespace shared by HTTP and TCP adapters. */

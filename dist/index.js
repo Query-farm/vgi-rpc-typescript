@@ -12564,6 +12564,17 @@ function envoyXfccSpiffeProvider(options) {
 var PROVIDER2 = "iroh";
 var CANONICAL_ENDPOINT = /^[0-9a-f]{64}$/u;
 var IROH_FORWARDED_ENDPOINT_HEADER = "VGI-Forwarded-Iroh-Endpoint";
+function irohHttpBridgeOptions(options) {
+  const provider = irohForwardedHeaderIdentityProvider({
+    issuer: options.issuer,
+    trustedProxyAddresses: options.trustedProxyAddresses ?? ["127.0.0.1"]
+  });
+  return {
+    peerIdentityProviders: [provider],
+    peerAuthenticationPolicy: options.authenticate === false ? observePeerIdentity : peerIdentityPrimary("iroh"),
+    peerResolutionContext: options.peerResolutionContext
+  };
+}
 function validateIrohIssuer(issuer) {
   if (typeof issuer !== "string" || !issuer) {
     throw new TypeError("Iroh issuer must be non-empty text without controls");
@@ -14381,6 +14392,26 @@ async function serveTcp(protocol, options = {}) {
     done
   };
 }
+
+// src/launcher/serve-iroh.ts
+function serveIrohTcpUpstream(protocol, options) {
+  validateIrohIssuer(options.issuer);
+  const {
+    issuer,
+    authenticate = true,
+    trustedProxyAddresses = ["127.0.0.1"],
+    host = "127.0.0.1",
+    ...transport
+  } = options;
+  return serveTcp(protocol, {
+    ...transport,
+    host,
+    proxyProtocolV2Required: true,
+    trustedProxyAddresses,
+    irohProxyIssuer: issuer,
+    peerAuthenticationPolicy: authenticate ? peerIdentityPrimary("iroh") : observePeerIdentity
+  });
+}
 // src/launcher/serve-unix.ts
 import { existsSync as existsSync2, unlinkSync as unlinkSync3 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
@@ -15302,6 +15333,7 @@ export {
   serveUnix,
   serveTcp,
   serveStream,
+  serveIrohTcpUpstream,
   resolveExternalLocation,
   requirePeerIdentity,
   redactClaims,
@@ -15343,6 +15375,7 @@ export {
   jsonStateSerializer,
   isExternalLocationBatch,
   isCapabilitySnapshotFresh,
+  irohHttpBridgeOptions,
   irohForwardedHeaderIdentityProvider,
   irohConnect,
   int82 as int8,
@@ -15452,4 +15485,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=3759E3A1C13BA14D64756E2164756E21
+//# debugId=6F5EC8BBCBCF600164756E2164756E21

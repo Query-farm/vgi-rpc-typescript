@@ -147,6 +147,26 @@ set.
 This native adapter is for Node/Bun, not browser bundles. Browser Iroh clients
 use the separately packaged Rust/WASM connector.
 
+### Workers behind an Iroh bridge
+
+Node/Bun raw workers use the loopback-safe convenience wrapper:
+
+```typescript
+import { serveIrohTcpUpstream } from "@query-farm/vgi-rpc";
+
+await serveIrohTcpUpstream(protocol, {
+  issuer: "production",
+  port: 9400,
+});
+```
+
+For HTTP workers, spread `irohHttpBridgeOptions(...)` into
+`createHttpHandler`. Its required `peerResolutionContext` adapter must supply
+the immediate socket peer and the raw, multiplicity-preserving header list;
+this keeps a plain Fetch `Request` from becoming a header-spoofing trust
+boundary. Both helpers default to authenticated EndpointIds and exact IPv4
+loopback trust; observation mode is an explicit `authenticate: false`.
+
 ## Testing with the Python CLI
 
 Test it with the Python CLI:

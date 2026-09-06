@@ -144,7 +144,10 @@ export {
 export {
   IROH_FORWARDED_ENDPOINT_HEADER,
   type IrohForwardedHeaderOptions,
+  type IrohHttpBridgeOptions,
+  type IrohHttpHandlerOptions,
   irohForwardedHeaderIdentityProvider,
+  irohHttpBridgeOptions,
 } from "./iroh.js";
 export { Protocol } from "./protocol.js";
 export {

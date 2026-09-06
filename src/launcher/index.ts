@@ -36,6 +36,10 @@ export {
   readProxyProtocolV2,
   VGI_IROH_ENDPOINT_TLV,
 } from "./proxy-protocol-v2.js";
+export {
+  type ServeIrohTcpUpstreamOptions,
+  serveIrohTcpUpstream,
+} from "./serve-iroh.js";
 export { type ServeTcpHandle, type ServeTcpOptions, serveTcp } from "./serve-tcp.js";
 export { type ServeUnixHandle, type ServeUnixOptions, serveUnix } from "./serve-unix.js";
 export {
