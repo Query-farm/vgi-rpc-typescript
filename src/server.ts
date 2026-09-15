@@ -77,7 +77,6 @@ export class VgiRpcServer {
    *  The primary stays in `protocol` so every existing path is untouched; it is
    *  projected into a binding on demand by {@link bindings}. */
   private extraBindings: Map<string, ProtocolBinding> = new Map();
-  private _primaryHash: Promise<string> | null = null;
 
   constructor(
     protocol: Protocol,
