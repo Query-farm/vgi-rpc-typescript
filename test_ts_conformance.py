@@ -40,6 +40,16 @@ BUN_TRANSPORT_KIND_WORKER = [
     "run",
     os.path.join(_TS_DIR, "examples", "conformance-transport-kind.ts"),
 ]
+# The `vgi_rpc.Identity.v1` fixture worker. One binary, two configurations,
+# selected by `--identity`; see IDENTITY_CONFORMANCE_FIXTURE.md §1. Kept out of
+# BUN_HTTP_WORKER on purpose — the shared group asserts against the *plain*
+# worker that a deployment configuring no hook hosts no identity protocol at
+# all, and that property dies the moment the plain worker configures one.
+BUN_HTTP_IDENTITY_WORKER = [
+    "bun",
+    "run",
+    os.path.join(_TS_DIR, "examples", "conformance-http-identity.ts"),
+]
 # Flechette variants — same source, different Arrow backend via Node's
 # conditional resolution (workerd → impl-flechette, default → impl-arrowjs).
 # Bun resolves the `imports` map in package.json by `--conditions`.
@@ -413,6 +423,46 @@ def conformance_http_introspect_port() -> Iterator[int]:
     ``getfixturevalue`` and skips the whole group if it is missing.
     """
     proc, port = _start_http_server([*BUN_HTTP_WORKER, "--introspect"])
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_identity_port() -> Iterator[int]:
+    """Bun worker hosting ``vgi_rpc.Identity.v1`` with *both* hooks configured.
+
+    Backs the shared identity group (``TestIdentityWireShape`` and the eleven
+    classes after it).  The protocol is nearly all guards and every guard reads
+    deployment policy, so the group cannot assert anything against a worker
+    whose allowlist, resolver and minter are unknown — the whole policy is
+    pinned in ``IDENTITY_CONFORMANCE_FIXTURE.md`` §3 and implemented in
+    ``examples/conformance-http-identity.ts``.
+
+    Its own process, and deliberately not the plain worker plus a flag:
+    ``TestIdentityAbsentByDefault`` asserts against ``conformance_http_port``
+    that a deployment configuring no hook hosts no identity protocol at all,
+    and adding identity there would make that property untestable.
+
+    The fixture name is load-bearing — the group looks it up with
+    ``getfixturevalue`` and skips, loudly and by name, if it is missing.
+    """
+    proc, port = _start_http_server([*BUN_HTTP_IDENTITY_WORKER, "--identity", "both"])
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_identity_introspect_only_port() -> Iterator[int]:
+    """The same binary with the mint hook left out.
+
+    Backs ``TestIdentityNarrowing``.  That an unconfigured hook makes its method
+    *absent* rather than hosted-and-refusing — and shrinks the ``protocol_hash``
+    with it — is only observable against a second worker configured with one
+    hook, so it cannot be folded into the fixture above.
+    """
+    proc, port = _start_http_server([*BUN_HTTP_IDENTITY_WORKER, "--identity", "introspect-only"])
     yield port
     proc.terminate()
     proc.wait(timeout=5)

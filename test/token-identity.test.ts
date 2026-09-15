@@ -802,3 +802,157 @@ describe("the dispatched methods", () => {
     );
   });
 });
+
+describe("dispatch over a raw transport", () => {
+  // Writing the cross-port conformance group surfaced a framework bug in the
+  // Python reference that had made `vgi_rpc.Identity.v1` *completely
+  // uncallable over every transport*, unnoticed, since it landed: `ctx`
+  // injection resolved "does this method want a context?" against the
+  // **primary** binding's method set rather than against the binding that owns
+  // the dispatched method. Identity is a secondary protocol whose methods both
+  // take a context -- they need the caller's `AuthContext` to apply their
+  // guards -- so they received none, and every call died on a missing argument
+  // before any guard ran.
+  //
+  // It was invisible because every identity test in that port (and, until
+  // this block, in this one) constructed the implementation directly and
+  // handed it a context it had built itself. Nothing called the protocol end
+  // to end.
+  //
+  // This port takes a different shape -- a unary handler's context is a
+  // positional argument every dispatcher supplies, and `OutputCollector`
+  // defaults `auth` to `AuthContext.anonymous()` -- so the bug cannot be
+  // spelled here the same way. That is a claim worth *running*, which is what
+  // these three cases do: the same `VgiRpcServer`, driven over the raw
+  // stdio framing and over HTTP.
+
+  const impl = () =>
+    new IdentityImpl({
+      resolveToken: resolver,
+      mintGrant: minter,
+      introspectPrincipals: ["proxy"],
+      maxAuthAge: 900,
+    });
+
+  /** Serve one raw-framed request against `server` and return the response. */
+  async function rawCall(
+    server: VgiRpcServer,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<{ type: string; kind: string; result?: Record<string, unknown> }> {
+    const { buildRequestIpc } = await import("../src/client/ipc.js");
+    const { RecordBatchReader } = await import("@query-farm/apache-arrow");
+    const { ERROR_KIND_KEY, LOG_EXTRA_KEY } = await import("../src/constants.js");
+    const definition = server.resolve(IDENTITY_PROTOCOL_NAME, method).method;
+    const request = buildRequestIpc(definition.paramsSchema as never, params, method, {
+      protocol: IDENTITY_PROTOCOL_NAME,
+    });
+    const readable = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(request);
+        controller.close();
+      },
+    });
+    const chunks: Uint8Array[] = [];
+    await server.serveConnection(readable, {
+      write(bytes: Uint8Array) {
+        chunks.push(new Uint8Array(bytes));
+      },
+    });
+    const joined = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const reader = await RecordBatchReader.from(joined);
+    await reader.open();
+    for (const batch of reader.readAll()) {
+      const extra = batch.metadata?.get(LOG_EXTRA_KEY);
+      if (extra) {
+        return {
+          type: String(JSON.parse(extra).exception_type ?? ""),
+          kind: batch.metadata?.get(ERROR_KIND_KEY) ?? "",
+        };
+      }
+      if (batch.numRows > 0 && batch.schema.fields[0]?.name === "result") {
+        return { type: "", kind: "", result: decodePayload(batch.getChildAt(0)?.get(0) as Uint8Array) };
+      }
+    }
+    return { type: "", kind: "" };
+  }
+
+  test("a raw transport carries no caller, so introspection fails closed", async () => {
+    // The signature of the reference's bug is a *missing argument* or a
+    // `TypeError` reading `auth` off `undefined` -- a failure before any
+    // guard. What must arrive instead is the guard's own typed refusal, which
+    // is also what makes stdio and unix fail closed for free.
+    const server = new VgiRpcServer(new Protocol("app.Raw.v1"), { serverId: "raw-identity" });
+    server.registerIdentity(impl());
+    const refused = await rawCall(server, "introspect_token", { token: "good" });
+    expect(refused).toEqual({ type: "IntrospectionRefusedError", kind: "introspection_refused" });
+  });
+
+  test("and cannot mint either, for want of an auth_time", async () => {
+    const server = new VgiRpcServer(new Protocol("app.Raw.v1"), { serverId: "raw-identity" });
+    server.registerIdentity(impl());
+    const refused = await rawCall(server, "issue_grant", { purpose: "ci", scopes: ["read"], ttl_seconds: 60n });
+    expect(refused).toEqual({ type: "StaleAuthError", kind: "stale_auth" });
+  });
+
+  test("the control: the same server resolves for an allowlisted caller over HTTP", async () => {
+    // Without this the two cases above pass against a dispatch path that hands
+    // *every* call an empty context -- which refuses everything, and so is
+    // indistinguishable from a working allowlist. The allowlisted half rides
+    // HTTP because that is the only transport this port carries an
+    // authenticated caller into a co-hosted binding on: `serveTcp` and
+    // `serveUnix` take a bare `Protocol` and build their own host, so they
+    // cannot register a secondary protocol at all.
+    const { createHttpHandler } = await import("../src/http/index.js");
+    const { buildRequestIpc } = await import("../src/client/ipc.js");
+    const { RecordBatchReader } = await import("@query-farm/apache-arrow");
+    const { ARROW_CONTENT_TYPE, rpcPath } = await import("../src/http/common.js");
+
+    const server = new VgiRpcServer(new Protocol("app.Raw.v1"), { serverId: "raw-identity" });
+    server.registerIdentity(impl());
+    const handler = createHttpHandler(server, {
+      compressionLevel: null,
+      authenticate: (request: Request) => {
+        const principal = request.headers.get("X-Test-Principal");
+        return principal ? new AuthContext("test", true, principal) : AuthContext.anonymous();
+      },
+    });
+    const definition = server.resolve(IDENTITY_PROTOCOL_NAME, "introspect_token").method;
+    const body = buildRequestIpc(definition.paramsSchema as never, { token: "good" }, "introspect_token", {
+      protocol: IDENTITY_PROTOCOL_NAME,
+    });
+    const respond = (principal: string) =>
+      handler(
+        new Request(`http://worker.example${rpcPath(IDENTITY_PROTOCOL_NAME, "introspect_token")}`, {
+          method: "POST",
+          headers: { "Content-Type": ARROW_CONTENT_TYPE, "X-Test-Principal": principal },
+          body: body as unknown as BodyInit,
+        }),
+      );
+
+    const allowed = await respond("proxy");
+    const reader = await RecordBatchReader.from(new Uint8Array(await allowed.arrayBuffer()));
+    await reader.open();
+    const batch = reader.readAll().find((b) => b.numRows > 0);
+    expect(decodePayload(batch!.getChildAt(0)?.get(0) as Uint8Array)).toEqual({
+      principal: "bob",
+      token_name: "ci-key",
+      ttl_seconds: 300n,
+    });
+
+    // And a caller off the allowlist on the same surface is refused, so the
+    // success above is the allowlist answering rather than the guard being
+    // skipped whenever a principal is present at all.
+    const { ERROR_KIND_KEY } = await import("../src/constants.js");
+    const denied = await respond("mallory");
+    const deniedReader = await RecordBatchReader.from(new Uint8Array(await denied.arrayBuffer()));
+    await deniedReader.open();
+    const errored = deniedReader.readAll().find((b) => b.metadata?.get(ERROR_KIND_KEY));
+    expect(errored?.metadata?.get(ERROR_KIND_KEY)).toBe("introspection_refused");
+  });
+});
