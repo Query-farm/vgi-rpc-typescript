@@ -9,7 +9,7 @@ import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
 /**
  * Whether an RPC method is request/response or streaming. Mirrors Python's
- * `MethodType` and is carried in the `__describe__` payload.
+ * `MethodType` and is carried in the `vgi_rpc.Reflection.v1` description.
  */
 export enum MethodType {
   /** Single request batch in, single result batch out. */
@@ -310,7 +310,9 @@ export interface DispatchInfo {
   kind?: TransportKind;
   /** Logical service / protocol name. */
   protocol?: string;
-  /** SHA-256 hex of the canonical __describe__ payload (always required in access log). */
+  /** SHA-256 hex of the canonical description of the protocol that owns the
+   *  dispatched method -- not the server's primary. Always required in the
+   *  access log, where it is the registry key for decoding archived records. */
   protocolHash?: string;
   /** Operator-supplied protocol-contract version label (optional). */
   protocolVersion?: string;

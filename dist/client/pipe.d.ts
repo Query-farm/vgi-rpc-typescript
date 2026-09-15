@@ -79,7 +79,8 @@ export declare class PipeStreamSession implements StreamSession {
  * Connect to a vgi-rpc server over a raw bidirectional pipe (a readable stream
  * of server output plus a writable for client input). The connection is
  * single-threaded: only one call or stream may be in flight at a time. The
- * `__describe__` handshake is sent before the reader is opened to avoid deadlock.
+ * first introspection request is sent before the reader is opened to avoid
+ * deadlock.
  */
 export declare function pipeConnect(readable: ReadableStream<Uint8Array>, writable: PipeWritable, options?: PipeConnectOptions): RpcClient;
 /**

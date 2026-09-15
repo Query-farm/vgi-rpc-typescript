@@ -51,5 +51,8 @@ protocol.exchange<{ factor: number }>("scale", {
   doc: "Scale input values by a factor.",
 });
 
+// `enableDescribe` hosts `vgi_rpc.Reflection.v1`, which is how a client
+// discovers this service's methods. It is the default; spelled out here so the
+// example says where introspection comes from.
 const server = new VgiRpcServer(protocol, { enableDescribe: true });
 server.run();

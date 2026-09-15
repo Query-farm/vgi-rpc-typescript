@@ -1,5 +1,41 @@
 import { type VgiBatch, type VgiSchema } from "../arrow/index.js";
 import type { CookieSpec } from "../types.js";
+/**
+ * Build the HTTP path for one RPC call: `{prefix}/{protocol}/{method}`.
+ *
+ * The protocol segment is a required faithful projection of the request's
+ * `vgi_rpc.protocol` metadata -- present so an edge device can act on the
+ * protocol without an Arrow parser. The metadata remains canonical; see
+ * {@link createHttpHandler} for what happens when the two disagree.
+ *
+ * @param protocol Routing key of the hosted protocol (`vgi_rpc.Identity.v1`).
+ * @param method RPC method name.
+ * @param opts.prefix Server mount prefix (`""` or `"/vgi"`).
+ * @param opts.suffix `"/init"` or `"/exchange"` for stream endpoints.
+ */
+export declare function rpcPath(protocol: string, method: string, opts?: {
+    prefix?: string;
+    suffix?: string;
+}): string;
+/**
+ * Build the path for a server-level reserved method such as `__upload_url__`.
+ *
+ * Reserved names are owned by no protocol and stay flat, at `{prefix}/{method}`.
+ * Kept beside {@link rpcPath} so the distinction is visible at the point of use
+ * rather than being something each caller has to remember.
+ */
+export declare function reservedPath(method: string, opts?: {
+    prefix?: string;
+}): string;
+/**
+ * Build an RPC path from an already-namespaced `{prefix}/{protocol}`.
+ *
+ * The client folds the protocol into its prefix once, after introspection, so
+ * this is the form its call sites need.
+ */
+export declare function rpcPathFromPrefix(namespacedPrefix: string, method: string, opts?: {
+    suffix?: string;
+}): string;
 /** MIME type for Arrow IPC stream request and response bodies. */
 export declare const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
 /** Synthetic method name for the pre-signed upload-URL endpoint. */

@@ -21,7 +21,11 @@ export interface ServeTcpOptions {
     protocolVersion?: string;
     /** Custom server identifier. */
     serverId?: string;
-    /** Enable __describe__ method. Default: true. */
+    /** Host `vgi_rpc.Reflection.v1`. Default: true.
+     *
+     *  Named for the `__describe__` method it used to switch on. What it gates
+     *  is introspection, which is now a co-hosted protocol rather than a
+     *  reserved method answered before dispatch. */
     enableDescribe?: boolean;
     /** Optional dispatch hook for observability. */
     dispatchHook?: DispatchHook;

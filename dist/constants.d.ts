@@ -1,5 +1,18 @@
 /** Batch-metadata key carrying the invoked RPC method name. */
 export declare const RPC_METHOD_KEY = "vgi_rpc.method";
+/** Names the protocol a request addresses -- the routing key.
+ *
+ *  Dispatch resolves the pair `(protocol, method)`: a server hosts one or more
+ *  protocols and method names may collide across them, which is what lets
+ *  protocols be authored independently. Required on every request, including
+ *  against a server hosting exactly one protocol -- an exemption would let an
+ *  intermediary that rebuilds a request and drops the field land silently on
+ *  whichever protocol happened to be first, rather than being told.
+ *
+ *  The major version is part of the protocol name (`vgi_rpc.Reflection.v1`), so
+ *  an incompatible major is a routing failure rather than a parse failure, and
+ *  v1 and v2 can be served side by side while clients migrate. */
+export declare const PROTOCOL_KEY = "vgi_rpc.protocol";
 /** Batch-metadata key carrying a log batch's severity level. */
 export declare const LOG_LEVEL_KEY = "vgi_rpc.log_level";
 /** Batch-metadata key carrying a log batch's message text. */
@@ -15,22 +28,13 @@ export declare const REQUEST_VERSION = "1";
 export declare const SERVER_ID_KEY = "vgi_rpc.server_id";
 /** Batch-metadata key carrying the client-supplied request id. */
 export declare const REQUEST_ID_KEY = "vgi_rpc.request_id";
-/** Batch-metadata key carrying the service / protocol name. */
-export declare const PROTOCOL_NAME_KEY = "vgi_rpc.protocol_name";
-/** Batch-metadata key carrying the `__describe__` response schema version. */
-export declare const DESCRIBE_VERSION_KEY = "vgi_rpc.describe_version";
-export declare const PROTOCOL_HASH_KEY = "vgi_rpc.protocol_hash";
-/** Current `__describe__` response schema version (the slim 8-column schema). */
-export declare const DESCRIBE_VERSION = "4";
 /** Application protocol surface version. Carried on every request batch from
- *  a client bound to a Protocol that declares `protocolVersion`; also emitted
- *  in the __describe__ response metadata. Format: canonical semver
+ *  a client bound to a Protocol that declares `protocolVersion`, and reported
+ *  by `vgi_rpc.Reflection.v1`. Format: canonical semver
  *  MAJOR.MINOR.PATCH. Enforced at the dispatch boundary on the server: exact
  *  major+minor match required, patch ignored. Distinct from `REQUEST_VERSION`
  *  (wire framing). Mirrors Python's `PROTOCOL_VERSION_KEY`. */
 export declare const PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
-/** Reserved method name for the introspection (`__describe__`) call. */
-export declare const DESCRIBE_METHOD_NAME = "__describe__";
 /** Batch-metadata key carrying the base64-encoded stream continuation/state token. */
 export declare const STATE_KEY = "vgi_rpc.stream_state#b64";
 /**

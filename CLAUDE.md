@@ -31,7 +31,7 @@ examples/
   conformance.ts    — 87-method conformance suite for wire-protocol testing
 test/
   wire.test.ts      — Unit tests for wire serialization
-  describe.test.ts  — Unit tests for __describe__ method
+  dispatch-identity.test.ts — Access records name the owning binding, and its digest
   schema.test.ts    — Unit tests for toSchema and inferParamTypes
   output-collector.test.ts — Unit tests for OutputCollector and result validation
   integration.test.ts      — Integration tests (requires Python CLI)
@@ -82,14 +82,17 @@ This library must remain wire-compatible with the Python vgi-rpc implementation.
 - Request batches carry `vgi_rpc.method` and `vgi_rpc.request_version` in batch metadata
 - Streaming uses lockstep: one output batch per input batch (interleaved reads/writes to avoid deadlock)
 - Log/error messages are zero-row batches with `vgi_rpc.log_level` and `vgi_rpc.log_message` metadata
-- `__describe__` introspection returns service metadata as an Arrow batch (slim DESCRIBE_VERSION 4 schema; see "Cross-language wire alignment" below)
+- Introspection is `vgi_rpc.Reflection.v1`, an ordinary co-hosted protocol (`list_protocols`, then `describe`); the reserved `__describe__` method is retired and refused with a message naming it
 
 ## Cross-language wire alignment
 
 This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
 
-- **`__describe__`** — `DESCRIBE_VERSION = "4"` (`src/constants.ts`). The response batch is the slim 8-column schema (`src/dispatch/describe.ts`): `name`, `method_type`, `has_return`, `params_schema_ipc`, `result_schema_ipc`, `has_header`, `header_schema_ipc`, `is_exchange`. Python-flavoured columns (`doc`, `param_types_json`, `param_defaults_json`, `param_docs_json`) are not on the wire — the Protocol class is the source of truth for human-readable type info. The response's custom metadata carries `vgi_rpc.protocol_hash`, a SHA-256 hex digest computed by `computeProtocolHash` to mirror Python's `compute_protocol_hash` byte-for-byte. Within-port stable; cross-port byte equality is *not* guaranteed because Arrow IPC schema bytes vary across language Arrow libraries.
+- **Introspection** — `vgi_rpc.Reflection.v1` (`src/reflection.ts`), a co-hosted protocol with two methods: `list_protocols` (what this server hosts, with versions and hashes) and `describe(protocol)` (one protocol's methods). Each reply rides as serialized Arrow IPC in a single `result` binary column, the framework's ordinary convention for a structured return — so a server that externalizes returns a pointer batch for reflection like any other method, and a client must resolve it. Decoding is tolerant by contract: by field name, ignoring unknown columns, defaulting absent ones that have defaults, raising for an absent one that does not. **A field added in a minor version must carry a default.** The `protocol_hash` it reports is the canonical digest (`src/protocol-hash.ts`: SHA-256 over RFC 8785 canonical JSON of the decoded structure), which is comparable across ports — unlike the retired describe payload's digest, which hashed Arrow IPC bytes and was comparable only against itself. `__describe__` is retired on every transport and refused with a message naming the replacement protocol and both entry points; only that one reserved name is special-cased.
+
 - **Access log** — `AccessLogHook` in `src/access-log.ts` writes one JSONL record per dispatch when installed via `new VgiRpcServer(protocol, { dispatchHook })` or `createHttpHandler(protocol, { dispatchHook })`. The record shape conforms to `vgi_rpc/access_log.schema.json` in the Python repo and validates under `vgi-rpc-test --access-log <path>`. `DispatchInfo` (`src/types.ts`) carries `protocol`, `protocolHash`, `protocolVersion`, `remoteAddr`, `httpStatus`, `requestData`, `streamId`, `cancelled`, `claims`, `requestBytes`, `externalizedBytes`, and `deferral`. Configure `protocolVersion` via the `VgiRpcServer` constructor option.
+
+  **`protocol` and `protocolHash` are the owning binding's, at every emit site.** A server hosts several protocols; the record must name the one that owns the dispatched method, and carry *its* canonical digest. The two disagreeing is worse than either being wrong alone — `protocol_hash` is the registry key for decoding archived records, so a record naming one protocol and carrying another's decodes against the wrong description while passing the schema. Both are read inline from `binding` via `protocolHashFor(binding)` at all four sites (stdio server, HTTP handler, unix and tcp launchers), and `test/dispatch-identity.test.ts` enumerates those sites structurally — a fifth one added later fails that test rather than reintroducing this silently. Framework endpoints owned by no protocol (`__transport_options__`, `__upload_url__`) log the primary, which is the specified behaviour rather than a gap.
 
   **HTTP stream records.** Over HTTP a stream is many requests, so one record is emitted per `/init` and per `/exchange`, and the fields that tie them together come from the dispatcher rather than the handler: `DispatchContext.streamObserver` (`src/http/dispatch.ts`) reports the stream's chain id and any client cancel. `stream_id` is the hex of the stream's `callId` — minted once at `/init`, carried sealed in the call token and every cursor — so `/init` and its continuations agree and two streams never collide without a second identifier or a token-format change. The all-zeros id is reserved for a stream record whose request failed before a stream existed. `request_data` rides on unary calls and stream `/init` (spec §4.3) and on no continuation; `http_status` is on every HTTP record.
 

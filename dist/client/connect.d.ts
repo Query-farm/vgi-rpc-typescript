@@ -4,7 +4,7 @@ import { HttpStreamSession } from "./stream.js";
 import type { HttpConnectOptions, StreamSession } from "./types.js";
 /** A connected RPC client, returned by {@link httpConnect}, {@link pipeConnect}, and {@link subprocessConnect}. */
 export interface RpcClient {
-    /** Invoke a unary method. Returns the single result row, or `null` for void methods. Parameter defaults from `__describe__` are applied automatically. */
+    /** Invoke a unary method. Returns the single result row, or `null` for void methods. Parameter defaults from the server's description are applied automatically. */
     call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null>;
     /** Open a streaming method, returning a {@link StreamSession} for exchange or producer iteration. */
     stream(method: string, params?: Record<string, any>): Promise<StreamSession>;
@@ -44,7 +44,7 @@ export interface HttpRpcClient extends RpcClient {
 }
 /**
  * Connect to a vgi-rpc server over HTTP. The returned client lazily introspects
- * the server (caching `__describe__`) on the first call and transparently handles
+ * the server via `vgi_rpc.Reflection.v1` (caching the result) on the first call and transparently handles
  * zstd compression, authorization, and 413 request externalization.
  */
 export declare function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): HttpRpcClient;

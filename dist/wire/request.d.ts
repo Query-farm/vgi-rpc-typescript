@@ -1,6 +1,9 @@
 import { type VgiBatch, type VgiSchema } from "../arrow/index.js";
 export interface ParsedRequest {
     methodName: string;
+    /** The protocol the method belongs to -- the routing key. Empty only for a
+     *  request that carried none, which the dispatcher refuses. */
+    protocol: string;
     requestVersion: string;
     requestId: string | null;
     schema: VgiSchema;
@@ -24,7 +27,7 @@ export declare function validateRequestSchema(actual: VgiSchema, expected: VgiSc
 export declare function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest;
 /**
  * Fill in `defaults` for any params that arrived as null/undefined.
- * The slim DESCRIBE_VERSION 4 wire format no longer carries defaults to the
+ * `vgi_rpc.Reflection.v1` does not carry parameter defaults to the
  * client, so default substitution must happen server-side: the client sends
  * a null in any column it didn't supply, and dispatch swaps in the registered
  * default before invoking the handler.

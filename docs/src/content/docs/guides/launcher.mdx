@@ -13,7 +13,7 @@ This page covers the **serving / launcher** side. To **connect** to a running se
 
 ## How it works
 
-- **One server process per socket.** `serveUnix` binds an AF_UNIX socket, accepts connections one at a time (sequential listen, like Python's `serve_unix`), and dispatches each connection through the standard unary / stream / `__describe__` machinery.
+- **One server process per socket.** `serveUnix` binds an AF_UNIX socket, accepts connections one at a time (sequential listen, like Python's `serve_unix`), and dispatches each connection through the standard unary / stream machinery.
 - **Self-termination.** A worker shuts itself down after `idleTimeout` seconds with zero connected clients, after an initial `startupGrace` window so a slow first caller doesn't see the socket vanish.
 - **Spawn-or-reuse.** `launch` derives a deterministic socket path from a hash of the worker command tuple, serializes concurrent first-callers on a per-hash lockfile, probes for an existing worker, and spawns one only if none is serving.
 - **Worker contract.** A worker accepts `--unix PATH` and `--idle-timeout SEC` on its command line, and prints exactly one `UNIX:<absolute-path>` line to stdout once bind + listen succeed.
@@ -55,7 +55,7 @@ Once bind + listen succeed, `serveUnix` writes `UNIX:<absolute-path>\n` to stdou
 | `startupGraceSeconds` | `number` | `5` | Grace period after `listen()` succeeds before the idle timer starts ticking. |
 | `protocolVersion` | `string` | `""` | Optional logical-service / protocol-contract version label. |
 | `serverId` | `string` | random | Custom server identifier (random 12-char id if omitted). |
-| `enableDescribe` | `boolean` | `true` | Enable the `__describe__` introspection method. |
+| `enableDescribe` | `boolean` | `true` | Host `vgi_rpc.Reflection.v1`, the introspection protocol. |
 | `dispatchHook` | `DispatchHook` | — | Optional dispatch hook for observability. |
 | `externalLocation` | `ExternalLocationConfig` | — | Optional external-storage config for large-batch externalization. |
 | `onServeStart` | `ServeStartHook` | — | Lifecycle hook fired once before the first dispatched request. |

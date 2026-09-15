@@ -41,7 +41,6 @@ RPC routes are **namespaced by protocol**. A server hosts one or more protocols 
 | `/{protocol}/{method}` | POST | Unary method call |
 | `/{protocol}/{method}/init` | POST | Initialize a stream (producer or exchange) |
 | `/{protocol}/{method}/exchange` | POST | Send/receive a stream batch |
-| `/__describe__` | POST | Machine-readable Arrow describe batch |
 | `/__upload_url__/init` | POST | Request a pre-signed upload URL (when `uploadUrlProvider` is set) |
 | `/__session__` | DELETE | Tear down a sticky session (when `enableSticky` is set) |
 | `/describe` | GET | HTML describe / API-reference page |
@@ -49,6 +48,18 @@ RPC routes are **namespaced by protocol**. A server hosts one or more protocols 
 | `/health` | GET | JSON health probe (auth-exempt) |
 
 Reserved endpoints below the RPC rows belong to the *server* rather than to any one protocol, so they stay flat under the prefix.
+
+Introspection is not among them. `vgi_rpc.Reflection.v1` is an ordinary
+co-hosted protocol and is reached on the ordinary RPC routes —
+`/vgi_rpc.Reflection.v1/list_protocols` and `/vgi_rpc.Reflection.v1/describe`.
+Handing `createHttpHandler` a bare `Protocol` hosts it alongside that protocol,
+since a server no client can bootstrap against is not a useful default; hand it
+a `VgiRpcServer` and its own decision stands.
+
+`POST {prefix}/__describe__` is **retired**. It answers 404 with a message
+naming the replacement protocol and both entry points, rather than a bare "no
+such method" — which a stale client cannot tell apart from "this server was
+built without introspection", and the two need opposite fixes.
 
 Build these paths with the exported helpers rather than by hand: `rpcPath(protocol, method, { prefix, suffix })`, `rpcPathFromPrefix(namespacedPrefix, method, { suffix })`, and `reservedPath(method, { prefix })`.
 

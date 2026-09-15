@@ -25,7 +25,7 @@ Define RPC methods with Arrow-typed schemas, serve them over stdin/stdout, and i
 - **Schema shorthand** — declare schemas with `{ name: str, count: int }` instead of manual `Schema`/`Field` construction
 - **Fluent protocol builder** — chain `.unary()`, `.producer()`, `.exchange()` calls to define your service
 - **Type-safe streaming state** — generic `<S>` parameter threads state types through init and produce/exchange functions
-- **Runtime introspection** — opt-in `__describe__` method for dynamic service discovery via the CLI
+- **Runtime introspection** — `vgi_rpc.Reflection.v1`, a co-hosted protocol for dynamic service discovery via the CLI
 - **Result validation** — missing required fields in handler results throw descriptive errors at emit time
 - **Authentication** — bearer tokens, JWT, mTLS (PEM-in-header and XFCC), with chainable authenticators
 - **Six client transports** — HTTP, HTTP-over-Iroh (`httpiConnect`), raw Iroh (`irohConnect`), subprocess, raw pipe, and raw TCP, all sharing a unified `RpcClient` interface. Raw TCP carries no auth/TLS and defaults to loopback (`127.0.0.1`) — trusted networks only; use HTTP otherwise.
@@ -444,7 +444,7 @@ This library implements the same wire protocol as the Python [`vgi-rpc`](https:/
 - Request batches carry method name and version in batch metadata
 - Lockstep streaming: one output batch per input batch
 - Zero-row batches for log messages and errors
-- `__describe__` introspection method for cross-language service discovery
+- `vgi_rpc.Reflection.v1` for cross-language service discovery (`list_protocols`, then `describe`)
 
 See the [Wire Protocol Specification](https://vgi-rpc.query.farm/wire-protocol) for the full protocol details.
 

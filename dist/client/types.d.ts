@@ -5,12 +5,22 @@ export type ExchangeInput = Record<string, any>[] | RecordBatch;
 export interface HttpConnectOptions {
     /**
      * Statically declared service description. When supplied, the client uses
-     * these method and stream schemas directly and does not call `__describe__`.
+     * these method and stream schemas directly and does not introspect at all.
      * This is required for services that intentionally expose only their
      * declared RPC surface and for exact exchange input schemas that cannot be
      * recovered by inspecting runtime values.
      */
     description?: import("./introspect.js").ServiceDescription;
+    /**
+     * Which protocol to bind to, skipping reflection's `list_protocols` hop.
+     *
+     * Introspection is two round trips -- what does this server host, then
+     * describe one of them -- because a server may host several and there is no
+     * longer a single "the" protocol to ask about without asking. Naming one
+     * here answers the first question locally. Defaults to the first hosted
+     * protocol that is not framework-reserved.
+     */
+    protocol?: string;
     /** Route prefix the server mounts its methods under (e.g. `/api`). Trailing slashes are stripped. Defaults to no prefix. */
     prefix?: string;
     /** Callback invoked for each log/error message the server emits during a request. */
@@ -62,6 +72,16 @@ export interface StreamSession {
 }
 /** Options for {@link pipeConnect}, the client over raw readable/writable streams. */
 export interface PipeConnectOptions {
+    /**
+     * Which protocol to bind to, skipping reflection's `list_protocols` hop.
+     *
+     * Introspection is two round trips -- what does this server host, then
+     * describe one of them -- because a server may host several and there is no
+     * longer a single "the" protocol to ask about without asking. Naming one
+     * here answers the first question locally. Defaults to the first hosted
+     * protocol that is not framework-reserved.
+     */
+    protocol?: string;
     /** Callback invoked for each log/error message the server emits during a request. */
     onLog?: (msg: LogMessage) => void;
     /** External storage config for resolving externalized batches. */

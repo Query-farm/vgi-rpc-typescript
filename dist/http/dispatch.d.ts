@@ -8,6 +8,13 @@ export interface DispatchContext {
     tokenKey: Uint8Array;
     tokenTtl: number;
     serverId: string;
+    /** Wire name of the protocol that owns the dispatched method.
+     *
+     *  Bound into the AEAD associated data of this stream's cursor and call
+     *  tokens, so a continuation presented under a different protocol fails the
+     *  tag check and is rejected exactly as an invalid token -- including on the
+     *  call-state cache-hit path, where the call token is never opened at all. */
+    protocolName: string;
     /** Deprecated compatibility alias for the hard response budget. */
     maxStreamResponseBytes?: number;
     /** Hard wire cap for unary, exchange, and each producer turn.
@@ -52,8 +59,6 @@ export interface DispatchContext {
         cancelled?: boolean;
     };
 }
-/** Dispatch a __describe__ request. */
-export declare function httpDispatchDescribe(protocolName: string, methods: Map<string, MethodDefinition>, serverId: string, protocolVersion?: string): Promise<Response>;
 /** Dispatch a unary HTTP request. */
 export declare function httpDispatchUnary(method: MethodDefinition, body: Uint8Array, ctx: DispatchContext): Promise<Response>;
 /** Dispatch a stream init HTTP request (producer or exchange). */

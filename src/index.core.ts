@@ -24,14 +24,10 @@ export {
 export { AuthContext } from "./auth.js";
 export * from "./client/index.js";
 export {
-  DESCRIBE_METHOD_NAME,
-  DESCRIBE_VERSION,
-  DESCRIBE_VERSION_KEY,
   ERROR_KIND_KEY,
   LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
-  PROTOCOL_NAME_KEY,
   REQUEST_ID_KEY,
   REQUEST_VERSION,
   REQUEST_VERSION_KEY,

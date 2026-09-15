@@ -40,7 +40,7 @@ export function rpcPath(protocol: string, method: string, opts?: { prefix?: stri
 }
 
 /**
- * Build the path for a server-level reserved method such as `__describe__`.
+ * Build the path for a server-level reserved method such as `__upload_url__`.
  *
  * Reserved names are owned by no protocol and stay flat, at `{prefix}/{method}`.
  * Kept beside {@link rpcPath} so the distinction is visible at the point of use

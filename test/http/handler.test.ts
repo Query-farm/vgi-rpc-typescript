@@ -24,6 +24,7 @@ import {
 } from "../../src/constants.js";
 import { ARROW_CONTENT_TYPE } from "../../src/http/common.js";
 import { createHttpHandler, float, int32, Protocol, str, TransportKind } from "../../src/index.js";
+import { decodeServiceDescription, REFLECTION_PROTOCOL_NAME } from "../../src/reflection.js";
 import { gzipDecompress } from "../../src/util/gzip.js";
 import { zstdDecompress } from "../../src/util/zstd.js";
 
@@ -37,9 +38,8 @@ import { zstdDecompress } from "../../src/util/zstd.js";
 const PROTOCOL_NAME = "TestHTTP";
 
 /** `{baseUrl}{prefix}/{protocol}` — the namespaced prefix RPC routes hang off.
- *  Reserved framework endpoints (`__describe__`, `__upload_url__/init`,
- *  `health`) belong to the server rather than to any protocol and stay flat
- *  on `{baseUrl}/vgi`. */
+ *  Reserved framework endpoints (`__upload_url__/init`, `health`) belong to
+ *  the server rather than to any protocol and stay flat on `{baseUrl}/vgi`. */
 const RPC = `http://localhost:9999/vgi/${PROTOCOL_NAME}`;
 
 function buildRequestIpc(
@@ -300,13 +300,18 @@ describe("HTTP Handler", () => {
     expect(batches[1].getChildAt(0)?.get(0)).toBe("test");
   });
 
-  // -- __describe__ --
+  // -- introspection --
 
-  test("describe endpoint", async () => {
-    const body = buildRequestIpc(new Schema([]), {}, "__describe__");
+  test("vgi_rpc.Reflection.v1 lists every method of the primary", async () => {
+    const body = buildRequestIpc(
+      new Schema([new Field("protocol", new Utf8(), false)]),
+      { protocol: [PROTOCOL_NAME] },
+      "describe",
+      new Map([[PROTOCOL_KEY, REFLECTION_PROTOCOL_NAME]]),
+    );
 
     const res = await handler(
-      new Request(`${BASE}/vgi/__describe__`, {
+      new Request(`${BASE}/vgi/${REFLECTION_PROTOCOL_NAME}/describe`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -315,13 +320,10 @@ describe("HTTP Handler", () => {
 
     expect(res.status).toBe(200);
     const { batches } = await readResponseBatches(res);
-    expect(batches.length).toBe(1);
-    // Should list all methods
-    const names: string[] = [];
-    const nameCol = batches[0].getChildAt(0)!;
-    for (let i = 0; i < batches[0].numRows; i++) {
-      names.push(nameCol.get(i));
-    }
+    const payload = batches[batches.length - 1].getChild("result")!.get(0) as Uint8Array;
+    const desc = decodeServiceDescription(payload);
+    expect(desc.protocol).toBe(PROTOCOL_NAME);
+    const names = desc.methods.map((m) => m.name);
     expect(names).toContain("add");
     expect(names).toContain("greet");
     expect(names).toContain("count");

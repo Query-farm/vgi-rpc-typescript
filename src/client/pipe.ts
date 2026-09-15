@@ -10,14 +10,27 @@ import {
   Struct,
   vectorFromArray,
 } from "@query-farm/apache-arrow";
-import { DESCRIBE_METHOD_NAME } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { serializeIpcStream } from "../http/common.js";
+import {
+  decodeProtocolList,
+  decodeServiceDescription,
+  type ProtocolListDesc,
+  REFLECTION_DESCRIBE,
+  REFLECTION_LIST_PROTOCOLS,
+} from "../reflection.js";
 import { IpcStreamReader } from "../wire/reader.js";
 import { MAX_STREAM_CHUNK } from "../wire/writer.js";
 import type { RpcClient } from "./connect.js";
-import { type MethodInfo, parseDescribeResponse, type ServiceDescription } from "./introspect.js";
+import {
+  adaptServiceDescription,
+  type MethodInfo,
+  pickApplicationProtocol,
+  reflectionRequest,
+  reflectionResult,
+  type ServiceDescription,
+} from "./introspect.js";
 import { buildRequestIpc, dispatchLogOrError, extractBatchRows, inferArrowType } from "./ipc.js";
 import type {
   ExchangeInput,
@@ -441,7 +454,8 @@ export class PipeStreamSession implements StreamSession {
  * Connect to a vgi-rpc server over a raw bidirectional pipe (a readable stream
  * of server output plus a writable for client input). The connection is
  * single-threaded: only one call or stream may be in flight at a time. The
- * `__describe__` handshake is sent before the reader is opened to avoid deadlock.
+ * first introspection request is sent before the reader is opened to avoid
+ * deadlock.
  */
 export function pipeConnect(
   readable: ReadableStream<Uint8Array>,
@@ -459,6 +473,12 @@ export function pipeConnect(
   // client can know a priori what else the server speaks, then address that.
   let protocolName = "";
   let serverProtocolVersion = "";
+  let describedHash = "";
+  let hostedProtocols: string[] = [];
+  // Naming a protocol skips the `list_protocols` hop -- worth it against a
+  // server whose primary is not the one this client wants, and against one
+  // hosting several.
+  const requestedProtocol = options?.protocol;
   let _busy = false;
   let _drainPromise: Promise<void> | null = null;
   let closed = false;
@@ -480,9 +500,9 @@ export function pipeConnect(
   };
 
   // The IpcStreamReader.create() blocks until the first IPC schema arrives
-  // on the readable. To avoid deadlock, we must send our first request
-  // (the __describe__ call) BEFORE opening the reader. After that, the
-  // response bytes are in the pipe buffer and the reader can consume them.
+  // on the readable. To avoid deadlock, we must send our first request (the
+  // first reflection call) BEFORE opening the reader. After that, the response
+  // bytes are in the pipe buffer and the reader can consume them.
   async function ensureReader(): Promise<IpcStreamReader> {
     if (reader) return reader;
     if (!readerPromise) {
@@ -520,28 +540,39 @@ export function pipeConnect(
 
     await acquireBusy();
     try {
-      // Send __describe__ request BEFORE opening the reader.
-      // IpcStreamReader.create() blocks on reader.open() which reads the
-      // first schema message. The server won't write anything until it
-      // receives a request. Sending first avoids deadlock.
-      const emptySchema = new Schema([]);
-      const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
-      writeFn(body);
+      // One unary reflection call. The *first* one has to be written before
+      // the reader is opened: IpcStreamReader.create() blocks on reader.open()
+      // reading the first schema message, and the server writes nothing until
+      // it has a request. Sending first is what avoids the deadlock.
+      const call = async (method: string, protocol?: string): Promise<Uint8Array> => {
+        writeFn(reflectionRequest(method, protocol));
+        const r = await ensureReader();
+        // ensureReader() consumed the schema via open(). readStream() — on the
+        // first call (initialized=false) — returns the current stream without
+        // calling reset().
+        const response = await r.readStream();
+        if (!response) {
+          throw new RpcError("TransportError", `EOF reading the '${method}' reflection response`, "");
+        }
+        return reflectionResult(response.batches as any, onLog);
+      };
 
-      const r = await ensureReader();
-
-      // Read response (first IPC stream = describe response schema + batches)
-      // ensureReader() consumed the schema via open(). Use readStream()
-      // which — on the first call (initialized=false) — returns the current
-      // stream without calling reset().
-      const response = await r.readStream();
-      if (!response) {
-        throw new Error("EOF reading __describe__ response");
+      // Two round trips: what does this server host, then describe one of
+      // them. The first is unavoidable now that a server may host several
+      // protocols -- there is no longer a single "the" protocol to ask about
+      // without asking. An explicit `protocol` skips it.
+      let listing: ProtocolListDesc | undefined;
+      let target = requestedProtocol;
+      if (!target) {
+        listing = decodeProtocolList(await call(REFLECTION_LIST_PROTOCOLS));
+        target = pickApplicationProtocol(listing);
       }
+      const desc = adaptServiceDescription(decodeServiceDescription(await call(REFLECTION_DESCRIBE, target)), listing);
 
-      const desc = await parseDescribeResponse(response.batches as any, onLog);
       protocolName = desc.protocolName;
       serverProtocolVersion = desc.protocolVersion;
+      describedHash = desc.protocolHash;
+      hostedProtocols = desc.hostedProtocols;
       methodCache = new Map(desc.methods.map((m) => [m.name, m]));
       return methodCache;
     } finally {
@@ -689,6 +720,8 @@ export function pipeConnect(
       return {
         protocolName,
         protocolVersion: serverProtocolVersion,
+        protocolHash: describedHash,
+        hostedProtocols,
         methods: [...methods.values()],
       };
     },

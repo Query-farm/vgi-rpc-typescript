@@ -233,9 +233,7 @@ export function buildDescribePage(
   methods: Map<string, MethodDefinition>,
   repoUrl: string | null,
 ): string {
-  const sortedMethods = [...methods.entries()]
-    .filter(([name]) => name !== "__describe__")
-    .sort(([a], [b]) => a.localeCompare(b));
+  const sortedMethods = [...methods.entries()].sort(([a], [b]) => a.localeCompare(b));
 
   const cards = sortedMethods.map(([, method]) => buildMethodCard(method)).join("\n");
 

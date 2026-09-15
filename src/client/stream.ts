@@ -113,7 +113,7 @@ export class HttpStreamSession implements StreamSession {
     baseUrl: string;
     /** The already-namespaced `{prefix}/{protocol}` an `/exchange` path hangs
      *  off. Folded by the caller, which learns the protocol from
-     *  `__describe__`. */
+     *  the server's description. */
     prefix: string;
     method: string;
     stateToken: string | null;
@@ -287,7 +287,7 @@ export class HttpStreamSession implements StreamSession {
     // We'll use the keys from input[0] to figure out columns.
     if (input.length === 0) {
       // Zero-row exchange: build an empty batch with state token.
-      // Use inputSchema from __describe__ if available; fall back to
+      // Use inputSchema from the description if available; fall back to
       // outputSchema so the server sees the correct column names.
       const zeroSchema = this._inputSchema ?? this._outputSchema;
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
@@ -295,7 +295,7 @@ export class HttpStreamSession implements StreamSession {
       return this._doExchange(zeroSchema, [batchWithMeta]);
     }
 
-    // __describe__ is the contract. Runtime inference cannot represent an
+    // The server's description is the contract. Runtime inference cannot represent an
     // all-null typed column and loses parameters on complex Arrow types. Keep
     // inference only as a compatibility fallback for peers that omitted the
     // input schema from their description.

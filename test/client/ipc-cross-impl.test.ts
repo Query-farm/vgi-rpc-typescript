@@ -49,9 +49,9 @@ function buildExpectedMetadata(method: string, protocolVersion?: string): Map<st
 
 for (const { name, impl } of impls) {
   describe(`buildRequestIpc parity: ${name}`, () => {
-    it("empty schema (e.g. __describe__) serializes to a valid stream", () => {
+    it("empty schema (e.g. list_protocols) serializes to a valid stream", () => {
       const schema = new Schema([]);
-      const metadata = buildExpectedMetadata("__describe__", "1.0.0");
+      const metadata = buildExpectedMetadata("list_protocols", "1.0.0");
 
       // This mirrors the empty-schema branch of buildRequestIpc.
       const batch = impl.emptyBatchWithMetadata(schema as any, metadata);
@@ -76,7 +76,7 @@ for (const { name, impl } of impls) {
       expect(batches.length).toBeGreaterThan(0);
       const got = (batches[0] as any).metadata;
       expect(got).toBeDefined();
-      expect(got.get(RPC_METHOD_KEY)).toBe("__describe__");
+      expect(got.get(RPC_METHOD_KEY)).toBe("list_protocols");
       expect(got.get(PROTOCOL_VERSION_KEY)).toBe("1.0.0");
     });
 
@@ -123,7 +123,7 @@ describe("buildRequestIpc empty-schema regression — apache-arrow batch passed 
   // apache-arrow batch doesn't surface that field.
   it("flechette.serializeBatches refuses an apache-arrow RecordBatch", () => {
     const schema = new Schema([]);
-    const apacheBatch = arrowjsImpl.emptyBatchWithMetadata(schema as any, buildExpectedMetadata("__describe__"));
+    const apacheBatch = arrowjsImpl.emptyBatchWithMetadata(schema as any, buildExpectedMetadata("list_protocols"));
 
     expect(() => flechetteImpl.serializeBatches(schema as any, [apacheBatch as any])).toThrow(); // any throw is fine — the point is that mixing impls is incoherent.
   });
@@ -145,8 +145,8 @@ describe("introspect.deserializeSchema returns impl-native types", () => {
   // (browser/worker) based on the active condition — not always the
   // apache-arrow one.
   it("active impl is the one whose deserializeSchema introspect returns", async () => {
-    const { parseDescribeResponse } = await import("../../src/client/introspect.js");
-    void parseDescribeResponse; // import for side-effect coverage
+    const { adaptServiceDescription } = await import("../../src/client/introspect.js");
+    void adaptServiceDescription; // import for side-effect coverage
 
     // Use the apache-arrow impl to build a `(request: binary)` schema
     // serialized as a Schema IPC message. Both impls' deserializeSchema
@@ -193,8 +193,8 @@ describe("introspect → buildRequestIpc end-to-end (catalog_attach shape)", () 
   // the (empty) binary value as a nested IPC stream.
   //
   // We reproduce the catalog_attach wire shape:
-  //   1. The server's __describe__ response carries the params schema as
-  //      IPC bytes for `RecordBatch(request: binary)`.
+  //   1. The server's reflection `describe` reply carries the params schema
+  //      as IPC bytes for `RecordBatch(request: binary)`.
   //   2. The client deserializes that schema.
   //   3. The client builds a 1-row request batch with a real
   //      (non-empty) binary payload.
@@ -203,7 +203,7 @@ describe("introspect → buildRequestIpc end-to-end (catalog_attach shape)", () 
   for (const { name, impl } of impls) {
     it(`${name}: schema-deserialize → binary-encode → re-decode round-trips`, () => {
       // Build the schema (`request: binary`) and emit just-its IPC bytes,
-      // matching what the server includes in its __describe__ response.
+      // matching what the server puts in `params_schema_ipc`.
       const originalSchema = impl.schema([impl.field("request", impl.binary() as any, true)]);
       const schemaBytes = impl.serializeSchema(originalSchema);
 

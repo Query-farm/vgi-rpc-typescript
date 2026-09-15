@@ -54,7 +54,8 @@ const server = new VgiRpcServer(protocol, { enableDescribe: true });
 server.run();
 ```
 
-Setting `enableDescribe: true` registers the `__describe__` introspection method.
+Setting `enableDescribe: true` hosts `vgi_rpc.Reflection.v1`, the co-hosted protocol a client
+introspects through. It is the default.
 
 ## 4. Test with the CLI
 

@@ -9,7 +9,7 @@
  * character off and dispatch the method name "/<method>", which matches
  * nothing — reported from the field as
  *
- *   Unknown method: '/__describe__'. Available methods: [aggregate_bind, ...]
+ *   Unknown method: '/aggregate_bind'. Available methods: [aggregate_bind, ...]
  *
  * where every name in that list is unprefixed, so the leading slash was the
  * whole story. Health, the landing surface and the client bundle 404'd the
@@ -18,7 +18,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { createHttpHandler, float, Protocol } from "../../src/index.js";
+import { buildRequestIpc } from "../../src/client/ipc.js";
+import { rpcPath } from "../../src/http/common.js";
+import { createHttpHandler, float, Protocol, toSchema } from "../../src/index.js";
 
 function handlerFor(prefix?: string) {
   const protocol = new Protocol("PathSvc");
@@ -30,29 +32,49 @@ function handlerFor(prefix?: string) {
   return createHttpHandler(protocol, { serverId: "path-test", ...(prefix ? { prefix } : {}) });
 }
 
-const describeBody = (url: string) =>
+/** A well-formed `PathSvc.double` call, addressed at whatever URL is given.
+ *
+ *  A real dispatchable route rather than a reserved one: `__describe__` used
+ *  to serve as the probe here, and its retirement would otherwise have taken
+ *  the normalization coverage with it. */
+const callBody = (url: string) =>
   new Request(url, {
     method: "POST",
     headers: { "Content-Type": "application/vnd.apache.arrow.stream" },
-    body: new Uint8Array(0),
+    body: buildRequestIpc(toSchema({ x: float }) as never, { x: 4 }, "double", {
+      protocol: "PathSvc",
+    }) as unknown as BodyInit,
   });
 
+const path = (prefix?: string) => rpcPath("PathSvc", "double", prefix ? { prefix } : undefined);
+
 describe("duplicate slashes in the request path", () => {
-  test("__describe__ resolves with a doubled leading slash", async () => {
+  test("a method resolves with a doubled leading slash", async () => {
     const handler = handlerFor();
-    const single = await handler(describeBody("http://x/__describe__"));
-    const doubled = await handler(describeBody("http://x//__describe__"));
+    const single = await handler(callBody(`http://x${path()}`));
+    const doubled = await handler(callBody(`http://x/${path()}`));
     expect(single.status).toBe(200);
     expect(doubled.status).toBe(single.status);
   });
 
   test("the doubled path dispatches the same method, not '/method'", async () => {
     const handler = handlerFor();
-    const resp = await handler(describeBody("http://x//__describe__"));
+    const resp = await handler(callBody(`http://x/${path()}`));
     // The old failure surfaced as a 404 whose body named the method with a
     // leading slash. Assert on that shape so a regression is unmistakable.
     const body = await resp.text().catch(() => "");
-    expect(body).not.toContain("'/__describe__'");
+    expect(body).not.toContain("'/double'");
+  });
+
+  test("the retired flat path is collapsed too, so the refusal is reachable", async () => {
+    // The exact shape from the field report, and the reason it still matters:
+    // an *un*-collapsed `//__describe__` matches no route and 404s as bare
+    // text, which reads identically to "this server never had introspection".
+    // Collapsed, it reaches the refusal that names where introspection went.
+    const handler = handlerFor();
+    const resp = await handler(callBody("http://x//__describe__"));
+    expect(resp.status).toBe(404);
+    expect(await resp.text()).toContain("vgi_rpc.Reflection.v1");
   });
 
   test("health tolerates it too", async () => {
@@ -64,20 +86,20 @@ describe("duplicate slashes in the request path", () => {
 
   test("many slashes collapse, not just two", async () => {
     const handler = handlerFor();
-    const resp = await handler(describeBody("http://x////__describe__"));
+    const resp = await handler(callBody(`http://x///${path()}`));
     expect(resp.status).toBe(200);
   });
 
   test("a prefixed worker collapses inside and around the prefix", async () => {
     const handler = handlerFor("/vgi");
-    for (const url of ["http://x/vgi/__describe__", "http://x//vgi//__describe__"]) {
-      expect((await handler(describeBody(url))).status).toBe(200);
+    for (const url of [`http://x${path("/vgi")}`, `http://x//vgi//PathSvc//double`]) {
+      expect((await handler(callBody(url))).status).toBe(200);
     }
   });
 
   test("a path outside the prefix still 404s — normalization is not a bypass", async () => {
     const handler = handlerFor("/vgi");
-    const resp = await handler(describeBody("http://x//other//__describe__"));
+    const resp = await handler(callBody("http://x//other//PathSvc//double"));
     expect(resp.status).toBe(404);
   });
 });

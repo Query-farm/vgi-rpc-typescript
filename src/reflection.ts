@@ -29,6 +29,7 @@ import {
   batchFromColumns,
   binary,
   bool,
+  deserializeBatch,
   field,
   list,
   schema as makeSchema,
@@ -37,8 +38,8 @@ import {
   struct,
   utf8,
 } from "./arrow/index.js";
-import type { VgiSchema } from "./arrow/types.js";
-import { ProtocolNotSupportedError } from "./binding.js";
+import type { VgiBatch, VgiSchema } from "./arrow/types.js";
+import { type ProtocolBinding, ProtocolNotSupportedError } from "./binding.js";
 import { REQUEST_VERSION } from "./constants.js";
 import { Protocol } from "./protocol.js";
 import { computeProtocolHash, type HashMethod } from "./protocol-hash.js";
@@ -50,6 +51,42 @@ import { MethodType } from "./types.js";
  *  Fixed, and the one protocol name a client may know a priori: it is the
  *  bootstrap, so there is nothing to discover it with. */
 export const REFLECTION_PROTOCOL_NAME = "vgi_rpc.Reflection.v1";
+
+/** The cheap question: what does this server host?
+ *
+ *  The bootstrap hop. A client that already knows which protocol it wants can
+ *  skip straight to {@link REFLECTION_DESCRIBE}. */
+export const REFLECTION_LIST_PROTOCOLS = "list_protocols";
+
+/** The expensive question: what are one protocol's methods? */
+export const REFLECTION_DESCRIBE = "describe";
+
+/** Parameters of {@link REFLECTION_DESCRIBE}, exported so a client can build the
+ *  request without a description of the protocol it is asking to be described. */
+export const REFLECTION_DESCRIBE_PARAMS: VgiSchema = makeSchema([field("protocol", utf8(), false)]);
+
+/** The reserved name introspection used to answer to.
+ *
+ *  Kept only so the refusal can say where introspection went. A stale client
+ *  told merely "no such method" cannot tell "retired" from "this server was
+ *  built without introspection", and those need opposite fixes: one is a
+ *  client to update, the other a server to reconfigure. */
+export const RETIRED_DESCRIBE_METHOD = "__describe__";
+
+/** Why `__describe__` is refused, and what to call instead.
+ *
+ *  Names the protocol and both of its entry points, so a stale client is
+ *  fixable from the error text alone rather than from a changelog. Only this
+ *  one reserved name is special-cased -- every other keeps the plain "this
+ *  server does not implement it" answer, which is what a client probing for
+ *  an optional method needs. */
+export function describeRetiredMessage(): string {
+  return (
+    `'${RETIRED_DESCRIBE_METHOD}' was retired. Introspection is now the ` +
+    `'${REFLECTION_PROTOCOL_NAME}' protocol: call '${REFLECTION_LIST_PROTOCOLS}' for what this ` +
+    `server hosts, then '${REFLECTION_DESCRIBE}' for one protocol's methods.`
+  );
+}
 
 /** Values {@link MethodInfoDesc.idempotency} may take, borrowed from gRPC's
  *  `idempotency_level`.
@@ -183,6 +220,140 @@ export function encodeReflectionPayload(value: object, schema: ReturnType<typeof
   return serializeBatch(batchFromColumns(schema, columns as Record<string, any[]>));
 }
 
+// --- Decoding -------------------------------------------------------------
+//
+// Tolerant by contract, and the contract is one-directional: read by field
+// name, ignore columns this build does not know, default the ones that are
+// absent *and have a default*, and raise for an absent field that has none.
+// Zero-filling a required field would hand a caller a description that is
+// wrong rather than absent, which is the worse of the two failures -- a
+// missing method is noticed, a method described with an empty parameter
+// schema is not.
+//
+// The rule that follows, and that binds every port: a field added in a minor
+// version must carry a default, or the addition is a breaking change wearing
+// a minor version number.
+
+/** A decoded struct row, as either backend hands it back.
+ *
+ *  arrow-js yields a `StructRow` proxy and flechette a plain object; both
+ *  answer property access by field name, and both answer `undefined` for a
+ *  column that is not there -- which is the whole of what tolerant decoding
+ *  needs from them. */
+type WireRow = Record<string, unknown>;
+
+function decodeFailure(what: string, detail: string): Error {
+  return new Error(
+    `Could not decode a '${REFLECTION_PROTOCOL_NAME}' ${what}: ${detail}. ` +
+      `The reply came from a server this client cannot read; check that it hosts ` +
+      `a compatible major version of the reflection protocol.`,
+  );
+}
+
+/** Read a field that has no default. */
+function required<T>(row: WireRow, key: string, what: string): T {
+  const value = row[key];
+  if (value === undefined || value === null) {
+    throw decodeFailure(what, `it carries no '${key}', and that field has no default`);
+  }
+  return value as T;
+}
+
+/** Read a field that has a default, tolerating its absence. */
+function optional<T>(row: WireRow, key: string, fallback: T): T {
+  const value = row[key];
+  return value === undefined || value === null ? fallback : (value as T);
+}
+
+/** Read bytes that default to empty rather than to null.
+ *
+ *  Empty rather than nullable on the wire for the same reason: a nullable
+ *  column costs every port a null check on a value it will only ever treat as
+ *  absent. */
+function bytes(row: WireRow, key: string): Uint8Array {
+  const value = row[key];
+  if (value === undefined || value === null) return new Uint8Array(0);
+  return value as Uint8Array;
+}
+
+/** Materialize a list column's one row as plain rows. */
+function listRows(batch: VgiBatch, name: string, what: string): WireRow[] {
+  const column = batch.getChild(name);
+  if (column === null) {
+    throw decodeFailure(what, `the payload has no '${name}' column`);
+  }
+  const value = column.get(0);
+  if (value === undefined || value === null) {
+    throw decodeFailure(what, `its '${name}' column is null`);
+  }
+  return [...(value as Iterable<WireRow>)];
+}
+
+/** Read the single row of a reflection payload's nested IPC stream. */
+function payloadRow(payload: Uint8Array, what: string): VgiBatch {
+  const batch = deserializeBatch(payload);
+  if (batch.numRows < 1) {
+    throw decodeFailure(what, "the payload carries no rows");
+  }
+  return batch;
+}
+
+function decodeSummary(row: WireRow): ProtocolSummaryDesc {
+  return {
+    protocol: required<string>(row, "protocol", "protocol summary"),
+    protocol_version: required<string>(row, "protocol_version", "protocol summary"),
+    protocol_hash: required<string>(row, "protocol_hash", "protocol summary"),
+    deprecated: optional(row, "deprecated", false),
+    deprecation_message: optional(row, "deprecation_message", ""),
+    features: [...optional<Iterable<string>>(row, "features", [])].map(String),
+  };
+}
+
+function decodeMethod(row: WireRow): MethodInfoDesc {
+  return {
+    name: required<string>(row, "name", "method description"),
+    method_type: required<string>(row, "method_type", "method description"),
+    has_return: required<boolean>(row, "has_return", "method description"),
+    has_header: required<boolean>(row, "has_header", "method description"),
+    stream_kind: required<string>(row, "stream_kind", "method description"),
+    params_schema_ipc: bytes(row, "params_schema_ipc"),
+    result_schema_ipc: bytes(row, "result_schema_ipc"),
+    header_schema_ipc: bytes(row, "header_schema_ipc"),
+    idempotency: optional(row, "idempotency", "unknown"),
+    deprecated: optional(row, "deprecated", false),
+    deprecation_message: optional(row, "deprecation_message", ""),
+  };
+}
+
+/** Decode a `list_protocols` reply. */
+export function decodeProtocolList(payload: Uint8Array): ProtocolListDesc {
+  const batch = payloadRow(payload, "protocol listing");
+  const row = {
+    server_id: batch.getChild("server_id")?.get(0),
+    server_version: batch.getChild("server_version")?.get(0),
+    request_version: batch.getChild("request_version")?.get(0),
+  } as WireRow;
+  return {
+    server_id: required<string>(row, "server_id", "protocol listing"),
+    server_version: required<string>(row, "server_version", "protocol listing"),
+    request_version: required<string>(row, "request_version", "protocol listing"),
+    protocols: listRows(batch, "protocols", "protocol listing").map(decodeSummary),
+  };
+}
+
+/** Decode a `describe` reply. */
+export function decodeServiceDescription(payload: Uint8Array): ServiceDescriptionDesc {
+  const batch = payloadRow(payload, "service description");
+  const row: WireRow = {};
+  for (const f of batch.schema.fields) {
+    if (f.name !== "methods") row[f.name] = batch.getChild(f.name)?.get(0);
+  }
+  return {
+    ...decodeSummary(row),
+    methods: listRows(batch, "methods", "service description").map(decodeMethod),
+  };
+}
+
 /** Serialize a schema, or return empty bytes when there is none. */
 function schemaIpc(schema: VgiSchema | undefined | null): Uint8Array {
   if (!schema) return new Uint8Array(0);
@@ -240,6 +411,37 @@ export async function bindingHash(name: string, methods: ReadonlyMap<string, Met
     hashMethods.push(entry);
   }
   return computeProtocolHash(name, hashMethods);
+}
+
+/** Memoized canonical hashes, keyed by the protocol object and the wire name
+ *  it is hosted under.
+ *
+ *  Keyed by the `Protocol` rather than by the binding because a host may
+ *  project its primary binding freshly on every call, and a cache that misses
+ *  every time would put a SHA-256 over the whole method table on the dispatch
+ *  path of every request. */
+const HASHES = new WeakMap<object, Map<string, Promise<string>>>();
+
+/** The canonical digest of the protocol this binding hosts.
+ *
+ *  This is the value the access log's `protocol_hash` carries: the registry
+ *  key a consumer uses to decode an archived record, which is why it must be
+ *  the *owning* binding's digest rather than the server's primary. A record
+ *  naming one protocol and carrying another's is well-formed, passes the
+ *  schema, and decodes against the wrong description -- and nothing about it
+ *  looks wrong. */
+export function protocolHashFor(binding: ProtocolBinding): Promise<string> {
+  let byName = HASHES.get(binding.protocol);
+  if (!byName) {
+    byName = new Map();
+    HASHES.set(binding.protocol, byName);
+  }
+  let hash = byName.get(binding.name);
+  if (!hash) {
+    hash = bindingHash(binding.name, binding.protocol.getMethods());
+    byName.set(binding.name, hash);
+  }
+  return hash;
 }
 
 /** Build the reflection protocol for `server`.

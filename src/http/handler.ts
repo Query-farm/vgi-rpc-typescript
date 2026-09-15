@@ -11,15 +11,7 @@ import {
   ProtocolNotSupportedError,
   validateProtocolName,
 } from "../binding.js";
-import {
-  DESCRIBE_METHOD_NAME,
-  PROTOCOL_HASH_KEY,
-  PROTOCOL_KEY,
-  PROTOCOL_VERSION_KEY,
-  REQUEST_ID_HEADER,
-  RPC_ERROR_HEADER,
-} from "../constants.js";
-import { buildDescribeBatch } from "../dispatch/describe.js";
+import { PROTOCOL_KEY, PROTOCOL_VERSION_KEY, REQUEST_ID_HEADER, RPC_ERROR_HEADER } from "../constants.js";
 import { MethodNotImplementedError, ProtocolVersionError, parseProtocolVersion, SessionLostError } from "../errors.js";
 import {
   PeerEvidenceSet,
@@ -31,6 +23,13 @@ import {
   type PeerResolutionOptions,
 } from "../identity.js";
 import type { Protocol } from "../protocol.js";
+import {
+  buildReflectionProtocol,
+  describeRetiredMessage,
+  protocolHashFor,
+  REFLECTION_PROTOCOL_NAME,
+  RETIRED_DESCRIBE_METHOD,
+} from "../reflection.js";
 import {
   type AccessLogDeferral,
   type CallStatistics,
@@ -78,12 +77,7 @@ import {
   UPLOAD_URL_PARAMS_SCHEMA,
   UPLOAD_URL_RESPONSE_SCHEMA,
 } from "./common.js";
-import {
-  httpDispatchDescribe,
-  httpDispatchStreamExchange,
-  httpDispatchStreamInit,
-  httpDispatchUnary,
-} from "./dispatch.js";
+import { httpDispatchStreamExchange, httpDispatchStreamInit, httpDispatchUnary } from "./dispatch.js";
 import {
   createIntrospector,
   INTROSPECT_ENABLED_HEADER,
@@ -236,7 +230,31 @@ export function createHttpHandler(
   // nothing downstream has to care which was handed in.
   const bindings: Map<string, ProtocolBinding> = isProtocolHost(target)
     ? target.bindings()
-    : new Map([[target.name, { name: target.name, protocol: target, protocolHash: "", versionExempt: false }]]);
+    : new Map([[target.name, { name: target.name, protocol: target, versionExempt: false }]]);
+  // A bare `Protocol` is not a host, so nothing had the chance to decide
+  // whether this deployment offers introspection -- and since `__describe__`
+  // was retired, a server hosting no reflection is one no client can bootstrap
+  // against at all. Synthesize it, after the primary so the primary stays what
+  // every server-level surface reports. A `ProtocolHost` made its own
+  // decision, and that decision is respected: an opt-out over stdio that came
+  // back over HTTP would be no opt-out.
+  if (!isProtocolHost(target)) {
+    bindings.set(REFLECTION_PROTOCOL_NAME, {
+      name: REFLECTION_PROTOCOL_NAME,
+      protocol: buildReflectionProtocol({
+        listBindings: () => bindings as never,
+        hashFor: (name) => {
+          const b = bindings.get(name);
+          return b ? protocolHashFor(b) : Promise.resolve("");
+        },
+        serverId: () => serverId,
+        serverVersion: () => "",
+      }),
+      // What a version-mismatched client calls to learn *what* mismatched;
+      // gating it would deny the client the diagnosis it came for.
+      versionExempt: true,
+    });
+  }
   const hostedNames = [...bindings.keys()].sort();
   // Validated here rather than at the first request. A name that cannot be a
   // path segment cannot be addressed over HTTP at all, so hosting one would
@@ -257,7 +275,7 @@ export function createHttpHandler(
     throw new Error("createHttpHandler was given a server that hosts no protocols.");
   }
   // The primary protocol, which every server-level surface reports: the
-  // landing and describe pages, `__describe__`, and the `protocol` field of
+  // landing and describe pages and the `protocol` field of
   // the health body.
   const protocol = primary.protocol;
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
@@ -347,22 +365,6 @@ export function createHttpHandler(
 
   const methods = protocol.getMethods();
 
-  // Lazily compute the protocol hash once; it's the SHA-256 over the
-  // canonical __describe__ payload and is derived from buildDescribeBatch's
-  // metadata.  Async because Web Crypto digests are async.  Used to stamp
-  // every dispatched access-log record with `protocol_hash`.
-  let protocolHashPromise: Promise<string> | null = null;
-  function getProtocolHash(): Promise<string> {
-    if (!protocolHashPromise) {
-      protocolHashPromise = buildDescribeBatch(
-        protocol.name,
-        methods,
-        serverId,
-        protocol.protocolVersion || undefined,
-      ).then(({ metadata }) => metadata.get(PROTOCOL_HASH_KEY) ?? "");
-    }
-    return protocolHashPromise;
-  }
   const protocolVersion = protocol.protocolVersion || options?.protocolVersion || "";
 
   /**
@@ -851,6 +853,10 @@ export function createHttpHandler(
     }
     const binding = bindings.get(protocolName);
     if (!binding) return ProtocolNotSupportedError.notHosted(protocolName, hostedNames);
+    // Retired rather than merely absent. A caller told only "no method of that
+    // name" cannot tell that from "this server was built without
+    // introspection", and the two need opposite fixes.
+    if (methodName === RETIRED_DESCRIBE_METHOD) return new MethodNotImplementedError(describeRetiredMessage());
     const method = binding.protocol.getMethod(methodName);
     if (!method) {
       const available = binding.protocol.methodNames();
@@ -1150,7 +1156,7 @@ export function createHttpHandler(
     // sends "//<method>". With an empty prefix `resolveRoute` then slices
     // exactly one character off and dispatches the method name "/<method>",
     // which matches nothing — surfacing as
-    //   Unknown method: '/__describe__'. Available methods: [...]
+    //   Unknown method: '/echo'. Available methods: [...]
     // where every name in that list is unprefixed, so the leading slash is the
     // whole story. Every other route (health, landing, the client bundle,
     // .well-known) 404s the same way for the same reason.
@@ -1548,7 +1554,16 @@ export function createHttpHandler(
     // the body claims to be; answering 415 is what makes a caller that
     // classifies 401/403/404 as definitive — the classification token
     // introspection mandates — retry an unrouted path forever.
-    const specialPost = path === `${prefix}/${UPLOAD_URL_METHOD}/init` || path === `${prefix}/${DESCRIBE_METHOD_NAME}`;
+    // The flat `{prefix}/__describe__` a stale client still posts to. Answered
+    // ahead of the media-type gate and of routing: the point of the refusal is
+    // that it reaches a client old enough to be wrong about everything else,
+    // and a 415 on the way to it would say nothing.
+    if (path === `${prefix}/${RETIRED_DESCRIBE_METHOD}`) {
+      if (stickyLockRelease) stickyLockRelease();
+      const retired = new MethodNotImplementedError(describeRetiredMessage());
+      return compressIfAccepted(makeErrorResponse(retired, 404), responseEncoding, responseLimitBytes);
+    }
+    const specialPost = path === `${prefix}/${UPLOAD_URL_METHOD}/init`;
     const route = specialPost ? null : resolveRoute(path);
     let resolved: { binding: ProtocolBinding; method: MethodDefinition } | null = null;
     if (!specialPost) {
@@ -1678,22 +1693,6 @@ export function createHttpHandler(
       }
     }
 
-    // Route: {prefix}/__describe__
-    if (path === `${prefix}/${DESCRIBE_METHOD_NAME}`) {
-      try {
-        const response = await httpDispatchDescribe(
-          protocol.name,
-          methods,
-          serverId,
-          protocol.protocolVersion || undefined,
-        );
-        addCorsHeaders(response.headers);
-        return compressIfAccepted(response, responseEncoding, responseLimitBytes);
-      } catch (error: any) {
-        return compressIfAccepted(makeErrorResponse(error, 500), responseEncoding, responseLimitBytes);
-      }
-    }
-
     // Resolved above, ahead of the media-type gate; all three are non-null there.
     const { protocolName, methodName, action } = route!;
     const { binding, method } = resolved!;
@@ -1712,11 +1711,10 @@ export function createHttpHandler(
     // this stream's cursor and call tokens, so a continuation presented under
     // another protocol fails the tag check and is rejected exactly as an
     // invalid token — including on the call-state cache-hit path, where the
-    // call token is never opened at all. `__describe__` is exempt from the
-    // version gate because it is the diagnostic a mismatched client calls to
-    // discover the server's version.
-    const versionGated =
-      !binding.versionExempt && binding.protocol.protocolVersionParts !== null && methodName !== DESCRIBE_METHOD_NAME;
+    // call token is never opened at all. Reflection carries the exemption on
+    // its binding instead of by method name: it is what a mismatched client
+    // calls to learn *what* mismatched.
+    const versionGated = !binding.versionExempt && binding.protocol.protocolVersionParts !== null;
     if (action !== "exchange") {
       try {
         // Peek at request batch metadata without consuming the body — the
@@ -1751,7 +1749,6 @@ export function createHttpHandler(
     await notifyTransport(transportKind);
 
     const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
-    const protocolHash = await getProtocolHash();
     const auth = ctx.authContext;
     const info: DispatchInfo = {
       method: methodName,
@@ -1762,11 +1759,15 @@ export function createHttpHandler(
       // an id on the response that names nothing in the log looks like a
       // working trail right up to the moment somebody follows it.
       requestId,
-      // The protocol that owns the resolved method, not the server's primary:
-      // a wrong protocol label in an access record looks plausible rather
-      // than failing, which is the worst way for a field to be wrong.
+      // The protocol that owns the dispatched method, and *its* canonical
+      // digest. Both from the resolved binding, never the server's primary:
+      // `protocol_hash` is the registry key for decoding an archived record,
+      // so a record naming one protocol while carrying another's is decoded
+      // against the wrong description -- and passes the schema while doing it.
+      // Read inline rather than through a local so the pairing is visible at
+      // the emit site, which is what `test/dispatch-identity.test.ts` checks.
       protocol: binding.name,
-      protocolHash,
+      protocolHash: await protocolHashFor(binding),
       protocolVersion,
       kind: transportKind,
       principal: auth?.principal ?? "",

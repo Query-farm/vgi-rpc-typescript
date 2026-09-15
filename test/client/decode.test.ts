@@ -196,7 +196,7 @@ describe("httpConnect against a custom-header server", () => {
 
     try {
       const client = httpConnect(`http://localhost:${server.port}`);
-      // Exercises httpIntrospect (__describe__) and then the unary call path,
+      // Exercises httpIntrospect (reflection) and then the unary call path,
       // both of which decode independently.
       const desc = await client.describe();
       expect(desc.methods.map((m) => m.name)).toContain("double");

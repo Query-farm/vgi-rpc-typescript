@@ -11,7 +11,6 @@ import {
 } from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
 import { CALL_STATE_KEY, CANCEL_KEY, STATE_KEY } from "../constants.js";
-import { buildDescribeBatch, DESCRIBE_SCHEMA } from "../dispatch/describe.js";
 import {
   type ExternalLocationConfig,
   isExternalLocationBatch,
@@ -370,18 +369,6 @@ function makeCapErrorResponse(schema: VgiSchema, error: Error, ctx: DispatchCont
   const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
   (response as any).__dispatchError = error;
   return response;
-}
-
-/** Dispatch a __describe__ request. */
-export async function httpDispatchDescribe(
-  protocolName: string,
-  methods: Map<string, MethodDefinition>,
-  serverId: string,
-  protocolVersion?: string,
-): Promise<Response> {
-  const { batch } = await buildDescribeBatch(protocolName, methods, serverId, protocolVersion);
-  const body = serializeIpcStream(DESCRIBE_SCHEMA, [batch]);
-  return arrowResponse(body);
 }
 
 /** Dispatch a unary HTTP request. */

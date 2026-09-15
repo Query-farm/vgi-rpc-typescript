@@ -84,6 +84,9 @@ export declare class HttpStreamSession implements StreamSession {
     private _responseBudgetSupport;
     constructor(opts: {
         baseUrl: string;
+        /** The already-namespaced `{prefix}/{protocol}` an `/exchange` path hangs
+         *  off. Folded by the caller, which learns the protocol from
+         *  the server's description. */
         prefix: string;
         method: string;
         stateToken: string | null;

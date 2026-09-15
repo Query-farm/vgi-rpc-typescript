@@ -185,7 +185,7 @@ export function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest 
 
 /**
  * Fill in `defaults` for any params that arrived as null/undefined.
- * The slim DESCRIBE_VERSION 4 wire format no longer carries defaults to the
+ * `vgi_rpc.Reflection.v1` does not carry parameter defaults to the
  * client, so default substitution must happen server-side: the client sends
  * a null in any column it didn't supply, and dispatch swaps in the registered
  * default before invoking the handler.

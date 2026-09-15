@@ -16,7 +16,7 @@ const server = new VgiRpcServer(protocol, {
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enableDescribe` | `boolean` | `true` | Register the `__describe__` introspection method |
+| `enableDescribe` | `boolean` | `true` | Host `vgi_rpc.Reflection.v1`, the introspection protocol |
 | `serverId` | `string` | Random 12-char hex ID | Server identifier included in response metadata |
 | `protocolVersion` | `string` | `""` | Operator-supplied protocol-contract version label, surfaced on dispatch info / access-log records |
 | `dispatchHook` | `DispatchHook` | — | Observability hook invoked at the start and end of every dispatch (tracing, metrics) |

@@ -33,7 +33,7 @@ type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
 
 /** A connected RPC client, returned by {@link httpConnect}, {@link pipeConnect}, and {@link subprocessConnect}. */
 export interface RpcClient {
-  /** Invoke a unary method. Returns the single result row, or `null` for void methods. Parameter defaults from `__describe__` are applied automatically. */
+  /** Invoke a unary method. Returns the single result row, or `null` for void methods. Parameter defaults from the server's description are applied automatically. */
   call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null>;
   /** Open a streaming method, returning a {@link StreamSession} for exchange or producer iteration. */
   stream(method: string, params?: Record<string, any>): Promise<StreamSession>;
@@ -75,7 +75,7 @@ export interface HttpRpcClient extends RpcClient {
 
 /**
  * Connect to a vgi-rpc server over HTTP. The returned client lazily introspects
- * the server (caching `__describe__`) on the first call and transparently handles
+ * the server via `vgi_rpc.Reflection.v1` (caching the result) on the first call and transparently handles
  * zstd compression, authorization, and 413 request externalization.
  */
 export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): HttpRpcClient {
@@ -100,7 +100,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   let methodCache: Map<string, MethodInfo> | null = options?.description
     ? new Map(options.description.methods.map((method) => [method.name, method]))
     : null;
-  /** Application protocol surface version discovered via __describe__. When
+  /** Application protocol surface version discovered via reflection. When
    *  non-empty, the client emits it on every request as
    *  `vgi_rpc.protocol_version` so a versioned server can validate at the
    *  dispatch boundary. */
@@ -113,9 +113,9 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   /** `{prefix}/{protocol}` — the namespaced prefix every RPC path hangs off.
    *
    *  Folded once here rather than at each call site, matching the reference
-   *  client. The reserved endpoints (`__describe__`, `__upload_url__/init`,
-   *  `health`, `__session__`) belong to the server rather than to any one
-   *  protocol and stay on the flat `prefix`. */
+   *  client. The reserved endpoints (`__upload_url__/init`, `health`,
+   *  `__session__`) belong to the server rather than to any one protocol and
+   *  stay on the flat `prefix`. */
   function rpcPrefix(): string {
     if (!serverProtocolName) {
       throw new RpcError(
@@ -307,6 +307,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
     await ensureCompression();
     const desc = await httpIntrospect(baseUrl, {
       prefix,
+      protocol: options?.protocol,
       authorization,
       compressionLevel,
       compressFn,
@@ -608,6 +609,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       await ensureResponseBudgetSupport();
       return httpIntrospect(baseUrl, {
         prefix,
+        protocol: options?.protocol,
         authorization,
         compressionLevel,
         compressFn,

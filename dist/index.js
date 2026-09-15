@@ -776,6 +776,7 @@ import { Schema as Schema3 } from "@query-farm/apache-arrow";
 
 // src/constants.ts
 var RPC_METHOD_KEY = "vgi_rpc.method";
+var PROTOCOL_KEY = "vgi_rpc.protocol";
 var LOG_LEVEL_KEY = "vgi_rpc.log_level";
 var LOG_MESSAGE_KEY = "vgi_rpc.log_message";
 var LOG_EXTRA_KEY = "vgi_rpc.log_extra";
@@ -783,12 +784,7 @@ var REQUEST_VERSION_KEY = "vgi_rpc.request_version";
 var REQUEST_VERSION = "1";
 var SERVER_ID_KEY = "vgi_rpc.server_id";
 var REQUEST_ID_KEY = "vgi_rpc.request_id";
-var PROTOCOL_NAME_KEY = "vgi_rpc.protocol_name";
-var DESCRIBE_VERSION_KEY = "vgi_rpc.describe_version";
-var PROTOCOL_HASH_KEY = "vgi_rpc.protocol_hash";
-var DESCRIBE_VERSION = "4";
 var PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
-var DESCRIBE_METHOD_NAME = "__describe__";
 var STATE_KEY = "vgi_rpc.stream_state#b64";
 var CALL_STATE_KEY = "vgi_rpc.call_state#b64";
 var CANCEL_KEY = "vgi_rpc.cancel";
@@ -949,6 +945,8 @@ var float64 = () => new A_Float64;
 var utf8 = () => new A_Utf8;
 var binary = () => new A_Binary;
 var timestampMicro = (timezone = null) => new A_Timestamp(A_TimeUnit.MICROSECOND, timezone);
+var list = (child) => new A_List(child);
+var struct = (fields) => new A_Struct(fields);
 function field(name, type, nullable = true, metadata) {
   return new A_Field(name, type, nullable, metadata ?? new Map);
 }
@@ -1614,6 +1612,15 @@ async function gzipCompress(data, _level) {
 
 // src/http/common.ts
 init_zstd();
+function rpcPath(protocol, method, opts) {
+  return `${opts?.prefix ?? ""}/${protocol}/${method}${opts?.suffix ?? ""}`;
+}
+function reservedPath(method, opts) {
+  return `${opts?.prefix ?? ""}/${method}`;
+}
+function rpcPathFromPrefix(namespacedPrefix, method, opts) {
+  return `${namespacedPrefix}/${method}${opts?.suffix ?? ""}`;
+}
 var ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
 var UPLOAD_URL_METHOD = "__upload_url__";
 var MAX_UPLOAD_URL_COUNT = 100;
@@ -1858,6 +1865,1375 @@ async function decodeResponseBody(headers, body, zstdDecompress2, maxDecodedByte
 // src/client/introspect.ts
 import { Schema as ArrowSchema } from "@query-farm/apache-arrow";
 
+// src/binding.ts
+var PROTOCOL_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+var RESERVED_PROTOCOL_PREFIX = "vgi_rpc.";
+var MAX_PROTOCOL_NAME_BYTES = 255;
+function validateProtocolName(name, allowReserved = false) {
+  if (!name)
+    throw new Error("A protocol name may not be empty.");
+  if (new TextEncoder().encode(name).length > MAX_PROTOCOL_NAME_BYTES) {
+    throw new Error(`Protocol name exceeds ${MAX_PROTOCOL_NAME_BYTES} bytes: ${name.slice(0, 64)}...`);
+  }
+  if (!PROTOCOL_NAME_RE.test(name)) {
+    throw new Error(`Protocol name '${name}' is not an identifier, optionally dot-qualified. ` + `Expected something like 'vgi.Identity.v1'.`);
+  }
+  if (!allowReserved && name.startsWith(RESERVED_PROTOCOL_PREFIX)) {
+    throw new Error(`Protocol name '${name}' claims the reserved '${RESERVED_PROTOCOL_PREFIX}' prefix, ` + `which is for protocols the framework defines.`);
+  }
+}
+function isProtocolHost(target) {
+  return typeof target?.bindings === "function";
+}
+
+class ProtocolNotSpecifiedError extends Error {
+  errorKind = "protocol_not_specified";
+  constructor(hosted, message) {
+    super(message ?? `Request carries no 'vgi_rpc.protocol' routing key. Every request must name ` + `the protocol it addresses. This server hosts: [${hosted.join(", ")}].`);
+    this.name = "ProtocolNotSpecifiedError";
+  }
+  static percentEncoded() {
+    return new ProtocolNotSpecifiedError([], "The protocol path segment contains a percent sign. The protocol name charset " + "never requires percent-encoding, so this is rejected rather than decoded.");
+  }
+}
+
+class ProtocolNotSupportedError extends Error {
+  errorKind = "protocol_not_supported";
+  constructor(message) {
+    super(message);
+    this.name = "ProtocolNotSupportedError";
+  }
+  static notHosted(requested, hosted) {
+    return new ProtocolNotSupportedError(`This server does not host protocol '${requested}'. Hosted: [${hosted.join(", ")}].`);
+  }
+}
+
+// src/schema.ts
+var str = utf8();
+var bytes = binary();
+var int = int64();
+var int322 = int32();
+var int162 = int16();
+var int82 = int8();
+var uint82 = uint8();
+var uint162 = uint16();
+var uint322 = uint32();
+var uint642 = uint64();
+var float = float64();
+var float322 = float32();
+var bool2 = bool();
+function isField(x) {
+  return x != null && typeof x.name === "string" && x.type != null && typeof x.nullable === "boolean";
+}
+function isDataType(x) {
+  return x != null && typeof x.typeId === "number";
+}
+function toSchema(spec) {
+  const maybeFields = spec.fields;
+  if (Array.isArray(maybeFields)) {
+    const out = [];
+    for (const f of maybeFields) {
+      if (isField(f)) {
+        out.push(f);
+      } else {
+        out.push(field(f.name, f.type, f.nullable ?? true, f.metadata));
+      }
+    }
+    return schema(out);
+  }
+  const fields = [];
+  for (const [name, value] of Object.entries(spec)) {
+    if (isField(value)) {
+      fields.push(value);
+    } else if (isDataType(value)) {
+      fields.push(field(name, value, false));
+    } else {
+      throw new TypeError(`Invalid schema value for "${name}": expected DataType or Field, got ${typeof value}`);
+    }
+  }
+  return schema(fields);
+}
+function inferParamTypes(spec) {
+  const sch = toSchema(spec);
+  if (sch.fields.length === 0)
+    return;
+  const result = {};
+  for (const f of sch.fields) {
+    let mapped;
+    if (isUtf8(f.type))
+      mapped = "str";
+    else if (isBinary(f.type))
+      mapped = "bytes";
+    else if (isBool(f.type))
+      mapped = "bool";
+    else if (isFloat(f.type))
+      mapped = "float";
+    else if (isInt(f.type))
+      mapped = "int";
+    if (!mapped)
+      return;
+    result[f.name] = mapped;
+  }
+  return result;
+}
+
+// src/auth.ts
+class AuthContext {
+  domain;
+  authenticated;
+  principal;
+  claims;
+  constructor(domain, authenticated, principal, claims = {}) {
+    this.domain = domain;
+    this.authenticated = authenticated;
+    this.principal = principal;
+    this.claims = claims;
+  }
+  static anonymous() {
+    return new AuthContext("", false, null);
+  }
+  requireAuthenticated() {
+    if (!this.authenticated) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
+  }
+}
+
+// src/util/web-crypto.ts
+function randomBytes(length) {
+  const buf = new Uint8Array(length);
+  crypto.getRandomValues(buf);
+  return buf;
+}
+function constantTimeEqual(a, b) {
+  if (a.length !== b.length)
+    return false;
+  let diff = 0;
+  for (let i = 0;i < a.length; i++)
+    diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+var _hmacKeyCache = new Map;
+async function sha256(data) {
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return new Uint8Array(digest);
+}
+async function sha256Hex2(data) {
+  const bytes2 = await sha256(data);
+  let s = "";
+  for (let i = 0;i < bytes2.length; i++)
+    s += bytes2[i].toString(16).padStart(2, "0");
+  return s;
+}
+
+// src/identity.ts
+var PeerIdentityStatus = {
+  OFF: "off",
+  NOT_APPLICABLE: "not_applicable",
+  AVAILABLE: "available",
+  UNAVAILABLE: "unavailable",
+  PERMISSION_DENIED: "permission_denied",
+  NO_MATCH: "no_match",
+  INVALID: "invalid",
+  UNTRUSTED_PROXY: "untrusted_proxy"
+};
+var PEER_IDENTITY_STATUSES = new Set(Object.values(PeerIdentityStatus));
+var IdentityAssurance = {
+  CRYPTOGRAPHIC_PEER: "cryptographic_peer",
+  LOCAL_DAEMON: "local_daemon",
+  CONFIGURED_PROXY: "configured_proxy"
+};
+var IDENTITY_ASSURANCES = new Set(Object.values(IdentityAssurance));
+var PeerSubjectKind = {
+  USER: "user",
+  TAGGED_NODE: "tagged_node",
+  WORKLOAD: "workload",
+  ENDPOINT: "endpoint",
+  UNKNOWN: "unknown"
+};
+var PEER_SUBJECT_KINDS = new Set(Object.values(PeerSubjectKind));
+var SubjectStability = {
+  STABLE: "stable",
+  LOGIN: "login",
+  NONE: "none"
+};
+var SUBJECT_STABILITIES = new Set(Object.values(SubjectStability));
+var MAX_JSON_BYTES = 65536;
+var MAX_JSON_DEPTH = 16;
+var MAX_JSON_VALUES = 4096;
+var MAX_HEADER_COUNT = 128;
+var MAX_HEADER_VALUES = 16;
+var MAX_HEADER_BYTES = 65536;
+var HTTP_FIELD_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+function assertWellFormedUtf16(value, path) {
+  for (let index = 0;index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 55296 && unit <= 56319) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 56320 && next <= 57343))
+        throw new TypeError(`${path} contains an unpaired surrogate`);
+      index++;
+    } else if (unit >= 56320 && unit <= 57343) {
+      throw new TypeError(`${path} contains an unpaired surrogate`);
+    }
+  }
+}
+function snapshotJson(value, path = "evidence", depth = 0, limits = { values: 0, sourceBytes: 0 }) {
+  if (depth > MAX_JSON_DEPTH)
+    throw new TypeError(`${path} exceeds maximum JSON depth`);
+  limits.values++;
+  if (limits.values > MAX_JSON_VALUES)
+    throw new TypeError(`${path} exceeds maximum JSON value count`);
+  if (value === null || typeof value === "boolean")
+    return value;
+  if (typeof value === "string") {
+    assertWellFormedUtf16(value, path);
+    if (value.length > MAX_JSON_BYTES)
+      throw new TypeError(`${path} exceeds maximum JSON byte size`);
+    limits.sourceBytes += new TextEncoder().encode(value).length;
+    if (limits.sourceBytes > MAX_JSON_BYTES)
+      throw new TypeError(`${path} exceeds maximum JSON byte size`);
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new TypeError(`${path} numbers must be finite`);
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item, index) => snapshotJson(item, `${path}[${index}]`, depth + 1, limits)));
+  }
+  if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      assertWellFormedUtf16(key, `${path} key`);
+      limits.sourceBytes += new TextEncoder().encode(key).length;
+      if (limits.sourceBytes > MAX_JSON_BYTES)
+        throw new TypeError(`${path} exceeds maximum JSON byte size`);
+      if (item === undefined)
+        throw new TypeError(`${path}.${key} is not JSON-compatible`);
+      out[key] = snapshotJson(item, `${path}.${key}`, depth + 1, limits);
+    }
+    return Object.freeze(out);
+  }
+  throw new TypeError(`${path} is not JSON-compatible`);
+}
+function snapshotObject(value, path) {
+  const snapshot = snapshotJson(value ?? {}, path);
+  if (new TextEncoder().encode(canonicalJson(snapshot)).length > MAX_JSON_BYTES) {
+    throw new TypeError(`${path} exceeds maximum JSON byte size`);
+  }
+  return snapshot;
+}
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object")
+    return JSON.stringify(value);
+  if (Array.isArray(value))
+    return `[${value.map(canonicalJson).join(",")}]`;
+  const object = value;
+  return `{${Object.keys(object).sort(compareUnicode).map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+}
+function containsControl(value) {
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code <= 31 || code === 127)
+      return true;
+  }
+  return false;
+}
+
+class PeerResolutionContext {
+  transport;
+  immediatePeer;
+  sourceEndpoint;
+  assertedPeer;
+  destinationAddress;
+  authority;
+  serviceName;
+  metadata;
+  deadline;
+  budgetMs;
+  #startedAt;
+  #headers;
+  constructor(transport, options = {}) {
+    if (!transport)
+      throw new TypeError("peer transport must not be empty");
+    assertWellFormedUtf16(transport, "peer transport");
+    this.transport = transport;
+    for (const [name, value] of Object.entries({
+      immediatePeer: options.immediatePeer,
+      sourceEndpoint: options.sourceEndpoint,
+      assertedPeer: options.assertedPeer,
+      destinationAddress: options.destinationAddress,
+      authority: options.authority,
+      serviceName: options.serviceName
+    })) {
+      if (value !== undefined)
+        assertWellFormedUtf16(value, name);
+    }
+    this.immediatePeer = options.immediatePeer;
+    this.sourceEndpoint = options.sourceEndpoint;
+    this.assertedPeer = options.assertedPeer;
+    this.destinationAddress = options.destinationAddress;
+    this.authority = options.authority;
+    this.serviceName = options.serviceName;
+    if (options.deadline !== undefined && (!Number.isFinite(options.deadline) || options.deadline <= 0)) {
+      throw new TypeError("peer deadline must be a positive epoch millisecond value");
+    }
+    this.deadline = options.deadline;
+    if (options.budgetMs !== undefined && (!Number.isFinite(options.budgetMs) || options.budgetMs <= 0)) {
+      throw new TypeError("peer budgetMs must be positive");
+    }
+    this.budgetMs = options.budgetMs;
+    this.#startedAt = performance.now();
+    this.metadata = snapshotObject(options.metadata, "peer metadata");
+    const headers = new Map;
+    const entries = options.headers instanceof Map ? options.headers.entries() : Object.entries(options.headers ?? {});
+    let headerBytes = 0;
+    for (const [name, rawValues] of entries) {
+      if (headers.size >= MAX_HEADER_COUNT)
+        throw new PeerIdentityRejectedError("too many peer identity headers");
+      assertWellFormedUtf16(name, "peer-resolution header name");
+      if (!HTTP_FIELD_NAME.test(name))
+        throw new TypeError("invalid peer-resolution header name");
+      const key = name.toLowerCase();
+      if (headers.has(key))
+        throw new PeerIdentityRejectedError("case-varied duplicate peer identity header");
+      if (!Array.isArray(rawValues)) {
+        throw new PeerIdentityRejectedError(`peer identity header ${JSON.stringify(name)} did not preserve multiplicity`);
+      }
+      const values = Object.freeze([...rawValues]);
+      if (values.length > MAX_HEADER_VALUES) {
+        throw new PeerIdentityRejectedError(`too many values for peer identity header: ${name}`);
+      }
+      values.forEach((value) => {
+        assertWellFormedUtf16(value, `peer-resolution header value: ${name}`);
+      });
+      if (values.some((value) => typeof value !== "string" || containsControl(value))) {
+        throw new TypeError(`invalid peer-resolution header value: ${name}`);
+      }
+      headerBytes += new TextEncoder().encode(name).length;
+      for (const value of values)
+        headerBytes += new TextEncoder().encode(value).length;
+      if (headerBytes > MAX_HEADER_BYTES)
+        throw new PeerIdentityRejectedError("peer identity headers are too large");
+      headers.set(key, values);
+    }
+    this.#headers = headers;
+    Object.freeze(this);
+  }
+  header(name) {
+    assertWellFormedUtf16(name, "peer-resolution header lookup");
+    const values = this.#headers.get(name.toLowerCase()) ?? [];
+    if (values.length > 1)
+      throw new PeerIdentityRejectedError(`duplicate peer identity header: ${name}`);
+    return values[0];
+  }
+  remainingBudgetMs() {
+    return this.budgetMs === undefined ? undefined : Math.max(0, this.budgetMs - (performance.now() - this.#startedAt));
+  }
+}
+
+class PeerIdentity {
+  provider;
+  evidenceSource;
+  assurance;
+  issuer;
+  transport;
+  subjectKind;
+  subjectKey;
+  subjectStability;
+  subjectVerified;
+  attributes;
+  capabilities;
+  capabilitiesVerified;
+  sourceAddress;
+  proxyAddress;
+  constructor(options) {
+    if (!options.provider || !options.evidenceSource || !options.issuer || !options.transport) {
+      throw new TypeError("provider, evidenceSource, issuer, and transport are required");
+    }
+    for (const [name, value] of Object.entries({
+      provider: options.provider,
+      evidenceSource: options.evidenceSource,
+      issuer: options.issuer,
+      transport: options.transport,
+      subjectKey: options.subjectKey,
+      sourceAddress: options.sourceAddress,
+      proxyAddress: options.proxyAddress
+    })) {
+      if (value !== undefined)
+        assertWellFormedUtf16(value, name);
+    }
+    const stability = options.subjectStability ?? SubjectStability.NONE;
+    const subjectKind = options.subjectKind ?? PeerSubjectKind.UNKNOWN;
+    if (!IDENTITY_ASSURANCES.has(options.assurance))
+      throw new TypeError("invalid peer identity assurance");
+    if (!PEER_SUBJECT_KINDS.has(subjectKind))
+      throw new TypeError("invalid peer subject kind");
+    if (!SUBJECT_STABILITIES.has(stability))
+      throw new TypeError("invalid peer subject stability");
+    if (options.subjectVerified && !options.subjectKey)
+      throw new TypeError("verified peer identity requires subjectKey");
+    if (!options.subjectKey && stability !== SubjectStability.NONE) {
+      throw new TypeError("subjectless peer identity must use none stability");
+    }
+    this.provider = options.provider;
+    this.evidenceSource = options.evidenceSource;
+    this.assurance = options.assurance;
+    this.issuer = options.issuer;
+    this.transport = options.transport;
+    this.subjectKind = subjectKind;
+    this.subjectKey = options.subjectKey;
+    this.subjectStability = stability;
+    this.subjectVerified = options.subjectVerified ?? false;
+    this.attributes = snapshotObject(options.attributes, "peer attributes");
+    this.capabilities = snapshotObject(options.capabilities, "peer capabilities");
+    this.capabilitiesVerified = options.capabilitiesVerified ?? false;
+    this.sourceAddress = options.sourceAddress;
+    this.proxyAddress = options.proxyAddress;
+    Object.freeze(this);
+  }
+  get canonicalPrincipal() {
+    if (!this.subjectKey)
+      throw new TypeError("subjectless peer evidence has no canonical principal");
+    return `peer/${percentIdentity(this.provider)}/${percentIdentity(this.issuer)}/${percentIdentity(this.subjectKey)}`;
+  }
+}
+function percentIdentity(value) {
+  let out = "";
+  for (const byte of new TextEncoder().encode(value)) {
+    const character = String.fromCharCode(byte);
+    out += /[A-Za-z0-9._~-]/.test(character) ? character : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+class PeerIdentityResult {
+  provider;
+  status;
+  identities;
+  constructor(provider, status, identities = []) {
+    if (!provider)
+      throw new TypeError("peer identity provider is required");
+    assertWellFormedUtf16(provider, "peer identity provider");
+    if (!PEER_IDENTITY_STATUSES.has(status))
+      throw new TypeError("invalid peer identity status");
+    if (status === PeerIdentityStatus.AVAILABLE !== identities.length > 0) {
+      throw new TypeError("only an available result may carry identities");
+    }
+    if (identities.some((identity) => identity.provider !== provider))
+      throw new TypeError("peer result provider mismatch");
+    this.provider = provider;
+    this.status = status;
+    this.identities = Object.freeze([...identities]);
+    Object.freeze(this);
+  }
+  static available(identity) {
+    return new PeerIdentityResult(identity.provider, PeerIdentityStatus.AVAILABLE, [identity]);
+  }
+}
+
+class PeerEvidenceSet {
+  static EMPTY = new PeerEvidenceSet;
+  identities;
+  #statuses;
+  constructor(results = []) {
+    const statuses = new Map;
+    const identities = [];
+    for (const result of results) {
+      if (!PEER_IDENTITY_STATUSES.has(result.status)) {
+        throw new TypeError(`invalid peer identity status: ${String(result.status)}`);
+      }
+      if (statuses.has(result.provider))
+        throw new TypeError(`duplicate peer identity provider: ${result.provider}`);
+      statuses.set(result.provider, result.status);
+      identities.push(...result.identities);
+    }
+    this.#statuses = statuses;
+    this.identities = Object.freeze(identities);
+    Object.freeze(this);
+  }
+  status(provider) {
+    return this.#statuses.get(provider) ?? PeerIdentityStatus.OFF;
+  }
+  forProvider(provider) {
+    return Object.freeze(this.identities.filter((identity) => identity.provider === provider));
+  }
+  eligibleSubjects(provider) {
+    return Object.freeze(this.forProvider(provider).filter((identity) => identity.subjectVerified && !!identity.subjectKey && identity.subjectStability === SubjectStability.STABLE));
+  }
+  uniqueVerifiedSubject(provider) {
+    const matches = this.eligibleSubjects(provider);
+    if (matches.length !== 1) {
+      throw new PeerIdentityRejectedError(`provider ${JSON.stringify(provider)} did not produce one verified stable subject`);
+    }
+    return matches[0];
+  }
+  requireUsableProvider(provider) {
+    const status = this.status(provider);
+    if (status === PeerIdentityStatus.UNAVAILABLE || status === PeerIdentityStatus.PERMISSION_DENIED) {
+      throw new PeerIdentityUnavailableError(`peer identity provider ${JSON.stringify(provider)} is unavailable`);
+    }
+    if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
+      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`, status === PeerIdentityStatus.UNTRUSTED_PROXY ? "proxy_required" : "invalid_credential");
+    }
+    return this.uniqueVerifiedSubject(provider);
+  }
+  requireAvailableProvider(provider) {
+    const status = this.status(provider);
+    if (status === PeerIdentityStatus.UNAVAILABLE || status === PeerIdentityStatus.PERMISSION_DENIED) {
+      throw new PeerIdentityUnavailableError(`peer identity provider ${JSON.stringify(provider)} is unavailable`);
+    }
+    if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
+      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`, status === PeerIdentityStatus.UNTRUSTED_PROXY ? "proxy_required" : "invalid_credential");
+    }
+    const identities = this.forProvider(provider);
+    if (status !== PeerIdentityStatus.AVAILABLE || identities.length === 0) {
+      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} did not produce evidence`);
+    }
+    return identities;
+  }
+  async bindingDigest(providers, applicationAuth) {
+    const fields = [];
+    for (const provider of [...new Set(providers)].sort()) {
+      fields.push(provider, this.status(provider));
+      const identities = this.forProvider(provider).map((identity) => [
+        identity.provider,
+        identity.issuer,
+        identity.subjectKey ?? "",
+        identity.assurance,
+        identity.evidenceSource,
+        identity.transport,
+        identity.subjectKind,
+        identity.subjectStability,
+        String(identity.subjectVerified),
+        String(identity.capabilitiesVerified),
+        "",
+        "",
+        canonicalJson(identity.attributes),
+        canonicalJson(identity.capabilities)
+      ]).sort((a, b) => compareFields(a, b));
+      for (const identity of identities)
+        fields.push(...identity);
+    }
+    if (applicationAuth)
+      fields.push("application_auth", applicationAuth.domain ?? "", applicationAuth.principal ?? "");
+    let size = 0;
+    const encoded = fields.map((field2) => {
+      const bytes2 = new TextEncoder().encode(field2);
+      size += 8 + bytes2.length;
+      return bytes2;
+    });
+    const input = new Uint8Array(size);
+    const view = new DataView(input.buffer);
+    let offset = 0;
+    for (const bytes2 of encoded) {
+      view.setBigUint64(offset, BigInt(bytes2.length));
+      offset += 8;
+      input.set(bytes2, offset);
+      offset += bytes2.length;
+    }
+    return sha256Hex2(input);
+  }
+}
+function compareFields(a, b) {
+  for (let index = 0;index < a.length; index++) {
+    const comparison = compareUnicode(a[index], b[index]);
+    if (comparison !== 0)
+      return comparison;
+  }
+  return 0;
+}
+function compareUnicode(a, b) {
+  const left = Array.from(a, (character) => character.codePointAt(0));
+  const right = Array.from(b, (character) => character.codePointAt(0));
+  for (let index = 0;index < Math.min(left.length, right.length); index++) {
+    if (left[index] < right[index])
+      return -1;
+    if (left[index] > right[index])
+      return 1;
+  }
+  return left.length - right.length;
+}
+
+class PeerIdentityUnavailableError extends Error {
+  retryAfter;
+  constructor(message = "peer identity provider unavailable", retryAfter = 5) {
+    super(message);
+    this.name = "PeerIdentityUnavailableError";
+    this.retryAfter = retryAfter;
+  }
+}
+
+class PeerIdentityRejectedError extends Error {
+  vgiAuthReason;
+  constructor(message, reason = "invalid_credential") {
+    super(message);
+    this.name = "PeerIdentityRejectedError";
+    this.vgiAuthReason = reason;
+  }
+}
+function observePeerIdentity(_evidence, auth) {
+  return auth;
+}
+function requirePeerIdentity(provider) {
+  return async (evidence, auth) => {
+    evidence.requireAvailableProvider(provider);
+    return withEvidenceBinding(auth, await evidence.bindingDigest([provider]));
+  };
+}
+function peerIdentityPrimary(provider) {
+  return async (evidence) => {
+    const identity = evidence.requireUsableProvider(provider);
+    return new AuthContext(provider, true, identity.canonicalPrincipal, {
+      issuer: identity.issuer,
+      subject_kind: identity.subjectKind,
+      assurance: identity.assurance,
+      evidence_source: identity.evidenceSource,
+      subject: identity.subjectKey,
+      peer_evidence_binding: await evidence.bindingDigest([provider])
+    });
+  };
+}
+function anyOfPeerIdentities(...providers) {
+  if (providers.length === 0)
+    throw new TypeError("at least one peer provider is required");
+  return async (evidence, auth) => {
+    for (const provider of providers) {
+      const status = evidence.status(provider);
+      if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
+        throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`);
+      }
+      if (evidence.eligibleSubjects(provider).length > 1) {
+        throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} produced ambiguous subjects`);
+      }
+    }
+    if (auth.authenticated)
+      return auth;
+    for (const provider of providers) {
+      if (evidence.status(provider) === PeerIdentityStatus.AVAILABLE && evidence.eligibleSubjects(provider).length === 1) {
+        return peerIdentityPrimary(provider)(evidence, auth);
+      }
+    }
+    if (providers.some((provider) => evidence.status(provider) === PeerIdentityStatus.UNAVAILABLE || evidence.status(provider) === PeerIdentityStatus.PERMISSION_DENIED)) {
+      throw new PeerIdentityUnavailableError("no usable authentication factor; a peer provider is unavailable");
+    }
+    throw new PeerIdentityRejectedError("no configured provider produced a verified subject");
+  };
+}
+function allOfPeerIdentities(providers, identityLinker, principalProvider = providers[0]) {
+  if (providers.length === 0 || !identityLinker)
+    throw new TypeError("all-of requires providers and an identity linker");
+  if (!providers.includes(principalProvider))
+    throw new TypeError("principalProvider must be one of providers");
+  return async (evidence, auth) => {
+    if (!auth.authenticated)
+      throw new PeerIdentityRejectedError("all-of requires application authentication");
+    const identities = new Map;
+    for (const provider of providers)
+      identities.set(provider, evidence.requireUsableProvider(provider));
+    await identityLinker(auth, identities);
+    const primary = await peerIdentityPrimary(principalProvider)(evidence, auth);
+    return new AuthContext(primary.domain, true, primary.principal, {
+      ...primary.claims,
+      application_domain: auth.domain,
+      application_principal: auth.principal,
+      peer_evidence_binding: await evidence.bindingDigest(providers, auth)
+    });
+  };
+}
+function withEvidenceBinding(auth, binding) {
+  return new AuthContext(auth.domain, auth.authenticated, auth.principal, {
+    ...auth.claims,
+    peer_evidence_binding: binding
+  });
+}
+
+// src/types.ts
+var MethodType;
+((MethodType2) => {
+  MethodType2["UNARY"] = "unary";
+  MethodType2["STREAM"] = "stream";
+})(MethodType ||= {});
+var TransportKind;
+((TransportKind2) => {
+  TransportKind2["PIPE"] = "pipe";
+  TransportKind2["HTTP"] = "http";
+  TransportKind2["UNIX"] = "unix";
+  TransportKind2["TCP"] = "tcp";
+})(TransportKind ||= {});
+var EMPTY_COOKIES = new Map;
+function cookieNotUnaryHttpError() {
+  return new Error("setCookie/deleteCookie is only supported inside unary RPC methods served over HTTP");
+}
+
+class RuntimeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RuntimeError";
+  }
+}
+function runtimeError(message) {
+  return new RuntimeError(message);
+}
+
+class OutputCollector {
+  _batches = [];
+  _dataBatchIdx = null;
+  _finished = false;
+  _producerMode;
+  _outputSchema;
+  _serverId;
+  _requestId;
+  _cookieSinkEnabled = false;
+  _responseCookies = [];
+  _stickyContext = null;
+  auth;
+  peerEvidence;
+  inputMetadata;
+  cookies;
+  kind;
+  remainingResponseBytes;
+  responseLimitBytes;
+  preferredResponseBytes;
+  remainingExternalizedResponseBytes;
+  externalizationEnabled;
+  constructor(outputSchema, producerMode = true, serverId = "", requestId = null, authContext, cookies, kind, budgets) {
+    this._outputSchema = outputSchema;
+    this._producerMode = producerMode;
+    this._serverId = serverId;
+    this._requestId = requestId;
+    this.auth = authContext ?? AuthContext.anonymous();
+    this.peerEvidence = budgets?.peerEvidence ?? PeerEvidenceSet.EMPTY;
+    this.inputMetadata = budgets?.inputMetadata;
+    this.cookies = cookies ?? EMPTY_COOKIES;
+    this.kind = kind;
+    this.remainingResponseBytes = budgets?.remainingResponseBytes;
+    this.responseLimitBytes = budgets?.responseLimitBytes ?? budgets?.remainingResponseBytes;
+    this.preferredResponseBytes = budgets?.preferredResponseBytes;
+    this.remainingExternalizedResponseBytes = budgets?.remainingExternalizedResponseBytes;
+    this.externalizationEnabled = budgets?.externalizationEnabled;
+  }
+  enableCookieSink() {
+    this._cookieSinkEnabled = true;
+  }
+  drainResponseCookies() {
+    const cookies = this._responseCookies;
+    this._responseCookies = [];
+    return cookies;
+  }
+  setCookie(name, value, attrs) {
+    if (!this._cookieSinkEnabled)
+      throw cookieNotUnaryHttpError();
+    this._responseCookies.push({
+      name,
+      value,
+      delete: false,
+      ...attrs ?? {}
+    });
+  }
+  deleteCookie(name, opts) {
+    if (!this._cookieSinkEnabled)
+      throw cookieNotUnaryHttpError();
+    this._responseCookies.push({
+      name,
+      value: "",
+      delete: true,
+      path: opts?.path,
+      domain: opts?.domain
+    });
+  }
+  attachStickyContext(ctx) {
+    this._stickyContext = ctx;
+  }
+  get session() {
+    return this._stickyContext?.state ?? null;
+  }
+  get sessionId() {
+    return this._stickyContext?.sessionId ?? null;
+  }
+  openSession(state, ttl) {
+    const sink = this._stickyContext;
+    if (!sink) {
+      throw runtimeError("sticky sessions not available on this transport");
+    }
+    if (!sink.acceptOpens) {
+      throw runtimeError("client did not opt in to sticky sessions " + "(missing VGI-Session-Accept: true header — open the call inside " + "an HttpConnection.with_session_token() block)");
+    }
+    if (sink.state !== null) {
+      throw runtimeError("a sticky session is already active for this request");
+    }
+    sink._open(state, ttl);
+    sink.action = "open";
+  }
+  closeSession() {
+    const sink = this._stickyContext;
+    if (!sink) {
+      throw runtimeError("sticky sessions not available on this transport");
+    }
+    sink._close();
+    sink.action = "close";
+  }
+  get outputSchema() {
+    return this._outputSchema;
+  }
+  get finished() {
+    return this._finished;
+  }
+  get batches() {
+    return this._batches;
+  }
+  get dataBatchIdx() {
+    return this._dataBatchIdx;
+  }
+  emit(batchOrColumns, metadata) {
+    let batch;
+    if (isBatch(batchOrColumns)) {
+      batch = batchOrColumns;
+    } else {
+      const coerced = coerceInt64(this._outputSchema, batchOrColumns);
+      const cols = {};
+      for (const f of this._outputSchema.fields) {
+        const v = coerced[f.name];
+        cols[f.name] = Array.isArray(v) ? v : [v];
+      }
+      batch = batchFromColumns(this._outputSchema, cols);
+    }
+    if (this._dataBatchIdx !== null) {
+      throw new RpcError("ProtocolError", "Only one data batch may be emitted per call", "");
+    }
+    this._dataBatchIdx = this._batches.length;
+    this._batches.push({ batch, metadata });
+  }
+  emitRow(values) {
+    const columns = {};
+    for (const [key, value] of Object.entries(values)) {
+      columns[key] = [value];
+    }
+    this.emit(columns);
+  }
+  finish() {
+    if (!this._producerMode) {
+      throw new Error("finish() is not allowed on exchange streams; " + "exchange streams must emit exactly one data batch per call");
+    }
+    this._finished = true;
+  }
+  clientLog(level, message, extra) {
+    const batch = buildLogBatch(this._outputSchema, level, message, extra, this._serverId, this._requestId);
+    this._batches.push({ batch });
+  }
+}
+
+// src/protocol.ts
+var EMPTY_SCHEMA = schema([]);
+
+class Protocol {
+  name;
+  protocolVersion;
+  protocolVersionParts;
+  _methods = new Map;
+  constructor(name, options) {
+    this.name = name;
+    const raw = options?.protocolVersion;
+    if (raw === undefined || raw === "") {
+      this.protocolVersion = "";
+      this.protocolVersionParts = null;
+    } else {
+      this.protocolVersion = raw;
+      this.protocolVersionParts = parseProtocolVersion(raw);
+    }
+  }
+  unary(name, config) {
+    const params = toSchema(config.params);
+    this._methods.set(name, {
+      name,
+      type: "unary" /* UNARY */,
+      paramsSchema: params,
+      resultSchema: toSchema(config.result),
+      handler: config.handler,
+      doc: config.doc,
+      defaults: config.defaults,
+      paramTypes: config.paramTypes ?? inferParamTypes(params)
+    });
+    return this;
+  }
+  producer(name, config) {
+    const params = toSchema(config.params);
+    this._methods.set(name, {
+      name,
+      type: "stream" /* STREAM */,
+      paramsSchema: params,
+      resultSchema: EMPTY_SCHEMA,
+      outputSchema: toSchema(config.outputSchema),
+      inputSchema: EMPTY_SCHEMA,
+      producerInit: config.init,
+      producerFn: config.produce,
+      onCancel: config.onCancel,
+      headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
+      headerInit: config.headerInit,
+      doc: config.doc,
+      defaults: config.defaults,
+      paramTypes: config.paramTypes ?? inferParamTypes(params)
+    });
+    return this;
+  }
+  exchange(name, config) {
+    const params = toSchema(config.params);
+    this._methods.set(name, {
+      name,
+      type: "stream" /* STREAM */,
+      paramsSchema: params,
+      resultSchema: EMPTY_SCHEMA,
+      inputSchema: toSchema(config.inputSchema),
+      outputSchema: toSchema(config.outputSchema),
+      exchangeInit: config.init,
+      exchangeFn: config.exchange,
+      onCancel: config.onCancel,
+      headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
+      headerInit: config.headerInit,
+      doc: config.doc,
+      defaults: config.defaults,
+      paramTypes: config.paramTypes ?? inferParamTypes(params)
+    });
+    return this;
+  }
+  getMethods() {
+    return new Map(this._methods);
+  }
+  getMethod(name) {
+    return this._methods.get(name);
+  }
+  methodNames() {
+    return [...this._methods.keys()].sort();
+  }
+}
+
+// src/type-tokens.ts
+class UnsupportedArrowTypeError extends Error {
+  constructor(type) {
+    super(`Arrow type ${String(type)} has no canonical token. Add one to ` + `src/type-tokens.ts and to every other port at the same time: a one-sided ` + `addition changes only this port's protocol hash.`);
+    this.name = "UnsupportedArrowTypeError";
+  }
+}
+var TIME_UNITS = ["s", "ms", "us", "ns"];
+function unitToken(unit) {
+  if (typeof unit === "number" && unit >= 0 && unit < TIME_UNITS.length)
+    return TIME_UNITS[unit];
+  if (typeof unit === "string") {
+    const lower = unit.toLowerCase();
+    if (lower === "second")
+      return "s";
+    if (lower === "millisecond")
+      return "ms";
+    if (lower === "microsecond")
+      return "us";
+    if (lower === "nanosecond")
+      return "ns";
+    if (TIME_UNITS.includes(lower))
+      return lower;
+  }
+  throw new UnsupportedArrowTypeError(`time unit ${String(unit)}`);
+}
+function anonChild(field2, name) {
+  return `${name}${field2.nullable ? "?" : ""}:${typeToken(field2.type)}`;
+}
+function child(field2) {
+  return anonChild(field2, field2.name);
+}
+function typeToken(type) {
+  const t = type;
+  switch (type.typeId) {
+    case TypeId.Null:
+      return "null";
+    case TypeId.Bool:
+      return "bool";
+    case TypeId.Int: {
+      const bits = Number(t.bitWidth ?? 64);
+      const signed = t.isSigned !== false;
+      return `${signed ? "int" : "uint"}${bits}`;
+    }
+    case TypeId.Float: {
+      const precision = Number(t.precision ?? 2);
+      return ["float16", "float32", "float64"][precision] ?? "float64";
+    }
+    case TypeId.Utf8:
+      return "utf8";
+    case TypeId.LargeUtf8:
+      return "large_utf8";
+    case TypeId.Binary:
+      return "binary";
+    case TypeId.LargeBinary:
+      return "large_binary";
+    case TypeId.FixedSizeBinary:
+      return `fixed_size_binary(${Number(t.byteWidth)})`;
+    case TypeId.Date:
+      return Number(t.unit ?? 0) === 0 ? "date32" : "date64";
+    case TypeId.Time: {
+      const bits = Number(t.bitWidth ?? 64);
+      return `time${bits}(${unitToken(t.unit)})`;
+    }
+    case TypeId.Timestamp: {
+      const tz = t.timezone ?? t.timeZone ?? null;
+      return tz ? `timestamp(${unitToken(t.unit)},tz=${String(tz)})` : `timestamp(${unitToken(t.unit)})`;
+    }
+    case TypeId.Duration:
+      return `duration(${unitToken(t.unit)})`;
+    case TypeId.Decimal: {
+      const bits = Number(t.bitWidth ?? 128);
+      return `decimal${bits}(${Number(t.precision)},${Number(t.scale)})`;
+    }
+    case TypeId.List:
+      return `list<${anonChild(listChild(t), "item")}>`;
+    case TypeId.FixedSizeList:
+      return `fixed_size_list(${Number(t.listSize)})<${anonChild(listChild(t), "item")}>`;
+    case TypeId.Struct:
+      return `struct<${structChildren(t).map(child).join(",")}>`;
+    case TypeId.Map: {
+      const entries = structChildren(listChild(t).type);
+      if (entries.length !== 2)
+        throw new UnsupportedArrowTypeError(type);
+      const token = `map<${anonChild(entries[0], "key")},${anonChild(entries[1], "value")}>`;
+      return t.keysSorted ? `${token},keys_sorted` : token;
+    }
+    case TypeId.Dictionary: {
+      const indexType = t.indices;
+      const valueType = t.dictionary;
+      if (!indexType || !valueType)
+        throw new UnsupportedArrowTypeError(type);
+      const token = `dictionary<index:${typeToken(indexType)},value:${typeToken(valueType)}>`;
+      return t.isOrdered ? `${token},ordered` : token;
+    }
+    case TypeId.Union: {
+      const codes = t.typeIds ?? [];
+      const parts = structChildren(t).map((f, i) => `${codes[i] ?? i}=${child(f)}`);
+      const kind = Number(t.mode ?? 0) === 0 ? "sparse_union" : "dense_union";
+      return `${kind}<${parts.join(",")}>`;
+    }
+    default:
+      throw new UnsupportedArrowTypeError(type);
+  }
+}
+function listChild(t) {
+  const children = t.children ?? [];
+  if (children.length !== 1)
+    throw new UnsupportedArrowTypeError(t);
+  return children[0];
+}
+function structChildren(t) {
+  return t.children ?? [];
+}
+function schemaTokens(fields) {
+  if (!fields)
+    return [];
+  return fields.map((f) => ({ name: f.name, nullable: f.nullable, type: typeToken(f.type) }));
+}
+
+// src/protocol-hash.ts
+var HASH_DOMAIN = "vgi_rpc.protocol_hash.v1|";
+function protocolDescription(protocolName, methods) {
+  const sorted = [...methods].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const entries = sorted.map((m) => {
+    const entry = {
+      name: m.name,
+      type: m.methodType,
+      has_return: m.hasReturn,
+      has_header: m.hasHeader,
+      params: schemaTokens(m.paramsFields)
+    };
+    if (m.hasReturn && m.resultFields)
+      entry.result = schemaTokens(m.resultFields);
+    if (m.hasHeader && m.headerFields)
+      entry.header = schemaTokens(m.headerFields);
+    return entry;
+  });
+  return { protocol: protocolName, methods: entries };
+}
+function canonicalJson2(value) {
+  if (value === null)
+    return "null";
+  if (typeof value === "boolean")
+    return value ? "true" : "false";
+  if (typeof value === "string")
+    return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "bigint") {
+    throw new TypeError(`The protocol-hash preimage carries no numbers, but found ${String(value)}. ` + `Fold it into a type token (e.g. 'decimal128(38,9)') instead.`);
+  }
+  if (Array.isArray(value))
+    return `[${value.map(canonicalJson2).join(",")}]`;
+  if (typeof value === "object") {
+    const obj = value;
+    const keys = Object.keys(obj).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson2(obj[k])}`).join(",")}}`;
+  }
+  throw new TypeError(`Unsupported value in the protocol-hash preimage: ${String(value)}`);
+}
+function canonicalDescription(protocolName, methods) {
+  return canonicalJson2(protocolDescription(protocolName, methods));
+}
+async function computeProtocolHash(protocolName, methods) {
+  const preimage = new TextEncoder().encode(HASH_DOMAIN + canonicalDescription(protocolName, methods));
+  const digest = await crypto.subtle.digest("SHA-256", preimage);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// src/reflection.ts
+var REFLECTION_PROTOCOL_NAME = "vgi_rpc.Reflection.v1";
+var REFLECTION_LIST_PROTOCOLS = "list_protocols";
+var REFLECTION_DESCRIBE = "describe";
+var REFLECTION_DESCRIBE_PARAMS = schema([field("protocol", utf8(), false)]);
+var RETIRED_DESCRIBE_METHOD = "__describe__";
+function describeRetiredMessage() {
+  return `'${RETIRED_DESCRIBE_METHOD}' was retired. Introspection is now the ` + `'${REFLECTION_PROTOCOL_NAME}' protocol: call '${REFLECTION_LIST_PROTOCOLS}' for what this ` + `server hosts, then '${REFLECTION_DESCRIBE}' for one protocol's methods.`;
+}
+var PROTOCOL_SUMMARY_FIELDS = [
+  field("protocol", utf8(), false),
+  field("protocol_version", utf8(), false),
+  field("protocol_hash", utf8(), false),
+  field("deprecated", bool(), false),
+  field("deprecation_message", utf8(), false),
+  field("features", list(field("item", utf8(), true)), false)
+];
+var METHOD_INFO_FIELDS = [
+  field("name", utf8(), false),
+  field("method_type", utf8(), false),
+  field("has_return", bool(), false),
+  field("has_header", bool(), false),
+  field("stream_kind", utf8(), false),
+  field("params_schema_ipc", binary(), false),
+  field("result_schema_ipc", binary(), false),
+  field("header_schema_ipc", binary(), false),
+  field("idempotency", utf8(), false),
+  field("deprecated", bool(), false),
+  field("deprecation_message", utf8(), false)
+];
+var PROTOCOL_LIST_SCHEMA = schema([
+  field("server_id", utf8(), false),
+  field("server_version", utf8(), false),
+  field("request_version", utf8(), false),
+  field("protocols", list(field("item", struct(PROTOCOL_SUMMARY_FIELDS), true)), false)
+]);
+var SERVICE_DESCRIPTION_SCHEMA = schema([
+  ...PROTOCOL_SUMMARY_FIELDS,
+  field("methods", list(field("item", struct(METHOD_INFO_FIELDS), true)), false)
+]);
+function encodeReflectionPayload(value, schema2) {
+  const columns = {};
+  for (const f of schema2.fields) {
+    columns[f.name] = [value[f.name]];
+  }
+  return serializeBatch(batchFromColumns(schema2, columns));
+}
+function decodeFailure(what, detail) {
+  return new Error(`Could not decode a '${REFLECTION_PROTOCOL_NAME}' ${what}: ${detail}. ` + `The reply came from a server this client cannot read; check that it hosts ` + `a compatible major version of the reflection protocol.`);
+}
+function required(row, key, what) {
+  const value = row[key];
+  if (value === undefined || value === null) {
+    throw decodeFailure(what, `it carries no '${key}', and that field has no default`);
+  }
+  return value;
+}
+function optional(row, key, fallback) {
+  const value = row[key];
+  return value === undefined || value === null ? fallback : value;
+}
+function bytes2(row, key) {
+  const value = row[key];
+  if (value === undefined || value === null)
+    return new Uint8Array(0);
+  return value;
+}
+function listRows(batch, name, what) {
+  const column = batch.getChild(name);
+  if (column === null) {
+    throw decodeFailure(what, `the payload has no '${name}' column`);
+  }
+  const value = column.get(0);
+  if (value === undefined || value === null) {
+    throw decodeFailure(what, `its '${name}' column is null`);
+  }
+  return [...value];
+}
+function payloadRow(payload, what) {
+  const batch = deserializeBatch(payload);
+  if (batch.numRows < 1) {
+    throw decodeFailure(what, "the payload carries no rows");
+  }
+  return batch;
+}
+function decodeSummary(row) {
+  return {
+    protocol: required(row, "protocol", "protocol summary"),
+    protocol_version: required(row, "protocol_version", "protocol summary"),
+    protocol_hash: required(row, "protocol_hash", "protocol summary"),
+    deprecated: optional(row, "deprecated", false),
+    deprecation_message: optional(row, "deprecation_message", ""),
+    features: [...optional(row, "features", [])].map(String)
+  };
+}
+function decodeMethod(row) {
+  return {
+    name: required(row, "name", "method description"),
+    method_type: required(row, "method_type", "method description"),
+    has_return: required(row, "has_return", "method description"),
+    has_header: required(row, "has_header", "method description"),
+    stream_kind: required(row, "stream_kind", "method description"),
+    params_schema_ipc: bytes2(row, "params_schema_ipc"),
+    result_schema_ipc: bytes2(row, "result_schema_ipc"),
+    header_schema_ipc: bytes2(row, "header_schema_ipc"),
+    idempotency: optional(row, "idempotency", "unknown"),
+    deprecated: optional(row, "deprecated", false),
+    deprecation_message: optional(row, "deprecation_message", "")
+  };
+}
+function decodeProtocolList(payload) {
+  const batch = payloadRow(payload, "protocol listing");
+  const row = {
+    server_id: batch.getChild("server_id")?.get(0),
+    server_version: batch.getChild("server_version")?.get(0),
+    request_version: batch.getChild("request_version")?.get(0)
+  };
+  return {
+    server_id: required(row, "server_id", "protocol listing"),
+    server_version: required(row, "server_version", "protocol listing"),
+    request_version: required(row, "request_version", "protocol listing"),
+    protocols: listRows(batch, "protocols", "protocol listing").map(decodeSummary)
+  };
+}
+function decodeServiceDescription(payload) {
+  const batch = payloadRow(payload, "service description");
+  const row = {};
+  for (const f of batch.schema.fields) {
+    if (f.name !== "methods")
+      row[f.name] = batch.getChild(f.name)?.get(0);
+  }
+  return {
+    ...decodeSummary(row),
+    methods: listRows(batch, "methods", "service description").map(decodeMethod)
+  };
+}
+function schemaIpc(schema2) {
+  if (!schema2)
+    return new Uint8Array(0);
+  return serializeSchema(schema2);
+}
+function streamKindFor(method) {
+  if (method.type === "unary" /* UNARY */)
+    return "";
+  if (method.exchangeFn)
+    return "exchange";
+  if (method.producerFn)
+    return "producer";
+  return "unknown";
+}
+function unaryHasReturn(method) {
+  return method.type === "unary" /* UNARY */ && (method.resultSchema?.fields.length ?? 0) > 0;
+}
+function describeMethod(method) {
+  return {
+    name: method.name,
+    method_type: method.type === "unary" /* UNARY */ ? "unary" : "stream",
+    has_return: unaryHasReturn(method),
+    has_header: method.headerSchema !== undefined,
+    stream_kind: streamKindFor(method),
+    params_schema_ipc: schemaIpc(method.paramsSchema),
+    result_schema_ipc: unaryHasReturn(method) ? schemaIpc(method.resultSchema) : new Uint8Array(0),
+    header_schema_ipc: schemaIpc(method.headerSchema),
+    idempotency: "unknown",
+    deprecated: false,
+    deprecation_message: ""
+  };
+}
+async function bindingHash(name, methods) {
+  const hashMethods = [];
+  for (const method of methods.values()) {
+    const entry = {
+      name: method.name,
+      methodType: method.type === "unary" /* UNARY */ ? "unary" : "stream",
+      hasReturn: unaryHasReturn(method),
+      hasHeader: method.headerSchema !== undefined,
+      paramsFields: method.paramsSchema?.fields ?? []
+    };
+    if (entry.hasReturn)
+      entry.resultFields = method.resultSchema?.fields ?? [];
+    if (entry.hasHeader)
+      entry.headerFields = method.headerSchema?.fields ?? [];
+    hashMethods.push(entry);
+  }
+  return computeProtocolHash(name, hashMethods);
+}
+var HASHES = new WeakMap;
+function protocolHashFor(binding) {
+  let byName = HASHES.get(binding.protocol);
+  if (!byName) {
+    byName = new Map;
+    HASHES.set(binding.protocol, byName);
+  }
+  let hash = byName.get(binding.name);
+  if (!hash) {
+    hash = bindingHash(binding.name, binding.protocol.getMethods());
+    byName.set(binding.name, hash);
+  }
+  return hash;
+}
+function buildReflectionProtocol(deps) {
+  const p = new Protocol(REFLECTION_PROTOCOL_NAME);
+  p.unary("list_protocols", {
+    params: {},
+    result: { result: binary() },
+    doc: "Return every protocol this server hosts, with versions and hashes.",
+    handler: async () => {
+      const all = deps.listBindings();
+      const names = [...all.keys()].sort();
+      const protocols = [];
+      for (const name of names) {
+        const b = all.get(name);
+        protocols.push({
+          protocol: b.name,
+          protocol_version: b.protocol.protocolVersion ?? "",
+          protocol_hash: await deps.hashFor(name),
+          deprecated: false,
+          deprecation_message: "",
+          features: []
+        });
+      }
+      const listing = {
+        server_id: deps.serverId(),
+        server_version: deps.serverVersion(),
+        request_version: REQUEST_VERSION,
+        protocols
+      };
+      return { result: encodeReflectionPayload(listing, PROTOCOL_LIST_SCHEMA) };
+    }
+  });
+  p.unary("describe", {
+    params: { protocol: utf8() },
+    result: { result: binary() },
+    doc: "Return one protocol's full description.",
+    handler: async (params) => {
+      const protocol = String(params.protocol ?? "");
+      const all = deps.listBindings();
+      const b = all.get(protocol);
+      if (!b) {
+        throw ProtocolNotSupportedError.notHosted(protocol, [...all.keys()].sort());
+      }
+      const methods = [...b.protocol.getMethods().values()].sort((x, y) => x.name < y.name ? -1 : x.name > y.name ? 1 : 0).map(describeMethod);
+      const desc = {
+        protocol: b.name,
+        protocol_version: b.protocol.protocolVersion ?? "",
+        protocol_hash: await deps.hashFor(protocol),
+        deprecated: false,
+        deprecation_message: "",
+        features: [],
+        methods
+      };
+      return { result: encodeReflectionPayload(desc, SERVICE_DESCRIPTION_SCHEMA) };
+    }
+  });
+  return p;
+}
+
 // src/client/ipc.ts
 import {
   Binary,
@@ -2003,6 +3379,9 @@ function coerceForArrow(type, value) {
 function buildRequestIpc(schema2, params, method, options) {
   const metadata = new Map;
   metadata.set(RPC_METHOD_KEY, method);
+  if (options?.protocol) {
+    metadata.set(PROTOCOL_KEY, options.protocol);
+  }
   metadata.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   if (options?.protocolVersion) {
     metadata.set(PROTOCOL_VERSION_KEY, options.protocolVersion);
@@ -2093,10 +3472,42 @@ async function readSequentialStreams(body) {
 }
 
 // src/client/introspect.ts
-function deserializeSchema2(bytes) {
-  return deserializeSchema(bytes);
+function deserializeSchema2(bytes3) {
+  if (bytes3.length === 0)
+    return new ArrowSchema([]);
+  return deserializeSchema(bytes3);
 }
-async function parseDescribeResponse(batches, onLog) {
+function adaptMethod(wire) {
+  const type = wire.method_type === "stream" ? "stream" : "unary";
+  const info = {
+    name: wire.name,
+    type,
+    paramsSchema: deserializeSchema2(wire.params_schema_ipc),
+    resultSchema: deserializeSchema2(wire.result_schema_ipc)
+  };
+  if (type === "stream")
+    info.streamKind = wire.stream_kind;
+  if (wire.has_header)
+    info.headerSchema = deserializeSchema2(wire.header_schema_ipc);
+  return info;
+}
+function adaptServiceDescription(wire, listing) {
+  return {
+    protocolName: wire.protocol,
+    protocolVersion: wire.protocol_version,
+    protocolHash: wire.protocol_hash,
+    hostedProtocols: listing ? listing.protocols.map((p) => p.protocol) : [],
+    methods: wire.methods.map(adaptMethod)
+  };
+}
+function pickApplicationProtocol(listing) {
+  const application = listing.protocols.find((p) => !p.protocol.startsWith(RESERVED_PROTOCOL_PREFIX));
+  if (!application) {
+    throw new RpcError("ProtocolError", `Server ${listing.server_id} hosts no application protocol: it offers only ` + `[${listing.protocols.map((p) => p.protocol).join(", ")}]. Name a protocol explicitly ` + `to describe one of those.`, "");
+  }
+  return application.protocol;
+}
+function reflectionResult(batches, onLog) {
   let dataBatch = null;
   for (const batch of batches) {
     if (batch.numRows === 0) {
@@ -2106,43 +3517,24 @@ async function parseDescribeResponse(batches, onLog) {
     dataBatch = batch;
   }
   if (!dataBatch) {
-    throw new Error("Empty __describe__ response");
+    throw new RpcError("ProtocolError", `Empty '${REFLECTION_PROTOCOL_NAME}' response`, "");
   }
-  const meta = dataBatch.metadata;
-  const protocolName = meta?.get(PROTOCOL_NAME_KEY) ?? "";
-  const protocolVersion = meta?.get(PROTOCOL_VERSION_KEY) ?? "";
-  const methods = [];
-  for (let i = 0;i < dataBatch.numRows; i++) {
-    const name = dataBatch.getChildAt(0).get(i);
-    const methodType = dataBatch.getChildAt(1).get(i);
-    const _hasReturn = dataBatch.getChildAt(2).get(i);
-    const paramsIpc = dataBatch.getChildAt(3).get(i);
-    const resultIpc = dataBatch.getChildAt(4).get(i);
-    const hasHeader = dataBatch.getChildAt(5).get(i);
-    const headerIpc = dataBatch.getChildAt(6)?.get(i);
-    const paramsSchema = await deserializeSchema2(paramsIpc);
-    const resultSchema = await deserializeSchema2(resultIpc);
-    const info = {
-      name,
-      type: methodType,
-      paramsSchema,
-      resultSchema
-    };
-    if (methodType === "stream") {
-      info.outputSchema = resultSchema;
-    }
-    if (hasHeader && headerIpc) {
-      info.headerSchema = await deserializeSchema2(headerIpc);
-    }
-    methods.push(info);
+  const column = dataBatch.getChild("result") ?? dataBatch.getChildAt(0);
+  const value = column?.get(0);
+  if (!(value instanceof Uint8Array)) {
+    throw new RpcError("ProtocolError", `A '${REFLECTION_PROTOCOL_NAME}' reply carried no 'result' column of bytes`, "");
   }
-  return { protocolName, protocolVersion, methods };
+  return value;
+}
+function reflectionRequest(method, protocol) {
+  if (method === REFLECTION_DESCRIBE) {
+    return buildRequestIpc(REFLECTION_DESCRIBE_PARAMS, { protocol }, REFLECTION_DESCRIBE, { protocol: REFLECTION_PROTOCOL_NAME });
+  }
+  return buildRequestIpc(new ArrowSchema([]), {}, method, { protocol: REFLECTION_PROTOCOL_NAME });
 }
 async function httpIntrospect(rawBaseUrl, options) {
   const baseUrl = rawBaseUrl.replace(/\/+$/, "");
   const prefix = options?.prefix ?? "";
-  const emptySchema = new ArrowSchema([]);
-  const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
   const headers = { "Content-Type": ARROW_CONTENT_TYPE };
   if (options?.authorization) {
     headers.Authorization = options.authorization;
@@ -2150,10 +3542,8 @@ async function httpIntrospect(rawBaseUrl, options) {
   const level = options?.compressionLevel;
   const compressFn = options?.compressFn;
   const decompressFn = options?.decompressFn;
-  let sendBody = body;
   if (level != null && compressFn) {
     headers["Content-Encoding"] = "zstd";
-    sendBody = await compressFn(body, level);
   }
   if (level != null && decompressFn) {
     headers["Accept-Encoding"] = "zstd";
@@ -2170,20 +3560,32 @@ async function httpIntrospect(rawBaseUrl, options) {
     responseLimit = minPositive(maxResponse, capabilities.maxResponseBytes ?? undefined) ?? maxResponse;
   }
   headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(maxResponse);
-  const response = await (options?.fetch ?? globalThis.fetch)(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
-    method: "POST",
-    headers,
-    body: sendBody
-  });
-  if (response.status === 401) {
-    throw new RpcError("AuthenticationError", "Authentication required", "");
+  const fetchFn = options?.fetch ?? globalThis.fetch;
+  async function call(method, protocol2) {
+    const body = reflectionRequest(method, protocol2);
+    const sendBody = level != null && compressFn ? await compressFn(body, level) : body;
+    const response = await fetchFn(baseUrl + rpcPath(REFLECTION_PROTOCOL_NAME, method, { prefix }), {
+      method: "POST",
+      headers,
+      body: sendBody
+    });
+    if (response.status === 401) {
+      throw new RpcError("AuthenticationError", "Authentication required", "");
+    }
+    const responseCapabilities = requireResponseBudgetSupport(response.headers);
+    responseLimit = minPositive(responseLimit, responseCapabilities.maxResponseBytes ?? undefined) ?? responseLimit;
+    const rawBody = await readResponseBodyBounded(response, responseLimit);
+    const decoded = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn, responseLimit));
+    const { batches } = await readResponseBatches(decoded);
+    return reflectionResult(batches);
   }
-  const responseCapabilities = requireResponseBudgetSupport(response.headers);
-  responseLimit = minPositive(responseLimit, responseCapabilities.maxResponseBytes ?? undefined) ?? responseLimit;
-  const rawBody = await readResponseBodyBounded(response, responseLimit);
-  const responseBody = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn, responseLimit));
-  const { batches } = await readResponseBatches(responseBody);
-  return parseDescribeResponse(batches);
+  let listing;
+  let protocol = options?.protocol;
+  if (!protocol) {
+    listing = decodeProtocolList(await call(REFLECTION_LIST_PROTOCOLS));
+    protocol = pickApplicationProtocol(listing);
+  }
+  return adaptServiceDescription(decodeServiceDescription(await call(REFLECTION_DESCRIBE, protocol)), listing);
 }
 
 // src/client/stream.ts
@@ -2401,7 +3803,7 @@ class HttpStreamSession {
   }
   async _doExchange(schema2, batches) {
     const body = serializeIpcStream(schema2, batches);
-    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
+    const resp = await this._post(this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }), body);
     if (resp.status === 401) {
       throw new RpcError("AuthenticationError", "Authentication required", "");
     }
@@ -2566,7 +3968,7 @@ class HttpStreamSession {
     });
     const batch = new RecordBatch(emptySchema, data, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
-    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
+    const resp = await this._post(this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }), body);
     if (resp.status === 401) {
       throw new RpcError("AuthenticationError", "Authentication required", "");
     }
@@ -2594,7 +3996,7 @@ async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn 
   if (authorization)
     headers.Authorization = authorization;
   headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(acceptedMaxResponseBytes);
-  const resp = await fetchFn(`${baseUrl}${prefix}/${UPLOAD_URL_METHOD2}/init`, {
+  const resp = await fetchFn(baseUrl + reservedPath(`${UPLOAD_URL_METHOD2}/init`, { prefix }), {
     method: "POST",
     headers,
     body
@@ -2700,6 +4102,13 @@ function httpConnect(rawBaseUrl, options) {
   const effectiveExternalConfig = externalConfig ? { ...externalConfig, fetch: fetchFn } : externalConfig;
   let methodCache = options?.description ? new Map(options.description.methods.map((method) => [method.name, method])) : null;
   let serverProtocolVersion = options?.description?.protocolVersion ?? "";
+  let serverProtocolName = options?.description?.protocolName ?? "";
+  function rpcPrefix() {
+    if (!serverProtocolName) {
+      throw new RpcError("ProtocolError", "The server did not report a protocol name, so no RPC path can be built. " + "Every request must name the protocol it addresses.", "");
+    }
+    return `${prefix}/${serverProtocolName}`;
+  }
   let compressFn;
   let decompressFn;
   let compressionLoaded = false;
@@ -2833,6 +4242,7 @@ function httpConnect(rawBaseUrl, options) {
     await ensureCompression();
     const desc = await httpIntrospect(baseUrl, {
       prefix,
+      protocol: options?.protocol,
       authorization,
       compressionLevel,
       compressFn,
@@ -2843,6 +4253,7 @@ function httpConnect(rawBaseUrl, options) {
     });
     methodCache = new Map(desc.methods.map((m) => [m.name, m]));
     serverProtocolVersion = desc.protocolVersion;
+    serverProtocolName = desc.protocolName;
     return methodCache;
   }
   return {
@@ -2854,8 +4265,11 @@ function httpConnect(rawBaseUrl, options) {
         throw new Error(`Unknown method: '${method}'`);
       }
       const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
-      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}`, body);
+      const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+        protocolVersion: serverProtocolVersion,
+        protocol: serverProtocolName
+      });
+      const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(rpcPrefix(), method), body);
       checkAuth(resp);
       const responseBody = await readResponse(resp);
       const { batches } = await readResponseBatches(responseBody);
@@ -2893,8 +4307,11 @@ function httpConnect(rawBaseUrl, options) {
         throw new Error(`Unknown method: '${method}'`);
       }
       const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
-      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}/init`, body);
+      const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+        protocolVersion: serverProtocolVersion,
+        protocol: serverProtocolName
+      });
+      const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(rpcPrefix(), method, { suffix: "/init" }), body);
       checkAuth(resp);
       const responseBody = await readResponse(resp);
       let header = null;
@@ -3009,7 +4426,7 @@ function httpConnect(rawBaseUrl, options) {
       const outputSchema = (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null) ?? (pendingBatches.length > 0 ? pendingBatches[0].schema : null) ?? info.outputSchema ?? info.resultSchema;
       return new HttpStreamSession({
         baseUrl,
-        prefix,
+        prefix: rpcPrefix(),
         method,
         stateToken,
         callStateToken,
@@ -3031,10 +4448,11 @@ function httpConnect(rawBaseUrl, options) {
     async resumeStream(method, token, outputSchema) {
       await ensureCompression();
       await ensureResponseBudgetSupport();
+      await ensureMethodCache();
       const { cursor, callToken } = unpackResumeToken(token);
       return new HttpStreamSession({
         baseUrl,
-        prefix,
+        prefix: rpcPrefix(),
         method,
         stateToken: cursor,
         callStateToken: callToken,
@@ -3057,6 +4475,7 @@ function httpConnect(rawBaseUrl, options) {
       await ensureResponseBudgetSupport();
       return httpIntrospect(baseUrl, {
         prefix,
+        protocol: options?.protocol,
         authorization,
         compressionLevel,
         compressFn,
@@ -3071,7 +4490,7 @@ function httpConnect(rawBaseUrl, options) {
 }
 
 // src/client/iroh.ts
-import { randomBytes } from "node:crypto";
+import { randomBytes as randomBytes2 } from "node:crypto";
 
 // src/client/pipe.ts
 import {
@@ -3184,13 +4603,13 @@ class IpcStreamWriter {
     }
   }
   async writeStream(schema2, batches) {
-    const bytes = serializeBatches(schema2, batches);
+    const bytes3 = serializeBatches(schema2, batches);
     if (this.target.kind === "fd") {
-      writeAll(this.target.fd, bytes);
+      writeAll(this.target.fd, bytes3);
     } else if (this.target.kind === "sink") {
-      await this.target.sink.write(bytes);
+      await this.target.sink.write(bytes3);
     } else {
-      await socketWriteAll(this.target.socket, bytes);
+      await socketWriteAll(this.target.socket, bytes3);
     }
   }
   openStream(schema2) {
@@ -3219,17 +4638,17 @@ class IncrementalStream {
     this.closed = true;
     return this.enqueue(this.encoder.finish());
   }
-  enqueue(bytes) {
+  enqueue(bytes3) {
     const target = this.target;
     if (target.kind === "fd") {
-      writeAll(target.fd, bytes);
+      writeAll(target.fd, bytes3);
       return RESOLVED;
     }
     const next = this.writeChain.then(() => {
       if (target.kind === "sink") {
-        return target.sink.write(bytes);
+        return target.sink.write(bytes3);
       }
-      return socketWriteAll(target.socket, bytes);
+      return socketWriteAll(target.socket, bytes3);
     });
     this.writeChain = next.catch(() => {
       return;
@@ -3245,7 +4664,7 @@ function fieldsMatch(left, right) {
   }
   const leftChildren = left.type.children;
   const rightChildren = right.type.children;
-  return leftChildren.length === rightChildren.length && leftChildren.every((child, index) => fieldsMatch(child, rightChildren[index]));
+  return leftChildren.length === rightChildren.length && leftChildren.every((child2, index) => fieldsMatch(child2, rightChildren[index]));
 }
 function schemasMatch(left, right) {
   return left.fields.length === right.fields.length && left.fields.every((field2, index) => fieldsMatch(field2, right.fields[index]));
@@ -3512,16 +4931,19 @@ function pipeConnect(readable, writable, options) {
   let methodCache = null;
   let protocolName = "";
   let serverProtocolVersion = "";
+  let describedHash = "";
+  let hostedProtocols = [];
+  const requestedProtocol = options?.protocol;
   let _busy = false;
   let _drainPromise = null;
   let closed = false;
-  const writeFn = (bytes) => {
+  const writeFn = (bytes3) => {
     let offset = 0;
     do {
-      const end = Math.min(offset + MAX_STREAM_CHUNK, bytes.length);
-      writable.write(bytes.subarray(offset, end));
+      const end = Math.min(offset + MAX_STREAM_CHUNK, bytes3.length);
+      writable.write(bytes3.subarray(offset, end));
       offset = end;
-    } while (offset < bytes.length);
+    } while (offset < bytes3.length);
     writable.flush?.();
   };
   async function ensureReader() {
@@ -3554,17 +4976,26 @@ function pipeConnect(readable, writable, options) {
       return methodCache;
     await acquireBusy();
     try {
-      const emptySchema = new Schema4([]);
-      const body = buildRequestIpc(emptySchema, {}, DESCRIBE_METHOD_NAME);
-      writeFn(body);
-      const r = await ensureReader();
-      const response = await r.readStream();
-      if (!response) {
-        throw new Error("EOF reading __describe__ response");
+      const call = async (method, protocol) => {
+        writeFn(reflectionRequest(method, protocol));
+        const r = await ensureReader();
+        const response = await r.readStream();
+        if (!response) {
+          throw new RpcError("TransportError", `EOF reading the '${method}' reflection response`, "");
+        }
+        return reflectionResult(response.batches, onLog);
+      };
+      let listing;
+      let target = requestedProtocol;
+      if (!target) {
+        listing = decodeProtocolList(await call(REFLECTION_LIST_PROTOCOLS));
+        target = pickApplicationProtocol(listing);
       }
-      const desc = await parseDescribeResponse(response.batches, onLog);
+      const desc = adaptServiceDescription(decodeServiceDescription(await call(REFLECTION_DESCRIBE, target)), listing);
       protocolName = desc.protocolName;
       serverProtocolVersion = desc.protocolVersion;
+      describedHash = desc.protocolHash;
+      hostedProtocols = desc.hostedProtocols;
       methodCache = new Map(desc.methods.map((m) => [m.name, m]));
       return methodCache;
     } finally {
@@ -3582,7 +5013,10 @@ function pipeConnect(readable, writable, options) {
         }
         const r = await ensureReader();
         const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+          protocolVersion: serverProtocolVersion,
+          protocol: protocolName
+        });
         writeFn(body);
         const response = await r.readStream();
         if (!response) {
@@ -3626,7 +5060,10 @@ function pipeConnect(readable, writable, options) {
         }
         const r = await ensureReader();
         const fullParams = { ...info.defaults ?? {}, ...params ?? {} };
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+          protocolVersion: serverProtocolVersion,
+          protocol: protocolName
+        });
         writeFn(body);
         let header = null;
         if (info.headerSchema) {
@@ -3672,6 +5109,8 @@ function pipeConnect(readable, writable, options) {
       return {
         protocolName,
         protocolVersion: serverProtocolVersion,
+        protocolHash: describedHash,
+        hostedProtocols,
         methods: [...methods.values()]
       };
     },
@@ -3720,7 +5159,7 @@ function subprocessConnect(cmd, options) {
 // src/client/iroh.ts
 var IROH_ARROW_MUX_ALPN = "vgi-rpc/arrow-mux/1";
 var IROH_HTTP_ALPN = "iroh-http/2";
-var processEphemeralSecretKey = randomBytes(32);
+var processEphemeralSecretKey = randomBytes2(32);
 
 class IrohTransportError extends Error {
   stage;
@@ -3748,10 +5187,10 @@ function transportError(error, stage, category, dispatchCertainty) {
   return new IrohTransportError(error instanceof Error ? error.message : String(error), aborted ? "cancel" : stage, aborted ? "cancelled" : category, dispatchCertainty, { cause: error });
 }
 function decodeEndpointId(value) {
-  const bytes = new Uint8Array(32);
-  for (let i = 0;i < bytes.length; i++)
-    bytes[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
-  return bytes;
+  const bytes3 = new Uint8Array(32);
+  for (let i = 0;i < bytes3.length; i++)
+    bytes3[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
+  return bytes3;
 }
 function parseIrohEndpoint(raw) {
   if (typeof raw !== "string" || raw.length === 0 || raw.includes("\\") || raw.includes("?") || raw.includes("#") || [...raw].some((value) => value.charCodeAt(0) <= 32 || value.charCodeAt(0) === 127)) {
@@ -3935,8 +5374,8 @@ async function irohConnect(rawEndpoint, options = {}) {
     }
   });
   const writable = {
-    write(bytes) {
-      const owned = Array.from(bytes);
+    write(bytes3) {
+      const owned = Array.from(bytes3);
       writeQueue = writeQueue.then(() => activeIo(send.writeAll(owned), "write", "unknown", () => {
         send.reset(0n).catch(() => {});
       }));
@@ -3968,11 +5407,11 @@ async function irohConnect(rawEndpoint, options = {}) {
 // src/client/httpi.ts
 var BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 var IROH_HTTP_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
-function encodeIrohNodeId(bytes) {
+function encodeIrohNodeId(bytes3) {
   let accumulator = 0;
   let bits = 0;
   let encoded = "";
-  for (const byte of bytes) {
+  for (const byte of bytes3) {
     accumulator = accumulator << 8 | byte;
     bits += 8;
     while (bits >= 5) {
@@ -4129,8 +5568,8 @@ function targetAddress(host) {
   if (kind === 4)
     return Uint8Array.of(1, ...host.split(".").map(Number));
   if (kind === 6) {
-    const bytes = ipv6Bytes(host);
-    return Uint8Array.of(4, ...bytes);
+    const bytes3 = ipv6Bytes(host);
+    return Uint8Array.of(4, ...bytes3);
   }
   const ascii = domainToASCII(host);
   if (!ascii || ascii.length > 255 || /[^\x21-\x7e]/u.test(ascii)) {
@@ -4220,7 +5659,7 @@ function waitConnect(socket, signal) {
       signal.addEventListener("abort", aborted, { once: true });
   });
 }
-function write(socket, bytes, signal) {
+function write(socket, bytes3, signal) {
   return new Promise((resolve, reject) => {
     if (signal.aborted)
       return reject(signal.reason);
@@ -4229,7 +5668,7 @@ function write(socket, bytes, signal) {
       reject(signal.reason);
     };
     signal.addEventListener("abort", aborted, { once: true });
-    socket.write(bytes, (error) => {
+    socket.write(bytes3, (error) => {
       signal.removeEventListener("abort", aborted);
       if (error)
         reject(error);
@@ -4479,12 +5918,12 @@ class HttpResponseFramer {
   materialize(length) {
     return Buffer.from(this.bytes.subarray(0, length));
   }
-  ensureCapacity(required) {
-    if (required <= this.bytes.length)
+  ensureCapacity(required2) {
+    if (required2 <= this.bytes.length)
       return;
     let capacity = this.bytes.length;
-    while (capacity < required)
-      capacity = Math.min(this.maxResponseBytes, Math.max(capacity * 2, required));
+    while (capacity < required2)
+      capacity = Math.min(this.maxResponseBytes, Math.max(capacity * 2, required2));
     const replacement = Buffer.allocUnsafe(capacity);
     this.bytes.copy(replacement, 0, 0, this.length);
     this.bytes = replacement;
@@ -4889,8 +6328,8 @@ function rfc3339Utc() {
   const ms = d.getUTCMilliseconds().toString().padStart(3, "0");
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}.${ms}Z`;
 }
-function base64(bytes) {
-  return Buffer.from(bytes).toString("base64");
+function base64(bytes3) {
+  return Buffer.from(bytes3).toString("base64");
 }
 function roundTo2(f) {
   return Math.round(f * 100) / 100;
@@ -5206,27 +6645,6 @@ class AccessLogHook {
     return JSON.stringify(sentinel);
   }
 }
-// src/auth.ts
-class AuthContext {
-  domain;
-  authenticated;
-  principal;
-  claims;
-  constructor(domain, authenticated, principal, claims = {}) {
-    this.domain = domain;
-    this.authenticated = authenticated;
-    this.principal = principal;
-    this.claims = claims;
-  }
-  static anonymous() {
-    return new AuthContext("", false, null);
-  }
-  requireAuthenticated() {
-    if (!this.authenticated) {
-      throw new RpcError("AuthenticationError", "Authentication required", "");
-    }
-  }
-}
 // src/client/oauth.ts
 function parseMetadataJson(json) {
   const result = {
@@ -5410,33 +6828,6 @@ function buildWwwAuthenticateHeader(metadataUrl, clientId, clientSecret, useIdTo
   }
   return header;
 }
-// src/util/web-crypto.ts
-function randomBytes2(length) {
-  const buf = new Uint8Array(length);
-  crypto.getRandomValues(buf);
-  return buf;
-}
-function constantTimeEqual(a, b) {
-  if (a.length !== b.length)
-    return false;
-  let diff = 0;
-  for (let i = 0;i < a.length; i++)
-    diff |= a[i] ^ b[i];
-  return diff === 0;
-}
-var _hmacKeyCache = new Map;
-async function sha256(data) {
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return new Uint8Array(digest);
-}
-async function sha256Hex2(data) {
-  const bytes = await sha256(data);
-  let s = "";
-  for (let i = 0;i < bytes.length; i++)
-    s += bytes[i].toString(16).padStart(2, "0");
-  return s;
-}
-
 // src/http/unauthorized.ts
 var AUTH_REASON_HEADER = "VGI-Auth-Reason";
 var AUTH_PROXY_REQUIRED_HEADER = "VGI-Auth-Proxy-Required";
@@ -5566,823 +6957,6 @@ function chainAuthenticate(...authenticators) {
     throw error;
   };
 }
-// src/util/schema.ts
-function serializeSchema2(schema2) {
-  return serializeSchema(schema2);
-}
-
-// src/dispatch/describe.ts
-var DESCRIBE_SCHEMA = schema([
-  field("name", utf8(), false),
-  field("method_type", utf8(), false),
-  field("has_return", bool(), false),
-  field("params_schema_ipc", binary(), false),
-  field("result_schema_ipc", binary(), false),
-  field("has_header", bool(), false),
-  field("header_schema_ipc", binary(), true),
-  field("is_exchange", bool(), true)
-]);
-async function computeProtocolHash(protocolName, rows) {
-  const enc = new TextEncoder;
-  const parts = [];
-  const push = (v) => parts.push(typeof v === "string" ? enc.encode(v) : v);
-  push("vgi_rpc.describe.v");
-  push(DESCRIBE_VERSION);
-  push("|");
-  push(REQUEST_VERSION);
-  push("|");
-  push(protocolName);
-  push("|");
-  for (const r of rows) {
-    push(Uint8Array.of(31));
-    push(r.name);
-    push(Uint8Array.of(30));
-    push(r.methodType);
-    push(Uint8Array.of(30));
-    push(r.hasReturn ? "1" : "0");
-    push(Uint8Array.of(30));
-    push(r.hasHeader ? "1" : "0");
-    push(Uint8Array.of(30));
-    push(r.isExchange === null ? "-" : r.isExchange ? "1" : "0");
-    push(Uint8Array.of(30));
-    push(r.paramsIpc);
-    push(Uint8Array.of(30));
-    push(r.resultIpc);
-    push(Uint8Array.of(30));
-    if (r.headerIpc)
-      push(r.headerIpc);
-  }
-  let total = 0;
-  for (const p of parts)
-    total += p.length;
-  const buf = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    buf.set(p, off);
-    off += p.length;
-  }
-  return sha256Hex2(buf);
-}
-async function buildDescribeBatch(protocolName, methods, serverId, protocolVersion) {
-  const sortedEntries = [...methods.entries()].sort(([a], [b]) => a.localeCompare(b));
-  const names = [];
-  const methodTypes = [];
-  const hasReturns = [];
-  const paramsSchemas = [];
-  const resultSchemas = [];
-  const hasHeaders = [];
-  const headerSchemas = [];
-  const isExchanges = [];
-  const hashRows = [];
-  for (const [name, method] of sortedEntries) {
-    names.push(name);
-    methodTypes.push(method.type);
-    const hasReturn = method.type === "unary" && method.resultSchema.fields.length > 0;
-    hasReturns.push(hasReturn);
-    const paramsIpc = serializeSchema2(method.paramsSchema);
-    const resultIpc = serializeSchema2(method.resultSchema);
-    paramsSchemas.push(paramsIpc);
-    resultSchemas.push(resultIpc);
-    const hasHeader = !!method.headerSchema;
-    hasHeaders.push(hasHeader);
-    const headerIpc = method.headerSchema ? serializeSchema2(method.headerSchema) : null;
-    headerSchemas.push(headerIpc);
-    const isExchange = null;
-    isExchanges.push(isExchange);
-    hashRows.push({
-      name,
-      methodType: method.type,
-      hasReturn,
-      hasHeader,
-      isExchange,
-      paramsIpc,
-      resultIpc,
-      headerIpc
-    });
-  }
-  const baseBatch = batchFromColumns(DESCRIBE_SCHEMA, {
-    name: names,
-    method_type: methodTypes,
-    has_return: hasReturns,
-    params_schema_ipc: paramsSchemas,
-    result_schema_ipc: resultSchemas,
-    has_header: hasHeaders,
-    header_schema_ipc: headerSchemas,
-    is_exchange: isExchanges
-  });
-  const protocolHash = await computeProtocolHash(protocolName, hashRows);
-  const metadata = new Map;
-  metadata.set(PROTOCOL_NAME_KEY, protocolName);
-  metadata.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
-  metadata.set(DESCRIBE_VERSION_KEY, DESCRIBE_VERSION);
-  metadata.set(PROTOCOL_HASH_KEY, protocolHash);
-  metadata.set(SERVER_ID_KEY, serverId);
-  if (protocolVersion) {
-    metadata.set(PROTOCOL_VERSION_KEY, protocolVersion);
-  }
-  const batch = withBatchMetadata(baseBatch, metadata);
-  return { batch, metadata };
-}
-
-// src/identity.ts
-var PeerIdentityStatus = {
-  OFF: "off",
-  NOT_APPLICABLE: "not_applicable",
-  AVAILABLE: "available",
-  UNAVAILABLE: "unavailable",
-  PERMISSION_DENIED: "permission_denied",
-  NO_MATCH: "no_match",
-  INVALID: "invalid",
-  UNTRUSTED_PROXY: "untrusted_proxy"
-};
-var PEER_IDENTITY_STATUSES = new Set(Object.values(PeerIdentityStatus));
-var IdentityAssurance = {
-  CRYPTOGRAPHIC_PEER: "cryptographic_peer",
-  LOCAL_DAEMON: "local_daemon",
-  CONFIGURED_PROXY: "configured_proxy"
-};
-var IDENTITY_ASSURANCES = new Set(Object.values(IdentityAssurance));
-var PeerSubjectKind = {
-  USER: "user",
-  TAGGED_NODE: "tagged_node",
-  WORKLOAD: "workload",
-  ENDPOINT: "endpoint",
-  UNKNOWN: "unknown"
-};
-var PEER_SUBJECT_KINDS = new Set(Object.values(PeerSubjectKind));
-var SubjectStability = {
-  STABLE: "stable",
-  LOGIN: "login",
-  NONE: "none"
-};
-var SUBJECT_STABILITIES = new Set(Object.values(SubjectStability));
-var MAX_JSON_BYTES = 65536;
-var MAX_JSON_DEPTH = 16;
-var MAX_JSON_VALUES = 4096;
-var MAX_HEADER_COUNT = 128;
-var MAX_HEADER_VALUES = 16;
-var MAX_HEADER_BYTES = 65536;
-var HTTP_FIELD_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-function assertWellFormedUtf16(value, path) {
-  for (let index = 0;index < value.length; index++) {
-    const unit = value.charCodeAt(index);
-    if (unit >= 55296 && unit <= 56319) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 56320 && next <= 57343))
-        throw new TypeError(`${path} contains an unpaired surrogate`);
-      index++;
-    } else if (unit >= 56320 && unit <= 57343) {
-      throw new TypeError(`${path} contains an unpaired surrogate`);
-    }
-  }
-}
-function snapshotJson(value, path = "evidence", depth = 0, limits = { values: 0, sourceBytes: 0 }) {
-  if (depth > MAX_JSON_DEPTH)
-    throw new TypeError(`${path} exceeds maximum JSON depth`);
-  limits.values++;
-  if (limits.values > MAX_JSON_VALUES)
-    throw new TypeError(`${path} exceeds maximum JSON value count`);
-  if (value === null || typeof value === "boolean")
-    return value;
-  if (typeof value === "string") {
-    assertWellFormedUtf16(value, path);
-    if (value.length > MAX_JSON_BYTES)
-      throw new TypeError(`${path} exceeds maximum JSON byte size`);
-    limits.sourceBytes += new TextEncoder().encode(value).length;
-    if (limits.sourceBytes > MAX_JSON_BYTES)
-      throw new TypeError(`${path} exceeds maximum JSON byte size`);
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value))
-      throw new TypeError(`${path} numbers must be finite`);
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return Object.freeze(value.map((item, index) => snapshotJson(item, `${path}[${index}]`, depth + 1, limits)));
-  }
-  if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    const out = {};
-    for (const [key, item] of Object.entries(value)) {
-      assertWellFormedUtf16(key, `${path} key`);
-      limits.sourceBytes += new TextEncoder().encode(key).length;
-      if (limits.sourceBytes > MAX_JSON_BYTES)
-        throw new TypeError(`${path} exceeds maximum JSON byte size`);
-      if (item === undefined)
-        throw new TypeError(`${path}.${key} is not JSON-compatible`);
-      out[key] = snapshotJson(item, `${path}.${key}`, depth + 1, limits);
-    }
-    return Object.freeze(out);
-  }
-  throw new TypeError(`${path} is not JSON-compatible`);
-}
-function snapshotObject(value, path) {
-  const snapshot = snapshotJson(value ?? {}, path);
-  if (new TextEncoder().encode(canonicalJson(snapshot)).length > MAX_JSON_BYTES) {
-    throw new TypeError(`${path} exceeds maximum JSON byte size`);
-  }
-  return snapshot;
-}
-function canonicalJson(value) {
-  if (value === null || typeof value !== "object")
-    return JSON.stringify(value);
-  if (Array.isArray(value))
-    return `[${value.map(canonicalJson).join(",")}]`;
-  const object = value;
-  return `{${Object.keys(object).sort(compareUnicode).map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
-}
-function containsControl(value) {
-  for (const character of value) {
-    const code = character.codePointAt(0);
-    if (code <= 31 || code === 127)
-      return true;
-  }
-  return false;
-}
-
-class PeerResolutionContext {
-  transport;
-  immediatePeer;
-  sourceEndpoint;
-  assertedPeer;
-  destinationAddress;
-  authority;
-  serviceName;
-  metadata;
-  deadline;
-  budgetMs;
-  #startedAt;
-  #headers;
-  constructor(transport, options = {}) {
-    if (!transport)
-      throw new TypeError("peer transport must not be empty");
-    assertWellFormedUtf16(transport, "peer transport");
-    this.transport = transport;
-    for (const [name, value] of Object.entries({
-      immediatePeer: options.immediatePeer,
-      sourceEndpoint: options.sourceEndpoint,
-      assertedPeer: options.assertedPeer,
-      destinationAddress: options.destinationAddress,
-      authority: options.authority,
-      serviceName: options.serviceName
-    })) {
-      if (value !== undefined)
-        assertWellFormedUtf16(value, name);
-    }
-    this.immediatePeer = options.immediatePeer;
-    this.sourceEndpoint = options.sourceEndpoint;
-    this.assertedPeer = options.assertedPeer;
-    this.destinationAddress = options.destinationAddress;
-    this.authority = options.authority;
-    this.serviceName = options.serviceName;
-    if (options.deadline !== undefined && (!Number.isFinite(options.deadline) || options.deadline <= 0)) {
-      throw new TypeError("peer deadline must be a positive epoch millisecond value");
-    }
-    this.deadline = options.deadline;
-    if (options.budgetMs !== undefined && (!Number.isFinite(options.budgetMs) || options.budgetMs <= 0)) {
-      throw new TypeError("peer budgetMs must be positive");
-    }
-    this.budgetMs = options.budgetMs;
-    this.#startedAt = performance.now();
-    this.metadata = snapshotObject(options.metadata, "peer metadata");
-    const headers = new Map;
-    const entries = options.headers instanceof Map ? options.headers.entries() : Object.entries(options.headers ?? {});
-    let headerBytes = 0;
-    for (const [name, rawValues] of entries) {
-      if (headers.size >= MAX_HEADER_COUNT)
-        throw new PeerIdentityRejectedError("too many peer identity headers");
-      assertWellFormedUtf16(name, "peer-resolution header name");
-      if (!HTTP_FIELD_NAME.test(name))
-        throw new TypeError("invalid peer-resolution header name");
-      const key = name.toLowerCase();
-      if (headers.has(key))
-        throw new PeerIdentityRejectedError("case-varied duplicate peer identity header");
-      if (!Array.isArray(rawValues)) {
-        throw new PeerIdentityRejectedError(`peer identity header ${JSON.stringify(name)} did not preserve multiplicity`);
-      }
-      const values = Object.freeze([...rawValues]);
-      if (values.length > MAX_HEADER_VALUES) {
-        throw new PeerIdentityRejectedError(`too many values for peer identity header: ${name}`);
-      }
-      values.forEach((value) => {
-        assertWellFormedUtf16(value, `peer-resolution header value: ${name}`);
-      });
-      if (values.some((value) => typeof value !== "string" || containsControl(value))) {
-        throw new TypeError(`invalid peer-resolution header value: ${name}`);
-      }
-      headerBytes += new TextEncoder().encode(name).length;
-      for (const value of values)
-        headerBytes += new TextEncoder().encode(value).length;
-      if (headerBytes > MAX_HEADER_BYTES)
-        throw new PeerIdentityRejectedError("peer identity headers are too large");
-      headers.set(key, values);
-    }
-    this.#headers = headers;
-    Object.freeze(this);
-  }
-  header(name) {
-    assertWellFormedUtf16(name, "peer-resolution header lookup");
-    const values = this.#headers.get(name.toLowerCase()) ?? [];
-    if (values.length > 1)
-      throw new PeerIdentityRejectedError(`duplicate peer identity header: ${name}`);
-    return values[0];
-  }
-  remainingBudgetMs() {
-    return this.budgetMs === undefined ? undefined : Math.max(0, this.budgetMs - (performance.now() - this.#startedAt));
-  }
-}
-
-class PeerIdentity {
-  provider;
-  evidenceSource;
-  assurance;
-  issuer;
-  transport;
-  subjectKind;
-  subjectKey;
-  subjectStability;
-  subjectVerified;
-  attributes;
-  capabilities;
-  capabilitiesVerified;
-  sourceAddress;
-  proxyAddress;
-  constructor(options) {
-    if (!options.provider || !options.evidenceSource || !options.issuer || !options.transport) {
-      throw new TypeError("provider, evidenceSource, issuer, and transport are required");
-    }
-    for (const [name, value] of Object.entries({
-      provider: options.provider,
-      evidenceSource: options.evidenceSource,
-      issuer: options.issuer,
-      transport: options.transport,
-      subjectKey: options.subjectKey,
-      sourceAddress: options.sourceAddress,
-      proxyAddress: options.proxyAddress
-    })) {
-      if (value !== undefined)
-        assertWellFormedUtf16(value, name);
-    }
-    const stability = options.subjectStability ?? SubjectStability.NONE;
-    const subjectKind = options.subjectKind ?? PeerSubjectKind.UNKNOWN;
-    if (!IDENTITY_ASSURANCES.has(options.assurance))
-      throw new TypeError("invalid peer identity assurance");
-    if (!PEER_SUBJECT_KINDS.has(subjectKind))
-      throw new TypeError("invalid peer subject kind");
-    if (!SUBJECT_STABILITIES.has(stability))
-      throw new TypeError("invalid peer subject stability");
-    if (options.subjectVerified && !options.subjectKey)
-      throw new TypeError("verified peer identity requires subjectKey");
-    if (!options.subjectKey && stability !== SubjectStability.NONE) {
-      throw new TypeError("subjectless peer identity must use none stability");
-    }
-    this.provider = options.provider;
-    this.evidenceSource = options.evidenceSource;
-    this.assurance = options.assurance;
-    this.issuer = options.issuer;
-    this.transport = options.transport;
-    this.subjectKind = subjectKind;
-    this.subjectKey = options.subjectKey;
-    this.subjectStability = stability;
-    this.subjectVerified = options.subjectVerified ?? false;
-    this.attributes = snapshotObject(options.attributes, "peer attributes");
-    this.capabilities = snapshotObject(options.capabilities, "peer capabilities");
-    this.capabilitiesVerified = options.capabilitiesVerified ?? false;
-    this.sourceAddress = options.sourceAddress;
-    this.proxyAddress = options.proxyAddress;
-    Object.freeze(this);
-  }
-  get canonicalPrincipal() {
-    if (!this.subjectKey)
-      throw new TypeError("subjectless peer evidence has no canonical principal");
-    return `peer/${percentIdentity(this.provider)}/${percentIdentity(this.issuer)}/${percentIdentity(this.subjectKey)}`;
-  }
-}
-function percentIdentity(value) {
-  let out = "";
-  for (const byte of new TextEncoder().encode(value)) {
-    const character = String.fromCharCode(byte);
-    out += /[A-Za-z0-9._~-]/.test(character) ? character : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
-  }
-  return out;
-}
-
-class PeerIdentityResult {
-  provider;
-  status;
-  identities;
-  constructor(provider, status, identities = []) {
-    if (!provider)
-      throw new TypeError("peer identity provider is required");
-    assertWellFormedUtf16(provider, "peer identity provider");
-    if (!PEER_IDENTITY_STATUSES.has(status))
-      throw new TypeError("invalid peer identity status");
-    if (status === PeerIdentityStatus.AVAILABLE !== identities.length > 0) {
-      throw new TypeError("only an available result may carry identities");
-    }
-    if (identities.some((identity) => identity.provider !== provider))
-      throw new TypeError("peer result provider mismatch");
-    this.provider = provider;
-    this.status = status;
-    this.identities = Object.freeze([...identities]);
-    Object.freeze(this);
-  }
-  static available(identity) {
-    return new PeerIdentityResult(identity.provider, PeerIdentityStatus.AVAILABLE, [identity]);
-  }
-}
-
-class PeerEvidenceSet {
-  static EMPTY = new PeerEvidenceSet;
-  identities;
-  #statuses;
-  constructor(results = []) {
-    const statuses = new Map;
-    const identities = [];
-    for (const result of results) {
-      if (!PEER_IDENTITY_STATUSES.has(result.status)) {
-        throw new TypeError(`invalid peer identity status: ${String(result.status)}`);
-      }
-      if (statuses.has(result.provider))
-        throw new TypeError(`duplicate peer identity provider: ${result.provider}`);
-      statuses.set(result.provider, result.status);
-      identities.push(...result.identities);
-    }
-    this.#statuses = statuses;
-    this.identities = Object.freeze(identities);
-    Object.freeze(this);
-  }
-  status(provider) {
-    return this.#statuses.get(provider) ?? PeerIdentityStatus.OFF;
-  }
-  forProvider(provider) {
-    return Object.freeze(this.identities.filter((identity) => identity.provider === provider));
-  }
-  eligibleSubjects(provider) {
-    return Object.freeze(this.forProvider(provider).filter((identity) => identity.subjectVerified && !!identity.subjectKey && identity.subjectStability === SubjectStability.STABLE));
-  }
-  uniqueVerifiedSubject(provider) {
-    const matches = this.eligibleSubjects(provider);
-    if (matches.length !== 1) {
-      throw new PeerIdentityRejectedError(`provider ${JSON.stringify(provider)} did not produce one verified stable subject`);
-    }
-    return matches[0];
-  }
-  requireUsableProvider(provider) {
-    const status = this.status(provider);
-    if (status === PeerIdentityStatus.UNAVAILABLE || status === PeerIdentityStatus.PERMISSION_DENIED) {
-      throw new PeerIdentityUnavailableError(`peer identity provider ${JSON.stringify(provider)} is unavailable`);
-    }
-    if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
-      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`, status === PeerIdentityStatus.UNTRUSTED_PROXY ? "proxy_required" : "invalid_credential");
-    }
-    return this.uniqueVerifiedSubject(provider);
-  }
-  requireAvailableProvider(provider) {
-    const status = this.status(provider);
-    if (status === PeerIdentityStatus.UNAVAILABLE || status === PeerIdentityStatus.PERMISSION_DENIED) {
-      throw new PeerIdentityUnavailableError(`peer identity provider ${JSON.stringify(provider)} is unavailable`);
-    }
-    if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
-      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`, status === PeerIdentityStatus.UNTRUSTED_PROXY ? "proxy_required" : "invalid_credential");
-    }
-    const identities = this.forProvider(provider);
-    if (status !== PeerIdentityStatus.AVAILABLE || identities.length === 0) {
-      throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} did not produce evidence`);
-    }
-    return identities;
-  }
-  async bindingDigest(providers, applicationAuth) {
-    const fields = [];
-    for (const provider of [...new Set(providers)].sort()) {
-      fields.push(provider, this.status(provider));
-      const identities = this.forProvider(provider).map((identity) => [
-        identity.provider,
-        identity.issuer,
-        identity.subjectKey ?? "",
-        identity.assurance,
-        identity.evidenceSource,
-        identity.transport,
-        identity.subjectKind,
-        identity.subjectStability,
-        String(identity.subjectVerified),
-        String(identity.capabilitiesVerified),
-        "",
-        "",
-        canonicalJson(identity.attributes),
-        canonicalJson(identity.capabilities)
-      ]).sort((a, b) => compareFields(a, b));
-      for (const identity of identities)
-        fields.push(...identity);
-    }
-    if (applicationAuth)
-      fields.push("application_auth", applicationAuth.domain ?? "", applicationAuth.principal ?? "");
-    let size = 0;
-    const encoded = fields.map((field2) => {
-      const bytes = new TextEncoder().encode(field2);
-      size += 8 + bytes.length;
-      return bytes;
-    });
-    const input = new Uint8Array(size);
-    const view = new DataView(input.buffer);
-    let offset = 0;
-    for (const bytes of encoded) {
-      view.setBigUint64(offset, BigInt(bytes.length));
-      offset += 8;
-      input.set(bytes, offset);
-      offset += bytes.length;
-    }
-    return sha256Hex2(input);
-  }
-}
-function compareFields(a, b) {
-  for (let index = 0;index < a.length; index++) {
-    const comparison = compareUnicode(a[index], b[index]);
-    if (comparison !== 0)
-      return comparison;
-  }
-  return 0;
-}
-function compareUnicode(a, b) {
-  const left = Array.from(a, (character) => character.codePointAt(0));
-  const right = Array.from(b, (character) => character.codePointAt(0));
-  for (let index = 0;index < Math.min(left.length, right.length); index++) {
-    if (left[index] < right[index])
-      return -1;
-    if (left[index] > right[index])
-      return 1;
-  }
-  return left.length - right.length;
-}
-
-class PeerIdentityUnavailableError extends Error {
-  retryAfter;
-  constructor(message = "peer identity provider unavailable", retryAfter = 5) {
-    super(message);
-    this.name = "PeerIdentityUnavailableError";
-    this.retryAfter = retryAfter;
-  }
-}
-
-class PeerIdentityRejectedError extends Error {
-  vgiAuthReason;
-  constructor(message, reason = "invalid_credential") {
-    super(message);
-    this.name = "PeerIdentityRejectedError";
-    this.vgiAuthReason = reason;
-  }
-}
-function observePeerIdentity(_evidence, auth) {
-  return auth;
-}
-function requirePeerIdentity(provider) {
-  return async (evidence, auth) => {
-    evidence.requireAvailableProvider(provider);
-    return withEvidenceBinding(auth, await evidence.bindingDigest([provider]));
-  };
-}
-function peerIdentityPrimary(provider) {
-  return async (evidence) => {
-    const identity = evidence.requireUsableProvider(provider);
-    return new AuthContext(provider, true, identity.canonicalPrincipal, {
-      issuer: identity.issuer,
-      subject_kind: identity.subjectKind,
-      assurance: identity.assurance,
-      evidence_source: identity.evidenceSource,
-      subject: identity.subjectKey,
-      peer_evidence_binding: await evidence.bindingDigest([provider])
-    });
-  };
-}
-function anyOfPeerIdentities(...providers) {
-  if (providers.length === 0)
-    throw new TypeError("at least one peer provider is required");
-  return async (evidence, auth) => {
-    for (const provider of providers) {
-      const status = evidence.status(provider);
-      if (status === PeerIdentityStatus.INVALID || status === PeerIdentityStatus.UNTRUSTED_PROXY) {
-        throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} rejected evidence`);
-      }
-      if (evidence.eligibleSubjects(provider).length > 1) {
-        throw new PeerIdentityRejectedError(`peer identity provider ${JSON.stringify(provider)} produced ambiguous subjects`);
-      }
-    }
-    if (auth.authenticated)
-      return auth;
-    for (const provider of providers) {
-      if (evidence.status(provider) === PeerIdentityStatus.AVAILABLE && evidence.eligibleSubjects(provider).length === 1) {
-        return peerIdentityPrimary(provider)(evidence, auth);
-      }
-    }
-    if (providers.some((provider) => evidence.status(provider) === PeerIdentityStatus.UNAVAILABLE || evidence.status(provider) === PeerIdentityStatus.PERMISSION_DENIED)) {
-      throw new PeerIdentityUnavailableError("no usable authentication factor; a peer provider is unavailable");
-    }
-    throw new PeerIdentityRejectedError("no configured provider produced a verified subject");
-  };
-}
-function allOfPeerIdentities(providers, identityLinker, principalProvider = providers[0]) {
-  if (providers.length === 0 || !identityLinker)
-    throw new TypeError("all-of requires providers and an identity linker");
-  if (!providers.includes(principalProvider))
-    throw new TypeError("principalProvider must be one of providers");
-  return async (evidence, auth) => {
-    if (!auth.authenticated)
-      throw new PeerIdentityRejectedError("all-of requires application authentication");
-    const identities = new Map;
-    for (const provider of providers)
-      identities.set(provider, evidence.requireUsableProvider(provider));
-    await identityLinker(auth, identities);
-    const primary = await peerIdentityPrimary(principalProvider)(evidence, auth);
-    return new AuthContext(primary.domain, true, primary.principal, {
-      ...primary.claims,
-      application_domain: auth.domain,
-      application_principal: auth.principal,
-      peer_evidence_binding: await evidence.bindingDigest(providers, auth)
-    });
-  };
-}
-function withEvidenceBinding(auth, binding) {
-  return new AuthContext(auth.domain, auth.authenticated, auth.principal, {
-    ...auth.claims,
-    peer_evidence_binding: binding
-  });
-}
-
-// src/types.ts
-var MethodType;
-((MethodType2) => {
-  MethodType2["UNARY"] = "unary";
-  MethodType2["STREAM"] = "stream";
-})(MethodType ||= {});
-var TransportKind;
-((TransportKind2) => {
-  TransportKind2["PIPE"] = "pipe";
-  TransportKind2["HTTP"] = "http";
-  TransportKind2["UNIX"] = "unix";
-  TransportKind2["TCP"] = "tcp";
-})(TransportKind ||= {});
-var EMPTY_COOKIES = new Map;
-function cookieNotUnaryHttpError() {
-  return new Error("setCookie/deleteCookie is only supported inside unary RPC methods served over HTTP");
-}
-
-class RuntimeError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "RuntimeError";
-  }
-}
-function runtimeError(message) {
-  return new RuntimeError(message);
-}
-
-class OutputCollector {
-  _batches = [];
-  _dataBatchIdx = null;
-  _finished = false;
-  _producerMode;
-  _outputSchema;
-  _serverId;
-  _requestId;
-  _cookieSinkEnabled = false;
-  _responseCookies = [];
-  _stickyContext = null;
-  auth;
-  peerEvidence;
-  inputMetadata;
-  cookies;
-  kind;
-  remainingResponseBytes;
-  responseLimitBytes;
-  preferredResponseBytes;
-  remainingExternalizedResponseBytes;
-  externalizationEnabled;
-  constructor(outputSchema, producerMode = true, serverId = "", requestId = null, authContext, cookies, kind, budgets) {
-    this._outputSchema = outputSchema;
-    this._producerMode = producerMode;
-    this._serverId = serverId;
-    this._requestId = requestId;
-    this.auth = authContext ?? AuthContext.anonymous();
-    this.peerEvidence = budgets?.peerEvidence ?? PeerEvidenceSet.EMPTY;
-    this.inputMetadata = budgets?.inputMetadata;
-    this.cookies = cookies ?? EMPTY_COOKIES;
-    this.kind = kind;
-    this.remainingResponseBytes = budgets?.remainingResponseBytes;
-    this.responseLimitBytes = budgets?.responseLimitBytes ?? budgets?.remainingResponseBytes;
-    this.preferredResponseBytes = budgets?.preferredResponseBytes;
-    this.remainingExternalizedResponseBytes = budgets?.remainingExternalizedResponseBytes;
-    this.externalizationEnabled = budgets?.externalizationEnabled;
-  }
-  enableCookieSink() {
-    this._cookieSinkEnabled = true;
-  }
-  drainResponseCookies() {
-    const cookies = this._responseCookies;
-    this._responseCookies = [];
-    return cookies;
-  }
-  setCookie(name, value, attrs) {
-    if (!this._cookieSinkEnabled)
-      throw cookieNotUnaryHttpError();
-    this._responseCookies.push({
-      name,
-      value,
-      delete: false,
-      ...attrs ?? {}
-    });
-  }
-  deleteCookie(name, opts) {
-    if (!this._cookieSinkEnabled)
-      throw cookieNotUnaryHttpError();
-    this._responseCookies.push({
-      name,
-      value: "",
-      delete: true,
-      path: opts?.path,
-      domain: opts?.domain
-    });
-  }
-  attachStickyContext(ctx) {
-    this._stickyContext = ctx;
-  }
-  get session() {
-    return this._stickyContext?.state ?? null;
-  }
-  get sessionId() {
-    return this._stickyContext?.sessionId ?? null;
-  }
-  openSession(state, ttl) {
-    const sink = this._stickyContext;
-    if (!sink) {
-      throw runtimeError("sticky sessions not available on this transport");
-    }
-    if (!sink.acceptOpens) {
-      throw runtimeError("client did not opt in to sticky sessions " + "(missing VGI-Session-Accept: true header — open the call inside " + "an HttpConnection.with_session_token() block)");
-    }
-    if (sink.state !== null) {
-      throw runtimeError("a sticky session is already active for this request");
-    }
-    sink._open(state, ttl);
-    sink.action = "open";
-  }
-  closeSession() {
-    const sink = this._stickyContext;
-    if (!sink) {
-      throw runtimeError("sticky sessions not available on this transport");
-    }
-    sink._close();
-    sink.action = "close";
-  }
-  get outputSchema() {
-    return this._outputSchema;
-  }
-  get finished() {
-    return this._finished;
-  }
-  get batches() {
-    return this._batches;
-  }
-  get dataBatchIdx() {
-    return this._dataBatchIdx;
-  }
-  emit(batchOrColumns, metadata) {
-    let batch;
-    if (isBatch(batchOrColumns)) {
-      batch = batchOrColumns;
-    } else {
-      const coerced = coerceInt64(this._outputSchema, batchOrColumns);
-      const cols = {};
-      for (const f of this._outputSchema.fields) {
-        const v = coerced[f.name];
-        cols[f.name] = Array.isArray(v) ? v : [v];
-      }
-      batch = batchFromColumns(this._outputSchema, cols);
-    }
-    if (this._dataBatchIdx !== null) {
-      throw new RpcError("ProtocolError", "Only one data batch may be emitted per call", "");
-    }
-    this._dataBatchIdx = this._batches.length;
-    this._batches.push({ batch, metadata });
-  }
-  emitRow(values) {
-    const columns = {};
-    for (const [key, value] of Object.entries(values)) {
-      columns[key] = [value];
-    }
-    this.emit(columns);
-  }
-  finish() {
-    if (!this._producerMode) {
-      throw new Error("finish() is not allowed on exchange streams; " + "exchange streams must emit exactly one data batch per call");
-    }
-    this._finished = true;
-  }
-  clientLog(level, message, extra) {
-    const batch = buildLogBatch(this._outputSchema, level, message, extra, this._serverId, this._requestId);
-    this._batches.push({ batch });
-  }
-}
-
 // src/util/runtime.ts
 function isWorkerd() {
   return typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers";
@@ -6462,6 +7036,7 @@ function parseRequest(schema2, batch) {
   }
   return {
     methodName,
+    protocol: metadata.get(PROTOCOL_KEY) ?? "",
     requestVersion: version,
     requestId,
     schema: schema2,
@@ -6480,6 +7055,11 @@ function applyDefaults(params, defaults) {
   return params;
 }
 
+// src/util/schema.ts
+function serializeSchema2(schema2) {
+  return serializeSchema(schema2);
+}
+
 // node_modules/@noble/ciphers/utils.js
 /*! noble-ciphers - MIT License (c) 2023 Paul Miller (paulmillr.com) */
 function isBytes(a) {
@@ -6496,15 +7076,15 @@ function anumber(n) {
     throw new RangeError("positive integer expected, got " + n);
 }
 function abytes(value, length, title = "") {
-  const bytes = isBytes(value);
+  const bytes3 = isBytes(value);
   const len = value?.length;
   const needsLen = length !== undefined;
-  if (!bytes || needsLen && len !== length) {
+  if (!bytes3 || needsLen && len !== length) {
     const prefix = title && `"${title}" `;
     const ofLen = needsLen ? ` of length ${length}` : "";
-    const got = bytes ? `length=${len}` : `type=${typeof value}`;
+    const got = bytes3 ? `length=${len}` : `type=${typeof value}`;
     const message = prefix + "expected Uint8Array" + ofLen + ", got " + got;
-    if (!bytes)
+    if (!bytes3)
       throw new TypeError(message);
     throw new RangeError(message);
   }
@@ -6630,15 +7210,15 @@ function u64Lengths(dataLength, aadLength, isLE2) {
   view.setBigUint64(8, BigInt(dataLength), isLE2);
   return num;
 }
-function isAligned32(bytes) {
-  return bytes.byteOffset % 4 === 0;
+function isAligned32(bytes3) {
+  return bytes3.byteOffset % 4 === 0;
 }
-function copyBytes(bytes) {
-  return Uint8Array.from(abytes(bytes));
+function copyBytes(bytes3) {
+  return Uint8Array.from(abytes(bytes3));
 }
 
 // node_modules/@noble/ciphers/_arx.js
-var encodeStr = (str) => Uint8Array.from(str.split(""), (c) => c.charCodeAt(0));
+var encodeStr = (str2) => Uint8Array.from(str2.split(""), (c) => c.charCodeAt(0));
 var sigma16_32 = /* @__PURE__ */ (() => swap32IfBE(u32(encodeStr("expand 16-byte k"))))();
 var sigma32_32 = /* @__PURE__ */ (() => swap32IfBE(u32(encodeStr("expand 32-byte k"))))();
 function rotl(a, b) {
@@ -7260,7 +7840,7 @@ function sealBytes(plaintext, key, opts) {
   if (version < 1 || version > 255) {
     throw new Error(`AEAD envelope version must fit in one byte; got ${version}`);
   }
-  const nonce = randomBytes2(NONCE_LEN);
+  const nonce = randomBytes(NONCE_LEN);
   const ciphertext = xchacha20poly1305(key, nonce, opts.aad).encrypt(plaintext);
   const wire = new Uint8Array(VERSION_LEN + NONCE_LEN + ciphertext.length);
   wire[0] = version;
@@ -7293,38 +7873,43 @@ var _UTF8 = new TextEncoder;
 var TOKEN_VERSION = 5;
 var CALL_TOKEN_VERSION = 2;
 var CALL_ID_LEN = 16;
-var AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\x00");
-var BOUND_AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v5\x00");
-var CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v1\x00");
-var BOUND_CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v2\x00");
-function computeAad(principal, evidenceBinding, domain) {
-  return evidenceBinding ? boundAadWith(BOUND_AAD_PREFIX, principal, domain, evidenceBinding) : aadWith(AAD_PREFIX, principal);
+var SERVER_SCOPE = "\x00server";
+var AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v6\x00");
+var BOUND_AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v7\x00");
+var CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v3\x00");
+var BOUND_CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v4\x00");
+function computeAad(scope) {
+  return scope.evidenceBinding ? boundAadWith(BOUND_AAD_PREFIX, scope, scope.evidenceBinding) : aadWith(AAD_PREFIX, scope);
 }
-function computeCallAad(principal, evidenceBinding, domain) {
-  return evidenceBinding ? boundAadWith(BOUND_CALL_AAD_PREFIX, principal, domain, evidenceBinding) : aadWith(CALL_AAD_PREFIX, principal);
+function computeCallAad(scope) {
+  return scope.evidenceBinding ? boundAadWith(BOUND_CALL_AAD_PREFIX, scope, scope.evidenceBinding) : aadWith(CALL_AAD_PREFIX, scope);
 }
-function boundAadWith(prefix, principal, domain, evidenceBinding) {
+function scopeTail(protocol) {
+  return _UTF8.encode(`\x00${protocol}`);
+}
+function boundAadWith(prefix, scope, evidenceBinding) {
   const binding = _UTF8.encode(evidenceBinding);
-  if (principal === null || principal === undefined) {
-    return concatBytes2(prefix, _UTF8.encode("\x00anonymous\x00"), binding);
+  const tail = scopeTail(scope.protocol);
+  if (scope.principal === null || scope.principal === undefined) {
+    return concatBytes2(prefix, _UTF8.encode("\x00anonymous\x00"), binding, tail);
   }
-  return concatBytes2(prefix, new Uint8Array([1]), _UTF8.encode(domain ?? ""), new Uint8Array([0]), _UTF8.encode(principal), new Uint8Array([0]), binding);
+  return concatBytes2(prefix, new Uint8Array([1]), _UTF8.encode(scope.domain ?? ""), new Uint8Array([0]), _UTF8.encode(scope.principal), new Uint8Array([0]), binding, tail);
 }
-function aadWith(prefix, principal) {
-  if (!principal) {
-    const tail2 = _UTF8.encode("\x00anonymous");
-    return concatBytes2(prefix, tail2);
+function aadWith(prefix, scope) {
+  const tail = scopeTail(scope.protocol);
+  if (!scope.principal) {
+    return concatBytes2(prefix, _UTF8.encode("\x00anonymous"), tail);
   }
-  const pBytes = _UTF8.encode(principal);
-  const tail = new Uint8Array(1 + pBytes.length);
-  tail[0] = 1;
-  tail.set(pBytes, 1);
-  return concatBytes2(prefix, tail);
+  const pBytes = _UTF8.encode(scope.principal);
+  const identity = new Uint8Array(1 + pBytes.length);
+  identity[0] = 1;
+  identity.set(pBytes, 1);
+  return concatBytes2(prefix, identity, tail);
 }
-function bytesToBase64(bytes) {
+function bytesToBase64(bytes3) {
   let s = "";
-  for (let i = 0;i < bytes.length; i += 32768) {
-    s += String.fromCharCode(...bytes.subarray(i, i + 32768));
+  for (let i = 0;i < bytes3.length; i += 32768) {
+    s += String.fromCharCode(...bytes3.subarray(i, i + 32768));
   }
   return btoa(s);
 }
@@ -7359,7 +7944,7 @@ function concatBytes2(...parts) {
   }
   return out;
 }
-function packStateToken(stateBytes, callId, tokenKey, principal, createdAt, evidenceBinding, domain) {
+function packStateToken(stateBytes, callId, tokenKey, scope, createdAt) {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
@@ -7375,12 +7960,12 @@ function packStateToken(stateBytes, callId, tokenKey, principal, createdAt, evid
   offset += 4;
   plaintext.set(stateBytes, offset);
   const wire = sealBytes(plaintext, tokenKey, {
-    aad: computeAad(principal, evidenceBinding, domain),
+    aad: computeAad(scope),
     version: TOKEN_VERSION
   });
   return bytesToBase64(wire);
 }
-function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principal, createdAt, evidenceBinding, domain, responseBudget) {
+function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, scope, createdAt, responseBudget) {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
@@ -7404,12 +7989,12 @@ function packCallToken(callId, schemaBytes, inputSchemaBytes, tokenKey, principa
   offset += 8;
   writeU64LE(view, offset, BigInt(responseBudget?.preferredResponseBytes ?? 0));
   const wire = sealBytes(plaintext, tokenKey, {
-    aad: computeCallAad(principal, evidenceBinding, domain),
+    aad: computeCallAad(scope),
     version: CALL_TOKEN_VERSION
   });
   return bytesToBase64(wire);
 }
-function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal, evidenceBinding, domain) {
+function unpackStateToken(tokenBase64, tokenKey, tokenTtl, scope) {
   let raw;
   try {
     raw = base64ToBytes(tokenBase64);
@@ -7422,7 +8007,7 @@ function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal, evidenceBi
   let plaintext;
   try {
     plaintext = openBytes(raw, tokenKey, {
-      aad: computeAad(principal, evidenceBinding, domain),
+      aad: computeAad(scope),
       version: TOKEN_VERSION
     });
   } catch (err2) {
@@ -7459,7 +8044,7 @@ function unpackStateToken(tokenBase64, tokenKey, tokenTtl, principal, evidenceBi
   const stateBytes = copyAligned(offset, stateLen);
   return { stateBytes, callId, createdAt };
 }
-function unpackCallToken(token, tokenKey, principal, tokenTtl = 0, evidenceBinding, domain) {
+function unpackCallToken(token, tokenKey, scope, tokenTtl = 0) {
   const raw = base64ToBytes(token);
   if (raw.length >= 1 && raw[0] !== CALL_TOKEN_VERSION) {
     throw new Error(`Unsupported call token version ${raw[0]}`);
@@ -7467,7 +8052,7 @@ function unpackCallToken(token, tokenKey, principal, tokenTtl = 0, evidenceBindi
   let plaintext;
   try {
     plaintext = openBytes(raw, tokenKey, {
-      aad: computeCallAad(principal, evidenceBinding, domain),
+      aad: computeCallAad(scope),
       version: CALL_TOKEN_VERSION
     });
   } catch (err2) {
@@ -7538,11 +8123,20 @@ function peerEvidenceBinding(auth) {
 function tokenPrincipal(auth) {
   return auth?.authenticated ? auth.principal ?? "" : null;
 }
-function callCacheKey(callId, auth) {
+function tokenScope(ctx) {
+  return {
+    protocol: ctx.protocolName,
+    principal: tokenPrincipal(ctx.authContext),
+    evidenceBinding: peerEvidenceBinding(ctx.authContext),
+    domain: ctx.authContext?.domain
+  };
+}
+function callCacheKey(callId, ctx) {
+  const auth = ctx.authContext;
   let hex = "";
   for (const b of callId)
     hex += b.toString(16).padStart(2, "0");
-  return `${hex}\x00${auth?.authenticated ? "1" : "0"}\x00${auth?.domain ?? ""}\x00${auth?.principal ?? ""}\x00${peerEvidenceBinding(auth) ?? ""}`;
+  return `${hex}\x00${ctx.protocolName}\x00${auth?.authenticated ? "1" : "0"}\x00${auth?.domain ?? ""}\x00${auth?.principal ?? ""}\x00${peerEvidenceBinding(auth) ?? ""}`;
 }
 function cacheEntriesFor(ctx) {
   return ctx.callStateCacheEntries ?? CALL_STATE_CACHE_ENTRIES;
@@ -7555,7 +8149,7 @@ function cacheCall(callId, ctx, call) {
     callStates.clear();
   }
   const ttl = ctx.tokenTtl;
-  callStates.set(callCacheKey(callId, ctx.authContext), {
+  callStates.set(callCacheKey(callId, ctx), {
     expiresAt: Math.floor(Date.now() / 1000) + (ttl > 0 ? ttl : 3600),
     call
   });
@@ -7566,10 +8160,7 @@ function newCallId() {
   return id;
 }
 function resolveCall(callId, callTokenB64, ctx) {
-  const principal = tokenPrincipal(ctx.authContext);
-  const binding = peerEvidenceBinding(ctx.authContext);
-  const domain = ctx.authContext?.domain;
-  const key = callCacheKey(callId, ctx.authContext);
+  const key = callCacheKey(callId, ctx);
   const hit = cacheEntriesFor(ctx) > 0 ? callStates.get(key) : undefined;
   if (hit) {
     if (Math.floor(Date.now() / 1000) <= hit.expiresAt)
@@ -7579,7 +8170,7 @@ function resolveCall(callId, callTokenB64, ctx) {
   if (!callTokenB64) {
     throw new HttpRpcError("Missing call token in exchange request", 400);
   }
-  const { callId: tokenCallId, call } = unpackCallToken(callTokenB64, ctx.tokenKey, principal, ctx.tokenTtl, binding, domain);
+  const { callId: tokenCallId, call } = unpackCallToken(callTokenB64, ctx.tokenKey, tokenScope(ctx), ctx.tokenTtl);
   if (tokenCallId.length !== callId.length || !tokenCallId.every((b, i) => b === callId[i])) {
     throw new HttpRpcError("Invalid state token: Malformed state token", 400);
   }
@@ -7589,10 +8180,11 @@ function resolveCall(callId, callTokenB64, ctx) {
 function mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx) {
   const callId = newCallId();
   noteStream(ctx, callId);
-  const principal = tokenPrincipal(ctx.authContext);
-  const binding = peerEvidenceBinding(ctx.authContext);
-  const domain = ctx.authContext?.domain;
-  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, principal, undefined, binding, domain, { responseLimitBytes: ctx.maxResponseBytes, preferredResponseBytes: ctx.preferredResponseBytes });
+  const scope = tokenScope(ctx);
+  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, scope, undefined, {
+    responseLimitBytes: ctx.maxResponseBytes,
+    preferredResponseBytes: ctx.preferredResponseBytes
+  });
   cacheCall(callId, ctx, {
     schemaBytes,
     inputSchemaBytes,
@@ -7601,7 +8193,7 @@ function mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx) {
   });
   return {
     callId,
-    token: packStateToken(stateBytes, callId, ctx.tokenKey, principal, undefined, binding, domain),
+    token: packStateToken(stateBytes, callId, ctx.tokenKey, scope),
     callToken
   };
 }
@@ -7614,16 +8206,16 @@ function noteStream(ctx, callId) {
     hex += b.toString(16).padStart(2, "0");
   observer.streamId = hex;
 }
-async function deserializeSchema3(bytes) {
-  return deserializeSchema(bytes);
+async function deserializeSchema3(bytes3) {
+  return deserializeSchema(bytes3);
 }
-var EMPTY_SCHEMA = schema([]);
+var EMPTY_SCHEMA2 = schema([]);
 function countExternalized(ctx) {
   const egress = ctx.egress;
   if (!egress)
     return;
-  return (bytes) => {
-    egress.externalizedBytes += bytes;
+  return (bytes3) => {
+    egress.externalizedBytes += bytes3;
   };
 }
 async function readInboundRequest(body, ctx) {
@@ -7690,11 +8282,6 @@ function makeCapErrorResponse(schema2, error, ctx) {
   response.__dispatchError = error;
   return response;
 }
-async function httpDispatchDescribe(protocolName, methods, serverId, protocolVersion) {
-  const { batch } = await buildDescribeBatch(protocolName, methods, serverId, protocolVersion);
-  const body = serializeIpcStream(DESCRIBE_SCHEMA, [batch]);
-  return arrowResponse(body);
-}
 async function httpDispatchUnary(method, body, ctx) {
   const schema2 = method.resultSchema;
   const { schema: effectiveSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
@@ -7750,7 +8337,7 @@ async function httpDispatchUnary(method, body, ctx) {
 async function httpDispatchStreamInit(method, body, ctx) {
   const isProducer = !!method.producerFn;
   const outputSchema = method.outputSchema;
-  const inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
+  const inputSchema = method.inputSchema ?? EMPTY_SCHEMA2;
   const { schema: reqSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
   const parsed = parseHttpRequest(reqSchema, reqBatch);
   if (parsed.methodName !== method.name) {
@@ -7773,7 +8360,7 @@ async function httpDispatchStreamInit(method, body, ctx) {
       state = await method.exchangeInit(parsed.params);
     }
   } catch (error) {
-    const errSchema = method.headerSchema ?? EMPTY_SCHEMA;
+    const errSchema = method.headerSchema ?? EMPTY_SCHEMA2;
     const errBatch = buildErrorBatch(errSchema, error, ctx.serverId, parsed.requestId);
     const response = arrowResponse(serializeIpcStream(errSchema, [errBatch]), 500);
     response.__dispatchError = error;
@@ -7800,7 +8387,7 @@ async function httpDispatchStreamInit(method, body, ctx) {
   if (effectiveProducer) {
     const initCallId = newCallId();
     noteStream(ctx, initCallId);
-    const initCallToken = packCallToken(initCallId, serializeSchema2(resolvedOutputSchema), serializeSchema2(resolvedInputSchema), ctx.tokenKey, tokenPrincipal(ctx.authContext), undefined, peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain, { responseLimitBytes: ctx.maxResponseBytes, preferredResponseBytes: ctx.preferredResponseBytes });
+    const initCallToken = packCallToken(initCallId, serializeSchema2(resolvedOutputSchema), serializeSchema2(resolvedInputSchema), ctx.tokenKey, tokenScope(ctx), undefined, { responseLimitBytes: ctx.maxResponseBytes, preferredResponseBytes: ctx.preferredResponseBytes });
     cacheCall(initCallId, ctx, {
       schemaBytes: serializeSchema2(resolvedOutputSchema),
       inputSchemaBytes: serializeSchema2(resolvedInputSchema),
@@ -7850,7 +8437,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     ctx.streamObserver.cancelled = true;
   let unpacked;
   try {
-    unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, tokenPrincipal(ctx.authContext), peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain);
+    unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, tokenScope(ctx));
   } catch (error) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
@@ -7881,7 +8468,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
   if (resolvedCall.inputSchemaBytes.length > 0) {
     inputSchema = await deserializeSchema3(resolvedCall.inputSchemaBytes);
   } else {
-    inputSchema = state?.__inputSchema ?? method.inputSchema ?? EMPTY_SCHEMA;
+    inputSchema = state?.__inputSchema ?? method.inputSchema ?? EMPTY_SCHEMA2;
   }
   const effectiveProducer = state?.__isProducer ?? isProducer;
   if (dispatchDebug())
@@ -7911,7 +8498,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     if (ctx.stickyContext)
       out.attachStickyContext(ctx.stickyContext);
     let conformedBatch = reqBatch;
-    if (!effectiveProducer && inputSchema !== EMPTY_SCHEMA && reqBatch.schema !== inputSchema) {
+    if (!effectiveProducer && inputSchema !== EMPTY_SCHEMA2 && reqBatch.schema !== inputSchema) {
       try {
         conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
       } catch (e) {
@@ -7950,7 +8537,7 @@ async function httpDispatchStreamExchange(method, body, ctx) {
       }
     } else {
       const stateBytes = ctx.stateSerializer.serialize(state);
-      const token = packStateToken(stateBytes, unpacked.callId, ctx.tokenKey, tokenPrincipal(ctx.authContext), undefined, peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain);
+      const token = packStateToken(stateBytes, unpacked.callId, ctx.tokenKey, tokenScope(ctx));
       for (const [idx, emitted] of out.batches.entries()) {
         const batch = emitted.batch;
         if (idx === out.dataBatchIdx) {
@@ -8043,7 +8630,7 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
     producerError = externalOvershoot;
   } else if (!producerError && !out.finished) {
     const stateBytes = ctx.stateSerializer.serialize(state);
-    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, tokenPrincipal(ctx.authContext), undefined, peerEvidenceBinding(ctx.authContext), ctx.authContext?.domain);
+    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, tokenScope(ctx));
     const tokenMeta = new Map;
     tokenMeta.set(STATE_KEY, token);
     if (call.callToken)
@@ -8084,15 +8671,64 @@ function concatBytes3(...arrays) {
   return result;
 }
 
-// src/http/introspect.ts
-var INTROSPECT_ENDPOINT = "/__introspect_token__";
-var INTROSPECT_ENABLED_HEADER = "VGI-Token-Introspection";
+// src/token-identity.ts
+var IDENTITY_PROTOCOL_NAME = "vgi_rpc.Identity.v1";
 var JWS_SHAPED = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
-var MAX_BODY_BYTES = 8192;
-var MAX_TOKEN_CHARS = 4096;
-var DEFAULT_INTROSPECT_TTL_SECONDS = 300;
+var MAX_TOKEN_BYTES = 4096;
+var DEFAULT_IDENTITY_TTL_SECONDS = 300;
+var DEFAULT_INTROSPECT_RATE_LIMIT = 20;
+var DEFAULT_MAX_AUTH_AGE_SECONDS = 900;
 async function tokenDigest(token) {
   return sha256Hex2(new TextEncoder().encode(token));
+}
+
+class IntrospectionRefusedError extends Error {
+  static errorKind = "introspection_refused";
+  errorKind = "introspection_refused";
+  constructor(message) {
+    super(message);
+    this.name = "IntrospectionRefusedError";
+  }
+}
+
+class TokenUnresolvedError extends Error {
+  static errorKind = "token_unresolved";
+  errorKind = "token_unresolved";
+  constructor(message) {
+    super(message);
+    this.name = "TokenUnresolvedError";
+  }
+}
+
+class StaleAuthError extends Error {
+  static errorKind = "stale_auth";
+  errorKind = "stale_auth";
+  constructor(message) {
+    super(message);
+    this.name = "StaleAuthError";
+  }
+}
+
+class GrantRefusedError extends Error {
+  static errorKind = "grant_refused";
+  errorKind = "grant_refused";
+  constructor(message) {
+    super(message);
+    this.name = "GrantRefusedError";
+  }
+}
+
+class IdentityUnavailableError extends Error {
+  static errorKind = "identity_unavailable";
+  errorKind = "identity_unavailable";
+  retryAfter;
+  detail;
+  constructor(detail = "", retryAfter = 5) {
+    super(detail || "identity lookup unavailable");
+    this.name = "IdentityUnavailableError";
+    this.detail = detail;
+    this.retryAfter = retryAfter;
+  }
 }
 
 class RateLimiter {
@@ -8115,7 +8751,195 @@ class RateLimiter {
     this.counts.set(key, count + 1);
     return true;
   }
+  get size() {
+    return this.counts.size;
+  }
 }
+function normalisePrincipals(principals) {
+  const allowed = new Set([...principals ?? []].filter((p) => p));
+  if (allowed.size === 0) {
+    throw new Error("introspectPrincipals must name at least one principal. Introspection is a " + "distinct capability from authentication: allowing any authenticated caller " + "lets any user resolve any other user's credential to its owner.");
+  }
+  return allowed;
+}
+function checkIntrospector(auth, principals) {
+  const caller = auth.principal ?? "";
+  if (!auth.authenticated || !principals.has(caller)) {
+    throw new IntrospectionRefusedError("caller is not an introspector");
+  }
+  return caller;
+}
+var TRIM_FLOOR = new Set([
+  "\t",
+  `
+`,
+  "\v",
+  "\f",
+  "\r",
+  " ",
+  "",
+  " "
+]);
+function isTrimmable(unit) {
+  return TRIM_FLOOR.has(unit) || unit.trim() === "";
+}
+function trimForShapeTest(token) {
+  let start = 0;
+  let end = token.length;
+  while (start < end && isTrimmable(token[start]))
+    start++;
+  while (end > start && isTrimmable(token[end - 1]))
+    end--;
+  return token.slice(start, end);
+}
+function isJwsShaped(token) {
+  return JWS_SHAPED.test(trimForShapeTest(token));
+}
+function rejectJwsShaped(token) {
+  if (!trimForShapeTest(token) || utf8Length2(token) > MAX_TOKEN_BYTES || isJwsShaped(token)) {
+    throw new TokenUnresolvedError("unresolved");
+  }
+}
+function utf8Length2(token) {
+  return new TextEncoder().encode(token).length;
+}
+function checkFreshness(auth, maxAuthAge, now) {
+  if (!auth.authenticated || !auth.principal) {
+    throw new StaleAuthError("caller is not authenticated");
+  }
+  const raw = auth.claims?.auth_time;
+  if (raw === undefined || raw === null) {
+    throw new StaleAuthError("credential carries no auth_time; only a recently authenticated user may mint a grant");
+  }
+  const authTime = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(authTime)) {
+    throw new StaleAuthError("credential carries an unusable auth_time");
+  }
+  const age = (now ?? Date.now() / 1000) - authTime;
+  if (age > maxAuthAge) {
+    throw new StaleAuthError(`last authentication was ${age.toFixed(0)}s ago, which exceeds the ` + `${maxAuthAge.toFixed(0)}s ceiling for minting a grant; re-authenticate`);
+  }
+  return authTime;
+}
+var TOKEN_IDENTITY_SCHEMA = schema([
+  field("principal", utf8(), false),
+  field("token_name", utf8(), false),
+  field("ttl_seconds", int64(), false)
+]);
+var ISSUED_GRANT_SCHEMA = schema([
+  field("token", utf8(), false),
+  field("expires_at", float64(), false),
+  field("grant_id", utf8(), false)
+]);
+function encodeTokenIdentity(identity) {
+  return serializeBatch(batchFromColumns(TOKEN_IDENTITY_SCHEMA, {
+    principal: [identity.principal],
+    token_name: [identity.tokenName ?? ""],
+    ttl_seconds: [BigInt(Math.trunc(identity.ttlSeconds ?? DEFAULT_IDENTITY_TTL_SECONDS))]
+  }));
+}
+function encodeIssuedGrant(grant) {
+  return serializeBatch(batchFromColumns(ISSUED_GRANT_SCHEMA, {
+    token: [grant.token],
+    expires_at: [grant.expiresAt],
+    grant_id: [grant.grantId ?? ""]
+  }));
+}
+
+class IdentityImpl {
+  resolveTokenHook;
+  mintGrantHook;
+  principals;
+  limiter;
+  maxAuthAge;
+  constructor(options = {}) {
+    this.resolveTokenHook = options.resolveToken;
+    this.mintGrantHook = options.mintGrant;
+    this.maxAuthAge = options.maxAuthAge ?? DEFAULT_MAX_AUTH_AGE_SECONDS;
+    this.principals = this.resolveTokenHook ? normalisePrincipals(options.introspectPrincipals) : new Set;
+    this.limiter = new RateLimiter(options.introspectRateLimit ?? DEFAULT_INTROSPECT_RATE_LIMIT);
+  }
+  offeredMethods() {
+    const offered = new Set;
+    if (this.resolveTokenHook)
+      offered.add("introspect_token");
+    if (this.mintGrantHook)
+      offered.add("issue_grant");
+    return offered;
+  }
+  async introspectToken(token, auth) {
+    if (!this.resolveTokenHook) {
+      throw new IntrospectionRefusedError("this worker does not resolve credentials");
+    }
+    const caller = checkIntrospector(auth, this.principals);
+    if (!this.limiter.allow(caller)) {
+      throw new IntrospectionRefusedError("introspection rate limit exceeded");
+    }
+    rejectJwsShaped(token);
+    let identity;
+    try {
+      identity = await this.resolveTokenHook(token);
+    } catch (err2) {
+      if (err2 instanceof AuthUnavailableError) {
+        throw new IdentityUnavailableError(err2.detail, err2.retryAfter);
+      }
+      throw err2;
+    }
+    if (identity == null) {
+      throw new TokenUnresolvedError("unresolved");
+    }
+    return identity;
+  }
+  async issueGrant(purpose, scopes, ttlSeconds, auth) {
+    if (!this.mintGrantHook) {
+      throw new GrantRefusedError("this worker does not mint grants");
+    }
+    checkFreshness(auth, this.maxAuthAge);
+    return this.mintGrantHook(auth.principal ?? "", purpose, scopes, ttlSeconds);
+  }
+}
+function toScopes(raw) {
+  if (raw == null)
+    return [];
+  const items = Array.isArray(raw) ? raw : [...raw];
+  return items.map((v) => v == null ? "" : String(v));
+}
+function buildIdentityProtocol(identity) {
+  const offered = identity.offeredMethods();
+  if (offered.size === 0)
+    return null;
+  const p = new Protocol(IDENTITY_PROTOCOL_NAME);
+  if (offered.has("introspect_token")) {
+    p.unary("introspect_token", {
+      params: { token: utf8() },
+      result: { result: binary() },
+      doc: "Resolve an opaque bearer credential to the identity it authenticates as.",
+      handler: async (params, ctx) => {
+        const auth = ctx.auth;
+        return { result: encodeTokenIdentity(await identity.introspectToken(String(params.token ?? ""), auth)) };
+      }
+    });
+  }
+  if (offered.has("issue_grant")) {
+    p.unary("issue_grant", {
+      params: { purpose: utf8(), scopes: list(field("item", utf8(), true)), ttl_seconds: int64() },
+      result: { result: binary() },
+      doc: "Mint a standing delegation credential for the calling user.",
+      handler: async (params, ctx) => {
+        const auth = ctx.auth;
+        const grant = await identity.issueGrant(String(params.purpose ?? ""), toScopes(params.scopes), Number(params.ttl_seconds ?? 0), auth);
+        return { result: encodeIssuedGrant(grant) };
+      }
+    });
+  }
+  return p;
+}
+
+// src/http/introspect.ts
+var INTROSPECT_ENDPOINT = "/__introspect_token__";
+var INTROSPECT_ENABLED_HEADER = "VGI-Token-Introspection";
+var MAX_BODY_BYTES = 8192;
+var DEFAULT_INTROSPECT_TTL_SECONDS = DEFAULT_IDENTITY_TTL_SECONDS;
 function createIntrospector(options) {
   const principals = new Set([...options.principals ?? []].filter((p) => p));
   if (principals.size === 0) {
@@ -8157,7 +8981,7 @@ async function readSubjectToken(request) {
   if (typeof body !== "object" || body === null || Array.isArray(body))
     return null;
   const token = body.token;
-  if (typeof token !== "string" || !token || token.length > MAX_TOKEN_CHARS)
+  if (typeof token !== "string" || !trimForShapeTest(token) || utf8Length2(token) > MAX_TOKEN_BYTES)
     return null;
   return token;
 }
@@ -8176,7 +9000,7 @@ async function introspect(request, auth, resolver, principals, defaultTtlSeconds
     return refuse(404, "unresolved");
   }
   const digest = await tokenDigest(token);
-  if (JWS_SHAPED.test(token)) {
+  if (isJwsShaped(token)) {
     console.warn("[introspect] refused: JWS-shaped subject", { principal: caller, tokenDigest: digest });
     return refuse(404, "unresolved");
   }
@@ -8184,7 +9008,7 @@ async function introspect(request, auth, resolver, principals, defaultTtlSeconds
   try {
     identity = await resolver(token);
   } catch (err2) {
-    if (!(err2 instanceof AuthUnavailableError)) {
+    if (!(err2 instanceof AuthUnavailableError) && !(err2 instanceof IdentityUnavailableError)) {
       throw err2;
     }
     console.warn("[introspect] unavailable", {
@@ -8414,7 +9238,7 @@ ${headerHtml}
 </div>`;
 }
 function buildDescribePage(protocolName, serverId, methods, repoUrl) {
-  const sortedMethods = [...methods.entries()].filter(([name]) => name !== "__describe__").sort(([a], [b]) => a.localeCompare(b));
+  const sortedMethods = [...methods.entries()].sort(([a], [b]) => a.localeCompare(b));
   const cards = sortedMethods.map(([, method]) => buildMethodCard(method)).join(`
 `);
   const repoLink = repoUrl ? ` &middot; <a href="${escapeHtml(repoUrl)}">Source</a>` : "";
@@ -9199,10 +10023,10 @@ var TOKEN_VERSION2 = 1;
 var SESSION_ID_LEN = 12;
 var PREFIX_LEN = 8 + 1;
 var SUFFIX_LEN = 8;
-function base64UrlEncode(bytes) {
+function base64UrlEncode(bytes3) {
   let s = "";
-  for (let i = 0;i < bytes.length; i += 32768) {
-    s += String.fromCharCode(...bytes.subarray(i, i + 32768));
+  for (let i = 0;i < bytes3.length; i += 32768) {
+    s += String.fromCharCode(...bytes3.subarray(i, i + 32768));
   }
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -9336,7 +10160,7 @@ class SessionRegistry {
     }
     const effective = ttl ?? this.defaultTtl;
     const expiresAt = Math.floor(Date.now() / 1000) + effective;
-    const sessionId = randomBytes2(SESSION_ID_LEN);
+    const sessionId = randomBytes(SESSION_ID_LEN);
     const key = sessionIdHex(sessionId);
     this.entries.set(key, {
       id: sessionId,
@@ -9426,13 +10250,13 @@ var jsonStateSerializer = {
   serialize(state) {
     return new TextEncoder().encode(JSON.stringify(state, (_key, value) => typeof value === "bigint" ? `__bigint__:${value}` : value));
   },
-  deserialize(bytes) {
-    return JSON.parse(new TextDecoder().decode(bytes), (_key, value) => typeof value === "string" && value.startsWith("__bigint__:") ? BigInt(value.slice(11)) : value);
+  deserialize(bytes3) {
+    return JSON.parse(new TextDecoder().decode(bytes3), (_key, value) => typeof value === "string" && value.startsWith("__bigint__:") ? BigInt(value.slice(11)) : value);
   }
 };
 
 // src/http/handler.ts
-var EMPTY_SCHEMA2 = schema([]);
+var EMPTY_SCHEMA3 = schema([]);
 var EMPTY_COOKIES2 = new Map;
 var MAX_UPLOAD_URL_REQUEST_BYTES = 8 * 1024;
 async function readBodyBounded(request, maxBytes) {
@@ -9489,9 +10313,38 @@ function parseRequestCookies(request) {
   }
   return out;
 }
-function createHttpHandler(protocol, options) {
+function createHttpHandler(target, options) {
+  const bindings = isProtocolHost(target) ? target.bindings() : new Map([[target.name, { name: target.name, protocol: target, versionExempt: false }]]);
+  if (!isProtocolHost(target)) {
+    bindings.set(REFLECTION_PROTOCOL_NAME, {
+      name: REFLECTION_PROTOCOL_NAME,
+      protocol: buildReflectionProtocol({
+        listBindings: () => bindings,
+        hashFor: (name) => {
+          const b = bindings.get(name);
+          return b ? protocolHashFor(b) : Promise.resolve("");
+        },
+        serverId: () => serverId,
+        serverVersion: () => ""
+      }),
+      versionExempt: true
+    });
+  }
+  const hostedNames = [...bindings.keys()].sort();
+  for (const name of hostedNames) {
+    try {
+      validateProtocolName(name, true);
+    } catch (e) {
+      throw new Error(`Cannot serve protocol '${name}' over HTTP: ${e.message}`);
+    }
+  }
+  const primary = [...bindings.values()][0];
+  if (!primary) {
+    throw new Error("createHttpHandler was given a server that hosts no protocols.");
+  }
+  const protocol = primary.protocol;
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
-  const tokenKey = options?.tokenKey ?? randomBytes2(32);
+  const tokenKey = options?.tokenKey ?? randomBytes(32);
   const tokenTtl = options?.tokenTtl ?? 3600;
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 300 : options.corsMaxAge;
@@ -9549,19 +10402,21 @@ function createHttpHandler(protocol, options) {
     }
   }
   const methods = protocol.getMethods();
-  let protocolHashPromise = null;
-  function getProtocolHash() {
-    if (!protocolHashPromise) {
-      protocolHashPromise = buildDescribeBatch(protocol.name, methods, serverId, protocol.protocolVersion || undefined).then(({ metadata }) => metadata.get(PROTOCOL_HASH_KEY) ?? "");
-    }
-    return protocolHashPromise;
-  }
   const protocolVersion = protocol.protocolVersion || options?.protocolVersion || "";
-  function enforceProtocolVersion(reqBatchMeta) {
-    const parts = protocol.protocolVersionParts;
+  function enforceRoutingAgreement(pathProtocol, reqBatchMeta) {
+    const declared = reqBatchMeta.get(PROTOCOL_KEY);
+    if (!declared) {
+      throw new ProtocolNotSpecifiedError(hostedNames);
+    }
+    if (declared !== pathProtocol) {
+      throw new ProtocolNotSupportedError(`Protocol mismatch: the request path resolved to '${pathProtocol}' but the Arrow IPC ` + `custom_metadata 'vgi_rpc.protocol' says '${declared}'. These must agree.`);
+    }
+  }
+  function enforceProtocolVersion(binding, reqBatchMeta) {
+    const parts = binding.protocol.protocolVersionParts;
     if (parts === null)
       return;
-    const serverVersion = protocol.protocolVersion;
+    const serverVersion = binding.protocol.protocolVersion;
     const clientVersion = reqBatchMeta?.get(PROTOCOL_VERSION_KEY);
     if (clientVersion === undefined) {
       throw new ProtocolVersionError(`VGI client/worker protocol_version mismatch.
@@ -9702,6 +10557,7 @@ function createHttpHandler(protocol, options) {
     tokenKey,
     tokenTtl,
     serverId,
+    protocolName: primary.name,
     maxResponseBytes,
     preferredResponseBytes: configuredPreferredResponseBytes,
     maxExternalizedResponseBytes,
@@ -9753,12 +10609,44 @@ function createHttpHandler(protocol, options) {
   function resolveRoute(path) {
     if (!path.startsWith(`${prefix}/`))
       return null;
-    const subPath = path.slice(prefix.length + 1);
-    if (subPath.endsWith("/init"))
-      return { methodName: subPath.slice(0, -5), action: "init" };
-    if (subPath.endsWith("/exchange"))
-      return { methodName: subPath.slice(0, -9), action: "exchange" };
-    return { methodName: subPath, action: "call" };
+    let subPath = path.slice(prefix.length + 1);
+    let action = "call";
+    if (subPath.endsWith("/init")) {
+      action = "init";
+      subPath = subPath.slice(0, -5);
+    } else if (subPath.endsWith("/exchange")) {
+      action = "exchange";
+      subPath = subPath.slice(0, -9);
+    }
+    const slash = subPath.indexOf("/");
+    if (slash <= 0)
+      return null;
+    const protocolName = subPath.slice(0, slash);
+    const methodName = subPath.slice(slash + 1);
+    if (!methodName || methodName.includes("/"))
+      return null;
+    return { protocolName, methodName, action };
+  }
+  function resolveBinding(protocolName, methodName) {
+    if (protocolName.includes("%")) {
+      return ProtocolNotSpecifiedError.percentEncoded();
+    }
+    try {
+      validateProtocolName(protocolName, true);
+    } catch (e) {
+      return new ProtocolNotSupportedError(`'vgi_rpc.protocol' is not a protocol name: ${e.message}`);
+    }
+    const binding = bindings.get(protocolName);
+    if (!binding)
+      return ProtocolNotSupportedError.notHosted(protocolName, hostedNames);
+    if (methodName === RETIRED_DESCRIBE_METHOD)
+      return new MethodNotImplementedError(describeRetiredMessage());
+    const method = binding.protocol.getMethod(methodName);
+    if (!method) {
+      const available = binding.protocol.methodNames();
+      return new MethodNotImplementedError(`Protocol '${protocolName}' has no method '${methodName}'. Available: [${available.join(", ")}].`);
+    }
+    return { binding, method };
   }
   function negotiateResponseEncoding(request) {
     return pickResponseEncoding(stampCustomContentEncoding ? null : request.headers.get("Accept-Encoding"), request.headers.get(VGI_ACCEPT_ENCODING_HEADER), canProduceEncoding);
@@ -9772,8 +10660,8 @@ function createHttpHandler(protocol, options) {
       headers2.delete(VGI_CONTENT_ENCODING_HEADER);
       const error = new Error(`HTTP body exceeds max_response_bytes (${responseBody.byteLength} > ${responseLimitBytes})`);
       error.name = "ResponseTooLargeError";
-      const errorBatch = buildErrorBatch(EMPTY_SCHEMA2, error, serverId, null);
-      const errorBody = serializeIpcStream(EMPTY_SCHEMA2, [errorBatch]);
+      const errorBatch = buildErrorBatch(EMPTY_SCHEMA3, error, serverId, null);
+      const errorBody = serializeIpcStream(EMPTY_SCHEMA3, [errorBatch]);
       headers2.set("Content-Type", ARROW_CONTENT_TYPE);
       headers2.set(RPC_ERROR_HEADER, "true");
       headers2.set("Content-Length", String(errorBody.byteLength));
@@ -9914,7 +10802,7 @@ function createHttpHandler(protocol, options) {
       throw missingCredential;
     return { authContext, peerEvidence };
   }
-  function makeErrorResponse(error, statusCode, schema2 = EMPTY_SCHEMA2) {
+  function makeErrorResponse(error, statusCode, schema2 = EMPTY_SCHEMA3) {
     const errBatch = buildErrorBatch(schema2, error, serverId, null);
     const body = serializeIpcStream(schema2, [errBatch]);
     const resp = arrowResponse(body, statusCode);
@@ -10056,7 +10944,12 @@ function createHttpHandler(protocol, options) {
         }
         principalKey = sessionPrincipalKey(auth2.authenticated, auth2.domain, auth2.principal, evidenceBinding);
       } catch {}
-      const aad = computeAad(aadPrincipal, evidenceBinding, aadDomain);
+      const aad = computeAad({
+        protocol: SERVER_SCOPE,
+        principal: aadPrincipal,
+        evidenceBinding,
+        domain: aadDomain
+      });
       let opened;
       try {
         opened = openSessionToken(tokenHeader, tokenKey, aad);
@@ -10129,7 +11022,12 @@ function createHttpHandler(protocol, options) {
       const aadPrincipal = auth2?.authenticated ? auth2.principal ?? "" : null;
       const evidenceBinding = peerEvidenceBinding2(auth2);
       const principalKey = sessionPrincipalKey(!!auth2?.authenticated, auth2?.domain, auth2?.principal, evidenceBinding);
-      const aad = computeAad(aadPrincipal, evidenceBinding, auth2?.domain);
+      const aad = computeAad({
+        protocol: SERVER_SCOPE,
+        principal: aadPrincipal,
+        evidenceBinding,
+        domain: auth2?.domain
+      });
       const acceptOpens = (request.headers.get(SESSION_ACCEPT_HEADER) ?? "").trim().toLowerCase() === "true";
       const sessionHeader = (request.headers.get(SESSION_HEADER) ?? "").trim();
       let resumeState = null;
@@ -10176,14 +11074,14 @@ function createHttpHandler(protocol, options) {
           const sid = sink.sessionId;
           if (!sid)
             return;
-          const bytes = new Uint8Array(sid.length / 2);
-          for (let i = 0;i < bytes.length; i++)
-            bytes[i] = parseInt(sid.slice(i * 2, i * 2 + 2), 16);
+          const bytes3 = new Uint8Array(sid.length / 2);
+          for (let i = 0;i < bytes3.length; i++)
+            bytes3[i] = parseInt(sid.slice(i * 2, i * 2 + 2), 16);
           if (stickyLockRelease) {
             stickyLockRelease();
             stickyLockRelease = null;
           }
-          sessionRegistry.close(bytes);
+          sessionRegistry.close(bytes3);
           sink.state = null;
           sink.closed = true;
         }
@@ -10191,21 +11089,28 @@ function createHttpHandler(protocol, options) {
       stickySink = sink;
       ctx.stickyContext = sink;
     }
-    const specialPost = path === `${prefix}/${UPLOAD_URL_METHOD}/init` || path === `${prefix}/${DESCRIBE_METHOD_NAME}`;
+    if (path === `${prefix}/${RETIRED_DESCRIBE_METHOD}`) {
+      if (stickyLockRelease)
+        stickyLockRelease();
+      const retired = new MethodNotImplementedError(describeRetiredMessage());
+      return compressIfAccepted(makeErrorResponse(retired, 404), responseEncoding, responseLimitBytes);
+    }
+    const specialPost = path === `${prefix}/${UPLOAD_URL_METHOD}/init`;
     const route = specialPost ? null : resolveRoute(path);
+    let resolved = null;
     if (!specialPost) {
       if (!route) {
         if (stickyLockRelease)
           stickyLockRelease();
         return new Response("Not Found", { status: 404 });
       }
-      if (!methods.has(route.methodName)) {
+      const outcome = resolveBinding(route.protocolName, route.methodName);
+      if (outcome instanceof Error) {
         if (stickyLockRelease)
           stickyLockRelease();
-        const available = [...methods.keys()].sort();
-        const err2 = new MethodNotImplementedError(`Unknown method: '${route.methodName}'. Available methods: [${available.join(", ")}]`);
-        return compressIfAccepted(makeErrorResponse(err2, 404), responseEncoding, responseLimitBytes);
+        return compressIfAccepted(makeErrorResponse(outcome, 404), responseEncoding, responseLimitBytes);
       }
+      resolved = outcome;
     }
     const contentType = request.headers.get("Content-Type");
     if (!contentType?.includes(ARROW_CONTENT_TYPE)) {
@@ -10293,27 +11198,23 @@ function createHttpHandler(protocol, options) {
         return compressIfAccepted(r, responseEncoding, responseLimitBytes);
       }
     }
-    if (path === `${prefix}/${DESCRIBE_METHOD_NAME}`) {
-      try {
-        const response = await httpDispatchDescribe(protocol.name, methods, serverId, protocol.protocolVersion || undefined);
-        addCorsHeaders(response.headers);
-        return compressIfAccepted(response, responseEncoding, responseLimitBytes);
-      } catch (error) {
-        return compressIfAccepted(makeErrorResponse(error, 500), responseEncoding, responseLimitBytes);
-      }
-    }
-    const { methodName, action } = route;
-    const method = methods.get(methodName);
-    if (protocol.protocolVersionParts !== null && methodName !== DESCRIBE_METHOD_NAME && action !== "exchange") {
+    const { protocolName, methodName, action } = route;
+    const { binding, method } = resolved;
+    const dispatchCtx = { ...ctx, protocolName: binding.name };
+    const versionGated = !binding.versionExempt && binding.protocol.protocolVersionParts !== null;
+    if (action !== "exchange") {
       try {
         let reqMeta;
         try {
           const peeked = deserializeBatch(body);
           reqMeta = peeked.metadata ?? undefined;
         } catch {}
-        enforceProtocolVersion(reqMeta);
+        if (reqMeta !== undefined)
+          enforceRoutingAgreement(protocolName, reqMeta);
+        if (versionGated)
+          enforceProtocolVersion(binding, reqMeta);
       } catch (exc) {
-        const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA2;
+        const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA3;
         const errBatch = buildErrorBatch(errSchema, exc, serverId, null);
         const errBody = serializeIpcStream(errSchema, [errBatch]);
         const response = arrowResponse(errBody, 400);
@@ -10324,15 +11225,14 @@ function createHttpHandler(protocol, options) {
     }
     await notifyTransport(transportKind);
     const methodType = method.type === "unary" /* UNARY */ ? "unary" : "stream";
-    const protocolHash = await getProtocolHash();
     const auth = ctx.authContext;
     const info = {
       method: methodName,
       methodType,
       serverId,
       requestId,
-      protocol: protocol.name,
-      protocolHash,
+      protocol: binding.name,
+      protocolHash: await protocolHashFor(binding),
       protocolVersion,
       kind: transportKind,
       principal: auth?.principal ?? "",
@@ -10359,17 +11259,17 @@ function createHttpHandler(protocol, options) {
         if (method.type !== "unary" /* UNARY */) {
           throw new HttpRpcError(`Method '${methodName}' is a stream method. Use /init and /exchange endpoints.`, 400);
         }
-        response = await httpDispatchUnary(method, body, ctx);
+        response = await httpDispatchUnary(method, body, dispatchCtx);
       } else if (action === "init") {
         if (method.type !== "stream" /* STREAM */) {
           throw new HttpRpcError(`Method '${methodName}' is a unary method. Use POST ${prefix}/${methodName} instead.`, 400);
         }
-        response = await httpDispatchStreamInit(method, body, ctx);
+        response = await httpDispatchStreamInit(method, body, dispatchCtx);
       } else {
         if (method.type !== "stream" /* STREAM */) {
           throw new HttpRpcError(`Method '${methodName}' is a unary method. Use POST ${prefix}/${methodName} instead.`, 400);
         }
-        response = await httpDispatchStreamExchange(method, body, ctx);
+        response = await httpDispatchStreamExchange(method, body, dispatchCtx);
       }
       const internalError = response.__dispatchError;
       if (internalError) {
@@ -10563,11 +11463,11 @@ if (Uint8Array.fromBase64) {
   decodeBase64Url = (input) => {
     try {
       const binary2 = atob(input.replace(/-/g, "+").replace(/_/g, "/").replace(/\s/g, ""));
-      const bytes = new Uint8Array(binary2.length);
+      const bytes3 = new Uint8Array(binary2.length);
       for (let i = 0;i < binary2.length; i++) {
-        bytes[i] = binary2.charCodeAt(i);
+        bytes3[i] = binary2.charCodeAt(i);
       }
-      return bytes;
+      return bytes3;
     } catch (cause) {
       throw CodedTypeError("The input to be decoded is not correctly encoded.", ERR_INVALID_ARG_VALUE, cause);
     }
@@ -11173,8 +12073,8 @@ var jwtClaimNames = {
   cnf: "confirmation",
   auth_time: "authentication time"
 };
-function validatePresence(required, result) {
-  for (const claim of required) {
+function validatePresence(required2, result) {
+  for (const claim of required2) {
     if (result.claims[claim] === undefined) {
       throw OPE(`JWT "${claim}" (${jwtClaimNames[claim]}) claim missing`, INVALID_RESPONSE, {
         claims: result.claims
@@ -11975,16 +12875,16 @@ function parseIpv4(value) {
   const parts = value.split(".");
   if (parts.length !== 4)
     return null;
-  const bytes = [];
+  const bytes3 = [];
   for (const part of parts) {
     if (!/^(?:0|[1-9][0-9]{0,2})$/u.test(part))
       return null;
     const byte = Number(part);
     if (byte > 255)
       return null;
-    bytes.push(byte);
+    bytes3.push(byte);
   }
-  return bytes;
+  return bytes3;
 }
 function parseIpv6Words(value, allowIpv4) {
   if (value === "")
@@ -11996,10 +12896,10 @@ function parseIpv6Words(value, allowIpv4) {
     if (part.includes(".")) {
       if (!allowIpv4 || index !== parts.length - 1)
         return null;
-      const bytes = parseIpv4(part);
-      if (!bytes)
+      const bytes3 = parseIpv4(part);
+      if (!bytes3)
         return null;
-      words.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
+      words.push(bytes3[0] << 8 | bytes3[1], bytes3[2] << 8 | bytes3[3]);
     } else {
       if (!/^[0-9a-f]{1,4}$/u.test(part))
         return null;
@@ -12099,40 +12999,40 @@ function validateSpiffeId(value, trustDomains) {
     throw new TypeError("SPIFFE trust domain is not allowed");
   return trustDomain;
 }
-function readDer(bytes, offset) {
-  if (offset + 2 > bytes.length)
+function readDer(bytes3, offset) {
+  if (offset + 2 > bytes3.length)
     throw new TypeError("truncated DER value");
-  const tag = bytes[offset];
-  const first = bytes[offset + 1];
+  const tag = bytes3[offset];
+  const first = bytes3[offset + 1];
   let length = 0;
   let header = 2;
   if ((first & 128) === 0) {
     length = first;
   } else {
     const count = first & 127;
-    if (count === 0 || count > 4 || offset + 2 + count > bytes.length)
+    if (count === 0 || count > 4 || offset + 2 + count > bytes3.length)
       throw new TypeError("invalid DER length");
     header += count;
     for (let index = 0;index < count; index++)
-      length = length * 256 + bytes[offset + 2 + index];
+      length = length * 256 + bytes3[offset + 2 + index];
     if (length < 128)
       throw new TypeError("non-canonical DER length");
   }
   const start = offset + header;
   const end = start + length;
-  if (!Number.isSafeInteger(end) || end > bytes.length)
+  if (!Number.isSafeInteger(end) || end > bytes3.length)
     throw new TypeError("truncated DER body");
-  return { tag, start, end, bytes };
+  return { tag, start, end, bytes: bytes3 };
 }
 function derChildren(node) {
   const children = [];
   let offset = node.start;
   while (offset < node.end) {
-    const child = readDer(node.bytes, offset);
-    if (child.end > node.end)
+    const child2 = readDer(node.bytes, offset);
+    if (child2.end > node.end)
       throw new TypeError("DER child exceeds parent");
-    children.push(child);
-    offset = child.end;
+    children.push(child2);
+    offset = child2.end;
   }
   if (offset !== node.end)
     throw new TypeError("malformed DER children");
@@ -12144,22 +13044,22 @@ function derContent(node) {
 function oid(node) {
   if (node.tag !== 6)
     throw new TypeError("expected DER OID");
-  const bytes = derContent(node);
-  if (bytes.length === 0)
+  const bytes3 = derContent(node);
+  if (bytes3.length === 0)
     throw new TypeError("empty DER OID");
-  const parts = [Math.min(2, Math.floor(bytes[0] / 40)), 0];
-  parts[1] = bytes[0] - parts[0] * 40;
+  const parts = [Math.min(2, Math.floor(bytes3[0] / 40)), 0];
+  parts[1] = bytes3[0] - parts[0] * 40;
   let value = 0;
-  for (let index = 1;index < bytes.length; index++) {
-    value = value * 128 + (bytes[index] & 127);
+  for (let index = 1;index < bytes3.length; index++) {
+    value = value * 128 + (bytes3[index] & 127);
     if (!Number.isSafeInteger(value))
       throw new TypeError("oversized DER OID");
-    if ((bytes[index] & 128) === 0) {
+    if ((bytes3[index] & 128) === 0) {
       parts.push(value);
       value = 0;
     }
   }
-  if ((bytes[bytes.length - 1] & 128) !== 0)
+  if ((bytes3[bytes3.length - 1] & 128) !== 0)
     throw new TypeError("truncated DER OID");
   return parts.join(".");
 }
@@ -12635,158 +13535,6 @@ function irohForwardedHeaderIdentityProvider(options) {
     }
   };
 }
-// src/schema.ts
-var str = utf8();
-var bytes = binary();
-var int = int64();
-var int322 = int32();
-var int162 = int16();
-var int82 = int8();
-var uint82 = uint8();
-var uint162 = uint16();
-var uint322 = uint32();
-var uint642 = uint64();
-var float = float64();
-var float322 = float32();
-var bool2 = bool();
-function isField(x) {
-  return x != null && typeof x.name === "string" && x.type != null && typeof x.nullable === "boolean";
-}
-function isDataType(x) {
-  return x != null && typeof x.typeId === "number";
-}
-function toSchema(spec) {
-  const maybeFields = spec.fields;
-  if (Array.isArray(maybeFields)) {
-    const out = [];
-    for (const f of maybeFields) {
-      if (isField(f)) {
-        out.push(f);
-      } else {
-        out.push(field(f.name, f.type, f.nullable ?? true, f.metadata));
-      }
-    }
-    return schema(out);
-  }
-  const fields = [];
-  for (const [name, value] of Object.entries(spec)) {
-    if (isField(value)) {
-      fields.push(value);
-    } else if (isDataType(value)) {
-      fields.push(field(name, value, false));
-    } else {
-      throw new TypeError(`Invalid schema value for "${name}": expected DataType or Field, got ${typeof value}`);
-    }
-  }
-  return schema(fields);
-}
-function inferParamTypes(spec) {
-  const sch = toSchema(spec);
-  if (sch.fields.length === 0)
-    return;
-  const result = {};
-  for (const f of sch.fields) {
-    let mapped;
-    if (isUtf8(f.type))
-      mapped = "str";
-    else if (isBinary(f.type))
-      mapped = "bytes";
-    else if (isBool(f.type))
-      mapped = "bool";
-    else if (isFloat(f.type))
-      mapped = "float";
-    else if (isInt(f.type))
-      mapped = "int";
-    if (!mapped)
-      return;
-    result[f.name] = mapped;
-  }
-  return result;
-}
-
-// src/protocol.ts
-var EMPTY_SCHEMA3 = schema([]);
-
-class Protocol {
-  name;
-  protocolVersion;
-  protocolVersionParts;
-  _methods = new Map;
-  constructor(name, options) {
-    this.name = name;
-    const raw = options?.protocolVersion;
-    if (raw === undefined || raw === "") {
-      this.protocolVersion = "";
-      this.protocolVersionParts = null;
-    } else {
-      this.protocolVersion = raw;
-      this.protocolVersionParts = parseProtocolVersion(raw);
-    }
-  }
-  unary(name, config) {
-    const params = toSchema(config.params);
-    this._methods.set(name, {
-      name,
-      type: "unary" /* UNARY */,
-      paramsSchema: params,
-      resultSchema: toSchema(config.result),
-      handler: config.handler,
-      doc: config.doc,
-      defaults: config.defaults,
-      paramTypes: config.paramTypes ?? inferParamTypes(params)
-    });
-    return this;
-  }
-  producer(name, config) {
-    const params = toSchema(config.params);
-    this._methods.set(name, {
-      name,
-      type: "stream" /* STREAM */,
-      paramsSchema: params,
-      resultSchema: EMPTY_SCHEMA3,
-      outputSchema: toSchema(config.outputSchema),
-      inputSchema: EMPTY_SCHEMA3,
-      producerInit: config.init,
-      producerFn: config.produce,
-      onCancel: config.onCancel,
-      headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
-      headerInit: config.headerInit,
-      doc: config.doc,
-      defaults: config.defaults,
-      paramTypes: config.paramTypes ?? inferParamTypes(params)
-    });
-    return this;
-  }
-  exchange(name, config) {
-    const params = toSchema(config.params);
-    this._methods.set(name, {
-      name,
-      type: "stream" /* STREAM */,
-      paramsSchema: params,
-      resultSchema: EMPTY_SCHEMA3,
-      inputSchema: toSchema(config.inputSchema),
-      outputSchema: toSchema(config.outputSchema),
-      exchangeInit: config.init,
-      exchangeFn: config.exchange,
-      onCancel: config.onCancel,
-      headerSchema: config.headerSchema ? toSchema(config.headerSchema) : undefined,
-      headerInit: config.headerInit,
-      doc: config.doc,
-      defaults: config.defaults,
-      paramTypes: config.paramTypes ?? inferParamTypes(params)
-    });
-    return this;
-  }
-  getMethods() {
-    return new Map(this._methods);
-  }
-  getMethod(name) {
-    return this._methods.get(name);
-  }
-  methodNames() {
-    return [...this._methods.keys()].sort();
-  }
-}
 // src/dispatch/stream.ts
 var EMPTY_SCHEMA4 = schema([]);
 async function dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, kind, authContext, peerEvidence) {
@@ -12914,33 +13662,94 @@ async function dispatchUnary(method, params, writer, serverId, requestId, extern
 // src/server.ts
 var EMPTY_SCHEMA5 = schema([]);
 function randomStreamId() {
-  const bytes2 = new Uint8Array(16);
-  crypto.getRandomValues(bytes2);
+  const bytes3 = new Uint8Array(16);
+  crypto.getRandomValues(bytes3);
   let out = "";
-  for (let i = 0;i < bytes2.length; i++) {
-    out += bytes2[i].toString(16).padStart(2, "0");
+  for (let i = 0;i < bytes3.length; i++) {
+    out += bytes3[i].toString(16).padStart(2, "0");
   }
   return out;
 }
 
 class VgiRpcServer {
   protocol;
-  enableDescribe;
   serverId;
-  _describePromise = null;
   protocolVersion;
   dispatchHook = null;
   externalConfig;
   onServeStart = null;
   serveStartFired = false;
+  extraBindings = new Map;
   constructor(protocol, options) {
     this.protocol = protocol;
-    this.enableDescribe = options?.enableDescribe ?? true;
     this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
     this.dispatchHook = options?.dispatchHook ?? null;
     this.externalConfig = options?.externalLocation;
     this.protocolVersion = options?.protocolVersion ?? "";
     this.onServeStart = options?.onServeStart ?? null;
+    if (options?.enableDescribe ?? true)
+      this.registerReflection();
+  }
+  bindings() {
+    const out = new Map;
+    out.set(this.protocol.name, {
+      name: this.protocol.name,
+      protocol: this.protocol,
+      versionExempt: false
+    });
+    for (const [name, b] of this.extraBindings)
+      out.set(name, b);
+    return out;
+  }
+  registerReflection() {
+    if (this.extraBindings.has(REFLECTION_PROTOCOL_NAME))
+      return;
+    const reflection = buildReflectionProtocol({
+      listBindings: () => this.bindings(),
+      hashFor: (name) => {
+        const binding = this.bindings().get(name);
+        return binding ? protocolHashFor(binding) : Promise.resolve("");
+      },
+      serverId: () => this.serverId,
+      serverVersion: () => ""
+    });
+    this.addProtocol({ name: REFLECTION_PROTOCOL_NAME, protocol: reflection, versionExempt: true }, true);
+  }
+  registerIdentity(identity) {
+    const protocol = buildIdentityProtocol(identity);
+    if (!protocol)
+      return;
+    this.addProtocol({ name: IDENTITY_PROTOCOL_NAME, protocol, versionExempt: false }, true);
+  }
+  addProtocol(binding, allowReserved = false) {
+    validateProtocolName(binding.name, allowReserved);
+    if (binding.name === this.protocol.name || this.extraBindings.has(binding.name)) {
+      throw new Error(`Two protocols are hosted under the same name '${binding.name}'. ` + `The name is the routing key, so it must be unique.`);
+    }
+    this.extraBindings.set(binding.name, binding);
+  }
+  resolve(protocol, method) {
+    if (method === RETIRED_DESCRIBE_METHOD) {
+      throw new MethodNotImplementedError(describeRetiredMessage());
+    }
+    const all = this.bindings();
+    const hosted = [...all.keys()].sort();
+    if (!protocol)
+      throw new ProtocolNotSpecifiedError(hosted);
+    try {
+      validateProtocolName(protocol, true);
+    } catch (e) {
+      throw new ProtocolNotSupportedError(`'vgi_rpc.protocol' is not a protocol name: ${e.message}`);
+    }
+    const binding = all.get(protocol);
+    if (!binding)
+      throw ProtocolNotSupportedError.notHosted(protocol, hosted);
+    const found = binding.protocol.getMethod(method);
+    if (!found) {
+      const available = binding.protocol.methodNames().sort();
+      throw new MethodNotImplementedError(`Protocol '${protocol}' has no method '${method}'. Available: [${available.join(", ")}].`);
+    }
+    return { method: found, binding };
   }
   async notifyTransport(kind) {
     if (this.serveStartFired)
@@ -12950,18 +13759,10 @@ class VgiRpcServer {
     }
     this.serveStartFired = true;
   }
-  async describeInfo() {
-    if (!this._describePromise) {
-      this._describePromise = buildDescribeBatch(this.protocol.name, this.protocol.getMethods(), this.serverId, this.protocol.protocolVersion || undefined).then(({ batch, metadata }) => ({
-        batch,
-        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? ""
-      }));
-    }
-    return this._describePromise;
-  }
-  checkProtocolVersion(clientVersion) {
-    const serverParts = this.protocol.protocolVersionParts;
-    const serverVersion = this.protocol.protocolVersion;
+  checkProtocolVersion(clientVersion, binding) {
+    const target = binding?.protocol ?? this.protocol;
+    const serverParts = target.protocolVersionParts;
+    const serverVersion = target.protocolVersion;
     if (clientVersion === undefined) {
       throw new ProtocolVersionError(`VGI client/worker protocol_version mismatch.
 ` + `  Client: <not declared>
@@ -13027,11 +13828,13 @@ class VgiRpcServer {
     }
     const batch = batches[0];
     let methodName;
+    let protocolName;
     let params;
     let requestId;
     try {
       const parsed = parseRequest(schema2, batch);
       methodName = parsed.methodName;
+      protocolName = parsed.protocol;
       params = parsed.params;
       requestId = parsed.requestId;
     } catch (e) {
@@ -13042,16 +13845,12 @@ class VgiRpcServer {
       }
       throw e;
     }
-    if (methodName === DESCRIBE_METHOD_NAME && this.enableDescribe) {
-      const { batch: batch2 } = await this.describeInfo();
-      await writer.writeStream(batch2.schema, [batch2]);
-      return;
-    }
-    const method = this.protocol.getMethod(methodName);
-    if (!method) {
-      const available = this.protocol.methodNames();
-      const err2 = new MethodNotImplementedError(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA5, err2, this.serverId, requestId);
+    let method;
+    let binding;
+    try {
+      ({ method, binding } = this.resolve(protocolName, methodName));
+    } catch (error) {
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA5, error, this.serverId, requestId);
       await writer.writeStream(EMPTY_SCHEMA5, [errBatch]);
       return;
     }
@@ -13063,10 +13862,10 @@ class VgiRpcServer {
       await writer.writeStream(errSchema, [errBatch]);
       return;
     }
-    if (this.protocol.protocolVersionParts !== null) {
+    if (!binding.versionExempt && binding.protocol.protocolVersionParts !== null) {
       try {
         const md = batch.metadata;
-        this.checkProtocolVersion(md?.get(PROTOCOL_VERSION_KEY));
+        this.checkProtocolVersion(md?.get(PROTOCOL_VERSION_KEY), binding);
       } catch (exc) {
         const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA5;
         const errBatch = buildErrorBatch(errSchema, exc, this.serverId, requestId);
@@ -13085,14 +13884,13 @@ class VgiRpcServer {
     if (methodType === "stream") {
       streamId = randomStreamId();
     }
-    const { protocolHash } = await this.describeInfo();
     const info = {
       method: methodName,
       methodType,
       serverId: this.serverId,
       requestId,
-      protocol: this.protocol.name,
-      protocolHash,
+      protocol: binding.name,
+      protocolHash: await protocolHashFor(binding),
       protocolVersion: this.protocolVersion,
       kind: transportKind,
       principal: "",
@@ -13204,7 +14002,7 @@ function writeUnaryResult(envelopeSchema, resultBytes) {
 }
 // src/launcher/hash.ts
 var HASH_LEN = 16;
-function canonicalJson2(value) {
+function canonicalJson3(value) {
   if (value === null)
     return "null";
   if (typeof value === "boolean")
@@ -13215,11 +14013,11 @@ function canonicalJson2(value) {
   if (typeof value === "string")
     return JSON.stringify(value);
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson2).join(",")}]`;
+    return `[${value.map(canonicalJson3).join(",")}]`;
   }
   if (typeof value === "object") {
     const keys = Object.keys(value).sort();
-    const parts = keys.map((k) => `${JSON.stringify(k)}:${canonicalJson2(value[k])}`);
+    const parts = keys.map((k) => `${JSON.stringify(k)}:${canonicalJson3(value[k])}`);
     return `{${parts.join(",")}}`;
   }
   throw new TypeError(`canonicalJson: unsupported type ${typeof value}`);
@@ -13246,7 +14044,7 @@ async function computeHash(workerArgv, cwd, env) {
     cwd: cwdValue,
     env: filteredEnv
   };
-  const payload = new TextEncoder().encode(canonicalJson2(canonical));
+  const payload = new TextEncoder().encode(canonicalJson3(canonical));
   const hex = await sha256Hex3(payload);
   return hex.slice(0, HASH_LEN);
 }
@@ -13698,16 +14496,16 @@ function ipv4Bytes(value) {
   const parts = value.split(".");
   if (parts.length !== 4)
     return;
-  const bytes2 = [];
+  const bytes3 = [];
   for (const part of parts) {
     if (!/^(0|[1-9][0-9]{0,2})$/u.test(part))
       return;
     const byte = Number(part);
     if (byte > 255)
       return;
-    bytes2.push(byte);
+    bytes3.push(byte);
   }
-  return bytes2;
+  return bytes3;
 }
 function ipv6Words(value) {
   if (!value || value.includes("%") || value.split("::").length > 2)
@@ -13723,10 +14521,10 @@ function ipv6Words(value) {
       if (piece.includes(".")) {
         if (!allowIpv4 || index !== pieces.length - 1)
           return;
-        const bytes2 = ipv4Bytes(piece);
-        if (!bytes2)
+        const bytes3 = ipv4Bytes(piece);
+        if (!bytes3)
           return;
-        words.push(bytes2[0] << 8 | bytes2[1], bytes2[2] << 8 | bytes2[3]);
+        words.push(bytes3[0] << 8 | bytes3[1], bytes3[2] << 8 | bytes3[3]);
       } else {
         if (!/^[0-9a-f]{1,4}$/iu.test(piece))
           return;
@@ -13781,8 +14579,8 @@ function normalizedIp(value) {
     throw new TypeError(`trusted proxy must be an exact IPv4 or IPv6 address: ${JSON.stringify(value)}`);
   const mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 65535;
   if (mapped) {
-    const bytes2 = [words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255];
-    return { address: bytes2.join("."), key: `4:${bytes2.join(".")}` };
+    const bytes3 = [words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255];
+    return { address: bytes3.join("."), key: `4:${bytes3.join(".")}` };
   }
   const key = words.map((word) => word.toString(16).padStart(4, "0")).join("");
   return { address: formatIpv6(words), key: `6:${key}` };
@@ -13982,7 +14780,6 @@ async function serveTcp(protocol, options = {}) {
   const startupGraceS = options.startupGraceSeconds ?? 5;
   const protocolVersion = options.protocolVersion ?? "";
   const serverId = options.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-  const enableDescribe = options.enableDescribe ?? true;
   const dispatchHook = options.dispatchHook ?? null;
   const externalConfig = options.externalLocation;
   const onServeStart = options.onServeStart ?? null;
@@ -14042,16 +14839,11 @@ async function serveTcp(protocol, options = {}) {
     throw new TypeError("forwarded Iroh identity conflicts with another iroh provider");
   }
   let activePeerProviderCalls = 0;
-  let describePromise = null;
-  function describeInfo() {
-    if (!describePromise) {
-      describePromise = buildDescribeBatch(protocol.name, protocol.getMethods(), serverId).then(({ batch, metadata }) => ({
-        batch,
-        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? ""
-      }));
-    }
-    return describePromise;
-  }
+  const rpcHost = new VgiRpcServer(protocol, {
+    serverId,
+    protocolVersion,
+    enableDescribe: options.enableDescribe ?? true
+  });
   let serveStartFired = false;
   let serveStartInFlight = null;
   async function notifyTransport() {
@@ -14290,11 +15082,13 @@ async function serveTcp(protocol, options = {}) {
     }
     const batch = batches[0];
     let methodName;
+    let protocolName;
     let params;
     let requestId;
     try {
       const parsed = parseRequest(schema2, batch);
       methodName = parsed.methodName;
+      protocolName = parsed.protocol;
       params = parsed.params;
       requestId = parsed.requestId;
     } catch (e) {
@@ -14304,17 +15098,12 @@ async function serveTcp(protocol, options = {}) {
         return;
       throw e;
     }
-    if (methodName === DESCRIBE_METHOD_NAME && enableDescribe) {
-      const { batch: descBatch } = await describeInfo();
-      await writer.writeStream(descBatch.schema, [descBatch]);
-      return;
-    }
-    const methods = protocol.getMethods();
-    const method = methods.get(methodName);
-    if (!method) {
-      const available = [...methods.keys()].sort();
-      const err2 = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, err2, serverId, requestId);
+    let method;
+    let binding;
+    try {
+      ({ method, binding } = rpcHost.resolve(protocolName, methodName));
+    } catch (error) {
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, error, serverId, requestId);
       await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
       return;
     }
@@ -14330,14 +15119,13 @@ async function serveTcp(protocol, options = {}) {
     try {
       requestData = serializeBatch(batch);
     } catch {}
-    const { protocolHash } = await describeInfo();
     const info = {
       method: methodName,
       methodType,
       serverId,
       requestId,
-      protocol: protocol.name,
-      protocolHash,
+      protocol: binding.name,
+      protocolHash: await protocolHashFor(binding),
       protocolVersion,
       kind: "tcp" /* TCP */,
       principal: identity.auth.principal ?? "",
@@ -14423,7 +15211,6 @@ async function serveUnix(protocol, options) {
   const startupGraceS = options.startupGraceSeconds ?? 5;
   const protocolVersion = options.protocolVersion ?? "";
   const serverId = options.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-  const enableDescribe = options.enableDescribe ?? true;
   const dispatchHook = options.dispatchHook ?? null;
   const externalConfig = options.externalLocation;
   const onServeStart = options.onServeStart ?? null;
@@ -14434,16 +15221,11 @@ async function serveUnix(protocol, options) {
       unlinkSync3(sockPath);
     } catch {}
   }
-  let describePromise = null;
-  function describeInfo() {
-    if (!describePromise) {
-      describePromise = buildDescribeBatch(protocol.name, protocol.getMethods(), serverId).then(({ batch, metadata }) => ({
-        batch,
-        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? ""
-      }));
-    }
-    return describePromise;
-  }
+  const host = new VgiRpcServer(protocol, {
+    serverId,
+    protocolVersion,
+    enableDescribe: options.enableDescribe ?? true
+  });
   let serveStartFired = false;
   let serveStartInFlight = null;
   async function notifyTransport() {
@@ -14562,11 +15344,13 @@ async function serveUnix(protocol, options) {
     }
     const batch = batches[0];
     let methodName;
+    let protocolName;
     let params;
     let requestId;
     try {
       const parsed = parseRequest(schema2, batch);
       methodName = parsed.methodName;
+      protocolName = parsed.protocol;
       params = parsed.params;
       requestId = parsed.requestId;
     } catch (e) {
@@ -14576,17 +15360,12 @@ async function serveUnix(protocol, options) {
         return;
       throw e;
     }
-    if (methodName === DESCRIBE_METHOD_NAME && enableDescribe) {
-      const { batch: descBatch } = await describeInfo();
-      await writer.writeStream(descBatch.schema, [descBatch]);
-      return;
-    }
-    const methods = protocol.getMethods();
-    const method = methods.get(methodName);
-    if (!method) {
-      const available = [...methods.keys()].sort();
-      const err2 = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA7, err2, serverId, requestId);
+    let method;
+    let binding;
+    try {
+      ({ method, binding } = host.resolve(protocolName, methodName));
+    } catch (error) {
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA7, error, serverId, requestId);
       await writer.writeStream(EMPTY_SCHEMA7, [errBatch]);
       return;
     }
@@ -14602,14 +15381,13 @@ async function serveUnix(protocol, options) {
     try {
       requestData = serializeBatch(batch);
     } catch {}
-    const { protocolHash } = await describeInfo();
     const info = {
       method: methodName,
       methodType,
       serverId,
       requestId,
-      protocol: protocol.name,
-      protocolHash,
+      protocol: binding.name,
+      protocolHash: await protocolHashFor(binding),
       protocolVersion,
       kind: "unix" /* UNIX */,
       principal: "",
@@ -14855,10 +15633,10 @@ class StrictJsonParser {
       this.index++;
   }
 }
-function parseStrictJson(bytes2, limit) {
-  if (bytes2.byteLength > limit)
+function parseStrictJson(bytes3, limit) {
+  if (bytes3.byteLength > limit)
     throw new Error("JSON exceeds byte limit");
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes2);
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes3);
   return new StrictJsonParser(text).parse();
 }
 function capabilities(value, requireSlash, requireObjectEntries) {
@@ -15017,14 +15795,14 @@ function localApiWaitConnect(socket, signal2) {
     signal2.addEventListener("abort", aborted, { once: true });
   });
 }
-function localApiWrite(socket, bytes2, signal2) {
+function localApiWrite(socket, bytes3, signal2) {
   return new Promise((resolve2, reject) => {
     const aborted = () => {
       socket.destroy();
       reject(signal2.reason);
     };
     signal2.addEventListener("abort", aborted, { once: true });
-    socket.write(bytes2, (error) => {
+    socket.write(bytes3, (error) => {
       signal2.removeEventListener("abort", aborted);
       if (error)
         reject(error);
@@ -15313,12 +16091,14 @@ export {
   writeUnaryResult,
   writeRequest,
   validateSpiffeId,
+  utf8Length2 as utf8Length,
   unpackStateToken,
   uint82 as uint8,
   uint642 as uint64,
   uint322 as uint32,
   uint162 as uint16,
   tryAcquireLock,
+  trimForShapeTest,
   tokenDigest,
   toSchema,
   tcpConnectSocks5h,
@@ -15334,8 +16114,12 @@ export {
   serveTcp,
   serveStream,
   serveIrohTcpUpstream,
+  rpcPathFromPrefix,
+  rpcPath,
   resolveExternalLocation,
+  reservedPath,
   requirePeerIdentity,
+  rejectJwsShaped,
   redactClaims,
   readUnaryResult,
   readRequest,
@@ -15343,6 +16127,7 @@ export {
   readIrohProxyProtocolV2,
   probeSocket,
   pipeConnect,
+  pickApplicationProtocol,
   peerIdentityPrimary,
   parseXfcc,
   parseUseIdTokenAsBearer,
@@ -15353,7 +16138,6 @@ export {
   parseIrohEndpoint,
   parseDeviceCodeClientSecret,
   parseDeviceCodeClientId,
-  parseDescribeResponse,
   parseClientSecret,
   parseClientId,
   parseCapabilitiesFromHeaders,
@@ -15361,6 +16145,7 @@ export {
   observePeerIdentity,
   oauthResourceMetadataToJson,
   normalizeProxyIpAddress,
+  normalisePrincipals,
   noRedaction,
   nginxSpiffeProvider,
   mtlsAuthenticateXfcc,
@@ -15373,6 +16158,7 @@ export {
   launch,
   jwtAuthenticate,
   jsonStateSerializer,
+  isJwsShaped,
   isExternalLocationBatch,
   isCapabilitySnapshotFresh,
   irohHttpBridgeOptions,
@@ -15399,6 +16185,8 @@ export {
   findProtocolVersion,
   fetchOAuthMetadata,
   envoyXfccSpiffeProvider,
+  encodeTokenIdentity,
+  encodeIssuedGrant,
   discoverHttpCapabilities,
   dialSocks5h,
   defaultStateDir,
@@ -15406,8 +16194,11 @@ export {
   createSocks5hFetch,
   createIntrospector,
   createHttpHandler,
+  checkIntrospector,
+  checkFreshness,
   chainAuthenticate,
   bytes,
+  buildIdentityProtocol,
   buildErrorStream,
   bool2 as bool,
   bearerAuthenticateStatic,
@@ -15416,6 +16207,7 @@ export {
   awsAlbSpiffeProvider,
   anyOfPeerIdentities,
   allOfPeerIdentities,
+  adaptServiceDescription,
   acquireLock,
   VgiRpcServer,
   VersionError,
@@ -15424,12 +16216,17 @@ export {
   UPLOAD_URL_PARAMS_SCHEMA,
   UPLOAD_URL_METHOD,
   TransportKind,
+  TokenUnresolvedError,
+  TOKEN_IDENTITY_SCHEMA,
   SubjectStability,
+  StaleAuthError,
   SessionLostError,
   ServerDrainingError,
   STATE_KEY,
+  SERVER_SCOPE,
   SERVER_ID_KEY,
   RpcError,
+  RateLimiter,
   RPC_METHOD_KEY,
   RPC_ERROR_HEADER,
   REQUEST_VERSION_KEY,
@@ -15447,33 +16244,39 @@ export {
   PeerIdentityRejectedError,
   PeerIdentity,
   PeerEvidenceSet,
-  PROTOCOL_NAME_KEY,
   OutputCollector,
   MethodType,
   MethodNotImplementedError,
   MAX_UPLOAD_URL_COUNT,
+  MAX_TOKEN_BYTES,
   LOG_MESSAGE_KEY,
   LOG_LEVEL_KEY,
   LOG_EXTRA_KEY,
   IrohUriError,
   IrohTransportError,
+  IntrospectionRefusedError,
+  IdentityUnavailableError,
+  IdentityImpl,
   IdentityAssurance,
+  ISSUED_GRANT_SCHEMA,
   IROH_HTTP_ALPN,
   IROH_FORWARDED_ENDPOINT_HEADER,
   IROH_ARROW_MUX_ALPN,
   INTROSPECT_ENDPOINT,
   INTROSPECT_ENABLED_HEADER,
+  IDENTITY_PROTOCOL_NAME,
   HttpStreamSession,
+  GrantRefusedError,
   FdSink,
   ERROR_KIND_SESSION_LOST,
   ERROR_KIND_SERVER_DRAINING,
   ERROR_KIND_METHOD_NOT_IMPLEMENTED,
   ERROR_KIND_KEY,
-  DESCRIBE_VERSION_KEY,
-  DESCRIBE_VERSION,
-  DESCRIBE_METHOD_NAME,
   DEFAULT_MAX_PROXY_V2_BYTES,
+  DEFAULT_MAX_AUTH_AGE_SECONDS,
   DEFAULT_INTROSPECT_TTL_SECONDS,
+  DEFAULT_INTROSPECT_RATE_LIMIT,
+  DEFAULT_IDENTITY_TTL_SECONDS,
   AuthUnavailableError,
   AuthReason,
   AuthFailure,
@@ -15485,4 +16288,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=6F5EC8BBCBCF600164756E2164756E21
+//# debugId=3AB55A5D61C4782464756E2164756E21

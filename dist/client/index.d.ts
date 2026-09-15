@@ -1,6 +1,6 @@
 export { discoverHttpCapabilities, type HttpServerCapabilities, isCapabilitySnapshotFresh, parseCapabilitiesFromHeaders, } from "./capabilities.js";
 export { type HttpRpcClient, httpConnect, type RpcClient } from "./connect.js";
-export { httpIntrospect, type MethodInfo, parseDescribeResponse, type ServiceDescription } from "./introspect.js";
+export { adaptServiceDescription, httpIntrospect, type MethodInfo, pickApplicationProtocol, type ServiceDescription, } from "./introspect.js";
 export type { OAuthResourceMetadataResponse } from "./oauth.js";
 export { fetchOAuthMetadata, httpOAuthMetadata, parseClientId, parseClientSecret, parseDeviceCodeClientId, parseDeviceCodeClientSecret, parseResourceMetadataUrl, parseUseIdTokenAsBearer, } from "./oauth.js";
 export { PipeStreamSession, pipeConnect, subprocessConnect } from "./pipe.js";

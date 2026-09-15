@@ -135,19 +135,31 @@ async function readResult(response: Response): Promise<Record<string, unknown>> 
  *  The kind is the part a client branches on -- it is stable across ports,
  *  where the class name is not. */
 async function readError(response: Response): Promise<{ type: string; kind: string }> {
+  const { type, kind } = await readErrorDetail(response);
+  return { type, kind };
+}
+
+/** The same batch, including the human-readable message.
+ *
+ *  Separate from {@link readError} because several cases assert the whole
+ *  `{type, kind}` object with `toEqual`, and a third key would break them for
+ *  a reason having nothing to do with what they test. */
+async function readErrorDetail(response: Response): Promise<{ type: string; kind: string; message: string }> {
   const { RecordBatchReader } = await import("@query-farm/apache-arrow");
   const reader = await RecordBatchReader.from(new Uint8Array(await response.arrayBuffer()));
   await reader.open();
   for (const batch of reader.readAll()) {
     const extra = batch.metadata?.get(LOG_EXTRA_KEY);
     if (extra) {
+      const parsed = JSON.parse(extra);
       return {
-        type: String(JSON.parse(extra).exception_type ?? ""),
+        type: String(parsed.exception_type ?? ""),
         kind: batch.metadata?.get(ERROR_KIND_KEY) ?? "",
+        message: String(parsed.exception_message ?? ""),
       };
     }
   }
-  return { type: "", kind: "" };
+  return { type: "", kind: "", message: "" };
 }
 
 /** The scopes column of `issue_grant`: `list<item?: utf8>`, item nullable --
@@ -228,7 +240,7 @@ describe("namespaced HTTP routes", () => {
       handler: () => ({ message: "from-other" }),
     });
     const server = makeServer();
-    server.addProtocol({ name: "other.App.v1", protocol: collide, protocolHash: "", versionExempt: false });
+    server.addProtocol({ name: "other.App.v1", protocol: collide, versionExempt: false });
     const h = createHttpHandler(server, { prefix: PREFIX, compressionLevel: null });
     const schema = toSchema({ message: str });
     const first = await post(
@@ -410,7 +422,7 @@ describe("a continuation stays on the protocol its stream started on", () => {
         return true;
       },
     });
-    server.addProtocol({ name: "other.App.v1", protocol: other, protocolHash: "", versionExempt: false });
+    server.addProtocol({ name: "other.App.v1", protocol: other, versionExempt: false });
     return server;
   }
 
@@ -492,11 +504,45 @@ describe("reserved endpoints belong to the server, not to a protocol", () => {
     });
   });
 
-  test("__describe__ stays flat", async () => {
+  test("__describe__ is refused with a message naming where introspection went", async () => {
+    // Retired, not merely absent -- and the two are indistinguishable from the
+    // caller's side while needing opposite fixes: one is a client to update,
+    // the other a server to reconfigure. A stale caller told only "no such
+    // method" has no way to learn that introspection moved to a protocol.
     const url = BASE + reservedPath("__describe__", { prefix: PREFIX });
     expect(url).toBe("http://worker.example/vgi/__describe__");
     const resp = await post(handler, url, body(APP_PROTOCOL, "__describe__", toSchema({}), {}));
-    expect(resp.status).toBe(200);
+    expect(resp.status).toBe(404);
+    const message = (await readErrorDetail(resp)).message;
+    expect(message).toContain("retired");
+    expect(message).toContain(REFLECTION_PROTOCOL_NAME);
+    expect(message).toContain("list_protocols");
+    expect(message).toContain("describe");
+  });
+
+  test("the namespaced spelling is refused the same way", async () => {
+    // A client that learned about path namespacing but not about the
+    // retirement lands here instead, and needs the same answer.
+    const resp = await post(
+      handler,
+      BASE + rpcPath(APP_PROTOCOL, "__describe__", { prefix: PREFIX }),
+      body(APP_PROTOCOL, "__describe__", toSchema({}), {}),
+    );
+    expect(resp.status).toBe(404);
+    expect((await readErrorDetail(resp)).message).toContain(REFLECTION_PROTOCOL_NAME);
+  });
+
+  test("another absent reserved name keeps the plain capability answer", async () => {
+    // Only `__describe__` is special-cased. A client probing for an optional
+    // method needs "this server does not have it", not a redirection to
+    // something it did not ask about.
+    const resp = await post(
+      handler,
+      BASE + rpcPath(APP_PROTOCOL, "__not_a_thing__", { prefix: PREFIX }),
+      body(APP_PROTOCOL, "__not_a_thing__", toSchema({}), {}),
+    );
+    expect(resp.status).toBe(404);
+    expect((await readErrorDetail(resp)).message).not.toContain("retired");
   });
 
   test("health stays flat", async () => {

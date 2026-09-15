@@ -75,7 +75,7 @@ async function startServer(proc: Subprocess): Promise<string> {
   // Wait for the server to accept connections
   for (let i = 0; i < 20; i++) {
     try {
-      await fetch(`${baseUrl}/__describe__`, { method: "POST" });
+      await fetch(`${baseUrl}/health`, { method: "OPTIONS" });
       return baseUrl;
     } catch {
       await new Promise((r) => setTimeout(r, 100));
@@ -153,8 +153,8 @@ function defineConformanceTests<TCtx>(
     supportsZeroRowExchange?: boolean;
     /** True when the server fills in optional-parameter defaults on its own
      *  (TS server does; Python server requires the client to merge defaults
-     *  before send, which the TS client can't do because DESCRIBE_VERSION 4
-     *  dropped ``param_defaults`` from the wire). */
+     *  before send, which the TS client can't do because reflection
+     *  carries no parameter defaults on the wire). */
     supportsServerSideDefaults?: boolean;
   },
 ) {
@@ -1363,8 +1363,8 @@ if (hasPython) {
       }),
     // Python's RpcServer doesn't fill in optional-parameter defaults
     // server-side — its own client merges from ``info.param_defaults``
-    // before sending. DESCRIBE_VERSION 4 dropped ``param_defaults`` from
-    // the wire, so a cross-language TS client can't know about them.
+    // before sending. Reflection carries no parameter defaults on the wire,
+    // so a cross-language TS client can't know about them.
     { supportsServerSideDefaults: false },
   );
 }

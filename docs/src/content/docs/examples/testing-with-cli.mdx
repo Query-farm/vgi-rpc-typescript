@@ -25,7 +25,7 @@ vgi-rpc --cmd "bun run server.ts" <command>
 vgi-rpc --cmd "bun run examples/calculator.ts" describe
 ```
 
-This calls the `__describe__` method and displays all available methods, their parameters, result schemas, and documentation.
+This calls `vgi_rpc.Reflection.v1` — `list_protocols`, then `describe` — and displays all available methods, their parameters, result schemas, and documentation.
 
 ### Call a unary method
 

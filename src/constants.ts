@@ -36,24 +36,13 @@ export const SERVER_ID_KEY = "vgi_rpc.server_id";
 /** Batch-metadata key carrying the client-supplied request id. */
 export const REQUEST_ID_KEY = "vgi_rpc.request_id";
 
-/** Batch-metadata key carrying the service / protocol name. */
-export const PROTOCOL_NAME_KEY = "vgi_rpc.protocol_name";
-/** Batch-metadata key carrying the `__describe__` response schema version. */
-export const DESCRIBE_VERSION_KEY = "vgi_rpc.describe_version";
-export const PROTOCOL_HASH_KEY = "vgi_rpc.protocol_hash";
-/** Current `__describe__` response schema version (the slim 8-column schema). */
-export const DESCRIBE_VERSION = "4";
-
 /** Application protocol surface version. Carried on every request batch from
- *  a client bound to a Protocol that declares `protocolVersion`; also emitted
- *  in the __describe__ response metadata. Format: canonical semver
+ *  a client bound to a Protocol that declares `protocolVersion`, and reported
+ *  by `vgi_rpc.Reflection.v1`. Format: canonical semver
  *  MAJOR.MINOR.PATCH. Enforced at the dispatch boundary on the server: exact
  *  major+minor match required, patch ignored. Distinct from `REQUEST_VERSION`
  *  (wire framing). Mirrors Python's `PROTOCOL_VERSION_KEY`. */
 export const PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
-
-/** Reserved method name for the introspection (`__describe__`) call. */
-export const DESCRIBE_METHOD_NAME = "__describe__";
 
 /** Batch-metadata key carrying the base64-encoded stream continuation/state token. */
 export const STATE_KEY = "vgi_rpc.stream_state#b64";

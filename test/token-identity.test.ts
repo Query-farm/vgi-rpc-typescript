@@ -208,7 +208,7 @@ describe("registration", () => {
     const server = new VgiRpcServer(app());
     const identity = buildIdentityProtocol(new IdentityImpl({ mintGrant: minter }))!;
     expect(() =>
-      server.addProtocol({ name: IDENTITY_PROTOCOL_NAME, protocol: identity, protocolHash: "", versionExempt: false }),
+      server.addProtocol({ name: IDENTITY_PROTOCOL_NAME, protocol: identity, versionExempt: false }),
     ).toThrow(/reserved/);
   });
 

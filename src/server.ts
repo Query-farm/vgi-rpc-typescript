@@ -8,8 +8,7 @@ import {
   ProtocolNotSupportedError,
   validateProtocolName,
 } from "./binding.js";
-import { DESCRIBE_METHOD_NAME, PROTOCOL_VERSION_KEY } from "./constants.js";
-import { buildDescribeBatch } from "./dispatch/describe.js";
+import { PROTOCOL_VERSION_KEY } from "./constants.js";
 import { dispatchStream } from "./dispatch/stream.js";
 import { dispatchUnary } from "./dispatch/unary.js";
 import {
@@ -19,9 +18,16 @@ import {
   RpcError,
   VersionError,
 } from "./errors.js";
+
 import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
-import { bindingHash, buildReflectionProtocol, REFLECTION_PROTOCOL_NAME } from "./reflection.js";
+import {
+  buildReflectionProtocol,
+  describeRetiredMessage,
+  protocolHashFor,
+  REFLECTION_PROTOCOL_NAME,
+  RETIRED_DESCRIBE_METHOD,
+} from "./reflection.js";
 import { buildIdentityProtocol, IDENTITY_PROTOCOL_NAME, type IdentityImpl } from "./token-identity.js";
 import {
   type CallStatistics,
@@ -55,15 +61,7 @@ function randomStreamId(): string {
  */
 export class VgiRpcServer {
   private protocol: Protocol;
-  private enableDescribe: boolean;
   private serverId: string;
-  // Lazily initialized — `buildDescribeBatch` is async because the protocol
-  // hash is computed via `crypto.subtle.digest` (Web Crypto). The dispatch
-  // path awaits the cached promise on first use.
-  private _describePromise: Promise<{
-    batch: import("./arrow/index.js").VgiBatch;
-    protocolHash: string;
-  }> | null = null;
   private protocolVersion: string;
   private dispatchHook: DispatchHook | null = null;
   private externalConfig: ExternalLocationConfig | undefined;
@@ -82,7 +80,12 @@ export class VgiRpcServer {
   constructor(
     protocol: Protocol,
     options?: {
-      /** Enable the `describe` RPC method (service self-description). Default `true`. */
+      /** Host `vgi_rpc.Reflection.v1`. Default `true`.
+       *
+       *  Named for the `__describe__` method it used to switch on, and kept
+       *  under that name across the fleet: what it gates is introspection,
+       *  and introspection is now a co-hosted protocol rather than a reserved
+       *  method answered before dispatch. */
       enableDescribe?: boolean;
       /** Opaque per-process server identifier surfaced to clients and the landing page. */
       serverId?: string;
@@ -97,12 +100,15 @@ export class VgiRpcServer {
     },
   ) {
     this.protocol = protocol;
-    this.enableDescribe = options?.enableDescribe ?? true;
     this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
     this.dispatchHook = options?.dispatchHook ?? null;
     this.externalConfig = options?.externalLocation;
     this.protocolVersion = options?.protocolVersion ?? "";
     this.onServeStart = options?.onServeStart ?? null;
+    // Registered here rather than left to the caller: a server no client can
+    // introspect is not a useful default now that `__describe__` is gone, and
+    // reflection is what the client bootstraps from.
+    if (options?.enableDescribe ?? true) this.registerReflection();
   }
 
   /** Every protocol this server hosts, primary first.
@@ -114,7 +120,6 @@ export class VgiRpcServer {
     out.set(this.protocol.name, {
       name: this.protocol.name,
       protocol: this.protocol,
-      protocolHash: "",
       versionExempt: false,
     });
     for (const [name, b] of this.extraBindings) out.set(name, b);
@@ -129,29 +134,23 @@ export class VgiRpcServer {
    *
    *  The binding is version-exempt: this is the protocol a version-mismatched
    *  client calls to learn *what* mismatched, and gating it would deny the
-   *  client the diagnosis it came for. */
+   *  client the diagnosis it came for.
+   *
+   *  Idempotent, because the constructor already calls it unless the
+   *  deployment opted out: an explicit second call should not turn a working
+   *  server into a duplicate-name error. */
   registerReflection(): void {
-    const hashes = new Map<string, Promise<string>>();
+    if (this.extraBindings.has(REFLECTION_PROTOCOL_NAME)) return;
     const reflection = buildReflectionProtocol({
       listBindings: () => this.bindings() as never,
       hashFor: (name) => {
-        // Cached: read on every reflection call, and a protocol's method table
-        // does not change after registration.
-        let h = hashes.get(name);
-        if (!h) {
-          const binding = this.bindings().get(name);
-          h = binding ? bindingHash(name, binding.protocol.getMethods()) : Promise.resolve("");
-          hashes.set(name, h);
-        }
-        return h;
+        const binding = this.bindings().get(name);
+        return binding ? protocolHashFor(binding) : Promise.resolve("");
       },
       serverId: () => this.serverId,
       serverVersion: () => "",
     });
-    this.addProtocol(
-      { name: REFLECTION_PROTOCOL_NAME, protocol: reflection, protocolHash: "", versionExempt: true },
-      true,
-    );
+    this.addProtocol({ name: REFLECTION_PROTOCOL_NAME, protocol: reflection, versionExempt: true }, true);
   }
 
   /** Host `vgi_rpc.Identity.v1` on this server, when the deployment configured
@@ -177,7 +176,7 @@ export class VgiRpcServer {
   registerIdentity(identity: IdentityImpl): void {
     const protocol = buildIdentityProtocol(identity);
     if (!protocol) return;
-    this.addProtocol({ name: IDENTITY_PROTOCOL_NAME, protocol, protocolHash: "", versionExempt: false }, true);
+    this.addProtocol({ name: IDENTITY_PROTOCOL_NAME, protocol, versionExempt: false }, true);
   }
 
   /** Host an additional protocol alongside the primary.
@@ -207,7 +206,23 @@ export class VgiRpcServer {
    *  capability-probe signal: a client testing for an optional method must be
    *  able to tell "you do not speak this protocol" from "you speak it but lack
    *  this method". */
-  resolve(protocol: string, method: string): { method: MethodDefinition; binding: ProtocolBinding } {
+  resolve(
+    protocol: string,
+    method: string,
+  ): {
+    /** The resolved method definition. */
+    method: MethodDefinition;
+    /** The binding that owns it -- the source of the access record's identity. */
+    binding: ProtocolBinding;
+  } {
+    // Retired rather than merely absent, and the two are indistinguishable
+    // from the caller's side while needing opposite fixes -- one is a client
+    // to update, the other a server to reconfigure. Answered before the
+    // routing checks because a stale client does not name a protocol either,
+    // and "you failed to route" is not the diagnosis it needs.
+    if (method === RETIRED_DESCRIBE_METHOD) {
+      throw new MethodNotImplementedError(describeRetiredMessage());
+    }
     const all = this.bindings();
     const hosted = [...all.keys()].sort();
     if (!protocol) throw new ProtocolNotSpecifiedError(hosted);
@@ -238,25 +253,6 @@ export class VgiRpcServer {
       await this.onServeStart(kind);
     }
     this.serveStartFired = true;
-  }
-
-  /** Build (or retrieve cached) describe batch + protocol hash. */
-  private async describeInfo(): Promise<{
-    batch: import("./arrow/index.js").VgiBatch;
-    protocolHash: string;
-  }> {
-    if (!this._describePromise) {
-      this._describePromise = buildDescribeBatch(
-        this.protocol.name,
-        this.protocol.getMethods(),
-        this.serverId,
-        this.protocol.protocolVersion || undefined,
-      ).then(({ batch, metadata }) => ({
-        batch,
-        protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? "",
-      }));
-    }
-    return this._describePromise;
   }
 
   /** Validate a client's declared protocol_version against the Protocol's
@@ -413,13 +409,6 @@ export class VgiRpcServer {
       throw e;
     }
 
-    // Handle __describe__ — lazy-build on first request.
-    if (methodName === DESCRIBE_METHOD_NAME && this.enableDescribe) {
-      const { batch } = await this.describeInfo();
-      await writer.writeStream(batch.schema, [batch]);
-      return;
-    }
-
     // Resolve (protocol, method). Method names may collide across protocols,
     // so the routing key is part of the lookup rather than a label on it.
     let method: MethodDefinition;
@@ -479,14 +468,20 @@ export class VgiRpcServer {
       streamId = randomStreamId();
     }
 
-    const { protocolHash } = await this.describeInfo();
     const info: DispatchInfo = {
       method: methodName,
       methodType,
       serverId: this.serverId,
       requestId,
-      protocol: this.protocol.name,
-      protocolHash,
+      // The protocol that owns the dispatched method, and *its* canonical
+      // digest. Both from the resolved binding, never the server's primary:
+      // `protocol_hash` is the registry key for decoding an archived record,
+      // so a record naming one protocol while carrying another's is decoded
+      // against the wrong description -- and passes the schema while doing it.
+      // Read inline rather than through a local so the pairing is visible at
+      // the emit site, which is what `test/dispatch-identity.test.ts` checks.
+      protocol: binding.name,
+      protocolHash: await protocolHashFor(binding),
       protocolVersion: this.protocolVersion,
       kind: transportKind,
       principal: "",

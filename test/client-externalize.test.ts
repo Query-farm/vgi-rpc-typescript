@@ -29,15 +29,16 @@ try {
   hasPython = r.exitCode === 0;
 } catch {}
 
-// The TS client now posts to `{prefix}/{protocol}/{method}`: the protocol rides
-// as a path segment as well as in `vgi_rpc.protocol` metadata, and the server
-// routes on it. A reference server that predates namespaced routes answers 404
-// to every one of those paths, so this suite would be asserting against a
-// server it cannot address at all rather than against externalization.
+// The TS client posts to `{prefix}/{protocol}/{method}` and bootstraps from
+// `vgi_rpc.Reflection.v1`. Both arrived together in the reference, so a server
+// that predates them answers 404 to every path this client knows how to build
+// -- and the suite would be asserting against a server it cannot address at
+// all rather than against externalization.
 //
 // `vgi_rpc.http._common.rpc_path` is the route-shape helper the namespaced
 // reference gained with the routes themselves, so importing it is the same
-// question as "does this server route by protocol?".
+// question as "is this server new enough to talk to?". Point
+// `VGI_RPC_PYTHON_BIN` at a current reference and the whole suite runs.
 let hasNamespacedRoutes = false;
 if (hasPython) {
   try {
@@ -131,15 +132,18 @@ describeFn("client request externalization (Python server)", () => {
     client.close();
   });
 
-  it("large request triggers 413 fallback then auto-externalizes", async () => {
+  it("the very first large request externalizes, without needing a 413", async () => {
     reset();
     const client = httpConnect(baseUrl);
-    // First call: cap cache cold, body >> MAX → server returns 413, client
-    // discovers caps from response headers, retries via upload-URL.
+    // Even on a brand-new client the caps are known by the time the body is
+    // built: `postWithExternalization` discovers them before it sends, so the
+    // request that would have drawn a 413 never leaves. The 413 handler stays
+    // as the fallback for a *stale* snapshot -- a server whose cap dropped
+    // after discovery -- which this fixture cannot produce.
     const big = "x".repeat(MAX * 4);
     const r1 = await client.call("echo_large_string", { value: big });
     expect(r1!.result).toBe(big);
-    expect(counters.total413s).toBeGreaterThanOrEqual(1);
+    expect(counters.total413s).toBe(0);
     expect(counters.uploadUrlInits).toBeGreaterThanOrEqual(1);
     expect(counters.blobPuts).toBeGreaterThanOrEqual(1);
     client.close();

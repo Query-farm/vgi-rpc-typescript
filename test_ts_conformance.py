@@ -908,12 +908,15 @@ def conformance_describe(
     ts_http_port: int,
     ts_http_zstd_port: int,
 ) -> "ServiceDescription":
-    """Introspect the TS worker under test via a real ``__describe__`` call.
+    """Introspect the TS worker under test over the wire.
 
     Parallels ``conformance_conn`` (same transport matrix) so the upstream
-    ``TestDescribeConformance`` suite validates ``__describe__`` over the wire
-    against the actual Bun/Node/Deno worker rather than an in-process Python
-    server.  The TS server enables describe by default.
+    ``TestDescribeConformance`` suite validates introspection against the
+    actual Bun/Node/Deno worker rather than an in-process Python server.
+
+    Introspection is ``vgi_rpc.Reflection.v1`` -- ``list_protocols`` then
+    ``describe`` -- which is what ``introspect`` / ``http_introspect`` now
+    call.  The TS server hosts it by default.
     """
     from vgi_rpc.http import http_introspect
     from vgi_rpc.introspect import introspect
@@ -947,7 +950,18 @@ def conformance_describe(
         port = request.getfixturevalue("ts_flechette_http_port")
     else:
         raise AssertionError(f"unhandled transport for conformance_describe: {param}")
-    return http_introspect(base_url=f"http://127.0.0.1:{port}")
+    external_location = None
+    if param == "http_externalize_always":
+        from vgi_rpc.external import ExternalLocationConfig
+
+        # Reflection is an ordinary protocol, so against a server that
+        # externalizes everything its reply arrives as a pointer batch like any
+        # other.  The old ``__describe__`` fast path was exempt only by
+        # accident of answering before dispatch.  Server hands out
+        # ``http://127.0.0.1`` download URLs from the in-process fake storage,
+        # so the HTTPS-only validator has to be off.
+        external_location = ExternalLocationConfig(url_validator=None)
+    return http_introspect(base_url=f"http://127.0.0.1:{port}", external_location=external_location)
 
 
 # Import all test classes from the conformance pytest suite (shipped with the package)

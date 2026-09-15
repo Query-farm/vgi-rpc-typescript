@@ -8,7 +8,13 @@ export {
   parseCapabilitiesFromHeaders,
 } from "./capabilities.js";
 export { type HttpRpcClient, httpConnect, type RpcClient } from "./connect.js";
-export { httpIntrospect, type MethodInfo, parseDescribeResponse, type ServiceDescription } from "./introspect.js";
+export {
+  adaptServiceDescription,
+  httpIntrospect,
+  type MethodInfo,
+  pickApplicationProtocol,
+  type ServiceDescription,
+} from "./introspect.js";
 export type { OAuthResourceMetadataResponse } from "./oauth.js";
 export {
   fetchOAuthMetadata,

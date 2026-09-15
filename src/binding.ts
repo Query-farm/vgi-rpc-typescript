@@ -56,8 +56,6 @@ export interface ProtocolBinding {
   /** Wire identity -- the routing key. */
   readonly name: string;
   readonly protocol: Protocol;
-  /** Fingerprint of this protocol's wire surface, identical in every port. */
-  protocolHash: string;
   /** Skip the version gate for this binding. Set for reflection, which is what
    *  a version-mismatched client calls to learn *what* mismatched -- gating it
    *  would deny the client the diagnosis it came for. */

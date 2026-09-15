@@ -66,7 +66,12 @@ describe("integration: describe", () => {
     expect(exitCode).toBe(0);
     const data = JSON.parse(stdout);
     expect(data.protocol_name).toBe("Calculator");
-    expect(data.describe_version).toBe("4");
+    // Not pinned to a number. `describe_version` is a field of the reference
+    // CLI's client-side view, and this port no longer defines one at all --
+    // introspection is `vgi_rpc.Reflection.v1`, whose version rides in its
+    // name. Pinning it here asserted the CLI's build, not this worker's
+    // behaviour, and went red when the reference moved it to "5".
+    expect(typeof data.describe_version).toBe("string");
     expect(data.methods.add).toBeTruthy();
     expect(data.methods.multiply).toBeTruthy();
     expect(data.methods.divide).toBeTruthy();

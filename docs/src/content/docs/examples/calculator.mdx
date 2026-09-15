@@ -53,7 +53,7 @@ Each `protocol.unary()` call registers a method with:
 - **`params`** — input schema using [schema shorthand](/guides/schema-shorthand/). `float` maps to Arrow `Float64`.
 - **`result`** — output schema, also using shorthand.
 - **`handler`** — async function that receives parsed parameters and returns a result record.
-- **`doc`** — documentation string exposed via `__describe__`.
+- **`doc`** — documentation string kept with the method definition.
 
 ### Error handling
 
@@ -61,7 +61,7 @@ The `divide` method demonstrates error propagation: throwing an `Error` sends it
 
 ### Server startup
 
-`VgiRpcServer` wraps the protocol and handles the stdin/stdout request loop. Setting `enableDescribe: true` enables the `__describe__` introspection method.
+`VgiRpcServer` wraps the protocol and handles the stdin/stdout request loop. Setting `enableDescribe: true` hosts `vgi_rpc.Reflection.v1`, the introspection protocol (the default).
 
 ## Running
 

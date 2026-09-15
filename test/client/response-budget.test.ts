@@ -35,7 +35,7 @@ describe("HTTP client response budgets", () => {
     let seen: string | null = null;
     const client = httpConnect("http://test", {
       fetch: async (_input, init) => {
-        const request = new Request("http://test/__describe__", init);
+        const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         seen = request.headers.get("VGI-Accept-Max-Response-Bytes");
         if (request.method === "OPTIONS") {
           return new Response(null, {
@@ -61,7 +61,7 @@ describe("HTTP client response budgets", () => {
     const client = httpConnect("http://test", {
       acceptedMaxResponseBytes: 65_536,
       fetch: async (_input, init) => {
-        const request = new Request("http://test/__describe__", init);
+        const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         seen = request.headers.get("VGI-Accept-Max-Response-Bytes");
         if (request.method === "OPTIONS") {
           return new Response(null, {
@@ -83,7 +83,7 @@ describe("HTTP client response budgets", () => {
     const client = httpConnect("http://test", {
       acceptedMaxResponseBytes: 128 * 1024,
       fetch: async (_input, init) => {
-        const request = new Request("http://test/__describe__", init);
+        const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         if (request.method === "OPTIONS") {
           return new Response(null, {
             status: 204,
@@ -172,7 +172,7 @@ describe("HTTP client response budgets", () => {
     let posts = 0;
     const client = httpConnect("http://test", {
       fetch: async (_input, init) => {
-        const request = new Request("http://test/__describe__", init);
+        const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         if (request.method === "OPTIONS") {
           options += 1;
           return new Response(null, {
@@ -197,7 +197,7 @@ describe("HTTP client response budgets", () => {
     let posts = 0;
     const unsupported = httpConnect("http://test", {
       fetch: async (_input, init) => {
-        const request = new Request("http://test/__describe__", init);
+        const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         if (request.method === "OPTIONS") return new Response(null, { status: 204 });
         posts += 1;
         return new Response();
@@ -208,7 +208,7 @@ describe("HTTP client response budgets", () => {
 
     const missingOnRpc = httpConnect("http://test", {
       fetch: async (_input, init) => {
-        const request = new Request("http://test/__describe__", init);
+        const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         if (request.method === "OPTIONS") {
           return new Response(null, {
             status: 204,
@@ -225,7 +225,7 @@ describe("HTTP client response budgets", () => {
     let posts = 0;
     const client = httpConnect("http://test", {
       fetch: async (_input, init) => {
-        const request = new Request("http://test/__describe__", init);
+        const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         if (request.method === "OPTIONS") {
           return new Response(null, {
             status: 503,

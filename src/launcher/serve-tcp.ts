@@ -27,8 +27,7 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { schema as makeSchema, serializeBatch } from "../arrow/index.js";
 import { AuthContext } from "../auth.js";
-import { DESCRIBE_METHOD_NAME } from "../constants.js";
-import { buildDescribeBatch } from "../dispatch/describe.js";
+import type { ProtocolBinding } from "../binding.js";
 import { dispatchStream } from "../dispatch/stream.js";
 import { dispatchUnary } from "../dispatch/unary.js";
 import { RpcError, VersionError } from "../errors.js";
@@ -49,10 +48,13 @@ import {
 } from "../identity.js";
 import { validateIrohIssuer } from "../iroh.js";
 import type { Protocol } from "../protocol.js";
+import { protocolHashFor } from "../reflection.js";
+import { VgiRpcServer } from "../server.js";
 import {
   type CallStatistics,
   type DispatchHook,
   type DispatchInfo,
+  type MethodDefinition,
   MethodType,
   type ServeStartHook,
   TransportKind,
@@ -92,7 +94,11 @@ export interface ServeTcpOptions {
   protocolVersion?: string;
   /** Custom server identifier. */
   serverId?: string;
-  /** Enable __describe__ method. Default: true. */
+  /** Host `vgi_rpc.Reflection.v1`. Default: true.
+   *
+   *  Named for the `__describe__` method it used to switch on. What it gates
+   *  is introspection, which is now a co-hosted protocol rather than a
+   *  reserved method answered before dispatch. */
   enableDescribe?: boolean;
   /** Optional dispatch hook for observability. */
   dispatchHook?: DispatchHook;
@@ -165,7 +171,6 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
   const startupGraceS = options.startupGraceSeconds ?? 5;
   const protocolVersion = options.protocolVersion ?? "";
   const serverId = options.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-  const enableDescribe = options.enableDescribe ?? true;
   const dispatchHook = options.dispatchHook ?? null;
   const externalConfig = options.externalLocation;
   const onServeStart = options.onServeStart ?? null;
@@ -225,25 +230,16 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
   }
   let activePeerProviderCalls = 0;
 
-  // Cache for __describe__ — Web-Crypto digest is async, so memoise.
-  let describePromise: Promise<{
-    batch: import("../arrow/index.js").VgiBatch;
-    protocolHash: string;
-  }> | null = null;
-  function describeInfo(): Promise<{
-    batch: import("../arrow/index.js").VgiBatch;
-    protocolHash: string;
-  }> {
-    if (!describePromise) {
-      describePromise = buildDescribeBatch(protocol.name, protocol.getMethods(), serverId).then(
-        ({ batch, metadata }) => ({
-          batch,
-          protocolHash: metadata.get("vgi_rpc.protocol_hash") ?? "",
-        }),
-      );
-    }
-    return describePromise;
-  }
+  // One routing host, so this transport resolves `(protocol, method)` the
+  // same way the stdio server does -- and hosts `vgi_rpc.Reflection.v1`,
+  // which is what a client bootstraps from now that `__describe__` is gone.
+  // Only the binding table and the resolver are used; the dispatch loop
+  // below stays this transport's own, because its framing is.
+  const rpcHost = new VgiRpcServer(protocol, {
+    serverId,
+    protocolVersion,
+    enableDescribe: options.enableDescribe ?? true,
+  });
 
   // Lifecycle: only commit `serveStartFired` after the hook returns successfully.
   let serveStartFired = false;
@@ -583,11 +579,13 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     }
     const batch = batches[0];
     let methodName: string;
+    let protocolName: string;
     let params: Record<string, unknown>;
     let requestId: string | null;
     try {
       const parsed = parseRequest(schema, batch);
       methodName = parsed.methodName;
+      protocolName = parsed.protocol;
       params = parsed.params;
       requestId = parsed.requestId;
     } catch (e: unknown) {
@@ -597,18 +595,16 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
       throw e;
     }
 
-    if (methodName === DESCRIBE_METHOD_NAME && enableDescribe) {
-      const { batch: descBatch } = await describeInfo();
-      await writer.writeStream(descBatch.schema, [descBatch]);
-      return;
-    }
-
-    const methods = protocol.getMethods();
-    const method = methods.get(methodName);
-    if (!method) {
-      const available = [...methods.keys()].sort();
-      const err = new Error(`Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`);
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, serverId, requestId);
+    // Resolve (protocol, method). The routing key is part of the lookup rather
+    // than a label on it: method names may collide across protocols, and a
+    // retired `__describe__` is refused here with a message naming where
+    // introspection went.
+    let method: MethodDefinition;
+    let binding: ProtocolBinding;
+    try {
+      ({ method, binding } = rpcHost.resolve(protocolName, methodName));
+    } catch (error) {
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA, error as Error, serverId, requestId);
       await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
@@ -628,14 +624,20 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
     } catch {
       // best-effort
     }
-    const { protocolHash } = await describeInfo();
     const info: DispatchInfo = {
       method: methodName,
       methodType,
       serverId,
       requestId,
-      protocol: protocol.name,
-      protocolHash,
+      // The protocol that owns the dispatched method, and *its* canonical
+      // digest. Both from the resolved binding, never the server's primary:
+      // `protocol_hash` is the registry key for decoding an archived record,
+      // so a record naming one protocol while carrying another's is decoded
+      // against the wrong description -- and passes the schema while doing it.
+      // Read inline rather than through a local so the pairing is visible at
+      // the emit site, which is what `test/dispatch-identity.test.ts` checks.
+      protocol: binding.name,
+      protocolHash: await protocolHashFor(binding),
       protocolVersion,
       kind: TransportKind.TCP,
       principal: identity.auth.principal ?? "",
