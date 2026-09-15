@@ -22,6 +22,7 @@ import {
 import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
 import { bindingHash, buildReflectionProtocol, REFLECTION_PROTOCOL_NAME } from "./reflection.js";
+import { buildIdentityProtocol, IDENTITY_PROTOCOL_NAME, type IdentityImpl } from "./token-identity.js";
 import {
   type CallStatistics,
   type DispatchHook,
@@ -151,6 +152,32 @@ export class VgiRpcServer {
       { name: REFLECTION_PROTOCOL_NAME, protocol: reflection, protocolHash: "", versionExempt: true },
       true,
     );
+  }
+
+  /** Host `vgi_rpc.Identity.v1` on this server, when the deployment configured
+   *  it.
+   *
+   *  Call this *after* {@link registerReflection} so identity appears in
+   *  reflection's output. (`listBindings` is read at request time here, so the
+   *  order is a convention rather than a mechanism -- but it is the convention
+   *  every port follows, and a port that later caches the listing would break
+   *  silently without it.)
+   *
+   *  Only the methods whose hooks the deployment supplied are hosted, so the
+   *  binding's `protocol_hash` narrows with them: a method this worker cannot
+   *  answer is better *absent* than routed-and-refusing, because then what the
+   *  server hosts describes what it actually does and a client learns it from
+   *  reflection rather than by calling and reading an error. With neither hook
+   *  configured nothing is registered at all -- which is what keeps a
+   *  dependency upgrade from growing a credential-to-identity oracle on every
+   *  existing worker.
+   *
+   *  Not version-exempt: the binding declares no `protocolVersion`, so the gate
+   *  never fires, and exempting it would be a claim rather than a fact. */
+  registerIdentity(identity: IdentityImpl): void {
+    const protocol = buildIdentityProtocol(identity);
+    if (!protocol) return;
+    this.addProtocol({ name: IDENTITY_PROTOCOL_NAME, protocol, protocolHash: "", versionExempt: false }, true);
   }
 
   /** Host an additional protocol alongside the primary.

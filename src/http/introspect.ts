@@ -37,8 +37,25 @@
  */
 
 import type { AuthContext } from "../auth.js";
-import { sha256Hex } from "../util/web-crypto.js";
+import {
+  DEFAULT_IDENTITY_TTL_SECONDS,
+  IdentityUnavailableError,
+  isJwsShaped,
+  MAX_TOKEN_CHARS,
+  RateLimiter,
+  type TokenIdentity,
+  type TokenResolver,
+  tokenDigest,
+} from "../token-identity.js";
 import { AuthUnavailableError } from "./unauthorized.js";
+
+// The credential-shaped constants, the limiter and the payload type are shared
+// with `vgi_rpc.Identity.v1` (`src/token-identity.ts`) rather than duplicated
+// here. This route and that protocol answer the same question and must refuse
+// the same credentials; two copies of a JWS regex is exactly the drift the
+// cross-port identity audit exists to catch.
+export { MAX_TOKEN_CHARS, tokenDigest } from "../token-identity.js";
+export type { TokenIdentity, TokenResolver };
 
 /** Endpoint path, appended to the handler's prefix. Matches the de-facto
  *  contract the existing proxy client already speaks. */
@@ -49,94 +66,16 @@ export const INTROSPECT_ENDPOINT = "/__introspect_token__";
  *  login that the worker it depends on cannot answer. */
 export const INTROSPECT_ENABLED_HEADER = "VGI-Token-Introspection";
 
-/** Three dot-separated base64url segments — a JWS. Such a credential is
- *  validated locally against a key set and MUST NOT be routed here: doing so
- *  sends a bearer token the asker may itself have rejected (expired, wrong
- *  audience) to a third party that might accept it. */
-const JWS_SHAPED = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
-
 /** Hard cap on the request body. The generic request-size limit would otherwise
  *  admit megabytes into a JSON parse for a body whose only legitimate content
  *  is one credential. */
 const MAX_BODY_BYTES = 8192;
 
-/** Cap on a credential we will even attempt to resolve. Anything longer is not
- *  a bearer token; refusing early keeps a resolver from being handed megabytes. */
-const MAX_TOKEN_CHARS = 4096;
-
-/** Default cache window handed to the caller when a resolver names none. */
-export const DEFAULT_INTROSPECT_TTL_SECONDS = 300;
-
-/**
- * Return a SHA-256 hex digest of `token`, for diagnostics.
+/** Default cache window handed to the caller when a resolver names none.
  *
- * The credential itself must never reach a log, a span, or an error message. A
- * digest is stable enough to correlate one credential's failures across records
- * without being the credential.
- */
-export async function tokenDigest(token: string): Promise<string> {
-  return sha256Hex(new TextEncoder().encode(token));
-}
-
-/** The identity an opaque credential authenticates as. */
-export interface TokenIdentity {
-  /** The canonical principal. Return it in the exact form the worker itself
-   *  would derive, so an asker that normalises differently does not authorize
-   *  as one identity while the worker serves another. */
-  principal: string;
-  /** Human-readable name for the credential, for audit trails. Never the
-   *  credential. */
-  tokenName?: string;
-  /** How long the answer may be cached. The caller does the caching; this
-   *  endpoint holds none of its own. Treat it as an authorization window,
-   *  because for any path the asker serves without re-presenting the credential
-   *  it is exactly that. */
-  ttlSeconds?: number;
-}
-
-/**
- * Resolves an opaque credential, returning `null` when it does not resolve.
- *
- * Throw {@link AuthUnavailableError} when the answer is not knowable — a
- * backing store that is down is not the same as a credential that is unknown,
- * and a caller that negative-caches the second must not cache the first.
- */
-export type TokenResolver = (credential: string) => TokenIdentity | null | Promise<TokenIdentity | null>;
-
-/**
- * Fixed-window request limiter, keyed by caller.
- *
- * Present because the endpoint is a credential→identity oracle even when
- * correctly restricted: an allowlisted caller whose own credential leaks can
- * still test guesses. Rate limiting does not close that, it bounds it — a lower
- * ceiling on how fast an attacker converts guesses to answers.
- *
- * Fixed-window rather than a token bucket: a window admits at most twice the
- * rate across a boundary, which is a rounding error here, and the state is one
- * integer per caller rather than a float that has to be aged.
- */
-class RateLimiter {
-  private readonly counts = new Map<string, number>();
-  private windowStart = 0;
-
-  constructor(
-    private readonly perWindow: number,
-    private readonly windowMs = 1000,
-  ) {}
-
-  allow(key: string, now: number = Date.now()): boolean {
-    if (now - this.windowStart >= this.windowMs) {
-      // Whole-map reset rather than per-key ageing: a caller cycling keys
-      // cannot grow the map beyond one window's worth.
-      this.counts.clear();
-      this.windowStart = now;
-    }
-    const count = this.counts.get(key) ?? 0;
-    if (count >= this.perWindow) return false;
-    this.counts.set(key, count + 1);
-    return true;
-  }
-}
+ *  One value, shared with the protocol: a route and a protocol that disagree
+ *  about the revocation lag are two different security postures. */
+export const DEFAULT_INTROSPECT_TTL_SECONDS = DEFAULT_IDENTITY_TTL_SECONDS;
 
 /** The endpoint, bound to one validated configuration. */
 export interface Introspector {
@@ -232,7 +171,13 @@ async function readSubjectToken(request: Request): Promise<string | null> {
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const token = (body as Record<string, unknown>).token;
-  if (typeof token !== "string" || !token || token.length > MAX_TOKEN_CHARS) return null;
+  // Blank *after trimming*: whitespace-only is not a credential, and it must
+  // not reach a resolver on this surface either. The length cap stays against
+  // the original — it is about what we were handed.
+  if (typeof token !== "string" || !token.trim() || token.length > MAX_TOKEN_CHARS) return null;
+  // Returned unmodified. Trimming is for the shape test alone; a resolver that
+  // was handed a rewritten credential would be answering about a string the
+  // caller never sent.
   return token;
 }
 
@@ -285,7 +230,7 @@ async function introspect(
 
   const digest = await tokenDigest(token);
 
-  if (JWS_SHAPED.test(token)) {
+  if (isJwsShaped(token)) {
     // Refused without ever reaching the resolver. A JWS is validated locally
     // against a key set; one arriving here is either a caller bug or an attempt
     // to have this worker vouch for a token its asker already rejected.
@@ -297,7 +242,10 @@ async function introspect(
   try {
     identity = await resolver(token);
   } catch (err) {
-    if (!(err instanceof AuthUnavailableError)) {
+    // Either spelling of "not knowable": this route's own, and the protocol's.
+    // One resolver serves both surfaces, so a resolver written against either
+    // must produce a 503 here rather than a definitive 404.
+    if (!(err instanceof AuthUnavailableError) && !(err instanceof IdentityUnavailableError)) {
       throw err;
     }
     // "I could not find out" is not "it did not resolve". Refusing with 404 here

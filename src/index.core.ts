@@ -106,9 +106,6 @@ export {
   type SpiffeX509HeaderProviderOptions,
   type StateSerializer,
   spiffeX509HeaderProvider,
-  type TokenIdentity,
-  type TokenResolver,
-  tokenDigest,
   type UnpackedToken,
   UPLOAD_URL_METHOD,
   UPLOAD_URL_PARAMS_SCHEMA,
@@ -170,6 +167,40 @@ export {
 } from "./schema.js";
 export { type ServeStreamOptions, serveStream } from "./serve-stream.js";
 export { VgiRpcServer } from "./server.js";
+// `vgi_rpc.Identity.v1` -- the framework-owned identity protocol. Its payload
+// types and credential-shaped constants are also what the HTTP
+// `__introspect_token__` route uses, so they are exported from here rather than
+// from `./http/index.js`: one definition, two surfaces.
+export {
+  buildIdentityProtocol,
+  checkFreshness,
+  checkIntrospector,
+  DEFAULT_IDENTITY_TTL_SECONDS,
+  DEFAULT_INTROSPECT_RATE_LIMIT,
+  DEFAULT_MAX_AUTH_AGE_SECONDS,
+  encodeIssuedGrant,
+  encodeTokenIdentity,
+  type GrantMinter,
+  GrantRefusedError,
+  IDENTITY_PROTOCOL_NAME,
+  IdentityImpl,
+  type IdentityOptions,
+  IdentityUnavailableError,
+  IntrospectionRefusedError,
+  ISSUED_GRANT_SCHEMA,
+  type IssuedGrant,
+  isJwsShaped,
+  MAX_TOKEN_CHARS,
+  normalisePrincipals,
+  RateLimiter,
+  rejectJwsShaped,
+  StaleAuthError,
+  TOKEN_IDENTITY_SCHEMA,
+  type TokenIdentity,
+  type TokenResolver,
+  TokenUnresolvedError,
+  tokenDigest,
+} from "./token-identity.js";
 export {
   type AccessLogDeferral,
   type CallContext,
