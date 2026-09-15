@@ -17,12 +17,13 @@ import type { Subprocess } from "bun";
 import { httpConnect, type LogMessage, type RpcClient, subprocessConnect } from "../src/client/index.js";
 import { httpIntrospect } from "../src/client/introspect.js";
 import { RpcError } from "../src/errors.js";
+import { PYTHON_BIN } from "./reference.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-const PYTHON = process.env.VGI_RPC_PYTHON_BIN ?? "python3";
+const PYTHON = PYTHON_BIN;
 
 /** Check if the vgi_rpc package is importable. */
 let hasPython = false;

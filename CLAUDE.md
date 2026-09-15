@@ -9,6 +9,30 @@ TypeScript server library for the vgi-rpc framework. Communicates over stdin/std
   - The Python CLI (`vgi-rpc`) and conformance suite are installed from PyPI: `pip install "vgi-rpc[http]"`
   - When in doubt about wire protocol details, check the Python implementation
 
+  **Two Python checkouts exist locally and they are not the same implementation.**
+  `vgi-rpc-python` (branch `multiservice/pr1-internal`) is canonical. The
+  similarly named `vgi-rpc` checkout is `main` — flat routes, no routing key,
+  `__describe__` still live, none of the multiservice work. Its version number
+  is *higher*, which is exactly why this went unnoticed: this repo's harness
+  was pinned to it, and the resulting all-red conformance run (1456 failed / 95
+  passed) read as port breakage rather than as a harness aimed at a server that
+  404s every namespaced path. Against the canonical reference the same suite is
+  1512 passed / 42 failed.
+
+  Nothing committed hardcodes either path. `test/reference.ts` resolves the
+  interpreter and the `vgi-rpc` CLI in three steps — environment override, then
+  the reference checkout's venv located relative to `$HOME`, then `PATH` — and
+  the `Makefile` mirrors it for `$(PYTHON)`. Override with:
+
+  | variable | what it points at |
+  |---|---|
+  | `VGI_RPC_PYTHON_HOME` | root of the reference checkout (default `~/Development/vgi-rpc-python`) |
+  | `VGI_RPC_PYTHON_BIN` | a specific interpreter, bypassing the checkout lookup |
+  | `VGI_RPC_CLI` | a specific `vgi-rpc` binary |
+
+  CI sets none of them: it pip-installs the reference, so the `PATH` fallback
+  is the correct answer there.
+
 ## Project Structure
 
 ```
@@ -63,7 +87,8 @@ The project uses a Makefile for common tasks. Run `make help` to see all targets
 - Integration and conformance tests require `vgi-rpc[http]` installed: `pip install "vgi-rpc[http]"`
   - Conformance tests use `test_ts_conformance.py` which imports `vgi_rpc.conformance._pytest_suite` and runs against `bun run examples/conformance.ts`
   - Integration tests use the `vgi-rpc` CLI (must be on PATH)
-  - Client tests use `vgi-rpc-conformance` to spawn Python servers (set `VGI_RPC_PYTHON_BIN` to override python binary)
+  - Client tests spawn Python servers via the interpreter `test/reference.ts` resolves; see **Related Projects** for the override variables
+  - A bare `bun test` against the canonical reference is **1246 pass / 9 skip / 0 fail**. Every failure in a run that reports ~26 fails with `Executable not found in $PATH: "vgi-rpc"` is a harness-pointing problem, not a port defect
 - Always use timeouts on subprocess spawns to prevent hangs
 - Build: `make build` or `bun run build` (runs TypeScript type-checking then bundles)
 
@@ -95,6 +120,8 @@ This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
   **`protocol` and `protocolHash` are the owning binding's, at every emit site.** A server hosts several protocols; the record must name the one that owns the dispatched method, and carry *its* canonical digest. The two disagreeing is worse than either being wrong alone — `protocol_hash` is the registry key for decoding archived records, so a record naming one protocol and carrying another's decodes against the wrong description while passing the schema. Both are read inline from `binding` via `protocolHashFor(binding)` at all four sites (stdio server, HTTP handler, unix and tcp launchers), and `test/dispatch-identity.test.ts` enumerates those sites structurally — a fifth one added later fails that test rather than reintroducing this silently. Framework endpoints owned by no protocol (`__transport_options__`, `__upload_url__`) log the primary, which is the specified behaviour rather than a gap.
 
   **HTTP stream records.** Over HTTP a stream is many requests, so one record is emitted per `/init` and per `/exchange`, and the fields that tie them together come from the dispatcher rather than the handler: `DispatchContext.streamObserver` (`src/http/dispatch.ts`) reports the stream's chain id and any client cancel. `stream_id` is the hex of the stream's `callId` — minted once at `/init`, carried sealed in the call token and every cursor — so `/init` and its continuations agree and two streams never collide without a second identifier or a token-format change. The all-zeros id is reserved for a stream record whose request failed before a stream existed. `request_data` rides on unary calls and stream `/init` (spec §4.3) and on no continuation; `http_status` is on every HTTP record.
+
+  Two things pin this end-to-end, and both are necessary. `conformance/check_access_log_streams.py` (run in CI with `--http --require-continuations`) reads a log a real worker produced and rejects one that is silent about streams, one whose ids are constant, and one that stamps `request_data` on a continuation. `test/http/stream-access-log.test.ts` drives a multi-turn `produce_n` through `createHttpHandler` in-process and asserts the same contract without a server. Neither is redundant: `test/access-log.test.ts` feeds `AccessLogHook` hand-built `DispatchInfo` values, so it can only show what the hook does with a `streamId` it is *handed* — it would pass unchanged on a handler that emitted nothing at all for streams, which is the exact state two sibling ports were found in. A record validator validates the records that exist; zero records invalidates nothing and reads as clean.
 
   **`remote_addr` is empty over HTTP**, unlike the reference, which reports the peer address. `createHttpHandler` is a `(Request) => Response` function: the fetch API exposes no peer address, and the runtimes that can supply one (Bun's `server.requestIP`) only do so through a server object the handler never sees. The schema permits the empty string.
 

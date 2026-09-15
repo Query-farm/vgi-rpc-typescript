@@ -20,8 +20,9 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { Subprocess } from "bun";
 import { httpConnect } from "../src/client/index.js";
 import type { ExternalLocationConfig } from "../src/external.js";
+import { PYTHON_BIN } from "./reference.js";
 
-const PYTHON = process.env.VGI_RPC_PYTHON_BIN ?? "/Users/rusty/Development/vgi-rpc/.venv/bin/python";
+const PYTHON = PYTHON_BIN;
 
 let hasPython = false;
 try {
@@ -35,10 +36,18 @@ try {
 // -- and the suite would be asserting against a server it cannot address at
 // all rather than against externalization.
 //
+// This probe used to be load-bearing: the interpreter default above was an
+// absolute path into the *stale* `vgi-rpc` checkout, so on a correctly set up
+// machine this group skipped every run. It no longer is -- `PYTHON_BIN`
+// resolves the canonical reference (see `test/reference.ts`) and these tests
+// run. What it now catches is an environment that genuinely cannot host them:
+// a `VGI_RPC_PYTHON_BIN` override aimed at an old tree, or a PATH `python3`
+// carrying a published pre-namespaced vgi-rpc. Keeping it turns that into a
+// legible skip instead of a wall of 404s that reads as a client bug.
+//
 // `vgi_rpc.http._common.rpc_path` is the route-shape helper the namespaced
 // reference gained with the routes themselves, so importing it is the same
-// question as "is this server new enough to talk to?". Point
-// `VGI_RPC_PYTHON_BIN` at a current reference and the whole suite runs.
+// question as "is this server new enough to talk to?".
 let hasNamespacedRoutes = false;
 if (hasPython) {
   try {
@@ -74,6 +83,15 @@ async function readPort(proc: Subprocess): Promise<string> {
   throw new Error(`Failed to read port from server: ${buf}`);
 }
 
+if (!hasPython || !hasNamespacedRoutes) {
+  // Say why, on the way past. A silent skip is how a gap stays invisible:
+  // the run reports green and nobody learns the group never executed.
+  console.warn(
+    `[client-externalize] skipped: ${PYTHON} ` +
+      (hasPython ? "predates namespaced routes" : "cannot import vgi_rpc.conformance.fake_storage/waitress") +
+      ". Set VGI_RPC_PYTHON_HOME or VGI_RPC_PYTHON_BIN to a current reference.",
+  );
+}
 const describeFn = hasPython && hasNamespacedRoutes ? describe : describe.skip;
 
 describeFn("client request externalization (Python server)", () => {

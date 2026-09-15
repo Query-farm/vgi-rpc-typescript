@@ -7,9 +7,15 @@
  * Each entry pins the byte-identical hash that
  * `vgi_rpc.launcher.compute_hash()` produces for the given (argv, cwd,
  * env) tuple.  Re-run
- * `~/Development/vgi-rpc/scripts/regenerate_launcher_parity_vectors.py`
- * to refresh both this file and the C++ launcher's vectors when the
- * canonical form changes.
+ * `scripts/regenerate_launcher_parity_vectors.py` in the canonical Python
+ * reference -- the `vgi-rpc-python` checkout, whose location this repo
+ * resolves via `VGI_RPC_PYTHON_HOME` (see `test/reference.ts`) -- to refresh
+ * both this file and the C++ launcher's vectors when the canonical form
+ * changes.
+ *
+ * This used to cite the `vgi-rpc` checkout, which is `main` and carries none
+ * of the multiservice work; regenerating from it would have silently pinned
+ * vectors from the wrong implementation.
  */
 
 import { describe, expect, test } from "bun:test";

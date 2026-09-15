@@ -1,10 +1,23 @@
 .PHONY: all build build-types build-js test test-unit test-integration test-conformance test-smoke typecheck lint clean distclean docs docs-dev docs-api-coverage help
 
-# Python with vgi-rpc installed.  Defaults to the editable local install in
-# the sibling vgi-rpc checkout (which is the source of truth for the
-# conformance suite); override on the command line for a different env, e.g.
-# ``make PYTHON=python3.13 test-conformance``.
-PYTHON ?= /Users/rusty/Development/vgi-rpc/.venv/bin/python
+# Python with vgi-rpc installed.
+#
+# The canonical reference is the `vgi-rpc-python` checkout on
+# `multiservice/pr1-internal` -- NOT the `vgi-rpc` checkout, which is `main`
+# and carries none of the multiservice work (flat routes, no routing key,
+# `__describe__` still live). The version numbers mislead: the stale tree is
+# the numerically higher one, and pointing this at it makes every namespaced
+# call 404 in a way that reads as a port bug rather than a harness one. That
+# is exactly what the previous hardcoded default did.
+#
+# Resolved relative to $(HOME) rather than hardcoded, then falling back to
+# whatever is on PATH so CI -- which pip-installs the reference instead of
+# checking it out -- needs no configuration. Override either level:
+#   make VGI_RPC_PYTHON_HOME=~/src/vgi-rpc-python test-conformance
+#   make PYTHON=python3.13 test-conformance
+VGI_RPC_PYTHON_HOME ?= $(HOME)/Development/vgi-rpc-python
+PYTHON ?= $(shell test -x "$(VGI_RPC_PYTHON_HOME)/.venv/bin/python" \
+	&& echo "$(VGI_RPC_PYTHON_HOME)/.venv/bin/python" || command -v python3)
 
 # Unit test files (no external dependencies)
 UNIT_TESTS := test/access-log.test.ts test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/http/sticky.test.ts test/auth.test.ts test/http-auth.test.ts test/bearer.test.ts

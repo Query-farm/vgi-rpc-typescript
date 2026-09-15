@@ -21,8 +21,9 @@ import {
 import type { Subprocess } from "bun";
 import { httpConnect } from "../src/client/connect.js";
 import type { ServiceDescription } from "../src/client/introspect.js";
+import { PYTHON_BIN } from "./reference.js";
 
-const PYTHON = process.env.VGI_RPC_PYTHON_BIN ?? "python3";
+const PYTHON = PYTHON_BIN;
 const canRunWorker = Bun.spawnSync([PYTHON, "-c", "import vgi_rpc.conformance.client_worker"]).exitCode === 0;
 const nativeDescribe = canRunWorker ? describe : describe.skip;
 
