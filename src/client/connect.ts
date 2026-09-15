@@ -105,6 +105,10 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
    *  `vgi_rpc.protocol_version` so a versioned server can validate at the
    *  dispatch boundary. */
   let serverProtocolVersion = options?.description?.protocolVersion ?? "";
+  // The routing key, learned from the same introspection response. Reflection
+  // has a fixed name, so it is the bootstrap: ask the one protocol whose name a
+  // client can know a priori what else the server speaks, then address that.
+  let serverProtocolName = options?.description?.protocolName ?? "";
   let compressFn: CompressFn | undefined;
   let decompressFn: DecompressFn | undefined;
   let compressionLoaded = false;
@@ -295,6 +299,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
     });
     methodCache = new Map(desc.methods.map((m) => [m.name, m]));
     serverProtocolVersion = desc.protocolVersion;
+    serverProtocolName = desc.protocolName;
     return methodCache;
   }
 
@@ -310,7 +315,10 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       // Apply defaults
       const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+      const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+        protocolVersion: serverProtocolVersion,
+        protocol: serverProtocolName,
+      });
       const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}`, body);
       checkAuth(resp);
 
@@ -363,7 +371,10 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       // Apply defaults
       const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+      const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+        protocolVersion: serverProtocolVersion,
+        protocol: serverProtocolName,
+      });
       const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}/init`, body);
       checkAuth(resp);
 

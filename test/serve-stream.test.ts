@@ -10,7 +10,7 @@ import { VgiRpcServer } from "../src/server.js";
 import { type DispatchInfo, TransportKind } from "../src/types.js";
 
 test("serveConnection threads its transport kind through hooks and call context", async () => {
-  const protocol = new Protocol("transport-kind");
+  const protocol = new Protocol("transport_kind");
   let hookKind: TransportKind | undefined;
   let contextKind: TransportKind | undefined;
   const serveStartKinds: TransportKind[] = [];
@@ -23,7 +23,7 @@ test("serveConnection threads its transport kind through hooks and call context"
     },
   });
   const method = protocol.getMethod("echo")!;
-  const request = buildRequestIpc(method.paramsSchema as any, { value: 1 }, "echo");
+  const request = buildRequestIpc(method.paramsSchema as any, { value: 1 }, "echo", { protocol: protocol.name });
   const readable = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(request);
@@ -50,7 +50,7 @@ test("serveConnection threads its transport kind through hooks and call context"
 });
 
 test("serveConnection rejects a mismatched parameter schema before invoking the handler", async () => {
-  const protocol = new Protocol("schema-contract");
+  const protocol = new Protocol("schema_contract");
   let invoked = false;
   protocol.unary("echo", {
     params: { value: float },
@@ -61,7 +61,7 @@ test("serveConnection rejects a mismatched parameter schema before invoking the 
     },
   });
   const wrongSchema = new Schema([new Field("value", new Utf8(), false)]);
-  const request = buildRequestIpc(wrongSchema, { value: "wrong" }, "echo");
+  const request = buildRequestIpc(wrongSchema, { value: "wrong" }, "echo", { protocol: protocol.name });
   const readable = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(request);

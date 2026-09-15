@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { backend, isMap, type VgiBatch, type VgiSchema } from "../arrow/index.js";
-import { REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
+import { PROTOCOL_KEY, REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError, VersionError } from "../errors.js";
 import { isOpaquePassthroughType } from "./opaque.js";
 
@@ -13,6 +13,9 @@ const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
 
 export interface ParsedRequest {
   methodName: string;
+  /** The protocol the method belongs to -- the routing key. Empty only for a
+   *  request that carried none, which the dispatcher refuses. */
+  protocol: string;
   requestVersion: string;
   requestId: string | null;
   schema: VgiSchema;
@@ -171,6 +174,7 @@ export function parseRequest(schema: VgiSchema, batch: VgiBatch): ParsedRequest 
 
   return {
     methodName,
+    protocol: metadata.get(PROTOCOL_KEY) ?? "",
     requestVersion: version,
     requestId,
     schema,

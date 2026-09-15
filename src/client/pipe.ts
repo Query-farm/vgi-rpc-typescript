@@ -454,6 +454,9 @@ export function pipeConnect(
   let reader: IpcStreamReader | null = null;
   let readerPromise: Promise<IpcStreamReader> | null = null;
   let methodCache: Map<string, MethodInfo> | null = null;
+  // The routing key, learned from the introspection response. Reflection has a
+  // fixed name, so it is the bootstrap: ask the one protocol whose name a
+  // client can know a priori what else the server speaks, then address that.
   let protocolName = "";
   let serverProtocolVersion = "";
   let _busy = false;
@@ -562,7 +565,10 @@ export function pipeConnect(
         const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
         // Send request
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+          protocolVersion: serverProtocolVersion,
+          protocol: protocolName,
+        });
         writeFn(body);
 
         // Read response
@@ -619,7 +625,10 @@ export function pipeConnect(
         const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
         // Send init request (params as a complete IPC stream)
-        const body = buildRequestIpc(info.paramsSchema, fullParams, method, { protocolVersion: serverProtocolVersion });
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+          protocolVersion: serverProtocolVersion,
+          protocol: protocolName,
+        });
         writeFn(body);
 
         // Read header if method has headerSchema

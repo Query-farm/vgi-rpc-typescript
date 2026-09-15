@@ -2,6 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { schema as makeSchema, serializeBatch } from "./arrow/index.js";
+import {
+  type ProtocolBinding,
+  ProtocolNotSpecifiedError,
+  ProtocolNotSupportedError,
+  validateProtocolName,
+} from "./binding.js";
 import { DESCRIBE_METHOD_NAME, PROTOCOL_VERSION_KEY } from "./constants.js";
 import { buildDescribeBatch } from "./dispatch/describe.js";
 import { dispatchStream } from "./dispatch/stream.js";
@@ -19,6 +25,7 @@ import {
   type CallStatistics,
   type DispatchHook,
   type DispatchInfo,
+  type MethodDefinition,
   MethodType,
   type ServeStartHook,
   TransportKind,
@@ -64,6 +71,12 @@ export class VgiRpcServer {
    *  failure on first request leaves it `false` and the next request
    *  re-fires rather than silently skipping. Mirrors Python 7b3999c. */
   private serveStartFired = false;
+  /** Protocols hosted beyond the primary, keyed by wire name.
+   *
+   *  The primary stays in `protocol` so every existing path is untouched; it is
+   *  projected into a binding on demand by {@link bindings}. */
+  private extraBindings: Map<string, ProtocolBinding> = new Map();
+  private _primaryHash: Promise<string> | null = null;
 
   constructor(
     protocol: Protocol,
@@ -89,6 +102,72 @@ export class VgiRpcServer {
     this.externalConfig = options?.externalLocation;
     this.protocolVersion = options?.protocolVersion ?? "";
     this.onServeStart = options?.onServeStart ?? null;
+  }
+
+  /** Every protocol this server hosts, primary first.
+   *
+   *  The primary is projected from the server's own protocol rather than
+   *  stored, so the existing registration paths keep working untouched. */
+  bindings(): Map<string, ProtocolBinding> {
+    const out = new Map<string, ProtocolBinding>();
+    out.set(this.protocol.name, {
+      name: this.protocol.name,
+      protocol: this.protocol,
+      protocolHash: "",
+      versionExempt: false,
+    });
+    for (const [name, b] of this.extraBindings) out.set(name, b);
+    return out;
+  }
+
+  /** Host an additional protocol alongside the primary.
+   *
+   *  `allowReserved` is for the framework's own protocols only; an application
+   *  passing `true` would be able to shadow reflection. */
+  addProtocol(binding: ProtocolBinding, allowReserved = false): void {
+    validateProtocolName(binding.name, allowReserved);
+    if (binding.name === this.protocol.name || this.extraBindings.has(binding.name)) {
+      throw new Error(
+        `Two protocols are hosted under the same name '${binding.name}'. ` +
+          `The name is the routing key, so it must be unique.`,
+      );
+    }
+    this.extraBindings.set(binding.name, binding);
+  }
+
+  /** Resolve one request's (protocol, method) pair.
+   *
+   *  The routing key is required, including against a server hosting exactly
+   *  one protocol: an exemption would let an intermediary that rebuilds a
+   *  request and drops the field land silently on whichever protocol happened
+   *  to be first, rather than being told.
+   *
+   *  The three failures are deliberately distinct, and a client depends on the
+   *  difference -- particularly the last, which is the documented
+   *  capability-probe signal: a client testing for an optional method must be
+   *  able to tell "you do not speak this protocol" from "you speak it but lack
+   *  this method". */
+  resolve(protocol: string, method: string): { method: MethodDefinition; binding: ProtocolBinding } {
+    const all = this.bindings();
+    const hosted = [...all.keys()].sort();
+    if (!protocol) throw new ProtocolNotSpecifiedError(hosted);
+    // Checked before the lookup so an arbitrary request-supplied string never
+    // reaches an error message, a log field or a metric label.
+    try {
+      validateProtocolName(protocol, true);
+    } catch (e) {
+      throw new ProtocolNotSupportedError(`'vgi_rpc.protocol' is not a protocol name: ${(e as Error).message}`);
+    }
+    const binding = all.get(protocol);
+    if (!binding) throw ProtocolNotSupportedError.notHosted(protocol, hosted);
+    const found = binding.protocol.getMethod(method);
+    if (!found) {
+      const available = binding.protocol.methodNames().sort();
+      throw new MethodNotImplementedError(
+        `Protocol '${protocol}' has no method '${method}'. Available: [${available.join(", ")}].`,
+      );
+    }
+    return { method: found, binding };
   }
 
   /** Fire the on_serve_start hook once for this transport. Idempotent
@@ -253,12 +332,14 @@ export class VgiRpcServer {
 
     const batch = batches[0];
     let methodName: string;
+    let protocolName: string;
     let params: Record<string, any>;
     let requestId: string | null;
 
     try {
       const parsed = parseRequest(schema, batch);
       methodName = parsed.methodName;
+      protocolName = parsed.protocol;
       params = parsed.params;
       requestId = parsed.requestId;
     } catch (e: any) {
@@ -278,17 +359,18 @@ export class VgiRpcServer {
       return;
     }
 
-    // Look up method
-    const method = this.protocol.getMethod(methodName);
-    if (!method) {
-      const available = this.protocol.methodNames();
-      const err = new MethodNotImplementedError(
-        `Unknown method: '${methodName}'. Available methods: [${available.join(", ")}]`,
-      );
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, this.serverId, requestId);
+    // Resolve (protocol, method). Method names may collide across protocols,
+    // so the routing key is part of the lookup rather than a label on it.
+    let method: MethodDefinition;
+    let binding: ProtocolBinding;
+    try {
+      ({ method, binding } = this.resolve(protocolName, methodName));
+    } catch (error) {
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA, error as Error, this.serverId, requestId);
       await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
+    void binding;
 
     try {
       validateRequestSchema(schema, method.paramsSchema, methodName);

@@ -17,6 +17,7 @@ import {
   LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
+  PROTOCOL_KEY,
   PROTOCOL_VERSION_KEY,
   REQUEST_VERSION,
   REQUEST_VERSION_KEY,
@@ -79,6 +80,11 @@ function coerceForArrow(type: DataType, value: any): any {
 /**
  * Build a 1-row Arrow IPC request batch with method metadata.
  *
+ * `options.protocol` is the routing key -- which protocol the method belongs
+ * to. The wire protocol requires it on every request, including against a
+ * server hosting exactly one protocol, so omitting it produces a request the
+ * server refuses with `protocol_not_specified`.
+ *
  * When `options.protocolVersion` is non-empty, the value is emitted as
  * `vgi_rpc.protocol_version` so servers that declare a Protocol-level
  * version validate the request at the dispatch boundary.
@@ -87,10 +93,13 @@ export function buildRequestIpc(
   schema: Schema,
   params: Record<string, any>,
   method: string,
-  options?: { protocolVersion?: string },
+  options?: { protocolVersion?: string; protocol?: string },
 ): Uint8Array {
   const metadata = new Map<string, string>();
   metadata.set(RPC_METHOD_KEY, method);
+  if (options?.protocol) {
+    metadata.set(PROTOCOL_KEY, options.protocol);
+  }
   metadata.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   if (options?.protocolVersion) {
     metadata.set(PROTOCOL_VERSION_KEY, options.protocolVersion);
