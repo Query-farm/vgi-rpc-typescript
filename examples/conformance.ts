@@ -113,5 +113,9 @@ if (unixArg !== undefined) {
   await handle.done;
 } else {
   const server = new VgiRpcServer(protocol, { enableDescribe: true, dispatchHook });
+  // Introspection is vgi_rpc.Reflection.v1, an ordinary co-hosted protocol,
+  // rather than a __describe__ method name. Registered after the application
+  // protocol so it appears in its own output without being special-cased.
+  server.registerReflection();
   server.run();
 }

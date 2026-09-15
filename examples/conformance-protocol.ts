@@ -100,9 +100,9 @@ const POINT_STRUCT = struct(POINT_FIELDS);
 
 const STATUS_CYCLE = ["PENDING", "ACTIVE", "CLOSED"];
 
-const richMapStrInt = mapType(field("key", utf8(), false), field("value", int64(), false));
+const richMapStrInt = mapType(field("key", utf8(), false), field("value", int64()));
 
-const richMapStrStr = mapType(field("key", utf8(), false), field("value", utf8(), false));
+const richMapStrStr = mapType(field("key", utf8(), false), field("value", utf8()));
 
 const RICH_HEADER_SCHEMA = schema([
   field("str_field", utf8(), false),
@@ -110,16 +110,16 @@ const RICH_HEADER_SCHEMA = schema([
   field("int_field", int64(), false),
   field("float_field", float64(), false),
   field("bool_field", boolType(), false),
-  field("list_of_int", list(field("item", int64(), false)), false),
-  field("list_of_str", list(field("item", utf8(), false)), false),
+  field("list_of_int", list(field("item", int64())), false),
+  field("list_of_str", list(field("item", utf8())), false),
   field("dict_field", richMapStrInt, false),
   field("enum_field", dictionary(int16Type(), utf8()), false),
   field("nested_point", POINT_STRUCT, false),
   field("optional_str", utf8(), true),
   field("optional_int", int64(), true),
   field("optional_nested", POINT_STRUCT, true),
-  field("list_of_nested", list(field("item", POINT_STRUCT, false)), false),
-  field("nested_list", list(field("item", list(field("item", int64(), false)), false)), false),
+  field("list_of_nested", list(field("item", POINT_STRUCT)), false),
+  field("nested_list", list(field("item", list(field("item", int64())))), false),
   field("annotated_int32", int32Type(), false),
   field("annotated_float32", float32Type(), false),
   field("dict_str_str", richMapStrStr, false),
@@ -276,7 +276,7 @@ protocol.unary("echo_enum", {
   handler: (p) => ({ result: p.status }),
 });
 
-const listUtf8 = list(field("item", utf8(), false));
+const listUtf8 = list(field("item", utf8()));
 
 protocol.unary("echo_list", {
   params: schema([field("values", listUtf8, false)]),
@@ -288,7 +288,7 @@ protocol.unary("echo_list", {
   },
 });
 
-const mapStrInt = mapType(field("key", utf8(), false), field("value", int64(), false));
+const mapStrInt = mapType(field("key", utf8(), false), field("value", int64()));
 
 protocol.unary("echo_dict", {
   params: schema([field("mapping", mapStrInt, false)]),
@@ -297,7 +297,7 @@ protocol.unary("echo_dict", {
   handler: (p) => ({ result: p.mapping }),
 });
 
-const nestedList = list(field("item", list(field("item", int64(), false)), false));
+const nestedList = list(field("item", list(field("item", int64()))));
 
 protocol.unary("echo_nested_list", {
   params: schema([field("matrix", nestedList, false)]),
@@ -1138,7 +1138,7 @@ protocol.exchange<Record<string, never>>("cancellable_exchange", {
 
 protocol.unary("cancel_probe_counters", {
   params: {},
-  result: schema([field("result", list(field("item", int64(), false)), false)]),
+  result: schema([field("result", list(field("item", int64())), false)]),
   handler: () => ({
     result: [BigInt(cancelProbe.produceCalls), BigInt(cancelProbe.exchangeCalls), BigInt(cancelProbe.onCancelCalls)],
   }),
@@ -1217,7 +1217,7 @@ protocol.unary("close_counter", {
 // session must be re-resolved by the sticky middleware on every HTTP
 // request. Mirrors `SessionCounterProducerState`/`SessionCounterExchangeState`
 // in vgi_rpc.conformance.
-const _SESSION_COUNTER_OUTPUT = schema([field("value", int64(), false)]);
+const _SESSION_COUNTER_OUTPUT = schema([field("value", int64())]);
 const _SESSION_COUNTER_EXCHANGE_INPUT = schema([field("by", int64(), false)]);
 
 protocol.producer<{ count: number; current: number }>("stream_session_counter", {

@@ -21,6 +21,7 @@ import {
 } from "./errors.js";
 import type { ExternalLocationConfig } from "./external.js";
 import type { Protocol } from "./protocol.js";
+import { bindingHash, buildReflectionProtocol, REFLECTION_PROTOCOL_NAME } from "./reflection.js";
 import {
   type CallStatistics,
   type DispatchHook,
@@ -120,6 +121,39 @@ export class VgiRpcServer {
     return out;
   }
 
+  /** Host `vgi_rpc.Reflection.v1` on this server.
+   *
+   *  Registered after the application protocol so it appears in its own output
+   *  without being special-cased, and so the primary stays the application
+   *  protocol -- which is what the single-protocol accessors report.
+   *
+   *  The binding is version-exempt: this is the protocol a version-mismatched
+   *  client calls to learn *what* mismatched, and gating it would deny the
+   *  client the diagnosis it came for. */
+  registerReflection(): void {
+    const hashes = new Map<string, Promise<string>>();
+    const reflection = buildReflectionProtocol({
+      listBindings: () => this.bindings() as never,
+      hashFor: (name) => {
+        // Cached: read on every reflection call, and a protocol's method table
+        // does not change after registration.
+        let h = hashes.get(name);
+        if (!h) {
+          const binding = this.bindings().get(name);
+          h = binding ? bindingHash(name, binding.protocol.getMethods()) : Promise.resolve("");
+          hashes.set(name, h);
+        }
+        return h;
+      },
+      serverId: () => this.serverId,
+      serverVersion: () => "",
+    });
+    this.addProtocol(
+      { name: REFLECTION_PROTOCOL_NAME, protocol: reflection, protocolHash: "", versionExempt: true },
+      true,
+    );
+  }
+
   /** Host an additional protocol alongside the primary.
    *
    *  `allowReserved` is for the framework's own protocols only; an application
@@ -204,9 +238,10 @@ export class VgiRpcServer {
    *  `protocol.protocolVersionParts` is non-null. Mirrors Python's
    *  `RpcServer._check_protocol_version`: exact major+minor match, patch
    *  ignored; directional error message names which side is older. */
-  private checkProtocolVersion(clientVersion: string | undefined): void {
-    const serverParts = this.protocol.protocolVersionParts!;
-    const serverVersion = this.protocol.protocolVersion;
+  private checkProtocolVersion(clientVersion: string | undefined, binding?: ProtocolBinding): void {
+    const target = binding?.protocol ?? this.protocol;
+    const serverParts = target.protocolVersionParts!;
+    const serverVersion = target.protocolVersion;
     if (clientVersion === undefined) {
       throw new ProtocolVersionError(
         "VGI client/worker protocol_version mismatch.\n" +
@@ -370,7 +405,6 @@ export class VgiRpcServer {
       await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
-    void binding;
 
     try {
       validateRequestSchema(schema, method.paramsSchema, methodName);
@@ -381,14 +415,16 @@ export class VgiRpcServer {
       return;
     }
 
-    // Application-protocol-version gate. Fires only when the Protocol
-    // declared a `protocolVersion`. `__describe__` is exempt — it is the
-    // diagnostic path a mismatched client uses to introspect the server's
-    // version. Mirrors Python's serve_one dispatch-boundary check.
-    if (this.protocol.protocolVersionParts !== null) {
+    // Application-protocol-version gate, against the binding that owns the
+    // resolved method. A server hosting several protocols has a version per
+    // binding and no single "server version"; gating a secondary against the
+    // primary rejects correct callers and names the wrong protocol when it
+    // does. A version-exempt binding (reflection) is skipped: it is what a
+    // mismatched client calls to learn what mismatched.
+    if (!binding.versionExempt && binding.protocol.protocolVersionParts !== null) {
       try {
         const md = batch.metadata;
-        this.checkProtocolVersion(md?.get(PROTOCOL_VERSION_KEY));
+        this.checkProtocolVersion(md?.get(PROTOCOL_VERSION_KEY), binding);
       } catch (exc) {
         const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
         const errBatch = buildErrorBatch(errSchema, exc as Error, this.serverId, requestId);
