@@ -195,7 +195,7 @@ export {
   ISSUED_GRANT_SCHEMA,
   type IssuedGrant,
   isJwsShaped,
-  MAX_TOKEN_CHARS,
+  MAX_TOKEN_BYTES,
   normalisePrincipals,
   RateLimiter,
   rejectJwsShaped,
@@ -205,6 +205,8 @@ export {
   type TokenResolver,
   TokenUnresolvedError,
   tokenDigest,
+  trimForShapeTest,
+  utf8Length,
 } from "./token-identity.js";
 export {
   type AccessLogDeferral,

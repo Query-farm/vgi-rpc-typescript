@@ -21,6 +21,7 @@ import {
   createIntrospector,
   INTROSPECT_ENABLED_HEADER,
   INTROSPECT_ENDPOINT,
+  MAX_TOKEN_BYTES,
   type TokenIdentity,
   tokenDigest,
 } from "../../src/http/introspect.js";
@@ -277,6 +278,57 @@ describe("the introspector allowlist has no permissive default", () => {
 // ---------------------------------------------------------------------------
 // Advertisement, and the CORS exposure that makes it readable
 // ---------------------------------------------------------------------------
+
+describe("the legacy route refuses exactly what the protocol refuses", () => {
+  // `POST {prefix}/__introspect_token__` and `vgi_rpc.Identity.v1` answer the
+  // same question and share one credential predicate, so a credential one
+  // surface refuses must not be resolvable on the other. Two spellings of one
+  // policy is the drift the cross-port identity audit exists to catch -- and
+  // both of these were live divergences in this port until the predicate was
+  // fixed, because `String#trim` leaves U+0085 and `String#length` counts
+  // UTF-16 code units.
+
+  test("a NEL-padded JWS is refused, though String.prototype.trim leaves the NEL", async () => {
+    // Measured, not assumed: `"aaa.bbb.ccc\u0085".trim()` is unchanged, so a
+    // route trimming with the language's own idea of whitespace would hand a
+    // JWS the asker may already have rejected straight to the resolver.
+    expect("aaa.bbb.ccc\u0085".trim()).toBe("aaa.bbb.ccc\u0085");
+    const seen: string[] = [];
+    const handler = createHttpHandler(makeProtocol(), {
+      prefix: "/vgi",
+      authenticate: principalAuth,
+      // Resolves anything: a refusal can only have come from the guard.
+      introspectResolver: (credential) => {
+        seen.push(credential);
+        return { principal: SUBJECT_PRINCIPAL };
+      },
+      introspectPrincipals: [INTROSPECTOR],
+    });
+    const resp = await handler(introspectRequest("aaa.bbb.ccc\u0085"));
+    expect(resp.status).toBe(404);
+    expect(seen).toEqual([]);
+  });
+
+  test("the body cap is measured in UTF-8 bytes, so a multibyte credential cannot exceed it", async () => {
+    // `String#length` counts UTF-16 code units, so a two-byte-per-character
+    // credential used to get twice its intended allowance on this route.
+    const seen: string[] = [];
+    const handler = createHttpHandler(makeProtocol(), {
+      prefix: "/vgi",
+      authenticate: principalAuth,
+      introspectResolver: (credential) => {
+        seen.push(credential);
+        return { principal: SUBJECT_PRINCIPAL };
+      },
+      introspectPrincipals: [INTROSPECTOR],
+    });
+    const multibyte = "\u00e9".repeat(MAX_TOKEN_BYTES / 2 + 1);
+    expect(multibyte.length).toBeLessThan(MAX_TOKEN_BYTES);
+    const resp = await handler(introspectRequest(multibyte));
+    expect(resp.status).toBe(404);
+    expect(seen).toEqual([]);
+  });
+});
 
 describe("capability advertisement", () => {
   test("absent — never 'false' — when introspection is off", async () => {

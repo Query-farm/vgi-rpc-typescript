@@ -26,13 +26,15 @@ import {
   IdentityUnavailableError,
   IntrospectionRefusedError,
   type IssuedGrant,
-  MAX_TOKEN_CHARS,
+  MAX_TOKEN_BYTES,
   RateLimiter,
   rejectJwsShaped,
   StaleAuthError,
   type TokenIdentity,
   TokenUnresolvedError,
   tokenDigest,
+  trimForShapeTest,
+  utf8Length,
 } from "../src/token-identity.js";
 import type { CallContext, MethodDefinition } from "../src/types.js";
 
@@ -272,7 +274,7 @@ describe("introspection is locked down", () => {
     // for tidiness would leak that the subject was malformed to someone with no
     // standing to ask.
     const impl = introspecting();
-    for (const token of ["", "x".repeat(MAX_TOKEN_CHARS + 1), "aaa.bbb.ccc"]) {
+    for (const token of ["", "x".repeat(MAX_TOKEN_BYTES + 1), "aaa.bbb.ccc"]) {
       const err = await impl.introspectToken(token, auth("mallory")).catch((e) => e);
       expect(err).toBeInstanceOf(IntrospectionRefusedError);
       expect(err.errorKind).toBe("introspection_refused");
@@ -292,7 +294,7 @@ describe("introspection is locked down", () => {
   test("rejections are uniform", async () => {
     // Unknown, malformed and over-long are one answer. Distinguishing them
     // would confirm that a guessed credential exists.
-    for (const token of ["", "unknown", "x".repeat(MAX_TOKEN_CHARS + 1)]) {
+    for (const token of ["", "unknown", "x".repeat(MAX_TOKEN_BYTES + 1)]) {
       const err = await introspecting()
         .introspectToken(token, auth("proxy"))
         .catch((e) => e);
@@ -588,7 +590,59 @@ describe("the JWS shape test survives translation", () => {
 
   test("the length cap is measured against the original", () => {
     // Trimming is not a way to shrink an over-long credential under the cap.
-    expect(() => rejectJwsShaped(`${" ".repeat(MAX_TOKEN_CHARS)}opaque`)).toThrow(TokenUnresolvedError);
+    expect(() => rejectJwsShaped(`${" ".repeat(MAX_TOKEN_BYTES)}opaque`)).toThrow(TokenUnresolvedError);
+  });
+
+  test("the enumerated trim floor is covered, U+0085 included", () => {
+    // "Whitespace" is itself a divergence one layer down, and this port is on
+    // the wrong side of it by default: measured, `String.prototype.trim` strips
+    // seven of these eight and leaves U+0085 (NEL), which is neither a
+    // LineTerminator nor in Space_Separator. Left to `trim()` alone this port
+    // would route "aaa.bbb.ccc\u0085" -- still a JWS to anyone who strips it --
+    // to a resolver, while Python, Go, Rust and C# refuse it.
+    for (const codepoint of [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0x85, 0xa0]) {
+      const pad = String.fromCharCode(codepoint);
+      const label = `U+${codepoint.toString(16).padStart(4, "0").toUpperCase()}`;
+      expect(() => rejectJwsShaped(`aaa.bbb.ccc${pad}`), label).toThrow(TokenUnresolvedError);
+      expect(() => rejectJwsShaped(`${pad}aaa.bbb.ccc`), label).toThrow(TokenUnresolvedError);
+      // Blank-after-trimming too: padding alone is not a credential.
+      expect(() => rejectJwsShaped(pad), label).toThrow(TokenUnresolvedError);
+    }
+  });
+
+  test("U+0085 is not trimmed by String.prototype.trim, which is why the floor is enumerated", () => {
+    // Pins the measurement the floor exists for, so a future refactor that
+    // "simplifies" trimForShapeTest back to `trim()` fails here with the reason
+    // attached rather than silently reopening the hole.
+    expect("a\u0085".trim()).toBe("a\u0085");
+    expect(trimForShapeTest("a\u0085")).toBe("a");
+  });
+
+  test("trimming wider than the floor is still safe", () => {
+    // The floor is a minimum, not a maximum: this port takes the union with
+    // whatever `trim()` calls whitespace, so U+2028 and U+3000 are stripped
+    // too -- and interleaved with a floor character, in either order.
+    for (const pad of ["\u2028", "\u3000", "\u0085\u2028", "\u2028\u0085"]) {
+      expect(() => rejectJwsShaped(`aaa.bbb.ccc${pad}`)).toThrow(TokenUnresolvedError);
+    }
+  });
+
+  test("the cap is measured in UTF-8 bytes, not UTF-16 code units", () => {
+    // This port measured `String#length`, which counts UTF-16 units, so a
+    // multibyte credential was measured *short* -- a two-byte-per-character
+    // credential got twice the intended allowance. Bytes is the unit the
+    // purpose implies: what a resolver would have to handle.
+    const multibyte = "\u00e9".repeat(MAX_TOKEN_BYTES / 2 + 1); // 2 bytes each
+    expect(multibyte.length).toBeLessThan(MAX_TOKEN_BYTES);
+    expect(utf8Length(multibyte)).toBeGreaterThan(MAX_TOKEN_BYTES);
+    expect(() => rejectJwsShaped(multibyte)).toThrow(TokenUnresolvedError);
+  });
+
+  test("an ASCII credential at the cap is unaffected by the unit change", () => {
+    // The three units agree for ASCII, which every real bearer token is, so the
+    // boundary must not have moved for the case that actually occurs.
+    expect(() => rejectJwsShaped("x".repeat(MAX_TOKEN_BYTES))).not.toThrow();
+    expect(() => rejectJwsShaped("x".repeat(MAX_TOKEN_BYTES + 1))).toThrow(TokenUnresolvedError);
   });
 
   test("the resolver receives the credential unmodified", async () => {
@@ -605,6 +659,96 @@ describe("the JWS shape test survives translation", () => {
     });
     await impl.introspectToken("  padded-opaque-token  ", auth("proxy"));
     expect(seen).toEqual(["  padded-opaque-token  "]);
+  });
+});
+
+describe("the guards fire on the dispatch path, not only in isolation", () => {
+  // Rejections here are deliberately uniform -- unknown, expired, malformed and
+  // over-long are one answer -- and that makes the obvious guard test prove
+  // nothing. An over-long credential is *also* an unknown one, so probing
+  // `introspectToken` with a credential the resolver does not know cannot
+  // distinguish "the cap refused it" from "the cap let it through and the
+  // resolver refused it". Delete the cap and such a test stays green; the
+  // reference had exactly that hole, and so did Rust's first draft.
+  //
+  // Every test below therefore uses the *resolvable-probe* form: a resolver
+  // that resolves anything, so a rejection can only have come from the guard,
+  // plus the assertion that the resolver was never reached. That second
+  // assertion is the half that fails when a guard is skipped, and each of these
+  // was mutation-checked by breaking its guard on purpose.
+
+  /** A resolver that resolves anything, and records what it was handed. */
+  function probe(options: Record<string, unknown> = {}): { impl: IdentityImpl; seen: string[] } {
+    const seen: string[] = [];
+    const impl = new IdentityImpl({
+      resolveToken: (token) => {
+        seen.push(token);
+        return { principal: "bob" };
+      },
+      introspectPrincipals: ["proxy"],
+      ...options,
+    });
+    return { impl, seen };
+  }
+
+  test("the length cap is enforced by introspectToken, not only by rejectJwsShaped", async () => {
+    // Mutation-checked: dropping the length clause from `rejectJwsShaped` turns
+    // this red on `seen`, while a probe with an unknown-credential resolver
+    // would stay green.
+    const { impl, seen } = probe();
+    const oversized = "x".repeat(MAX_TOKEN_BYTES + 1);
+    await expect(impl.introspectToken(oversized, auth("proxy"))).rejects.toThrow(TokenUnresolvedError);
+    expect(seen).toEqual([]);
+  });
+
+  test("a JWS is refused by introspectToken even when the resolver would resolve it", async () => {
+    const { impl, seen } = probe();
+    await expect(impl.introspectToken("aaa.bbb.ccc", auth("proxy"))).rejects.toThrow(TokenUnresolvedError);
+    expect(seen).toEqual([]);
+  });
+
+  test("a blank credential is refused by introspectToken", async () => {
+    const { impl, seen } = probe();
+    await expect(impl.introspectToken("   ", auth("proxy"))).rejects.toThrow(TokenUnresolvedError);
+    expect(seen).toEqual([]);
+  });
+
+  test("the allowlist is enforced by introspectToken", async () => {
+    const { impl, seen } = probe();
+    await expect(impl.introspectToken("resolvable", auth("mallory"))).rejects.toThrow(IntrospectionRefusedError);
+    expect(seen).toEqual([]);
+  });
+
+  test("the rate limit is enforced by introspectToken", async () => {
+    const { impl, seen } = probe({ introspectRateLimit: 1 });
+    await impl.introspectToken("resolvable", auth("proxy"));
+    await expect(impl.introspectToken("resolvable", auth("proxy"))).rejects.toThrow(IntrospectionRefusedError);
+    // One call got through; the second never reached the resolver.
+    expect(seen).toEqual(["resolvable"]);
+  });
+
+  test("freshness is enforced by issueGrant, not only by checkFreshness", async () => {
+    // The minting counterpart of the same trap: a minter that mints anything,
+    // so a refusal can only have come from the freshness guard.
+    const minted: string[] = [];
+    const impl = new IdentityImpl({
+      mintGrant: (principal) => {
+        minted.push(principal);
+        return { token: "t", expiresAt: NOW() + 60, grantId: "g" };
+      },
+      maxAuthAge: 900,
+    });
+    // No auth_time at all -- the transport-peer shape.
+    await expect(impl.issueGrant("ci", [], 60, auth("alice"))).rejects.toThrow(StaleAuthError);
+    // Present but stale.
+    await expect(impl.issueGrant("ci", [], 60, auth("alice", { authTime: NOW() - 10_000 }))).rejects.toThrow(
+      StaleAuthError,
+    );
+    expect(minted).toEqual([]);
+    // And a fresh one does mint, so the refusals above are the guard and not a
+    // minter that never works.
+    await impl.issueGrant("ci", [], 60, auth("alice", { authTime: NOW() - 30 }));
+    expect(minted).toEqual(["alice"]);
   });
 });
 

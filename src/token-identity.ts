@@ -68,8 +68,18 @@ const JWS_SHAPED = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
 
 /** Cap on a credential we will even attempt to resolve. Anything longer is not
  *  a bearer token; refusing early keeps a resolver from being handed
- *  megabytes. */
-export const MAX_TOKEN_CHARS = 4096;
+ *  megabytes.
+ *
+ *  Measured in **UTF-8 bytes**, which is the unit the purpose implies -- what
+ *  is bounded is what a resolver would have to handle, and megabytes are
+ *  bytes. Spelled out because the ports reached for three different units:
+ *  codepoints in Python and Rust, UTF-16 code units in Java, C# and (until
+ *  now) TypeScript, bytes in Go and C++. All three agree for an ASCII
+ *  credential, which every real bearer token is, so this bites only on a
+ *  multibyte one -- and `"x".length` counting UTF-16 units means this port was
+ *  measuring a multibyte credential *short*. Bytes is also the most
+ *  conservative of the three, so standardising on it can only refuse earlier. */
+export const MAX_TOKEN_BYTES = 4096;
 
 /** Default cache window handed to a caller when a resolver names none.
  *
@@ -287,6 +297,56 @@ export function checkIntrospector(auth: AuthContext, principals: ReadonlySet<str
   return caller;
 }
 
+/** The whitespace every port MUST trim before the JWS shape test.
+ *
+ *  Enumerated rather than delegated to the language, because "whitespace" is
+ *  itself a divergence one layer down. Measured, not assumed: this port's
+ *  `String.prototype.trim` covers seven of these eight and **not** `U+0085`
+ *  (NEL) -- it is neither a `LineTerminator` nor in `Space_Separator`, so the
+ *  spec's `WhiteSpace` production excludes it. Java's `Character.isWhitespace`
+ *  excludes it too, and an ASCII literal misses `U+0085` and `U+00A0` both.
+ *
+ *  Left to `trim()` alone, this port would route `"aaa.bbb.ccc\u0085"` --
+ *  still a JWS to anyone who strips it -- straight to a resolver, while
+ *  Python, Go, Rust and C# refuse it. That is the same hole the trim was added
+ *  to close, one level down.
+ *
+ *  A port MAY trim more, and this one does: {@link trimForShapeTest} takes the
+ *  union of this floor with whatever `trim()` calls whitespace. Trimming wider
+ *  can only add refusals; trimming narrower is a leak. */
+const TRIM_FLOOR = new Set([
+  "\u0009", // tab
+  "\u000A", // line feed
+  "\u000B", // vertical tab
+  "\u000C", // form feed
+  "\u000D", // carriage return
+  "\u0020", // space
+  "\u0085", // next line -- NOT trimmed by String.prototype.trim
+  "\u00A0", // no-break space
+]);
+
+/** True when one code unit is trimmable: in the enumerated floor, or whatever
+ *  this runtime's `trim()` calls whitespace. The union, in one predicate, so
+ *  an interleaved `"\u0085\u2028"` tail is stripped whichever order it comes
+ *  in -- two sequential passes would leave the leading set's characters
+ *  stranded behind the other's. */
+function isTrimmable(unit: string): boolean {
+  return TRIM_FLOOR.has(unit) || unit.trim() === "";
+}
+
+/** Strip trimmable code units from both ends, for the shape test only.
+ *
+ *  Never applied to what reaches a resolver: rewriting a credential before
+ *  resolving it would make the worker answer about a string the caller never
+ *  sent. */
+export function trimForShapeTest(token: string): string {
+  let start = 0;
+  let end = token.length;
+  while (start < end && isTrimmable(token[start])) start++;
+  while (end > start && isTrimmable(token[end - 1])) end--;
+  return token.slice(start, end);
+}
+
 /** Whether `token` is a JWS -- three dot-separated base64url segments.
  *
  *  Tested against the whitespace-**trimmed** credential, and that is the whole
@@ -301,22 +361,29 @@ export function checkIntrospector(auth: AuthContext, principals: ReadonlySet<str
  *  Shared with the HTTP `__introspect_token__` route so the two surfaces cannot
  *  drift into refusing different credentials. */
 export function isJwsShaped(token: string): boolean {
-  return JWS_SHAPED.test(token.trim());
+  return JWS_SHAPED.test(trimForShapeTest(token));
 }
 
 /** Refuse a blank, over-long or JWS-shaped subject before it reaches a resolver.
  *
  *  Whitespace-only is refused because it is not a credential. The length check
- *  is against the **original**: the cap is about what we were handed, not about
- *  what is left after trimming.
+ *  is against the **original**, in UTF-8 bytes: the cap is about what we were
+ *  handed, not about what is left after trimming, and not about how many UTF-16
+ *  code units the runtime happens to store it in.
  *
  *  Trimming is for the shape test only. The resolver still receives exactly
  *  what the caller sent -- rewriting a credential before resolving it would
  *  make the worker answer about a string the caller never sent. */
 export function rejectJwsShaped(token: string): void {
-  if (!token.trim() || token.length > MAX_TOKEN_CHARS || isJwsShaped(token)) {
+  if (!trimForShapeTest(token) || utf8Length(token) > MAX_TOKEN_BYTES || isJwsShaped(token)) {
     throw new TokenUnresolvedError("unresolved");
   }
+}
+
+/** The credential's length in UTF-8 bytes -- the unit {@link MAX_TOKEN_BYTES}
+ *  is measured in, and not what `String#length` reports. */
+export function utf8Length(token: string): number {
+  return new TextEncoder().encode(token).length;
 }
 
 /**

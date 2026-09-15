@@ -41,11 +41,13 @@ import {
   DEFAULT_IDENTITY_TTL_SECONDS,
   IdentityUnavailableError,
   isJwsShaped,
-  MAX_TOKEN_CHARS,
+  MAX_TOKEN_BYTES,
   RateLimiter,
   type TokenIdentity,
   type TokenResolver,
   tokenDigest,
+  trimForShapeTest,
+  utf8Length,
 } from "../token-identity.js";
 import { AuthUnavailableError } from "./unauthorized.js";
 
@@ -54,7 +56,7 @@ import { AuthUnavailableError } from "./unauthorized.js";
 // here. This route and that protocol answer the same question and must refuse
 // the same credentials; two copies of a JWS regex is exactly the drift the
 // cross-port identity audit exists to catch.
-export { MAX_TOKEN_CHARS, tokenDigest } from "../token-identity.js";
+export { MAX_TOKEN_BYTES, tokenDigest } from "../token-identity.js";
 export type { TokenIdentity, TokenResolver };
 
 /** Endpoint path, appended to the handler's prefix. Matches the de-facto
@@ -172,9 +174,12 @@ async function readSubjectToken(request: Request): Promise<string | null> {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const token = (body as Record<string, unknown>).token;
   // Blank *after trimming*: whitespace-only is not a credential, and it must
-  // not reach a resolver on this surface either. The length cap stays against
-  // the original — it is about what we were handed.
-  if (typeof token !== "string" || !token.trim() || token.length > MAX_TOKEN_CHARS) return null;
+  // not reach a resolver on this surface either. Trimming goes through the
+  // shared helper rather than `String#trim`, which does not strip U+0085 — so
+  // this surface refuses the same padded credentials the protocol does. The
+  // length cap stays against the original, in UTF-8 bytes: it is about what we
+  // were handed, not about what is left after trimming.
+  if (typeof token !== "string" || !trimForShapeTest(token) || utf8Length(token) > MAX_TOKEN_BYTES) return null;
   // Returned unmodified. Trimming is for the shape test alone; a resolver that
   // was handed a rewritten credential would be answering about a string the
   // caller never sent.
