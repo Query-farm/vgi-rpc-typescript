@@ -270,6 +270,17 @@ def conformance_transport_kind_probes() -> Iterator[tuple[tuple[str, Callable[[]
     """Expose real wire probes for every TypeScript server transport."""
 
     class _KindProbe(Protocol):
+        # The wire routing key, declared rather than inherited from the class
+        # name. `_protocol_wire_name` falls back to `__name__` when this is
+        # absent, so without it the client stamps `vgi_rpc.protocol` as
+        # "_KindProbe" -- a private Python identifier nobody ever meant as a
+        # wire name -- and the worker correctly refuses a protocol it does not
+        # host. Invisible until vgi-rpc-python cfe9838 started stamping the key
+        # in request builders that had previously sent none; C++ had four stubs
+        # with the same shape, this is the fifth. Any locally declared probe
+        # stub needs this line.
+        protocol_name = "TransportKindProbe"
+
         def report_transport_kind(self) -> str: ...
 
     from vgi_rpc.http import http_connect
