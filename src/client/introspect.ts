@@ -7,7 +7,7 @@ import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-bu
 import { DESCRIBE_METHOD_NAME, PROTOCOL_NAME_KEY, PROTOCOL_VERSION_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
-import { ARROW_CONTENT_TYPE } from "../http/common.js";
+import { ARROW_CONTENT_TYPE, reservedPath } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
@@ -197,11 +197,14 @@ export async function httpIntrospect(
   }
   headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(maxResponse);
 
-  const response = await (options?.fetch ?? globalThis.fetch)(`${baseUrl}${prefix}/${DESCRIBE_METHOD_NAME}`, {
-    method: "POST",
-    headers,
-    body: sendBody as unknown as BodyInit,
-  });
+  const response = await (options?.fetch ?? globalThis.fetch)(
+    baseUrl + reservedPath(DESCRIBE_METHOD_NAME, { prefix }),
+    {
+      method: "POST",
+      headers,
+      body: sendBody as unknown as BodyInit,
+    },
+  );
   if (response.status === 401) {
     throw new RpcError("AuthenticationError", "Authentication required", "");
   }

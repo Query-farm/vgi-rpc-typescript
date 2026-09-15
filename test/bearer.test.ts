@@ -4,7 +4,7 @@
 import { describe, expect, it } from "bun:test";
 import { RecordBatch, RecordBatchStreamWriter, recordBatchFromArrays } from "@query-farm/apache-arrow";
 import { AuthContext } from "../src/auth.js";
-import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../src/constants.js";
+import { PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../src/constants.js";
 import { bearerAuthenticate, bearerAuthenticateStatic, chainAuthenticate } from "../src/http/bearer.js";
 import { ARROW_CONTENT_TYPE } from "../src/http/common.js";
 import { createHttpHandler } from "../src/http/handler.js";
@@ -21,11 +21,16 @@ function makeRequest(authorization?: string): Request {
   return new Request("http://localhost/test", { method: "POST", headers });
 }
 
+/** The protocol the integration server below hosts: the routing key in every
+ *  request's metadata, and the path segment those requests are posted to. */
+const PROTOCOL_NAME = "test.Service.v1";
+
 function makeArrowBody(methodName: string): Uint8Array {
   const schema = toSchema({ message: str });
   const batch = recordBatchFromArrays({ message: ["hello"] }, schema);
   const meta = new Map<string, string>();
   meta.set(RPC_METHOD_KEY, methodName);
+  meta.set(PROTOCOL_KEY, PROTOCOL_NAME);
   meta.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   const batchWithMeta = new RecordBatch(schema, batch.data, meta);
   const writer = new RecordBatchStreamWriter();
@@ -179,7 +184,7 @@ describe("chainAuthenticate", () => {
 
 describe("bearer + HTTP handler integration", () => {
   function makeProtocol(): Protocol {
-    const p = new Protocol("test-service");
+    const p = new Protocol(PROTOCOL_NAME);
     p.unary("whoami", {
       params: { message: str },
       result: { identity: str },
@@ -196,7 +201,7 @@ describe("bearer + HTTP handler integration", () => {
     const handler = createHttpHandler(makeProtocol(), { authenticate: auth });
     const body = makeArrowBody("whoami");
     const resp = await handler(
-      new Request("http://localhost/whoami", {
+      new Request(`http://localhost/${PROTOCOL_NAME}/whoami`, {
         method: "POST",
         headers: {
           "Content-Type": ARROW_CONTENT_TYPE,
@@ -213,7 +218,7 @@ describe("bearer + HTTP handler integration", () => {
     const handler = createHttpHandler(makeProtocol(), { authenticate: auth });
     const body = makeArrowBody("whoami");
     const resp = await handler(
-      new Request("http://localhost/whoami", {
+      new Request(`http://localhost/${PROTOCOL_NAME}/whoami`, {
         method: "POST",
         headers: {
           "Content-Type": ARROW_CONTENT_TYPE,
@@ -233,7 +238,7 @@ describe("bearer + HTTP handler integration", () => {
     const handler = createHttpHandler(makeProtocol(), { authenticate: auth });
     const body = makeArrowBody("whoami");
     const resp = await handler(
-      new Request("http://localhost/whoami", {
+      new Request(`http://localhost/${PROTOCOL_NAME}/whoami`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -249,7 +254,7 @@ describe("bearer + HTTP handler integration", () => {
     const handler = createHttpHandler(makeProtocol(), { authenticate: auth });
     const body = makeArrowBody("whoami");
     const resp = await handler(
-      new Request("http://localhost/whoami", {
+      new Request(`http://localhost/${PROTOCOL_NAME}/whoami`, {
         method: "POST",
         headers: {
           "Content-Type": ARROW_CONTENT_TYPE,

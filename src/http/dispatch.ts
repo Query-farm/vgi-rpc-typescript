@@ -31,6 +31,7 @@ import {
   packCallToken,
   packStateToken,
   type ResolvedCall,
+  type TokenScope,
   unpackCallToken,
   unpackStateToken,
 } from "./token.js";
@@ -76,10 +77,21 @@ function tokenPrincipal(auth: AuthContext | undefined): string | null {
   return auth?.authenticated ? (auth.principal ?? "") : null;
 }
 
-function callCacheKey(callId: Uint8Array, auth: AuthContext | undefined): string {
+/** The AEAD scope for this request's cursor and call tokens. */
+function tokenScope(ctx: DispatchContext): TokenScope {
+  return {
+    protocol: ctx.protocolName,
+    principal: tokenPrincipal(ctx.authContext),
+    evidenceBinding: peerEvidenceBinding(ctx.authContext),
+    domain: ctx.authContext?.domain,
+  };
+}
+
+function callCacheKey(callId: Uint8Array, ctx: DispatchContext): string {
+  const auth = ctx.authContext;
   let hex = "";
   for (const b of callId) hex += b.toString(16).padStart(2, "0");
-  return `${hex}\u0000${auth?.authenticated ? "1" : "0"}\u0000${auth?.domain ?? ""}\u0000${auth?.principal ?? ""}\u0000${peerEvidenceBinding(auth) ?? ""}`;
+  return `${hex}\u0000${ctx.protocolName}\u0000${auth?.authenticated ? "1" : "0"}\u0000${auth?.domain ?? ""}\u0000${auth?.principal ?? ""}\u0000${peerEvidenceBinding(auth) ?? ""}`;
 }
 
 /** Entries this context lets the shared map hold on its behalf.
@@ -101,7 +113,7 @@ function cacheCall(callId: Uint8Array, ctx: DispatchContext, call: ResolvedCall)
     callStates.clear();
   }
   const ttl = ctx.tokenTtl;
-  callStates.set(callCacheKey(callId, ctx.authContext), {
+  callStates.set(callCacheKey(callId, ctx), {
     expiresAt: Math.floor(Date.now() / 1000) + (ttl > 0 ? ttl : 3600),
     call,
   });
@@ -129,10 +141,7 @@ function newCallId(): Uint8Array {
  * named.
  */
 function resolveCall(callId: Uint8Array, callTokenB64: string | null | undefined, ctx: DispatchContext): ResolvedCall {
-  const principal = tokenPrincipal(ctx.authContext);
-  const binding = peerEvidenceBinding(ctx.authContext);
-  const domain = ctx.authContext?.domain;
-  const key = callCacheKey(callId, ctx.authContext);
+  const key = callCacheKey(callId, ctx);
   const hit = cacheEntriesFor(ctx) > 0 ? callStates.get(key) : undefined;
   if (hit) {
     if (Math.floor(Date.now() / 1000) <= hit.expiresAt) return hit.call;
@@ -141,14 +150,7 @@ function resolveCall(callId: Uint8Array, callTokenB64: string | null | undefined
   if (!callTokenB64) {
     throw new HttpRpcError("Missing call token in exchange request", 400);
   }
-  const { callId: tokenCallId, call } = unpackCallToken(
-    callTokenB64,
-    ctx.tokenKey,
-    principal,
-    ctx.tokenTtl,
-    binding,
-    domain,
-  );
+  const { callId: tokenCallId, call } = unpackCallToken(callTokenB64, ctx.tokenKey, tokenScope(ctx), ctx.tokenTtl);
   if (tokenCallId.length !== callId.length || !tokenCallId.every((b, i) => b === callId[i])) {
     // The cursor named a different call. Uniform message: reachable only by
     // pairing two tokens the same principal legitimately holds.
@@ -167,20 +169,11 @@ function mintInitTokens(
 ): { callId: Uint8Array; token: string; callToken: string } {
   const callId = newCallId();
   noteStream(ctx, callId);
-  const principal = tokenPrincipal(ctx.authContext);
-  const binding = peerEvidenceBinding(ctx.authContext);
-  const domain = ctx.authContext?.domain;
-  const callToken = packCallToken(
-    callId,
-    schemaBytes,
-    inputSchemaBytes,
-    ctx.tokenKey,
-    principal,
-    undefined,
-    binding,
-    domain,
-    { responseLimitBytes: ctx.maxResponseBytes, preferredResponseBytes: ctx.preferredResponseBytes },
-  );
+  const scope = tokenScope(ctx);
+  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, scope, undefined, {
+    responseLimitBytes: ctx.maxResponseBytes,
+    preferredResponseBytes: ctx.preferredResponseBytes,
+  });
   // Warm the cache with what we already hold, so this stream's first
   // continuation need not open the token it was just handed.
   cacheCall(callId, ctx, {
@@ -191,7 +184,7 @@ function mintInitTokens(
   });
   return {
     callId,
-    token: packStateToken(stateBytes, callId, ctx.tokenKey, principal, undefined, binding, domain),
+    token: packStateToken(stateBytes, callId, ctx.tokenKey, scope),
     callToken,
   };
 }
@@ -232,6 +225,13 @@ export interface DispatchContext {
   tokenKey: Uint8Array;
   tokenTtl: number;
   serverId: string;
+  /** Wire name of the protocol that owns the dispatched method.
+   *
+   *  Bound into the AEAD associated data of this stream's cursor and call
+   *  tokens, so a continuation presented under a different protocol fails the
+   *  tag check and is rejected exactly as an invalid token -- including on the
+   *  call-state cache-hit path, where the call token is never opened at all. */
+  protocolName: string;
   /** Deprecated compatibility alias for the hard response budget. */
   maxStreamResponseBytes?: number;
   /** Hard wire cap for unary, exchange, and each producer turn.
@@ -555,10 +555,8 @@ export async function httpDispatchStreamInit(
       serializeSchema(resolvedOutputSchema),
       serializeSchema(resolvedInputSchema),
       ctx.tokenKey,
-      tokenPrincipal(ctx.authContext),
+      tokenScope(ctx),
       undefined,
-      peerEvidenceBinding(ctx.authContext),
-      ctx.authContext?.domain,
       { responseLimitBytes: ctx.maxResponseBytes, preferredResponseBytes: ctx.preferredResponseBytes },
     );
     cacheCall(initCallId, ctx, {
@@ -652,14 +650,7 @@ export async function httpDispatchStreamExchange(
   // the caller, so the id is authenticated before it resolves anything.
   let unpacked: import("./token.js").UnpackedToken;
   try {
-    unpacked = unpackStateToken(
-      tokenBase64,
-      ctx.tokenKey,
-      ctx.tokenTtl,
-      tokenPrincipal(ctx.authContext),
-      peerEvidenceBinding(ctx.authContext),
-      ctx.authContext?.domain,
-    );
+    unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, tokenScope(ctx));
   } catch (error: any) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
@@ -829,15 +820,7 @@ export async function httpDispatchStreamExchange(
     } else {
       // More data may follow — repack state into token for next exchange.
       const stateBytes = ctx.stateSerializer.serialize(state);
-      const token = packStateToken(
-        stateBytes,
-        unpacked.callId,
-        ctx.tokenKey,
-        tokenPrincipal(ctx.authContext),
-        undefined,
-        peerEvidenceBinding(ctx.authContext),
-        ctx.authContext?.domain,
-      );
+      const token = packStateToken(stateBytes, unpacked.callId, ctx.tokenKey, tokenScope(ctx));
 
       for (const [idx, emitted] of out.batches.entries()) {
         const batch = emitted.batch;
@@ -996,15 +979,7 @@ async function produceStreamResponse(
     // Every unfinished invocation returns one cursor. A response-size budget
     // never changes the fundamental one request/tick -> one invocation shape.
     const stateBytes = ctx.stateSerializer.serialize(state);
-    const token = packStateToken(
-      stateBytes,
-      call.callId,
-      ctx.tokenKey,
-      tokenPrincipal(ctx.authContext),
-      undefined,
-      peerEvidenceBinding(ctx.authContext),
-      ctx.authContext?.domain,
-    );
+    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, tokenScope(ctx));
     const tokenMeta = new Map<string, string>();
     tokenMeta.set(STATE_KEY, token);
     if (call.callToken) tokenMeta.set(CALL_STATE_KEY, call.callToken);

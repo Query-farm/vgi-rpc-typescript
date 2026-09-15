@@ -146,7 +146,7 @@ describe("Client auth", () => {
   test("client sends Authorization header when configured", async () => {
     let receivedAuth: string | null = null;
 
-    const p = new Protocol("test-service");
+    const p = new Protocol("test.Service.v1");
     p.unary("echo", {
       params: { message: str },
       result: { message: str },
@@ -175,7 +175,7 @@ describe("Client auth", () => {
   });
 
   test("client throws AuthenticationError on 401", async () => {
-    const p = new Protocol("test-service");
+    const p = new Protocol("test.Service.v1");
     p.unary("echo", {
       params: { message: str },
       result: { message: str },

@@ -19,7 +19,7 @@ import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-bu
 import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { makeExternalLocationBatch } from "../external.js";
-import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
+import { ARROW_CONTENT_TYPE, reservedPath, serializeIpcStream } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { readResponseBodyBounded } from "./decode.js";
@@ -73,7 +73,7 @@ export async function requestUploadUrls(
   if (authorization) headers.Authorization = authorization;
   headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(acceptedMaxResponseBytes);
 
-  const resp = await fetchFn(`${baseUrl}${prefix}/${UPLOAD_URL_METHOD}/init`, {
+  const resp = await fetchFn(baseUrl + reservedPath(`${UPLOAD_URL_METHOD}/init`, { prefix }), {
     method: "POST",
     headers,
     body: body as unknown as BodyInit,

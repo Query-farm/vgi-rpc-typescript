@@ -4,8 +4,17 @@
 import { batchFromColumns, deserializeBatch, schema as makeSchema, type VgiSchema } from "../arrow/index.js";
 import { AuthContext } from "../auth.js";
 import {
+  isProtocolHost,
+  type ProtocolBinding,
+  type ProtocolHost,
+  ProtocolNotSpecifiedError,
+  ProtocolNotSupportedError,
+  validateProtocolName,
+} from "../binding.js";
+import {
   DESCRIBE_METHOD_NAME,
   PROTOCOL_HASH_KEY,
+  PROTOCOL_KEY,
   PROTOCOL_VERSION_KEY,
   REQUEST_ID_HEADER,
   RPC_ERROR_HEADER,
@@ -26,6 +35,7 @@ import {
   type AccessLogDeferral,
   type CallStatistics,
   type DispatchInfo,
+  type MethodDefinition,
   MethodType,
   type ServeStartHook,
   TransportKind,
@@ -110,7 +120,7 @@ import {
   sessionPrincipalKey,
   startSessionReaper,
 } from "./sticky.js";
-import { computeAad } from "./token.js";
+import { computeAad, SERVER_SCOPE } from "./token.js";
 import { type HttpHandlerOptions, jsonStateSerializer } from "./types.js";
 import {
   AUTH_PROXY_REQUIRED_HEADER,
@@ -190,21 +200,66 @@ function parseRequestCookies(request: Request): ReadonlyMap<string, string> {
 }
 
 /**
- * Create a fetch-compatible HTTP handler for a vgi-rpc Protocol.
+ * Create a fetch-compatible HTTP handler for a vgi-rpc Protocol, or for a
+ * whole `VgiRpcServer` and every protocol it hosts.
  *
  * Compatible with Bun.serve(), Deno.serve(), Cloudflare Workers, and any
  * Web API runtime that uses the standard Request/Response types.
  *
+ * RPC routes are namespaced by protocol -- `{prefix}/{protocol}/{method}`,
+ * plus `/init` and `/exchange` for streams -- so a server hosting
+ * `vgi_rpc.Reflection.v1` and `vgi_rpc.Identity.v1` alongside its application
+ * protocol reaches all three over HTTP. Pass the server, not its primary
+ * protocol, for the co-hosted ones to be routable.
+ *
+ * The protocol rides twice on HTTP: in the request's `vgi_rpc.protocol`
+ * metadata and as that path segment. **The metadata is canonical** -- it is
+ * the only carrier on the stdio, unix and named-pipe transports -- and the
+ * path is a required faithful projection of it, present so an edge device can
+ * act on the protocol without an Arrow parser. This handler therefore
+ * requires the metadata on every unary call and stream `/init` and rejects a
+ * request whose two carriers disagree; unchecked, edge policy would be applied
+ * to one protocol while the worker dispatched another.
+ *
  * @example
  * ```typescript
- * const handler = createHttpHandler(protocol);
+ * const handler = createHttpHandler(server);
  * Bun.serve({ port: 8080, fetch: handler });
  * ```
  */
 export function createHttpHandler(
-  protocol: Protocol,
+  target: Protocol | ProtocolHost,
   options?: HttpHandlerOptions,
 ): (request: Request) => Response | Promise<Response> {
+  // A bare Protocol is the single-binding case; a host (VgiRpcServer)
+  // enumerates its own, primary first. Either way routing reads one table, so
+  // nothing downstream has to care which was handed in.
+  const bindings: Map<string, ProtocolBinding> = isProtocolHost(target)
+    ? target.bindings()
+    : new Map([[target.name, { name: target.name, protocol: target, protocolHash: "", versionExempt: false }]]);
+  const hostedNames = [...bindings.keys()].sort();
+  // Validated here rather than at the first request. A name that cannot be a
+  // path segment cannot be addressed over HTTP at all, so hosting one would
+  // 404 every call to it for reasons nothing in the response explains --
+  // `VgiRpcServer.addProtocol` already checks the secondaries, and the primary
+  // is projected rather than registered, so this is where it is caught.
+  // `allowReserved` because the framework's own protocols are already here by
+  // the time they reach this table.
+  for (const name of hostedNames) {
+    try {
+      validateProtocolName(name, true);
+    } catch (e) {
+      throw new Error(`Cannot serve protocol '${name}' over HTTP: ${(e as Error).message}`);
+    }
+  }
+  const primary = [...bindings.values()][0];
+  if (!primary) {
+    throw new Error("createHttpHandler was given a server that hosts no protocols.");
+  }
+  // The primary protocol, which every server-level surface reports: the
+  // landing and describe pages, `__describe__`, and the `protocol` field of
+  // the health body.
+  const protocol = primary.protocol;
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
   const tokenKey = options?.tokenKey ?? randomBytes(32);
   const tokenTtl = options?.tokenTtl ?? 3600;
@@ -310,15 +365,54 @@ export function createHttpHandler(
   }
   const protocolVersion = protocol.protocolVersion || options?.protocolVersion || "";
 
-  // Dispatch-boundary protocol_version check, fires only when the Protocol
-  // declares a `protocolVersion`. Mirrors Python's HTTP _app_unary /
-  // _app_stream gate added after the dispatch-loop bypass was caught in
-  // review. Throws ProtocolVersionError so the existing catch turns it into
-  // a buffered error stream rather than a raw HTTP 500.
-  function enforceProtocolVersion(reqBatchMeta: ReadonlyMap<string, string> | undefined): void {
-    const parts = protocol.protocolVersionParts;
+  /**
+   * Require the request's routing metadata to be present and to agree with the
+   * protocol the path named.
+   *
+   * On HTTP the protocol rides twice: in `vgi_rpc.protocol` and as a path
+   * segment. The metadata field is canonical -- it is the only carrier on the
+   * stdio, unix and named-pipe transports -- and the path segment is a
+   * required faithful projection, present so an edge device can act on the
+   * protocol without an Arrow parser.
+   *
+   * Left unchecked the two may disagree, and then edge policy is applied to
+   * one protocol while the worker runs another: the
+   * Content-Length/Transfer-Encoding shape. The `vgi_rpc.method` check the
+   * dispatchers already make is the same rule for the other half of the pair.
+   *
+   * The metadata is required even against a server hosting exactly one
+   * protocol. An exemption would let an intermediary that rebuilds a request
+   * and drops the field land silently on whichever protocol happened to be
+   * first, rather than being told.
+   */
+  function enforceRoutingAgreement(pathProtocol: string, reqBatchMeta: ReadonlyMap<string, string>): void {
+    const declared = reqBatchMeta.get(PROTOCOL_KEY);
+    if (!declared) {
+      throw new ProtocolNotSpecifiedError(hostedNames);
+    }
+    if (declared !== pathProtocol) {
+      throw new ProtocolNotSupportedError(
+        `Protocol mismatch: the request path resolved to '${pathProtocol}' but the Arrow IPC ` +
+          `custom_metadata 'vgi_rpc.protocol' says '${declared}'. These must agree.`,
+      );
+    }
+  }
+
+  // Dispatch-boundary protocol_version check, fires only when the resolved
+  // binding's Protocol declares a `protocolVersion`. A server hosting several
+  // protocols has a version per binding and no single "server version", so the
+  // gate reads the owning binding's -- gating a secondary against the primary
+  // rejects correct callers and names the wrong protocol when it does. Mirrors
+  // Python's HTTP _app_unary / _app_stream gate added after the dispatch-loop
+  // bypass was caught in review. Throws ProtocolVersionError so the existing
+  // catch turns it into a buffered error stream rather than a raw HTTP 500.
+  function enforceProtocolVersion(
+    binding: ProtocolBinding,
+    reqBatchMeta: ReadonlyMap<string, string> | undefined,
+  ): void {
+    const parts = binding.protocol.protocolVersionParts;
     if (parts === null) return;
-    const serverVersion = protocol.protocolVersion;
+    const serverVersion = binding.protocol.protocolVersion;
     const clientVersion = reqBatchMeta?.get(PROTOCOL_VERSION_KEY);
     if (clientVersion === undefined) {
       throw new ProtocolVersionError(
@@ -602,6 +696,9 @@ export function createHttpHandler(
     tokenKey,
     tokenTtl,
     serverId,
+    // Overwritten per request with the protocol the path resolved to; the
+    // primary is only the placeholder for requests that never reach dispatch.
+    protocolName: primary.name,
     maxResponseBytes,
     preferredResponseBytes: configuredPreferredResponseBytes,
     maxExternalizedResponseBytes,
@@ -688,15 +785,80 @@ export function createHttpHandler(
   }
 
   /**
-   * Split a POST path into the method it names and the action on it, or `null`
-   * when the path lies outside this worker's prefix.
+   * Split a POST path into the protocol and method it names and the action on
+   * it, or `null` when the path lies outside this worker's prefix or is not
+   * shaped like an RPC route.
+   *
+   * The segments come off `URL.pathname`, which the WHATWG URL parser leaves
+   * percent-encoded. That is deliberate and load-bearing: the protocol segment
+   * is compared raw, never decoded (see {@link resolveBinding}).
    */
-  function resolveRoute(path: string): { methodName: string; action: "call" | "init" | "exchange" } | null {
+  function resolveRoute(
+    path: string,
+  ): { protocolName: string; methodName: string; action: "call" | "init" | "exchange" } | null {
     if (!path.startsWith(`${prefix}/`)) return null;
-    const subPath = path.slice(prefix.length + 1);
-    if (subPath.endsWith("/init")) return { methodName: subPath.slice(0, -5), action: "init" };
-    if (subPath.endsWith("/exchange")) return { methodName: subPath.slice(0, -9), action: "exchange" };
-    return { methodName: subPath, action: "call" };
+    let subPath = path.slice(prefix.length + 1);
+    let action: "call" | "init" | "exchange" = "call";
+    if (subPath.endsWith("/init")) {
+      action = "init";
+      subPath = subPath.slice(0, -5);
+    } else if (subPath.endsWith("/exchange")) {
+      action = "exchange";
+      subPath = subPath.slice(0, -9);
+    }
+    const slash = subPath.indexOf("/");
+    // Exactly two segments: a protocol and a method. Neither may be empty, and
+    // a method name can contain no slash.
+    if (slash <= 0) return null;
+    const protocolName = subPath.slice(0, slash);
+    const methodName = subPath.slice(slash + 1);
+    if (!methodName || methodName.includes("/")) return null;
+    return { protocolName, methodName, action };
+  }
+
+  /**
+   * Resolve the `(protocol, method)` pair a path names, or the error that
+   * explains why it cannot be.
+   *
+   * Every failure here is a 404. A request naming a protocol this server does
+   * not host is unroutable whatever its body says, and 404 is the answer a
+   * caller can act on -- 415 reads as "fix your header and retry", which would
+   * loop forever against a path that will never resolve.
+   *
+   * The three failures stay distinct because a client depends on the
+   * difference, particularly the last: a client probing for an optional method
+   * must be able to tell "you do not speak this protocol" from "you speak it
+   * but lack this method".
+   */
+  function resolveBinding(
+    protocolName: string,
+    methodName: string,
+  ): { binding: ProtocolBinding; method: MethodDefinition } | Error {
+    // Raw-byte check, before anything decodes or looks up. The protocol name
+    // charset never requires percent-encoding, so a percent sign is either a
+    // bug or an attempt to have the edge and the worker read different
+    // strings -- the Content-Length/Transfer-Encoding shape. Compare raw;
+    // never compare decoded-against-raw.
+    if (protocolName.includes("%")) {
+      return ProtocolNotSpecifiedError.percentEncoded();
+    }
+    try {
+      // Checked before the lookup so a request-supplied path segment never
+      // reaches an error message, a log field or a metric label.
+      validateProtocolName(protocolName, true);
+    } catch (e) {
+      return new ProtocolNotSupportedError(`'vgi_rpc.protocol' is not a protocol name: ${(e as Error).message}`);
+    }
+    const binding = bindings.get(protocolName);
+    if (!binding) return ProtocolNotSupportedError.notHosted(protocolName, hostedNames);
+    const method = binding.protocol.getMethod(methodName);
+    if (!method) {
+      const available = binding.protocol.methodNames();
+      return new MethodNotImplementedError(
+        `Protocol '${protocolName}' has no method '${methodName}'. Available: [${available.join(", ")}].`,
+      );
+    }
+    return { binding, method };
   }
 
   /** Negotiate the response codec from the request's two accept headers. */
@@ -1182,7 +1344,15 @@ export function createHttpHandler(
         // Stale, forged, and identity-mismatched tokens all intentionally
         // collapse to the endpoint's idempotent 200 response.
       }
-      const aad = computeAad(aadPrincipal, evidenceBinding, aadDomain);
+      // Sticky sessions belong to the server, not to any one hosted protocol:
+      // a session opened while calling protocol A is the same session when the
+      // next call addresses protocol B.
+      const aad = computeAad({
+        protocol: SERVER_SCOPE,
+        principal: aadPrincipal,
+        evidenceBinding,
+        domain: aadDomain,
+      });
       let opened: { serverId: string; sessionId: Uint8Array };
       try {
         opened = openSessionToken(tokenHeader, tokenKey, aad);
@@ -1297,7 +1467,12 @@ export function createHttpHandler(
       const aadPrincipal = auth?.authenticated ? (auth.principal ?? "") : null;
       const evidenceBinding = peerEvidenceBinding(auth);
       const principalKey = sessionPrincipalKey(!!auth?.authenticated, auth?.domain, auth?.principal, evidenceBinding);
-      const aad = computeAad(aadPrincipal, evidenceBinding, auth?.domain);
+      const aad = computeAad({
+        protocol: SERVER_SCOPE,
+        principal: aadPrincipal,
+        evidenceBinding,
+        domain: auth?.domain,
+      });
       const acceptOpens = (request.headers.get(SESSION_ACCEPT_HEADER) ?? "").trim().toLowerCase() === "true";
       const sessionHeader = (request.headers.get(SESSION_HEADER) ?? "").trim();
 
@@ -1375,19 +1550,18 @@ export function createHttpHandler(
     // introspection mandates — retry an unrouted path forever.
     const specialPost = path === `${prefix}/${UPLOAD_URL_METHOD}/init` || path === `${prefix}/${DESCRIBE_METHOD_NAME}`;
     const route = specialPost ? null : resolveRoute(path);
+    let resolved: { binding: ProtocolBinding; method: MethodDefinition } | null = null;
     if (!specialPost) {
       if (!route) {
         if (stickyLockRelease) stickyLockRelease();
         return new Response("Not Found", { status: 404 });
       }
-      if (!methods.has(route.methodName)) {
+      const outcome = resolveBinding(route.protocolName, route.methodName);
+      if (outcome instanceof Error) {
         if (stickyLockRelease) stickyLockRelease();
-        const available = [...methods.keys()].sort();
-        const err = new MethodNotImplementedError(
-          `Unknown method: '${route.methodName}'. Available methods: [${available.join(", ")}]`,
-        );
-        return compressIfAccepted(makeErrorResponse(err, 404), responseEncoding, responseLimitBytes);
+        return compressIfAccepted(makeErrorResponse(outcome, 404), responseEncoding, responseLimitBytes);
       }
+      resolved = outcome;
     }
 
     // Validate Content-Type
@@ -1520,23 +1694,36 @@ export function createHttpHandler(
       }
     }
 
-    // Resolved above, ahead of the media-type gate; both are non-null there.
-    const { methodName, action } = route!;
-    const method = methods.get(methodName)!;
+    // Resolved above, ahead of the media-type gate; all three are non-null there.
+    const { protocolName, methodName, action } = route!;
+    const { binding, method } = resolved!;
+    // Scope this call's state and call tokens to the protocol that owns the
+    // method. Bound into the AEAD associated data rather than compared in
+    // application code, so a cross-protocol continuation fails the tag check
+    // even on the cache-hit path where the call token is never opened.
+    const dispatchCtx = { ...ctx, protocolName: binding.name };
 
-    // Application-protocol-version gate (HTTP dispatch path). Fires only
-    // when the Protocol declared a `protocolVersion`, on unary calls and
-    // stream init. `/exchange` continuations skip the gate — the Python
-    // client (and parity TS client) only emits `vgi_rpc.protocol_version`
-    // on the dispatch-entry request, not on follow-up exchange batches.
-    // `__describe__` is exempt — diagnostic path for mismatched clients to
-    // discover the server's version. Mirrors Python's _app_unary /
-    // _app_stream gate.
-    if (protocol.protocolVersionParts !== null && methodName !== DESCRIBE_METHOD_NAME && action !== "exchange") {
+    // Routing-carriage agreement, then the application-protocol-version gate.
+    // Both read the request batch's metadata, so they share one peek.
+    //
+    // `/exchange` continuations are exempt from both. They carry no routing
+    // metadata at all (a continuation batch is not a request batch), and they
+    // do not need to: the protocol is bound into the AEAD associated data of
+    // this stream's cursor and call tokens, so a continuation presented under
+    // another protocol fails the tag check and is rejected exactly as an
+    // invalid token — including on the call-state cache-hit path, where the
+    // call token is never opened at all. `__describe__` is exempt from the
+    // version gate because it is the diagnostic a mismatched client calls to
+    // discover the server's version.
+    const versionGated =
+      !binding.versionExempt && binding.protocol.protocolVersionParts !== null && methodName !== DESCRIBE_METHOD_NAME;
+    if (action !== "exchange") {
       try {
         // Peek at request batch metadata without consuming the body — the
-        // dispatch helpers re-deserialize. Cost is one extra deserialize
-        // per protocol-versioned dispatch; acceptable for a typed gate.
+        // dispatch helpers re-deserialize. That is one extra parse of an
+        // already-buffered, single-row batch per call/init, and it buys the
+        // routing check a place *ahead* of any handler code, where a
+        // disagreeing request has not yet run anything.
         let reqMeta: ReadonlyMap<string, string> | undefined;
         try {
           const peeked = deserializeBatch(body);
@@ -1545,7 +1732,8 @@ export function createHttpHandler(
           // Malformed body — fall through to the dispatch helper, which
           // will surface the parse error properly.
         }
-        enforceProtocolVersion(reqMeta);
+        if (reqMeta !== undefined) enforceRoutingAgreement(protocolName, reqMeta);
+        if (versionGated) enforceProtocolVersion(binding, reqMeta);
       } catch (exc) {
         const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
         const errBatch = buildErrorBatch(errSchema, exc as Error, serverId, null);
@@ -1574,7 +1762,10 @@ export function createHttpHandler(
       // an id on the response that names nothing in the log looks like a
       // working trail right up to the moment somebody follows it.
       requestId,
-      protocol: protocol.name,
+      // The protocol that owns the resolved method, not the server's primary:
+      // a wrong protocol label in an access record looks plausible rather
+      // than failing, which is the worst way for a field to be wrong.
+      protocol: binding.name,
       protocolHash,
       protocolVersion,
       kind: transportKind,
@@ -1610,7 +1801,7 @@ export function createHttpHandler(
         if (method.type !== MethodType.UNARY) {
           throw new HttpRpcError(`Method '${methodName}' is a stream method. Use /init and /exchange endpoints.`, 400);
         }
-        response = await httpDispatchUnary(method, body, ctx);
+        response = await httpDispatchUnary(method, body, dispatchCtx);
       } else if (action === "init") {
         if (method.type !== MethodType.STREAM) {
           throw new HttpRpcError(
@@ -1618,7 +1809,7 @@ export function createHttpHandler(
             400,
           );
         }
-        response = await httpDispatchStreamInit(method, body, ctx);
+        response = await httpDispatchStreamInit(method, body, dispatchCtx);
       } else {
         if (method.type !== MethodType.STREAM) {
           throw new HttpRpcError(
@@ -1626,7 +1817,7 @@ export function createHttpHandler(
             400,
           );
         }
-        response = await httpDispatchStreamExchange(method, body, ctx);
+        response = await httpDispatchStreamExchange(method, body, dispatchCtx);
       }
 
       // Check if the dispatch function caught an error internally

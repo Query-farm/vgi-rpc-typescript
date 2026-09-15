@@ -155,14 +155,14 @@ describe("httpConnect against a custom-header server", () => {
     const { float, Protocol, createHttpHandler } = await import("../../src/index.js");
     const { httpConnect } = await import("../../src/client/connect.js");
 
-    const protocol = new Protocol("decode-test");
+    const protocol = new Protocol("decode.Test.v1");
     protocol.unary("double", {
       params: { x: float },
       result: { y: float },
       handler: async ({ x }) => ({ y: x * 2 }),
     });
 
-    const handler = createHttpHandler(protocol, { serverId: "decode-test" });
+    const handler = createHttpHandler(protocol, { serverId: "decode.Test.v1" });
 
     // Mimic the edge-safe workerd path exactly: the body is compressed once,
     // and the codec is named in the custom header only. Where the handler

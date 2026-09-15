@@ -18,6 +18,48 @@ import type { CookieSpec } from "../types.js";
 import { gzipDecompress } from "../util/gzip.js";
 import { zstdDecompress } from "../util/zstd.js";
 
+// --- Route shape ------------------------------------------------------------
+// The single source of truth for the HTTP route shape, so a change to it is
+// one edit rather than a search across the client, the server and every test.
+
+/**
+ * Build the HTTP path for one RPC call: `{prefix}/{protocol}/{method}`.
+ *
+ * The protocol segment is a required faithful projection of the request's
+ * `vgi_rpc.protocol` metadata -- present so an edge device can act on the
+ * protocol without an Arrow parser. The metadata remains canonical; see
+ * {@link createHttpHandler} for what happens when the two disagree.
+ *
+ * @param protocol Routing key of the hosted protocol (`vgi_rpc.Identity.v1`).
+ * @param method RPC method name.
+ * @param opts.prefix Server mount prefix (`""` or `"/vgi"`).
+ * @param opts.suffix `"/init"` or `"/exchange"` for stream endpoints.
+ */
+export function rpcPath(protocol: string, method: string, opts?: { prefix?: string; suffix?: string }): string {
+  return `${opts?.prefix ?? ""}/${protocol}/${method}${opts?.suffix ?? ""}`;
+}
+
+/**
+ * Build the path for a server-level reserved method such as `__describe__`.
+ *
+ * Reserved names are owned by no protocol and stay flat, at `{prefix}/{method}`.
+ * Kept beside {@link rpcPath} so the distinction is visible at the point of use
+ * rather than being something each caller has to remember.
+ */
+export function reservedPath(method: string, opts?: { prefix?: string }): string {
+  return `${opts?.prefix ?? ""}/${method}`;
+}
+
+/**
+ * Build an RPC path from an already-namespaced `{prefix}/{protocol}`.
+ *
+ * The client folds the protocol into its prefix once, after introspection, so
+ * this is the form its call sites need.
+ */
+export function rpcPathFromPrefix(namespacedPrefix: string, method: string, opts?: { suffix?: string }): string {
+  return `${namespacedPrefix}/${method}${opts?.suffix ?? ""}`;
+}
+
 /** MIME type for Arrow IPC stream request and response bodies. */
 export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
 

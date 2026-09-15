@@ -7,7 +7,7 @@ import { CALL_STATE_KEY, LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
-import { ARROW_CONTENT_TYPE } from "../http/common.js";
+import { ARROW_CONTENT_TYPE, rpcPathFromPrefix } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import {
   discoverHttpCapabilities,
@@ -109,6 +109,24 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   // has a fixed name, so it is the bootstrap: ask the one protocol whose name a
   // client can know a priori what else the server speaks, then address that.
   let serverProtocolName = options?.description?.protocolName ?? "";
+
+  /** `{prefix}/{protocol}` — the namespaced prefix every RPC path hangs off.
+   *
+   *  Folded once here rather than at each call site, matching the reference
+   *  client. The reserved endpoints (`__describe__`, `__upload_url__/init`,
+   *  `health`, `__session__`) belong to the server rather than to any one
+   *  protocol and stay on the flat `prefix`. */
+  function rpcPrefix(): string {
+    if (!serverProtocolName) {
+      throw new RpcError(
+        "ProtocolError",
+        "The server did not report a protocol name, so no RPC path can be built. " +
+          "Every request must name the protocol it addresses.",
+        "",
+      );
+    }
+    return `${prefix}/${serverProtocolName}`;
+  }
   let compressFn: CompressFn | undefined;
   let decompressFn: DecompressFn | undefined;
   let compressionLoaded = false;
@@ -319,7 +337,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         protocolVersion: serverProtocolVersion,
         protocol: serverProtocolName,
       });
-      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}`, body);
+      const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(rpcPrefix(), method), body);
       checkAuth(resp);
 
       const responseBody = await readResponse(resp);
@@ -375,7 +393,10 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         protocolVersion: serverProtocolVersion,
         protocol: serverProtocolName,
       });
-      const resp = await postWithExternalization(`${baseUrl}${prefix}/${method}/init`, body);
+      const resp = await postWithExternalization(
+        baseUrl + rpcPathFromPrefix(rpcPrefix(), method, { suffix: "/init" }),
+        body,
+      );
       checkAuth(resp);
 
       const responseBody = await readResponse(resp);
@@ -528,7 +549,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
 
       return new HttpStreamSession({
         baseUrl,
-        prefix,
+        prefix: rpcPrefix(),
         method,
         stateToken,
         callStateToken,
@@ -554,10 +575,16 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       // compressionLevel was requested and no call has run yet.
       await ensureCompression();
       await ensureResponseBudgetSupport();
+      // The routing key is part of the `/exchange` path now, and a resumed
+      // stream arrives with nothing but its tokens — so the protocol name has
+      // to come from introspection even though the resume itself needs no
+      // bind/init round-trip. Memoized, and a no-op when the caller supplied a
+      // `description`.
+      await ensureMethodCache();
       const { cursor, callToken } = unpackResumeToken(token);
       return new HttpStreamSession({
         baseUrl,
-        prefix,
+        prefix: rpcPrefix(),
         method,
         stateToken: cursor,
         callStateToken: callToken,

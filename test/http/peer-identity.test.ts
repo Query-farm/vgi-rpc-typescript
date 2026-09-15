@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { RecordBatch, RecordBatchStreamWriter, recordBatchFromArrays } from "@query-farm/apache-arrow";
 import { AuthContext } from "../../src/auth.js";
-import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
+import { PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
 import { ARROW_CONTENT_TYPE } from "../../src/http/common.js";
 import { createHttpHandler } from "../../src/http/handler.js";
 import { AUTH_REASON_HEADER, AuthFailure, AuthReason } from "../../src/http/unauthorized.js";
@@ -40,11 +40,17 @@ function spiffeIdentity(): PeerIdentity {
   });
 }
 
+/** The protocol this file's server hosts: the routing key in every request's
+ *  metadata, and the path segment those requests are posted to. */
+const PROTOCOL_NAME = "peer.Identity.Test.v1";
+const ECHO_URL = `http://worker.example/${PROTOCOL_NAME}/echo`;
+
 function makeBody(): Uint8Array {
   const schema = toSchema({ message: str });
   const batch = recordBatchFromArrays({ message: ["hi"] }, schema);
   const metadata = new Map([
     [RPC_METHOD_KEY, "echo"],
+    [PROTOCOL_KEY, PROTOCOL_NAME],
     [REQUEST_VERSION_KEY, REQUEST_VERSION],
   ]);
   const writer = new RecordBatchStreamWriter();
@@ -56,7 +62,7 @@ function makeBody(): Uint8Array {
 
 function post(handler: (request: Request) => Promise<Response>): Promise<Response> {
   return handler(
-    new Request("http://worker.example/echo", {
+    new Request(ECHO_URL, {
       method: "POST",
       headers: { "Content-Type": ARROW_CONTENT_TYPE },
       body: makeBody(),
@@ -69,7 +75,7 @@ function postWithHeaders(
   headers: Record<string, string>,
 ): Promise<Response> {
   return handler(
-    new Request("http://worker.example/echo", {
+    new Request(ECHO_URL, {
       method: "POST",
       headers: { "Content-Type": ARROW_CONTENT_TYPE, ...headers },
       body: makeBody(),
@@ -78,7 +84,7 @@ function postWithHeaders(
 }
 
 function protocol(observe?: (context: CallContext) => void): Protocol {
-  const value = new Protocol("peer-identity-test");
+  const value = new Protocol(PROTOCOL_NAME);
   value.unary("echo", {
     params: { message: str },
     result: { message: str },

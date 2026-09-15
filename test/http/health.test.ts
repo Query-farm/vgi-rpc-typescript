@@ -11,7 +11,7 @@ import { Protocol } from "../../src/protocol.js";
 import { str } from "../../src/schema.js";
 
 function makeHandler() {
-  const p = new Protocol("test-service");
+  const p = new Protocol("test.Service.v1");
   p.unary("echo", {
     params: { message: str },
     result: { message: str },

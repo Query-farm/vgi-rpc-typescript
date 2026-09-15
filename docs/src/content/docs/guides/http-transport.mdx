@@ -34,11 +34,13 @@ Bun.serve({ port: 8080, fetch: handler });
 
 All routes are served under a configurable `prefix`. The default prefix is `""` (root), so the examples below show the root-mounted paths. When you set a `prefix` (e.g. `/api`), it is prepended to every path.
 
+RPC routes are **namespaced by protocol**. A server hosts one or more protocols and dispatch resolves the pair `(protocol, method)`, so method names may collide across protocols without colliding on the wire. Pass a `VgiRpcServer` rather than a bare `Protocol` for its co-hosted protocols — `vgi_rpc.Reflection.v1`, `vgi_rpc.Identity.v1` — to be reachable over HTTP.
+
 | Route | Method | Description |
 |-------|--------|-------------|
-| `/{method}` | POST | Unary method call |
-| `/{method}/init` | POST | Initialize a stream (producer or exchange) |
-| `/{method}/exchange` | POST | Send/receive a stream batch |
+| `/{protocol}/{method}` | POST | Unary method call |
+| `/{protocol}/{method}/init` | POST | Initialize a stream (producer or exchange) |
+| `/{protocol}/{method}/exchange` | POST | Send/receive a stream batch |
 | `/__describe__` | POST | Machine-readable Arrow describe batch |
 | `/__upload_url__/init` | POST | Request a pre-signed upload URL (when `uploadUrlProvider` is set) |
 | `/__session__` | DELETE | Tear down a sticky session (when `enableSticky` is set) |
@@ -46,7 +48,25 @@ All routes are served under a configurable `prefix`. The default prefix is `""` 
 | `/` | GET | HTML landing page |
 | `/health` | GET | JSON health probe (auth-exempt) |
 
+Reserved endpoints below the RPC rows belong to the *server* rather than to any one protocol, so they stay flat under the prefix.
+
+Build these paths with the exported helpers rather than by hand: `rpcPath(protocol, method, { prefix, suffix })`, `rpcPathFromPrefix(namespacedPrefix, method, { suffix })`, and `reservedPath(method, { prefix })`.
+
 POST requests carrying Arrow bodies must use `Content-Type: application/vnd.apache.arrow.stream` (exported as `ARROW_CONTENT_TYPE`).
+
+### The path is a projection; the metadata is canonical
+
+On HTTP the protocol rides twice: in the request batch's `vgi_rpc.protocol` metadata, and as that path segment. **The metadata is canonical** — it is the only carrier on the stdio, unix and named-pipe transports. The path segment is a required *faithful projection* of it, present so a proxy, WAF or gateway can act on the protocol without an Arrow parser.
+
+Three rules follow, and the server enforces all three:
+
+- `vgi_rpc.protocol` is **required** on every unary call and stream `/init`, including against a server hosting exactly one protocol. An exemption would let an intermediary that rebuilds a request and drops the field land silently on whichever protocol happened to be first.
+- A request whose two carriers **disagree** is rejected (HTTP 400, `error_kind: protocol_not_supported`). Unchecked, edge policy would be applied to one protocol while the worker dispatched another.
+- A **`%` anywhere in the protocol path segment** is rejected without decoding (HTTP 404). The name charset never requires percent-encoding, so a percent sign is a bug or an attempt to make the edge and the worker read different strings.
+
+An unknown protocol is a 404 (`protocol_not_supported`); a hosted protocol that lacks the named method is a 404 with `method_not_implemented`. The difference is the documented capability probe — a client testing for an optional method must be able to tell "you do not speak this protocol" from "you speak it but lack this method".
+
+`/exchange` continuations carry no routing metadata and are not checked against the path: the protocol is bound into the AEAD associated data of the stream's cursor and call tokens, so a continuation presented under another protocol fails the tag check and is rejected exactly as an invalid token — including on the call-state cache-hit path, where the call token is never opened at all.
 
 When OAuth is configured (see [OAuth](/guides/oauth/)), additional routes are mounted: `GET /_oauth/callback`, `GET /_oauth/logout`, `POST /_oauth/token`, and `GET /.well-known/oauth-protected-resource{prefix}`.
 
@@ -54,8 +74,8 @@ When OAuth is configured (see [OAuth](/guides/oauth/)), additional routes are mo
 
 HTTP streaming uses sealed state tokens to carry stream state across requests, so no server-side session storage is required:
 
-1. Client calls `/{method}/init` with parameters → receives the first batch plus a state token
-2. Client calls `/{method}/exchange` with the state token + input batch → receives an output batch plus a fresh token
+1. Client calls `/{protocol}/{method}/init` with parameters → receives the first batch plus a state token
+2. Client calls `/{protocol}/{method}/exchange` with the state token + input batch → receives an output batch plus a fresh token
 3. Repeat step 2 until the stream ends (the final response carries no token)
 
 State tokens are sealed with **XChaCha20-Poly1305 AEAD** (wire format v4):

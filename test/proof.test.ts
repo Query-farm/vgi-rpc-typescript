@@ -232,7 +232,7 @@ describe("capability advertisement", () => {
   // ships an enforcing worker that looks unenforced, and the reverse mistake
   // (advertising in `allow`) tells a proxy the hop is protected when it is not.
   function health(proxyProofRequired: boolean): Promise<Response> {
-    const p = new Protocol("proof-capability");
+    const p = new Protocol("proof.Capability.v1");
     p.unary("echo", {
       params: { message: str },
       result: { message: str },

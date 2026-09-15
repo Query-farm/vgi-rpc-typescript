@@ -12,7 +12,7 @@ import {
   Schema,
   Utf8,
 } from "@query-farm/apache-arrow";
-import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
+import { PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
 import { ARROW_CONTENT_TYPE } from "../../src/http/common.js";
 import { createHttpHandler, int32, Protocol, str } from "../../src/index.js";
 
@@ -20,10 +20,15 @@ import { createHttpHandler, int32, Protocol, str } from "../../src/index.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** The protocol this file's server hosts: the routing key in every request's
+ *  metadata, and the path segment those requests are posted to. */
+const PROTOCOL_NAME = "CookieService";
+
 function buildRequestIpc(schema: Schema, values: Record<string, any[]>, methodName: string): Uint8Array {
   const batch = recordBatchFromArrays(values, schema);
   const meta = new Map<string, string>();
   meta.set(RPC_METHOD_KEY, methodName);
+  if (!meta.has(PROTOCOL_KEY)) meta.set(PROTOCOL_KEY, PROTOCOL_NAME);
   meta.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   const batchWithMeta = new RecordBatch(schema, batch.data, meta);
 
@@ -117,7 +122,7 @@ function makeCookieProtocol(): Protocol {
 // ---------------------------------------------------------------------------
 
 describe("HTTP cookies", () => {
-  const BASE = "http://localhost:9999";
+  const BASE = `http://localhost:9999/${PROTOCOL_NAME}`;
   let handler: (req: Request) => Response | Promise<Response>;
 
   beforeAll(() => {

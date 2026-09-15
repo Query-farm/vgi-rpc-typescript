@@ -29,6 +29,23 @@ try {
   hasPython = r.exitCode === 0;
 } catch {}
 
+// The TS client now posts to `{prefix}/{protocol}/{method}`: the protocol rides
+// as a path segment as well as in `vgi_rpc.protocol` metadata, and the server
+// routes on it. A reference server that predates namespaced routes answers 404
+// to every one of those paths, so this suite would be asserting against a
+// server it cannot address at all rather than against externalization.
+//
+// `vgi_rpc.http._common.rpc_path` is the route-shape helper the namespaced
+// reference gained with the routes themselves, so importing it is the same
+// question as "does this server route by protocol?".
+let hasNamespacedRoutes = false;
+if (hasPython) {
+  try {
+    const r = Bun.spawnSync([PYTHON, "-c", "from vgi_rpc.http._common import rpc_path"]);
+    hasNamespacedRoutes = r.exitCode === 0;
+  } catch {}
+}
+
 async function readPort(proc: Subprocess): Promise<string> {
   const reader = proc.stdout.getReader();
   let buf = "";
@@ -56,7 +73,7 @@ async function readPort(proc: Subprocess): Promise<string> {
   throw new Error(`Failed to read port from server: ${buf}`);
 }
 
-const describeFn = hasPython ? describe : describe.skip;
+const describeFn = hasPython && hasNamespacedRoutes ? describe : describe.skip;
 
 describeFn("client request externalization (Python server)", () => {
   let proc: Subprocess;

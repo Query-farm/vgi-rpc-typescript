@@ -7,7 +7,7 @@ import { CALL_STATE_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
-import { ARROW_CONTENT_TYPE, serializeIpcStream } from "../http/common.js";
+import { ARROW_CONTENT_TYPE, rpcPathFromPrefix, serializeIpcStream } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
@@ -111,6 +111,9 @@ export class HttpStreamSession implements StreamSession {
 
   constructor(opts: {
     baseUrl: string;
+    /** The already-namespaced `{prefix}/{protocol}` an `/exchange` path hangs
+     *  off. Folded by the caller, which learns the protocol from
+     *  `__describe__`. */
     prefix: string;
     method: string;
     stateToken: string | null;
@@ -368,7 +371,10 @@ export class HttpStreamSession implements StreamSession {
 
   private async _doExchange(schema: Schema, batches: RecordBatch[]): Promise<Record<string, any>[]> {
     const body = serializeIpcStream(schema, batches);
-    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
+    const resp = await this._post(
+      this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }),
+      body,
+    );
     if (resp.status === 401) {
       throw new RpcError("AuthenticationError", "Authentication required", "");
     }
@@ -598,7 +604,10 @@ export class HttpStreamSession implements StreamSession {
     const batch = new RecordBatch(emptySchema, data, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
 
-    const resp = await this._post(`${this._baseUrl}${this._prefix}/${this._method}/exchange`, body);
+    const resp = await this._post(
+      this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }),
+      body,
+    );
     if (resp.status === 401) {
       throw new RpcError("AuthenticationError", "Authentication required", "");
     }

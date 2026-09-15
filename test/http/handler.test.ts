@@ -16,6 +16,7 @@ import {
 import {
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
+  PROTOCOL_KEY,
   REQUEST_VERSION,
   REQUEST_VERSION_KEY,
   RPC_METHOD_KEY,
@@ -30,6 +31,17 @@ import { zstdDecompress } from "../../src/util/zstd.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** The protocol this file's server hosts. It is both the routing key in every
+ *  request's metadata and the path segment those requests are posted to --
+ *  the metadata is canonical and the path is its required projection. */
+const PROTOCOL_NAME = "TestHTTP";
+
+/** `{baseUrl}{prefix}/{protocol}` — the namespaced prefix RPC routes hang off.
+ *  Reserved framework endpoints (`__describe__`, `__upload_url__/init`,
+ *  `health`) belong to the server rather than to any protocol and stay flat
+ *  on `{baseUrl}/vgi`. */
+const RPC = `http://localhost:9999/vgi/${PROTOCOL_NAME}`;
+
 function buildRequestIpc(
   schema: Schema,
   values: Record<string, any[]>,
@@ -39,6 +51,7 @@ function buildRequestIpc(
   const batch = recordBatchFromArrays(values, schema);
   const meta = metadata ?? new Map<string, string>();
   meta.set(RPC_METHOD_KEY, methodName);
+  if (!meta.has(PROTOCOL_KEY)) meta.set(PROTOCOL_KEY, PROTOCOL_NAME);
   meta.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   const batchWithMeta = new RecordBatch(schema, batch.data, meta);
 
@@ -177,7 +190,7 @@ describe("HTTP Handler", () => {
   test("POST to unknown path returns 404", async () => {
     const body = buildRequestIpc(new Schema([]), {}, "nope");
     const res = await handler(
-      new Request(`${BASE}/vgi/nope`, {
+      new Request(`${RPC}/nope`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -187,14 +200,14 @@ describe("HTTP Handler", () => {
   });
 
   test("GET returns 404 HTML page", async () => {
-    const res = await handler(new Request(`${BASE}/vgi/add`, { method: "GET" }));
+    const res = await handler(new Request(`${RPC}/add`, { method: "GET" }));
     expect(res.status).toBe(404);
     expect(res.headers.get("Content-Type")).toContain("text/html");
   });
 
   test("wrong Content-Type returns 415", async () => {
     const res = await handler(
-      new Request(`${BASE}/vgi/add`, {
+      new Request(`${RPC}/add`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
@@ -210,7 +223,7 @@ describe("HTTP Handler", () => {
     const body = buildRequestIpc(paramSchema, { a: [3], b: [4] }, "add");
 
     const res = await handler(
-      new Request(`${BASE}/vgi/add`, {
+      new Request(`${RPC}/add`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -231,7 +244,7 @@ describe("HTTP Handler", () => {
     const body = buildRequestIpc(paramSchema, { name: ["World"] }, "greet");
 
     const res = await handler(
-      new Request(`${BASE}/vgi/greet`, {
+      new Request(`${RPC}/greet`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -248,7 +261,7 @@ describe("HTTP Handler", () => {
     const body = buildRequestIpc(new Schema([]), {}, "fail");
 
     const res = await handler(
-      new Request(`${BASE}/vgi/fail`, {
+      new Request(`${RPC}/fail`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -269,7 +282,7 @@ describe("HTTP Handler", () => {
     const body = buildRequestIpc(paramSchema, { value: ["test"] }, "echo_with_log");
 
     const res = await handler(
-      new Request(`${BASE}/vgi/echo_with_log`, {
+      new Request(`${RPC}/echo_with_log`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -344,7 +357,7 @@ describe("HTTP Handler", () => {
     const body = buildRequestIpc(paramSchema, { a: [1], b: [2] }, "add");
 
     const res = await handlerWithCors(
-      new Request(`${BASE}/vgi/add`, {
+      new Request(`${RPC}/add`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -367,7 +380,7 @@ describe("HTTP Handler", () => {
       corsOrigins: "*",
     });
 
-    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    const res = await handlerWithCors(new Request(`${RPC}/add`, { method: "OPTIONS" }));
 
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
@@ -389,7 +402,7 @@ describe("HTTP Handler", () => {
       corsOrigins: "*",
     });
 
-    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    const res = await handlerWithCors(new Request(`${RPC}/add`, { method: "OPTIONS" }));
     expect(res.headers.get("Access-Control-Max-Age")).toBe("300");
   });
 
@@ -400,7 +413,7 @@ describe("HTTP Handler", () => {
       corsMaxAge: 3600,
     });
 
-    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    const res = await handlerWithCors(new Request(`${RPC}/add`, { method: "OPTIONS" }));
     expect(res.headers.get("Access-Control-Max-Age")).toBe("3600");
   });
 
@@ -411,7 +424,7 @@ describe("HTTP Handler", () => {
       corsMaxAge: null,
     });
 
-    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    const res = await handlerWithCors(new Request(`${RPC}/add`, { method: "OPTIONS" }));
     expect(res.headers.get("Access-Control-Max-Age")).toBeNull();
   });
 
@@ -426,7 +439,7 @@ describe("HTTP Handler", () => {
     const body = buildRequestIpc(paramSchema, { a: [1], b: [2] }, "add");
 
     const res = await handlerWithCors(
-      new Request(`${BASE}/vgi/add`, {
+      new Request(`${RPC}/add`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -441,7 +454,7 @@ describe("HTTP Handler", () => {
     const plain = createHttpHandler(makeTestProtocol(), { prefix: "/vgi", serverId: "cors-off" });
 
     const preflight = await plain(
-      new Request(`${BASE}/vgi/add`, {
+      new Request(`${RPC}/add`, {
         method: "OPTIONS",
         headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" },
       }),
@@ -454,7 +467,7 @@ describe("HTTP Handler", () => {
 
     const paramSchema = new Schema([new Field("a", new Float64(), false), new Field("b", new Float64(), false)]);
     const actual = await plain(
-      new Request(`${BASE}/vgi/add`, {
+      new Request(`${RPC}/add`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, Origin: "https://evil.example" },
         body: buildRequestIpc(paramSchema, { a: [1], b: [2] }, "add"),
@@ -475,7 +488,7 @@ describe("HTTP Handler", () => {
     // every call behind a proof gate.
     const requested = "content-type, x-vgi-accept-encoding, vgi-session, vgi-session-accept, vgi-proxy-proof";
     const res = await handlerWithCors(
-      new Request(`${BASE}/vgi/add`, {
+      new Request(`${RPC}/add`, {
         method: "OPTIONS",
         headers: {
           Origin: "https://conformance.example",
@@ -498,7 +511,7 @@ describe("HTTP Handler", () => {
       stickyEchoHeaders: { "fly-force-instance-id": "abc" },
     });
 
-    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    const res = await handlerWithCors(new Request(`${RPC}/add`, { method: "OPTIONS" }));
     const exposed = res.headers.get("Access-Control-Expose-Headers") ?? "";
 
     for (const name of [
@@ -524,7 +537,7 @@ describe("HTTP Handler", () => {
       },
     });
 
-    const res = await handlerWithCors(new Request(`${BASE}/vgi/add`, { method: "OPTIONS" }));
+    const res = await handlerWithCors(new Request(`${RPC}/add`, { method: "OPTIONS" }));
     const exposed = res.headers.get("Access-Control-Expose-Headers") ?? "";
 
     expect(exposed).toContain("VGI-Max-Request-Bytes");
@@ -536,7 +549,7 @@ describe("HTTP Handler", () => {
     const wrongSchema = new Schema([new Field("name", new Float64(), false)]);
     const body = buildRequestIpc(wrongSchema, { name: [42] }, "greet");
     const res = await handler(
-      new Request(`${BASE}/vgi/greet`, {
+      new Request(`${RPC}/greet`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -550,7 +563,7 @@ describe("HTTP Handler", () => {
     const wrongSchema = new Schema([new Field("factor", new Utf8(), false)]);
     const body = buildRequestIpc(wrongSchema, { factor: ["not-a-float"] }, "scale");
     const res = await handler(
-      new Request(`${BASE}/vgi/scale/init`, {
+      new Request(`${RPC}/scale/init`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -567,7 +580,7 @@ describe("HTTP Handler", () => {
       { a: [1, 2], b: [3, 4] },
     ]) {
       const res = await handler(
-        new Request(`${BASE}/vgi/add`, {
+        new Request(`${RPC}/add`, {
           method: "POST",
           headers: { "Content-Type": ARROW_CONTENT_TYPE },
           body: buildRequestIpc(paramSchema, values, "add"),
@@ -581,7 +594,7 @@ describe("HTTP Handler", () => {
   test("rejects stream-init parameter batches that do not have exactly one row", async () => {
     const paramSchema = new Schema([new Field("count", new Int32(), false)]);
     const res = await handler(
-      new Request(`${BASE}/vgi/count/init`, {
+      new Request(`${RPC}/count/init`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: buildRequestIpc(paramSchema, { count: [] }, "count"),
@@ -684,7 +697,7 @@ describe("HTTP Handler", () => {
     const body = buildRequestIpc(paramSchema, { count: [3] }, "count");
 
     const res = await handler(
-      new Request(`${BASE}/vgi/count/init`, {
+      new Request(`${RPC}/count/init`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -721,7 +734,7 @@ describe("HTTP Handler", () => {
       // Continuation turns go to /exchange carrying the cursor — posting to
       // /init again would re-initialise the producer and replay from 0.
       const next = await handler(
-        new Request(`${BASE}/vgi/count/exchange`, {
+        new Request(`${RPC}/count/exchange`, {
           method: "POST",
           headers: { "Content-Type": ARROW_CONTENT_TYPE },
           body: buildRequestIpc(paramSchema, { count: [3] }, "count", meta),
@@ -745,7 +758,7 @@ describe("HTTP Handler", () => {
     });
     const paramSchema = new Schema([new Field("count", new Int32(), false)]);
     const initRes = await cappedHandler(
-      new Request(`${BASE}/vgi/metadata_ticks/init`, {
+      new Request(`${RPC}/metadata_ticks/init`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: buildRequestIpc(paramSchema, { count: [2] }, "metadata_ticks"),
@@ -761,7 +774,7 @@ describe("HTTP Handler", () => {
       ["application.tick", "updated"],
     ]);
     const nextRes = await cappedHandler(
-      new Request(`${BASE}/vgi/metadata_ticks/exchange`, {
+      new Request(`${RPC}/metadata_ticks/exchange`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: buildRequestIpc(paramSchema, { count: [2] }, "metadata_ticks", metadata),
@@ -775,7 +788,7 @@ describe("HTTP Handler", () => {
   test("double data emission fails as a ProtocolError", async () => {
     const emptySchema = new Schema([]);
     const res = await handler(
-      new Request(`${BASE}/vgi/double_emit/init`, {
+      new Request(`${RPC}/double_emit/init`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: buildRequestIpc(emptySchema, {}, "double_emit"),
@@ -795,7 +808,7 @@ describe("HTTP Handler", () => {
 
     // Init
     const initRes = await handler(
-      new Request(`${BASE}/vgi/scale/init`, {
+      new Request(`${RPC}/scale/init`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: initBody,
@@ -817,7 +830,7 @@ describe("HTTP Handler", () => {
     const exchangeBody = buildRequestIpc(inputSchema, { value: [5] }, "scale", exchangeMeta);
 
     const exchangeRes = await handler(
-      new Request(`${BASE}/vgi/scale/exchange`, {
+      new Request(`${RPC}/scale/exchange`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: exchangeBody,
@@ -838,7 +851,7 @@ describe("HTTP Handler", () => {
   test("exchange 0-row data batch keeps emit metadata and token", async () => {
     const initBody = buildRequestIpc(new Schema([]), {}, "empty_reply");
     const initRes = await handler(
-      new Request(`${BASE}/vgi/empty_reply/init`, {
+      new Request(`${RPC}/empty_reply/init`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: initBody,
@@ -855,7 +868,7 @@ describe("HTTP Handler", () => {
     const exchangeBody = buildRequestIpc(inputSchema, { value: [5] }, "empty_reply", exchangeMeta);
 
     const exchangeRes = await handler(
-      new Request(`${BASE}/vgi/empty_reply/exchange`, {
+      new Request(`${RPC}/empty_reply/exchange`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: exchangeBody,
@@ -877,7 +890,7 @@ describe("HTTP Handler", () => {
 
     // Init
     const initRes = await handler(
-      new Request(`${BASE}/vgi/scale/init`, {
+      new Request(`${RPC}/scale/init`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: initBody,
@@ -895,7 +908,7 @@ describe("HTTP Handler", () => {
       const body = buildRequestIpc(inputSchema, { value: [inputVal] }, "scale", meta);
 
       const res = await handler(
-        new Request(`${BASE}/vgi/scale/exchange`, {
+        new Request(`${RPC}/scale/exchange`, {
           method: "POST",
           headers: { "Content-Type": ARROW_CONTENT_TYPE },
           body,
@@ -919,8 +932,10 @@ describe("HTTP Handler", () => {
 describe("HTTP onServeStart lifecycle", () => {
   const BASE = "http://localhost:9999";
 
-  function request(body: Uint8Array): Request {
-    return new Request(`${BASE}/vgi/ping`, {
+  // Each test here registers its own protocol, and the path segment has to
+  // name that one -- the metadata is canonical and the path is its projection.
+  function request(protocolName: string, body: Uint8Array): Request {
+    return new Request(`${BASE}/vgi/${protocolName}/ping`, {
       method: "POST",
       headers: { "Content-Type": ARROW_CONTENT_TYPE, "Accept-Encoding": "identity" },
       body,
@@ -928,7 +943,7 @@ describe("HTTP onServeStart lifecycle", () => {
   }
 
   test("simultaneous first requests share one successful hook invocation", async () => {
-    const protocol = new Protocol("lifecycle-concurrency");
+    const protocol = new Protocol("lifecycle.Concurrency.v1");
     let dispatches = 0;
     protocol.unary("ping", {
       params: {},
@@ -959,9 +974,11 @@ describe("HTTP onServeStart lifecycle", () => {
         await gate;
       },
     });
-    const body = buildRequestIpc(new Schema([]), {}, "ping");
+    const body = buildRequestIpc(new Schema([]), {}, "ping", new Map([[PROTOCOL_KEY, "lifecycle.Concurrency.v1"]]));
 
-    const pending = Array.from({ length: 8 }, () => Promise.resolve(handler(request(body))));
+    const pending = Array.from({ length: 8 }, () =>
+      Promise.resolve(handler(request("lifecycle.Concurrency.v1", body))),
+    );
     await entered;
     expect(hookCalls).toBe(1);
     expect(dispatches).toBe(0);
@@ -974,7 +991,7 @@ describe("HTTP onServeStart lifecycle", () => {
   });
 
   test("a failed hook retries once and never refires after success", async () => {
-    const protocol = new Protocol("lifecycle-retry");
+    const protocol = new Protocol("lifecycle.Retry.v1");
     protocol.unary("ping", {
       params: {},
       result: { result: str },
@@ -989,17 +1006,17 @@ describe("HTTP onServeStart lifecycle", () => {
         if (hookCalls === 1) throw new Error("transient startup failure");
       },
     });
-    const body = buildRequestIpc(new Schema([]), {}, "ping");
+    const body = buildRequestIpc(new Schema([]), {}, "ping", new Map([[PROTOCOL_KEY, "lifecycle.Retry.v1"]]));
 
     let firstErrorMessage = "";
     try {
-      await handler(request(body));
+      await handler(request("lifecycle.Retry.v1", body));
     } catch (error) {
       firstErrorMessage = error instanceof Error ? error.message : String(error);
     }
     expect(firstErrorMessage).toContain("transient startup failure");
-    expect((await handler(request(body))).status).toBe(200);
-    expect((await handler(request(body))).status).toBe(200);
+    expect((await handler(request("lifecycle.Retry.v1", body))).status).toBe(200);
+    expect((await handler(request("lifecycle.Retry.v1", body))).status).toBe(200);
     expect(hookCalls).toBe(2);
   });
 });
@@ -1009,8 +1026,6 @@ describe("HTTP onServeStart lifecycle", () => {
 // ---------------------------------------------------------------------------
 
 describe("exchange path without a `process` global", () => {
-  const BASE = "http://localhost:9999";
-
   /** Run `fn` with `globalThis.process` removed, as on workerd.
    *
    * The `await` inside the try is load-bearing: dispatch is asynchronous, so a
@@ -1038,7 +1053,7 @@ describe("exchange path without a `process` global", () => {
     const initRes = await withoutProcess(() =>
       Promise.resolve(
         handler(
-          new Request(`${BASE}/vgi/scale/init`, {
+          new Request(`${RPC}/scale/init`, {
             method: "POST",
             headers: { "Content-Type": ARROW_CONTENT_TYPE },
             body: buildRequestIpc(paramSchema, { factor: [10] }, "scale"),
@@ -1058,7 +1073,7 @@ describe("exchange path without a `process` global", () => {
     const exchangeRes = await withoutProcess(() =>
       Promise.resolve(
         handler(
-          new Request(`${BASE}/vgi/scale/exchange`, {
+          new Request(`${RPC}/scale/exchange`, {
             method: "POST",
             headers: { "Content-Type": ARROW_CONTENT_TYPE },
             body: buildRequestIpc(inputSchema, { value: [5] }, "scale", meta),
@@ -1078,8 +1093,6 @@ describe("exchange path without a `process` global", () => {
 // ---------------------------------------------------------------------------
 
 describe("response compression on workerd", () => {
-  const BASE = "http://localhost:9999";
-
   /** Build a handler with the runtime pretending to be Cloudflare Workers.
    *  `isWorkerd()` reads `navigator.userAgent`, and `createHttpHandler` reads
    *  it once at construction — so the stub has to wrap construction, not just
@@ -1106,7 +1119,7 @@ describe("response compression on workerd", () => {
 
   async function callAdd(handler: (req: Request) => Response | Promise<Response>): Promise<Response> {
     return handler(
-      new Request(`${BASE}/vgi/add`, {
+      new Request(`${RPC}/add`, {
         method: "POST",
         headers: {
           "Content-Type": ARROW_CONTENT_TYPE,

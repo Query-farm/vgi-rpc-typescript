@@ -21,6 +21,7 @@ import {
   LOCATION_KEY,
   LOG_LEVEL_KEY,
   LOG_MESSAGE_KEY,
+  PROTOCOL_KEY,
   REQUEST_VERSION,
   REQUEST_VERSION_KEY,
   RPC_ERROR_HEADER,
@@ -32,7 +33,13 @@ import { parseResponseBudgetDecimal } from "../../src/http/response-budget.js";
 import { AuthFailure, AuthReason } from "../../src/http/unauthorized.js";
 import { ARROW_CONTENT_TYPE, bytes, createHttpHandler, Protocol, str } from "../../src/index.js";
 
+/** Build one RPC request body.
+ *
+ *  `protocolName` is the routing key. It rides in the metadata, which is
+ *  canonical, and again in the path the caller posts to -- the two must agree,
+ *  so both come from the same literal at each call site. */
 function buildRequestIpc(
+  protocolName: string,
   schema: Schema,
   values: Record<string, any[]>,
   methodName: string,
@@ -41,6 +48,7 @@ function buildRequestIpc(
   const batch = recordBatchFromArrays(values, schema);
   const meta = new Map<string, string>();
   meta.set(RPC_METHOD_KEY, methodName);
+  meta.set(PROTOCOL_KEY, protocolName);
   meta.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   if (extraMetadata) for (const [key, value] of extraMetadata) meta.set(key, value);
   const batchWithMeta = new RecordBatch(schema, batch.data, meta);
@@ -104,9 +112,9 @@ describe("OutputCollector budget snapshots (worker-visible)", () => {
         new (await import("@query-farm/apache-arrow")).Utf8(),
       ),
     ]);
-    const body = buildRequestIpc(reqSchema, { msg: ["hi"] }, "ping");
+    const body = buildRequestIpc("BudgetSvc", reqSchema, { msg: ["hi"] }, "ping");
     const response = await handler(
-      new Request("http://test/ping", {
+      new Request("http://test/BudgetSvc/ping", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: body as unknown as BodyInit,
@@ -146,9 +154,9 @@ describe("OutputCollector budget snapshots (worker-visible)", () => {
 
     const M = await import("@query-farm/apache-arrow");
     const reqSchema = new Schema([new M.Field("msg", new M.Utf8())]);
-    const body = buildRequestIpc(reqSchema, { msg: ["hi"] }, "ping");
+    const body = buildRequestIpc("MinimumSvc", reqSchema, { msg: ["hi"] }, "ping");
     const response = await handler(
-      new Request("http://test/ping", {
+      new Request("http://test/MinimumSvc/ping", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "VGI-Accept-Max-Response-Bytes": "65536" },
         body: body as unknown as BodyInit,
@@ -208,12 +216,12 @@ describe("OutputCollector budget snapshots (worker-visible)", () => {
     const handler = createHttpHandler(protocol);
     const M = await import("@query-farm/apache-arrow");
     const reqSchema = new Schema([new M.Field("msg", new M.Utf8())]);
-    const body = buildRequestIpc(reqSchema, { msg: ["hi"] }, "ping");
+    const body = buildRequestIpc("DecimalSvc", reqSchema, { msg: ["hi"] }, "ping");
     // Fetch Headers strips surrounding OWS before application code can
     // inspect it; every other non-canonical spelling remains detectable.
     for (const value of ["0", "1", "65535", "01", "+1", "1.0", "9007199254740992"]) {
       const response = await handler(
-        new Request("http://test/ping", {
+        new Request("http://test/DecimalSvc/ping", {
           method: "POST",
           headers: { "Content-Type": ARROW_CONTENT_TYPE, "VGI-Accept-Max-Response-Bytes": value },
           body: body as unknown as BodyInit,
@@ -244,7 +252,7 @@ describe("OutputCollector budget snapshots (worker-visible)", () => {
       },
     });
     const response = await handler(
-      new Request("http://test/ping", {
+      new Request("http://test/AuthOrderSvc/ping", {
         method: "POST",
         headers: { "Content-Type": "not-arrow", "VGI-Accept-Max-Response-Bytes": "1" },
         body: new Uint8Array(70_000) as unknown as BodyInit,
@@ -267,9 +275,9 @@ describe("OutputCollector budget snapshots (worker-visible)", () => {
     const handler = createHttpHandler(protocol, { maxResponseBytes: 65_536 });
     const M = await import("@query-farm/apache-arrow");
     const reqSchema = new Schema([new M.Field("msg", new M.Utf8())]);
-    const body = buildRequestIpc(reqSchema, { msg: ["hi"] }, "ping");
+    const body = buildRequestIpc("BudgetSvc2", reqSchema, { msg: ["hi"] }, "ping");
     await handler(
-      new Request("http://test/ping", {
+      new Request("http://test/BudgetSvc2/ping", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: body as unknown as BodyInit,
@@ -291,9 +299,9 @@ describe("OutputCollector budget snapshots (worker-visible)", () => {
     });
     const M = await import("@query-farm/apache-arrow");
     const requestSchema = new Schema([new M.Field("_placeholder", new M.Utf8())]);
-    const body = buildRequestIpc(requestSchema, { _placeholder: [""] }, "blob");
+    const body = buildRequestIpc("UnaryRescueSvc", requestSchema, { _placeholder: [""] }, "blob");
     const response = await handler(
-      new Request("http://test/blob", {
+      new Request("http://test/UnaryRescueSvc/blob", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "VGI-Accept-Max-Response-Bytes": "65536" },
         body: body as unknown as BodyInit,
@@ -316,9 +324,9 @@ describe("OutputCollector budget snapshots (worker-visible)", () => {
     const handler = createHttpHandler(protocol, { maxResponseBytes: 1024 * 1024 });
     const M = await import("@query-farm/apache-arrow");
     const requestSchema = new Schema([new M.Field("_placeholder", new M.Utf8())]);
-    const body = buildRequestIpc(requestSchema, { _placeholder: [""] }, "blob");
+    const body = buildRequestIpc("UnaryStrictSvc", requestSchema, { _placeholder: [""] }, "blob");
     const response = await handler(
-      new Request("http://test/blob", {
+      new Request("http://test/UnaryStrictSvc/blob", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "VGI-Accept-Max-Response-Bytes": "65536" },
         body: body as unknown as BodyInit,
@@ -347,10 +355,10 @@ describe("producer stream external cap", () => {
     const M = await import("@query-farm/apache-arrow");
     const reqSchema = new Schema([new M.Field("_placeholder", new M.Utf8())]);
     const init = await handler(
-      new Request("http://test/drip/init", {
+      new Request("http://test/SealedBudgetSvc/drip/init", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "VGI-Accept-Max-Response-Bytes": "65536" },
-        body: buildRequestIpc(reqSchema, { _placeholder: [""] }, "drip") as unknown as BodyInit,
+        body: buildRequestIpc("SealedBudgetSvc", reqSchema, { _placeholder: [""] }, "drip") as unknown as BodyInit,
       }),
     );
     const { batches: initBatches } = await readBody(init);
@@ -364,10 +372,16 @@ describe("producer stream external cap", () => {
       [CALL_STATE_KEY, callToken!],
     ]);
     const continuation = await handler(
-      new Request("http://test/drip/exchange", {
+      new Request("http://test/SealedBudgetSvc/drip/exchange", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "VGI-Accept-Max-Response-Bytes": "1048576" },
-        body: buildRequestIpc(reqSchema, { _placeholder: [""] }, "drip", continuationMetadata) as unknown as BodyInit,
+        body: buildRequestIpc(
+          "SealedBudgetSvc",
+          reqSchema,
+          { _placeholder: [""] },
+          "drip",
+          continuationMetadata,
+        ) as unknown as BodyInit,
       }),
     );
     expect(continuation.status).toBe(200);
@@ -411,9 +425,9 @@ describe("producer stream external cap", () => {
 
     const M = await import("@query-farm/apache-arrow");
     const reqSchema = new Schema([new M.Field("_placeholder", new M.Utf8())]);
-    const body = buildRequestIpc(reqSchema, { _placeholder: [""] }, "drip");
+    const body = buildRequestIpc("ExfilSvc", reqSchema, { _placeholder: [""] }, "drip");
     const response = await handler(
-      new Request("http://test/drip/init", {
+      new Request("http://test/ExfilSvc/drip/init", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body: body as unknown as BodyInit,
@@ -447,9 +461,9 @@ describe("producer stream external cap", () => {
     const handler = createHttpHandler(protocol, { maxResponseBytes: 1024 * 1024 });
     const M = await import("@query-farm/apache-arrow");
     const reqSchema = new Schema([new M.Field("_placeholder", new M.Utf8())]);
-    const body = buildRequestIpc(reqSchema, { _placeholder: [""] }, "drip");
+    const body = buildRequestIpc("StrictProducerSvc", reqSchema, { _placeholder: [""] }, "drip");
     const response = await handler(
-      new Request("http://test/drip/init", {
+      new Request("http://test/StrictProducerSvc/drip/init", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "VGI-Accept-Max-Response-Bytes": "65536" },
         body: body as unknown as BodyInit,
@@ -476,9 +490,9 @@ describe("producer stream external cap", () => {
     });
     const M = await import("@query-farm/apache-arrow");
     const reqSchema = new Schema([new M.Field("_placeholder", new M.Utf8())]);
-    const body = buildRequestIpc(reqSchema, { _placeholder: [""] }, "drip");
+    const body = buildRequestIpc("RescueProducerSvc", reqSchema, { _placeholder: [""] }, "drip");
     const response = await handler(
-      new Request("http://test/drip/init", {
+      new Request("http://test/RescueProducerSvc/drip/init", {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "VGI-Accept-Max-Response-Bytes": "65536" },
         body: body as unknown as BodyInit,

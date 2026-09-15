@@ -15,25 +15,63 @@ const CALL_TOKEN_VERSION = 2;
 /** Length of the random per-stream id minted at `/init`. */
 export const CALL_ID_LEN = 16;
 
-const AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v4\0");
-const BOUND_AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v5\0");
-const CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v1\0");
-const BOUND_CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v2\0");
+/** Scope for a token that belongs to the server rather than to any one hosted
+ *  protocol -- sticky-session tokens, today.
+ *
+ *  Not a protocol name: the grammar forbids a leading NUL, so no hosted
+ *  protocol can ever collide with it. */
+export const SERVER_SCOPE = "\u0000server";
+
+/**
+ * Everything the AEAD associated data of a state or call token is bound to.
+ *
+ * Passed as one object rather than four positional strings because every field
+ * is a string and a transposition would still compile -- and a token bound to
+ * the wrong scope fails open in the only direction that matters: it opens.
+ */
+export interface TokenScope {
+  /**
+   * Wire name of the protocol that owns the stream, or {@link SERVER_SCOPE}.
+   *
+   * Bound into the AAD rather than carried in the plaintext so a
+   * cross-protocol continuation fails the AEAD tag check -- rejected exactly
+   * as an invalid token, with no comparison code to get wrong and nothing to
+   * forget on the call-state cache-hit path, where the call token is never
+   * opened at all. The cursor is always opened first, so binding it here
+   * covers both paths.
+   */
+  protocol: string;
+  /** The issuing principal; `null` for an anonymous caller. An authenticator
+   *  that deliberately uses an empty principal is still authenticated, and the
+   *  empty string and `null` produce different AAD. */
+  principal: string | null | undefined;
+  /** Digest of the resolved transport-peer evidence, when there is any.
+   *  Its presence selects the bound AAD prefix. */
+  evidenceBinding?: string;
+  /** Authentication domain of the issuing principal. */
+  domain?: string | null;
+}
+
+// AAD prefixes. The state and call lines are versioned independently because
+// they change for independent reasons; the prefix is fixed-length and
+// therefore prefix-unambiguous with respect to the variable-length identity
+// tail that follows. The version numbering matches the Python reference so
+// the two ports construct byte-identical associated data.
+const AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v6\0");
+const BOUND_AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v7\0");
+const CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v3\0");
+const BOUND_CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v4\0");
 
 /**
  * Build the AEAD associated data that binds a state token to its issuing
- * principal. Anonymous and authenticated tokens produce distinct AAD
- * strings, so an anonymous token cannot be opened by a named identity
- * (and vice versa).
+ * principal and to the protocol that owns its stream. Anonymous and
+ * authenticated tokens produce distinct AAD strings, so an anonymous token
+ * cannot be opened by a named identity (and vice versa).
  */
-export function computeAad(
-  principal: string | null | undefined,
-  evidenceBinding?: string,
-  domain?: string | null,
-): Uint8Array {
-  return evidenceBinding
-    ? boundAadWith(BOUND_AAD_PREFIX, principal, domain, evidenceBinding)
-    : aadWith(AAD_PREFIX, principal);
+export function computeAad(scope: TokenScope): Uint8Array {
+  return scope.evidenceBinding
+    ? boundAadWith(BOUND_AAD_PREFIX, scope, scope.evidenceBinding)
+    : aadWith(AAD_PREFIX, scope);
 }
 
 /**
@@ -43,47 +81,46 @@ export function computeAad(
  * fails the AEAD tag check rather than decoding into a payload the reader
  * would misinterpret.
  */
-export function computeCallAad(
-  principal: string | null | undefined,
-  evidenceBinding?: string,
-  domain?: string | null,
-): Uint8Array {
-  return evidenceBinding
-    ? boundAadWith(BOUND_CALL_AAD_PREFIX, principal, domain, evidenceBinding)
-    : aadWith(CALL_AAD_PREFIX, principal);
+export function computeCallAad(scope: TokenScope): Uint8Array {
+  return scope.evidenceBinding
+    ? boundAadWith(BOUND_CALL_AAD_PREFIX, scope, scope.evidenceBinding)
+    : aadWith(CALL_AAD_PREFIX, scope);
 }
 
-function boundAadWith(
-  prefix: Uint8Array,
-  principal: string | null | undefined,
-  domain: string | null | undefined,
-  evidenceBinding: string,
-): Uint8Array {
+/** The protocol tail, appended last so it is unambiguous against the
+ *  variable-length identity that precedes it. */
+function scopeTail(protocol: string): Uint8Array {
+  return _UTF8.encode(`\0${protocol}`);
+}
+
+function boundAadWith(prefix: Uint8Array, scope: TokenScope, evidenceBinding: string): Uint8Array {
   const binding = _UTF8.encode(evidenceBinding);
-  if (principal === null || principal === undefined) {
-    return concatBytes(prefix, _UTF8.encode("\0anonymous\0"), binding);
+  const tail = scopeTail(scope.protocol);
+  if (scope.principal === null || scope.principal === undefined) {
+    return concatBytes(prefix, _UTF8.encode("\0anonymous\0"), binding, tail);
   }
   return concatBytes(
     prefix,
     new Uint8Array([1]),
-    _UTF8.encode(domain ?? ""),
+    _UTF8.encode(scope.domain ?? ""),
     new Uint8Array([0]),
-    _UTF8.encode(principal),
+    _UTF8.encode(scope.principal),
     new Uint8Array([0]),
     binding,
+    tail,
   );
 }
 
-function aadWith(prefix: Uint8Array, principal: string | null | undefined): Uint8Array {
-  if (!principal) {
-    const tail = _UTF8.encode("\0anonymous");
-    return concatBytes(prefix, tail);
+function aadWith(prefix: Uint8Array, scope: TokenScope): Uint8Array {
+  const tail = scopeTail(scope.protocol);
+  if (!scope.principal) {
+    return concatBytes(prefix, _UTF8.encode("\0anonymous"), tail);
   }
-  const pBytes = _UTF8.encode(principal);
-  const tail = new Uint8Array(1 + pBytes.length);
-  tail[0] = 0x01;
-  tail.set(pBytes, 1);
-  return concatBytes(prefix, tail);
+  const pBytes = _UTF8.encode(scope.principal);
+  const identity = new Uint8Array(1 + pBytes.length);
+  identity[0] = 0x01;
+  identity.set(pBytes, 1);
+  return concatBytes(prefix, identity, tail);
 }
 
 // Base64 helpers — `btoa`/`atob` exist on Node 16+, Bun, and workerd; we work
@@ -155,18 +192,17 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
  * `created_at` lives inside the ciphertext so TTL enforcement runs after
  * authenticity. The version byte is informational (a self-describing
  * format marker); a tampered version byte still fails decryption because
- * we use the matching algorithm for that version. `principal` is bound
- * via AEAD associated data so a token minted for one identity fails
- * decryption when presented by another.
+ * we use the matching algorithm for that version. The {@link TokenScope} --
+ * principal, auth domain, peer-evidence digest, and the owning protocol -- is
+ * bound via AEAD associated data, so a token minted for one identity or one
+ * protocol fails decryption when presented under another.
  */
 export function packStateToken(
   stateBytes: Uint8Array,
   callId: Uint8Array,
   tokenKey: Uint8Array,
-  principal: string | null | undefined,
+  scope: TokenScope,
   createdAt?: number,
-  evidenceBinding?: string,
-  domain?: string | null,
 ): string {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
@@ -187,7 +223,7 @@ export function packStateToken(
   plaintext.set(stateBytes, offset);
 
   const wire = sealBytes(plaintext, tokenKey, {
-    aad: computeAad(principal, evidenceBinding, domain),
+    aad: computeAad(scope),
     version: TOKEN_VERSION,
   });
   return bytesToBase64(wire);
@@ -203,10 +239,8 @@ export function packCallToken(
   schemaBytes: Uint8Array,
   inputSchemaBytes: Uint8Array,
   tokenKey: Uint8Array,
-  principal: string | null | undefined,
+  scope: TokenScope,
   createdAt?: number,
-  evidenceBinding?: string,
-  domain?: string | null,
   responseBudget?: { responseLimitBytes?: number; preferredResponseBytes?: number },
 ): string {
   if (tokenKey.length !== 32) {
@@ -238,7 +272,7 @@ export function packCallToken(
   writeU64LE(view, offset, BigInt(responseBudget?.preferredResponseBytes ?? 0));
 
   const wire = sealBytes(plaintext, tokenKey, {
-    aad: computeCallAad(principal, evidenceBinding, domain),
+    aad: computeCallAad(scope),
     version: CALL_TOKEN_VERSION,
   });
   return bytesToBase64(wire);
@@ -286,9 +320,7 @@ export function unpackStateToken(
   tokenBase64: string,
   tokenKey: Uint8Array,
   tokenTtl: number,
-  principal: string | null | undefined,
-  evidenceBinding?: string,
-  domain?: string | null,
+  scope: TokenScope,
 ): UnpackedToken {
   let raw: Uint8Array;
   try {
@@ -304,7 +336,7 @@ export function unpackStateToken(
   let plaintext: Uint8Array;
   try {
     plaintext = openBytes(raw, tokenKey, {
-      aad: computeAad(principal, evidenceBinding, domain),
+      aad: computeAad(scope),
       version: TOKEN_VERSION,
     });
   } catch (err) {
@@ -359,10 +391,8 @@ export function unpackStateToken(
 export function unpackCallToken(
   token: string,
   tokenKey: Uint8Array,
-  principal: string | null | undefined,
+  scope: TokenScope,
   tokenTtl = 0,
-  evidenceBinding?: string,
-  domain?: string | null,
 ): { callId: Uint8Array; call: ResolvedCall } {
   const raw = base64ToBytes(token);
   if (raw.length >= 1 && raw[0] !== CALL_TOKEN_VERSION) {
@@ -371,7 +401,7 @@ export function unpackCallToken(
   let plaintext: Uint8Array;
   try {
     plaintext = openBytes(raw, tokenKey, {
-      aad: computeCallAad(principal, evidenceBinding, domain),
+      aad: computeCallAad(scope),
       version: CALL_TOKEN_VERSION,
     });
   } catch (err) {

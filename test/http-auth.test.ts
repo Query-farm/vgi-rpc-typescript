@@ -4,17 +4,23 @@
 import { describe, expect, test } from "bun:test";
 import { RecordBatch, RecordBatchStreamWriter, recordBatchFromArrays, type Schema } from "@query-farm/apache-arrow";
 import { AuthContext } from "../src/auth.js";
-import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../src/constants.js";
+import { PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../src/constants.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "../src/http/auth.js";
 import { ARROW_CONTENT_TYPE } from "../src/http/common.js";
 import { createHttpHandler } from "../src/http/handler.js";
 import { Protocol } from "../src/protocol.js";
 import { str, toSchema } from "../src/schema.js";
 
+/** The protocol every server in this file hosts: the routing key in each
+ *  request's metadata, and the path segment it is posted to. */
+const PROTOCOL_NAME = "test.Service.v1";
+const ECHO_URL = `http://localhost/${PROTOCOL_NAME}/echo`;
+
 function buildRequestIpc(schema: Schema, values: Record<string, any[]>, methodName: string): Uint8Array {
   const batch = recordBatchFromArrays(values, schema);
   const meta = new Map<string, string>();
   meta.set(RPC_METHOD_KEY, methodName);
+  if (!meta.has(PROTOCOL_KEY)) meta.set(PROTOCOL_KEY, PROTOCOL_NAME);
   meta.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   const batchWithMeta = new RecordBatch(schema, batch.data, meta);
   const writer = new RecordBatchStreamWriter();
@@ -25,7 +31,7 @@ function buildRequestIpc(schema: Schema, values: Record<string, any[]>, methodNa
 }
 
 function makeProtocol(): Protocol {
-  const p = new Protocol("test-service");
+  const p = new Protocol(PROTOCOL_NAME);
   p.unary("echo", {
     params: { message: str },
     result: { message: str },
@@ -44,7 +50,7 @@ describe("HTTP Auth", () => {
     const handler = createHttpHandler(makeProtocol());
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/echo", {
+      new Request(ECHO_URL, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -55,7 +61,7 @@ describe("HTTP Auth", () => {
 
   test("handler with auth callback: success passes context", async () => {
     let capturedAuth: AuthContext | null = null;
-    const p = new Protocol("test-service");
+    const p = new Protocol(PROTOCOL_NAME);
     p.unary("echo", {
       params: { message: str },
       result: { message: str },
@@ -73,7 +79,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/echo", {
+      new Request(ECHO_URL, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -94,7 +100,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/echo", {
+      new Request(ECHO_URL, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -232,7 +238,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/echo", {
+      new Request(ECHO_URL, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -258,7 +264,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/echo", {
+      new Request(ECHO_URL, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -282,7 +288,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/echo", {
+      new Request(ECHO_URL, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,
@@ -305,7 +311,7 @@ describe("HTTP Auth", () => {
       },
     });
 
-    const resp = await handler(new Request("http://localhost/echo", { method: "OPTIONS" }));
+    const resp = await handler(new Request(ECHO_URL, { method: "OPTIONS" }));
     expect(resp.status).toBe(204);
     expect(authCalled).toBe(false);
     expect(resp.headers.get("Access-Control-Allow-Origin")).toBe("*");
@@ -321,7 +327,7 @@ describe("HTTP Auth", () => {
 
     const body = makeArrowBody();
     const resp = await handler(
-      new Request("http://localhost/echo", {
+      new Request(ECHO_URL, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,

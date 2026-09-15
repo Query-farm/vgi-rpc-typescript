@@ -14,8 +14,9 @@ Communication uses multiple sequential Arrow IPC streams over stdin/stdout (subp
 Each request is a single Arrow IPC stream containing one `RecordBatch`:
 
 - The batch schema fields correspond to method parameters
-- Batch metadata carries the method name and protocol version:
+- Batch metadata carries the routing key, the method name and the protocol version:
   - `vgi_rpc.method` — the method name to invoke
+  - `vgi_rpc.protocol` — **required**: which of the server's hosted protocols the method belongs to. Dispatch resolves the pair `(protocol, method)`, so method names may collide across protocols. There is no single-protocol exemption: an intermediary that rebuilds a request and drops the field must be told, not landed silently on whichever protocol happened to be first. On HTTP this field is *canonical* and the `{prefix}/{protocol}/{method}` path segment is its required projection; see [HTTP transport](/guides/http-transport/).
   - `vgi_rpc.request_version` — wire framing version (currently `"1"`)
   - `vgi_rpc.protocol_version` — optional application protocol surface version (semver `MAJOR.MINOR.PATCH`)
   - `vgi_rpc.request_id` — optional request correlation ID

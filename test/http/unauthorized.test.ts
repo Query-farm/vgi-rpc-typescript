@@ -9,7 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { RecordBatch, RecordBatchStreamWriter, recordBatchFromArrays } from "@query-farm/apache-arrow";
 import { AuthContext } from "../../src/auth.js";
-import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
+import { PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
 import { chainAuthenticate } from "../../src/http/bearer.js";
 import { ARROW_CONTENT_TYPE } from "../../src/http/common.js";
 import { createHttpHandler } from "../../src/http/handler.js";
@@ -27,8 +27,13 @@ import { str, toSchema } from "../../src/schema.js";
 
 const PROXY_HEADER = "X-Forwarded-Client-Cert";
 
+/** The protocol every server in this file hosts: the routing key in each
+ *  request's metadata, and the path segment it is posted to. */
+const PROTOCOL_NAME = "unauthorized.Test.v1";
+const ECHO_URL = `http://localhost/${PROTOCOL_NAME}/echo`;
+
 function makeProtocol(): Protocol {
-  const p = new Protocol("unauthorized-test");
+  const p = new Protocol(PROTOCOL_NAME);
   p.unary("echo", {
     params: { message: str },
     result: { message: str },
@@ -42,6 +47,7 @@ function makeBody(): Uint8Array {
   const batch = recordBatchFromArrays({ message: ["hi"] }, schema);
   const meta = new Map<string, string>([
     [RPC_METHOD_KEY, "echo"],
+    [PROTOCOL_KEY, PROTOCOL_NAME],
     [REQUEST_VERSION_KEY, REQUEST_VERSION],
   ]);
   const writer = new RecordBatchStreamWriter();
@@ -55,7 +61,7 @@ function makeBody(): Uint8Array {
 function post(handler: (r: Request) => Promise<Response>, accept?: string): Promise<Response> {
   const headers: Record<string, string> = { "Content-Type": ARROW_CONTENT_TYPE };
   if (accept) headers.Accept = accept;
-  return handler(new Request("http://localhost/echo", { method: "POST", headers, body: makeBody() }));
+  return handler(new Request(ECHO_URL, { method: "POST", headers, body: makeBody() }));
 }
 
 describe("envelope", () => {
@@ -204,9 +210,7 @@ describe("handler response", () => {
     const plain = createHttpHandler(makeProtocol(), { corsOrigins: "*" });
     const proxied = createHttpHandler(makeProtocol(), { corsOrigins: "*", proxyAuthHeaders: [PROXY_HEADER] });
     const expose = async (h: (r: Request) => Promise<Response>) =>
-      (await h(new Request("http://localhost/echo", { method: "OPTIONS" }))).headers.get(
-        "Access-Control-Expose-Headers",
-      );
+      (await h(new Request(ECHO_URL, { method: "OPTIONS" }))).headers.get("Access-Control-Expose-Headers");
     expect(await expose(plain)).toContain(AUTH_REASON_HEADER);
     expect(await expose(plain)).not.toContain(AUTH_PROXY_REQUIRED_HEADER);
     expect(await expose(proxied)).toContain(AUTH_PROXY_REQUIRED_HEADER);

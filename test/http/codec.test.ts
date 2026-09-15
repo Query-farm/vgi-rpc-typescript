@@ -18,7 +18,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { RecordBatch, RecordBatchStreamWriter, recordBatchFromArrays, type Schema } from "@query-farm/apache-arrow";
-import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
+import { PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../../src/constants.js";
 import {
   COMPRESSION_ENCODINGS,
   clientAcceptEncoding,
@@ -35,6 +35,12 @@ import { isZstdCompressAvailable, zstdCompress, zstdDecompress } from "../../src
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** The protocol this file's server hosts: the routing key in every request's
+ *  metadata, and the path segment those requests are posted to. */
+const PROTOCOL_NAME = "CodecSvc";
+/** `{prefix}/{protocol}` — RPC routes hang off this; `health` does not. */
+const RPC = `http://localhost/${PROTOCOL_NAME}`;
+
 const ALL: (e: Encoding) => boolean = () => true;
 const GZIP_ONLY: (e: Encoding) => boolean = (e) => e === "gzip";
 const NONE: (e: Encoding) => boolean = () => false;
@@ -43,6 +49,7 @@ function buildRequestIpc(schema: Schema, values: Record<string, any[]>, methodNa
   const batch = recordBatchFromArrays(values, schema);
   const meta = new Map<string, string>();
   meta.set(RPC_METHOD_KEY, methodName);
+  if (!meta.has(PROTOCOL_KEY)) meta.set(PROTOCOL_KEY, PROTOCOL_NAME);
   meta.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   const batchWithMeta = new RecordBatch(schema, batch.data, meta);
   const writer = new RecordBatchStreamWriter();
@@ -71,7 +78,7 @@ async function callAdd(
   const method = protocol.getMethods().get("add")!;
   const body = buildRequestIpc(method.paramsSchema as unknown as Schema, { a: [2], b: [3] }, "add");
   return await handler(
-    new Request("http://localhost/add", {
+    new Request(`${RPC}/add`, {
       method: "POST",
       headers: { "Content-Type": ARROW_CONTENT_TYPE, ...headers },
       body: body as unknown as BodyInit,
@@ -397,7 +404,7 @@ describe("HTTP handler response-codec negotiation", () => {
   test("custom header survives CORS preflight (Access-Control-Allow-Headers echo)", async () => {
     const handler = createHttpHandler(makeProtocol(), { compressionLevel: 3, corsOrigins: "*" });
     const resp = await handler(
-      new Request("http://localhost/add", {
+      new Request(`${RPC}/add`, {
         method: "OPTIONS",
         headers: { "Access-Control-Request-Headers": "content-type, x-vgi-accept-encoding" },
       }),

@@ -15,7 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import { RecordBatch, RecordBatchStreamWriter, recordBatchFromArrays } from "@query-farm/apache-arrow";
 import { AccessLogHook, AccessLogSampler, type AccessLogSink, noRedaction, redactClaims } from "../src/access-log.js";
-import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../src/constants.js";
+import { PROTOCOL_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../src/constants.js";
 import type { ExternalStorage } from "../src/external.js";
 import { ARROW_CONTENT_TYPE } from "../src/http/common.js";
 import { createHttpHandler } from "../src/http/index.js";
@@ -346,10 +346,15 @@ describe("access log trace correlation", () => {
 // Egress accounting (HTTP transport)
 // ---------------------------------------------------------------------------
 
+/** The protocol the egress-accounting server hosts: the routing key in every
+ *  request's metadata, and the path segment those requests are posted to. */
+const EGRESS_PROTOCOL = "EgressService";
+
 function buildRequestIpc(schema: any, values: Record<string, any[]>, methodName: string): Uint8Array {
   const batch = recordBatchFromArrays(values, schema);
   const meta = new Map<string, string>([
     [RPC_METHOD_KEY, methodName],
+    [PROTOCOL_KEY, EGRESS_PROTOCOL],
     [REQUEST_VERSION_KEY, REQUEST_VERSION],
   ]);
   const withMeta = new RecordBatch(schema, batch.data, meta);
@@ -367,7 +372,7 @@ function paramsSchemaOf(protocol: Protocol, method: string): any {
 }
 
 function egressProtocol(): Protocol {
-  const protocol = new Protocol("EgressService");
+  const protocol = new Protocol(EGRESS_PROTOCOL);
   protocol.unary("bulk", {
     params: { value: str },
     result: { result: str },
@@ -389,7 +394,7 @@ describe("access log egress accounting", () => {
     const params = paramsSchemaOf(protocol, "bulk");
     const body = buildRequestIpc(params, { value: ["hello"] }, "bulk");
     const response = await handler(
-      new Request("http://localhost/bulk", {
+      new Request(`http://localhost/${EGRESS_PROTOCOL}/bulk`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "Accept-Encoding": "gzip" },
         body,
@@ -419,7 +424,7 @@ describe("access log egress accounting", () => {
     const plain = buildRequestIpc(params, { value: ["hello world"] }, "bulk");
     const compressed = await gzipCompress(plain);
     await handler(
-      new Request("http://localhost/bulk", {
+      new Request(`http://localhost/${EGRESS_PROTOCOL}/bulk`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE, "Content-Encoding": "gzip" },
         body: compressed as unknown as BodyInit,
@@ -448,7 +453,7 @@ describe("access log egress accounting", () => {
     const params = paramsSchemaOf(protocol, "bulk");
     const body = buildRequestIpc(params, { value: ["hello"] }, "bulk");
     const response = await handler(
-      new Request("http://localhost/bulk", {
+      new Request(`http://localhost/${EGRESS_PROTOCOL}/bulk`, {
         method: "POST",
         headers: { "Content-Type": ARROW_CONTENT_TYPE },
         body,

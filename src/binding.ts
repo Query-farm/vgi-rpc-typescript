@@ -64,6 +64,21 @@ export interface ProtocolBinding {
   readonly versionExempt: boolean;
 }
 
+/** Anything that hosts one or more protocols and can enumerate them.
+ *
+ *  Structural rather than a class reference so the HTTP handler can accept a
+ *  `VgiRpcServer` without importing it -- the handler is bundled for
+ *  workerd, where the stdio server has no business being pulled in. */
+export interface ProtocolHost {
+  /** Every protocol this host serves, keyed by wire name, primary first. */
+  bindings(): Map<string, ProtocolBinding>;
+}
+
+/** True when `target` enumerates protocols rather than being a bare one. */
+export function isProtocolHost(target: unknown): target is ProtocolHost {
+  return typeof (target as ProtocolHost | null)?.bindings === "function";
+}
+
 /** A request carrying no routing key.
  *
  *  Distinct from {@link ProtocolNotSupportedError} on purpose: the first says
@@ -71,12 +86,28 @@ export interface ProtocolBinding {
  *  this server does not host, and a client acts differently on each. */
 export class ProtocolNotSpecifiedError extends Error {
   readonly errorKind = "protocol_not_specified";
-  constructor(hosted: readonly string[]) {
+  constructor(hosted: readonly string[], message?: string) {
     super(
-      `Request carries no 'vgi_rpc.protocol' routing key. Every request must name ` +
-        `the protocol it addresses. This server hosts: [${hosted.join(", ")}].`,
+      message ??
+        `Request carries no 'vgi_rpc.protocol' routing key. Every request must name ` +
+          `the protocol it addresses. This server hosts: [${hosted.join(", ")}].`,
     );
     this.name = "ProtocolNotSpecifiedError";
+  }
+
+  /** A protocol path segment containing a percent sign.
+   *
+   *  Rejected without decoding: the name charset never requires
+   *  percent-encoding, so a `%` is a bug or an attempt to have the edge and
+   *  the worker read different strings. The segment itself is never echoed --
+   *  it has not been validated, and an unvalidated request string does not
+   *  belong in an error message, a log field or a metric label. */
+  static percentEncoded(): ProtocolNotSpecifiedError {
+    return new ProtocolNotSpecifiedError(
+      [],
+      "The protocol path segment contains a percent sign. The protocol name charset " +
+        "never requires percent-encoding, so this is rejected rather than decoded.",
+    );
   }
 }
 
