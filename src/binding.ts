@@ -81,7 +81,13 @@ export function isProtocolHost(target: unknown): target is ProtocolHost {
  *
  *  Distinct from {@link ProtocolNotSupportedError} on purpose: the first says
  *  the caller did not say which protocol it meant, the second that it named one
- *  this server does not host, and a client acts differently on each. */
+ *  this server does not host, and a client acts differently on each.
+ *
+ *  Raised on the **raw** transports, where the metadata is the only carrier of
+ *  the protocol and an absent field really is unroutable. HTTP does not raise
+ *  it for an absent field -- the path segment has already resolved the binding
+ *  there -- only for a protocol path segment containing a percent sign, via
+ *  {@link ProtocolNotSpecifiedError.percentEncoded}. */
 export class ProtocolNotSpecifiedError extends Error {
   readonly errorKind = "protocol_not_specified";
   constructor(hosted: readonly string[], message?: string) {

@@ -15,13 +15,14 @@ import { type HttpHandlerOptions } from "./types.js";
  * protocol, for the co-hosted ones to be routable.
  *
  * The protocol rides twice on HTTP: in the request's `vgi_rpc.protocol`
- * metadata and as that path segment. **The metadata is canonical** -- it is
- * the only carrier on the stdio, unix and named-pipe transports -- and the
- * path is a required faithful projection of it, present so an edge device can
- * act on the protocol without an Arrow parser. This handler therefore
- * requires the metadata on every unary call and stream `/init` and rejects a
- * request whose two carriers disagree; unchecked, edge policy would be applied
- * to one protocol while the worker dispatched another.
+ * metadata and as that path segment. On the stdio, unix and named-pipe
+ * transports the metadata is the only carrier and is therefore required; on
+ * HTTP the path is a faithful projection of it, present so an edge device can
+ * act on the protocol without an Arrow parser. This handler rejects a request
+ * whose two carriers **disagree** -- unchecked, edge policy would be applied
+ * to one protocol while the worker dispatched another -- but accepts one
+ * carrying no metadata at all, because the path has already resolved the
+ * binding by then. See `enforceRoutingAgreement` for what that costs.
  *
  * @example
  * ```typescript

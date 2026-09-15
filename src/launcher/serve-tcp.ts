@@ -164,6 +164,13 @@ export interface ServeTcpHandle {
  * host is loopback (`127.0.0.1`).  Use the HTTP transport for untrusted
  * networks.
  */
+// KNOWN GAP: `protocol` is a bare `Protocol`, not a `Protocol | ProtocolHost`
+// the way `createHttpHandler`'s target is, so a caller cannot register a
+// secondary protocol on this transport -- `vgi_rpc.Identity.v1` included, even
+// though TCP is the one raw transport that resolves a peer identity into an
+// `AuthContext` and could therefore actually answer `introspect_token`. Same
+// for `serveUnix` and `serveStream`. See `VgiRpcServer.registerIdentity` for
+// the full note and the fix.
 export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}): Promise<ServeTcpHandle> {
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 0;

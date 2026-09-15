@@ -10405,9 +10405,8 @@ function createHttpHandler(target, options) {
   const protocolVersion = protocol.protocolVersion || options?.protocolVersion || "";
   function enforceRoutingAgreement(pathProtocol, reqBatchMeta) {
     const declared = reqBatchMeta.get(PROTOCOL_KEY);
-    if (!declared) {
-      throw new ProtocolNotSpecifiedError(hostedNames);
-    }
+    if (!declared)
+      return;
     if (declared !== pathProtocol) {
       throw new ProtocolNotSupportedError(`Protocol mismatch: the request path resolved to '${pathProtocol}' but the Arrow IPC ` + `custom_metadata 'vgi_rpc.protocol' says '${declared}'. These must agree.`);
     }
@@ -16288,4 +16287,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=3AB55A5D61C4782464756E2164756E21
+//# debugId=15B23D6DFAADDDB864756E2164756E21

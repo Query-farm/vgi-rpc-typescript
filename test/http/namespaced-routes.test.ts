@@ -312,16 +312,64 @@ describe("the path is a projection of the metadata, and is checked against it", 
     expect(await readError(resp)).toEqual({ type: "ProtocolNotSupportedError", kind: "protocol_not_supported" });
   });
 
-  test("an absent vgi_rpc.protocol is rejected, with no single-protocol exemption", async () => {
-    // An intermediary that rebuilds a request and drops the field must be told,
-    // not landed silently on whichever protocol happened to be first.
+  test("an absent vgi_rpc.protocol is ACCEPTED here, because the path already routed it", async () => {
+    // This file used to assert the opposite, and the strict reading is the one
+    // the original HTTP-routing brief gave: required always, "even against a
+    // server hosting exactly one protocol". It is wrong on HTTP and the shared
+    // conformance harness pins it as a 200
+    // (`_adversarial_http.py::test_an_absent_routing_key_is_accepted_over_http`,
+    // multi-service spec §5c). By the time `enforceRoutingAgreement` runs, the
+    // path segment has already resolved the binding -- `resolveRoute` and
+    // `resolveBinding` read nothing else -- so there is no ambiguity left for
+    // the field to settle. Absent is the single-carrier case, not an unrouted
+    // request.
+    //
+    // The cost is stated where the relaxation lives: an intermediary that
+    // rewrites the *path* cannot reach inside the Arrow body to match it, so
+    // requiring the key is what would make such a rewrite detectable. Accepting
+    // absent routes on the projection alone. A client that does send the key is
+    // still fully protected by the disagreement check above.
     const resp = await post(
       handler,
       BASE + rpcPath(APP_PROTOCOL, "echo", { prefix: PREFIX }),
       body(null, "echo", toSchema({ message: str }), { message: "hi" }),
     );
-    expect(resp.status).toBe(400);
-    expect(await readError(resp)).toEqual({ type: "ProtocolNotSpecifiedError", kind: "protocol_not_specified" });
+    expect(resp.status).toBe(200);
+    expect((await readResult(resp)).message).toBe("hi");
+  });
+
+  test("but a raw transport still refuses it, where the metadata is the only carrier", async () => {
+    // The permissive half above is HTTP-specific and must not leak. On stdio,
+    // unix and named pipes there is no path segment, so an absent routing key
+    // really is unroutable -- and pinning the strict half matters as much as
+    // the permissive one, because a port that relaxed both would route on
+    // whichever protocol happened to be registered first and look correct
+    // until a second one was added.
+    const server = makeServer();
+    const request = body(null, "echo", toSchema({ message: str }), { message: "hi" });
+    const readable = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(request);
+        controller.close();
+      },
+    });
+    const chunks: Uint8Array[] = [];
+    await server.serveConnection(readable, {
+      write(bytes: Uint8Array) {
+        chunks.push(new Uint8Array(bytes));
+      },
+    });
+    const joined = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const { RecordBatchReader } = await import("@query-farm/apache-arrow");
+    const reader = await RecordBatchReader.from(joined);
+    await reader.open();
+    const errored = reader.readAll().find((b) => b.metadata?.get(ERROR_KIND_KEY));
+    expect(errored?.metadata?.get(ERROR_KIND_KEY)).toBe("protocol_not_specified");
   });
 
   test("a percent sign in the protocol segment is rejected without decoding", async () => {

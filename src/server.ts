@@ -172,7 +172,30 @@ export class VgiRpcServer {
    *  existing worker.
    *
    *  Not version-exempt: the binding declares no `protocolVersion`, so the gate
-   *  never fires, and exempting it would be a claim rather than a fact. */
+   *  never fires, and exempting it would be a claim rather than a fact.
+   *
+   *  **KNOWN GAP: this protocol is reachable over HTTP and stdio only.**
+   *  `createHttpHandler` accepts a `ProtocolHost`, and {@link serveConnection}
+   *  is a method on this class, so both can carry a secondary binding. The
+   *  three launcher transports cannot: `serveTcp`, `serveUnix` and
+   *  `serveStream` each take a bare {@link Protocol} and construct their *own*
+   *  `VgiRpcServer` internally, so there is no seam through which a caller can
+   *  register identity (or any other secondary protocol) on them.
+   *
+   *  That bites hardest on TCP, which is the one raw transport that does
+   *  resolve a peer identity into an `AuthContext` -- so it is the only place
+   *  `introspect_token` could succeed for an allowlisted caller off HTTP, and
+   *  it cannot host the method to try. `serveConnection` supplies no
+   *  `AuthContext` at all, so identity there is reachable but fails closed,
+   *  which is correct but is only half the property
+   *  IDENTITY_CONFORMANCE_FIXTURE.md §7 asks a port to cover; the allowlisted
+   *  half of `test/token-identity.test.ts`'s raw-transport block rides HTTP
+   *  for this reason and says so.
+   *
+   *  The fix is to widen those three signatures to `Protocol | ProtocolHost`
+   *  the way `createHttpHandler` already is. Left undone deliberately: it is a
+   *  public API change rather than a wiring fix, and naming it beats bundling
+   *  it into an unrelated commit. */
   registerIdentity(identity: IdentityImpl): void {
     const protocol = buildIdentityProtocol(identity);
     if (!protocol) return;

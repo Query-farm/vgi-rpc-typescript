@@ -67,13 +67,17 @@ POST requests carrying Arrow bodies must use `Content-Type: application/vnd.apac
 
 ### The path is a projection; the metadata is canonical
 
-On HTTP the protocol rides twice: in the request batch's `vgi_rpc.protocol` metadata, and as that path segment. **The metadata is canonical** — it is the only carrier on the stdio, unix and named-pipe transports. The path segment is a required *faithful projection* of it, present so a proxy, WAF or gateway can act on the protocol without an Arrow parser.
+On HTTP the protocol rides twice: in the request batch's `vgi_rpc.protocol` metadata, and as that path segment. On stdio, unix and named pipes the metadata is the **only** carrier and is therefore required. On HTTP the path segment is a *faithful projection* of it, present so a proxy, WAF or gateway can act on the protocol without an Arrow parser — and it is what actually resolves the binding, before anything reads the body.
 
 Three rules follow, and the server enforces all three:
 
-- `vgi_rpc.protocol` is **required** on every unary call and stream `/init`, including against a server hosting exactly one protocol. An exemption would let an intermediary that rebuilds a request and drops the field land silently on whichever protocol happened to be first.
+- `vgi_rpc.protocol` is **optional on HTTP** and required everywhere else. By the time the server looks, the path segment has already resolved the binding, so absent is the single-carrier case rather than an unrouted request. (An earlier version of this port required it here too. That reading is wrong on HTTP and the shared conformance suite pins the permissive half as a 200.)
 - A request whose two carriers **disagree** is rejected (HTTP 400, `error_kind: protocol_not_supported`). Unchecked, edge policy would be applied to one protocol while the worker dispatched another.
 - A **`%` anywhere in the protocol path segment** is rejected without decoding (HTTP 404). The name charset never requires percent-encoding, so a percent sign is a bug or an attempt to make the edge and the worker read different strings.
+
+:::caution[What accepting an absent routing key costs]
+An intermediary that rewrites the **path** cannot reach inside the Arrow body to match it, so requiring the metadata on HTTP is what would make such a rewrite detectable — the two carriers would disagree and rule two would fire. Accepting absent means a request carrying no key is routed on the projection alone, and a rewritten path is indistinguishable from an honest one. The gap is narrow — a client that *does* send the key is fully protected, and every first-party client sends it — and it is the price of a wire contract every port agrees on.
+:::
 
 An unknown protocol is a 404 (`protocol_not_supported`); a hosted protocol that lacks the named method is a 404 with `method_not_implemented`. The difference is the documented capability probe — a client testing for an optional method must be able to tell "you do not speak this protocol" from "you speak it but lack this method".
 

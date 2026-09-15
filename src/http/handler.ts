@@ -207,13 +207,14 @@ function parseRequestCookies(request: Request): ReadonlyMap<string, string> {
  * protocol, for the co-hosted ones to be routable.
  *
  * The protocol rides twice on HTTP: in the request's `vgi_rpc.protocol`
- * metadata and as that path segment. **The metadata is canonical** -- it is
- * the only carrier on the stdio, unix and named-pipe transports -- and the
- * path is a required faithful projection of it, present so an edge device can
- * act on the protocol without an Arrow parser. This handler therefore
- * requires the metadata on every unary call and stream `/init` and rejects a
- * request whose two carriers disagree; unchecked, edge policy would be applied
- * to one protocol while the worker dispatched another.
+ * metadata and as that path segment. On the stdio, unix and named-pipe
+ * transports the metadata is the only carrier and is therefore required; on
+ * HTTP the path is a faithful projection of it, present so an edge device can
+ * act on the protocol without an Arrow parser. This handler rejects a request
+ * whose two carriers **disagree** -- unchecked, edge policy would be applied
+ * to one protocol while the worker dispatched another -- but accepts one
+ * carrying no metadata at all, because the path has already resolved the
+ * binding by then. See `enforceRoutingAgreement` for what that costs.
  *
  * @example
  * ```typescript
@@ -368,30 +369,47 @@ export function createHttpHandler(
   const protocolVersion = protocol.protocolVersion || options?.protocolVersion || "";
 
   /**
-   * Require the request's routing metadata to be present and to agree with the
-   * protocol the path named.
+   * Refuse a request whose routing metadata *disagrees* with the protocol the
+   * path named. An absent field is accepted **on HTTP only**.
    *
    * On HTTP the protocol rides twice: in `vgi_rpc.protocol` and as a path
-   * segment. The metadata field is canonical -- it is the only carrier on the
-   * stdio, unix and named-pipe transports -- and the path segment is a
-   * required faithful projection, present so an edge device can act on the
-   * protocol without an Arrow parser.
-   *
-   * Left unchecked the two may disagree, and then edge policy is applied to
-   * one protocol while the worker runs another: the
+   * segment. Left unchecked the two may disagree, and then edge policy is
+   * applied to one protocol while the worker runs another -- the
    * Content-Length/Transfer-Encoding shape. The `vgi_rpc.method` check the
    * dispatchers already make is the same rule for the other half of the pair.
+   * That half is unconditional and stays so.
    *
-   * The metadata is required even against a server hosting exactly one
-   * protocol. An exemption would let an intermediary that rebuilds a request
-   * and drops the field land silently on whichever protocol happened to be
-   * first, rather than being told.
+   * Absent is a different question, and this port answered it wrongly until
+   * now. The earlier reading -- required always, "even against a server
+   * hosting exactly one protocol" -- refused a namespaced request carrying no
+   * routing key, which the shared conformance harness pins as a **200**
+   * (`_adversarial_http.py::test_an_absent_routing_key_is_accepted_over_http`,
+   * multi-service spec §5c). On HTTP the path segment has *already* resolved
+   * the binding before this runs: `resolveRoute` and `resolveBinding` read
+   * nothing but the path, so there is no ambiguity for the field to settle.
+   * Absent is the single-carrier case, not an unrouted request. Two ports
+   * reached the opposite readings independently, so both halves are pinned
+   * rather than inferred.
+   *
+   * **What the relaxation costs, taken deliberately.** Requiring the key on
+   * HTTP is what would make a *path rewrite* by an intermediary detectable: an
+   * intermediary that rewrites the path cannot reach inside the Arrow body to
+   * match it, so the two carriers would disagree and this check would fire.
+   * Accepting absent means a request with no key is routed on the projection
+   * alone, and a rewritten path is indistinguishable from an honest one. A
+   * real gap. It is narrow -- a client that *does* send the key is still fully
+   * protected, and every first-party client sends it -- and it is the price of
+   * a wire contract six ports can agree on.
+   *
+   * The raw transports keep the strict rule, enforced in
+   * {@link VgiRpcServer.resolve} rather than here: on stdio, unix and named
+   * pipes the metadata field is the only carrier, so absent there really is
+   * unroutable and no path segment exists to fall back on.
    */
   function enforceRoutingAgreement(pathProtocol: string, reqBatchMeta: ReadonlyMap<string, string>): void {
     const declared = reqBatchMeta.get(PROTOCOL_KEY);
-    if (!declared) {
-      throw new ProtocolNotSpecifiedError(hostedNames);
-    }
+    // Absent: the path already resolved the binding. See above.
+    if (!declared) return;
     if (declared !== pathProtocol) {
       throw new ProtocolNotSupportedError(
         `Protocol mismatch: the request path resolved to '${pathProtocol}' but the Arrow IPC ` +
