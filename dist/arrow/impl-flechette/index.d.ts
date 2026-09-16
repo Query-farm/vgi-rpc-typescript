@@ -45,6 +45,17 @@ export declare function schema(fields: readonly VgiField[], metadata?: Map<strin
 export declare function serializeSchema(s: VgiSchema): Uint8Array;
 export declare function deserializeSchema(bytes: Uint8Array): VgiSchema;
 export declare function serializeBatch(batch: VgiBatch): Uint8Array;
+/**
+ * Read every record batch out of one IPC stream.
+ *
+ * flechette decodes a stream into a single `Table`, concatenating its record
+ * batches and surfacing only the first one's custom metadata, so there is no
+ * per-batch view to return here: this yields the one batch
+ * {@link deserializeBatch} would. The caller loses a multi-batch externalized
+ * payload's log batches under this backend — the same shape of gap as the
+ * incremental-writer one, and for the same reason.
+ */
+export declare function deserializeBatches(bytes: Uint8Array): VgiBatch[];
 export declare function deserializeBatch(bytes: Uint8Array): VgiBatch;
 export declare function columnFromArray(values: any[], type: VgiDataType): VgiColumnData;
 export declare function singleRowBatch(s: VgiSchema, values: Record<string, any>): VgiBatch;

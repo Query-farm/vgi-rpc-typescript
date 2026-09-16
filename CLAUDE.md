@@ -88,7 +88,7 @@ The project uses a Makefile for common tasks. Run `make help` to see all targets
   - Conformance tests use `test_ts_conformance.py` which imports `vgi_rpc.conformance._pytest_suite` and runs against `bun run examples/conformance.ts`
   - Integration tests use the `vgi-rpc` CLI (must be on PATH)
   - Client tests spawn Python servers via the interpreter `test/reference.ts` resolves; see **Related Projects** for the override variables
-  - A bare `bun test` against the canonical reference is **1246 pass / 9 skip / 0 fail**. Every failure in a run that reports ~26 fails with `Executable not found in $PATH: "vgi-rpc"` is a harness-pointing problem, not a port defect
+  - A bare `bun test` against the canonical reference is **1255 pass / 9 skip / 0 fail**. Every failure in a run that reports ~26 fails with `Executable not found in $PATH: "vgi-rpc"` is a harness-pointing problem, not a port defect
 - Always use timeouts on subprocess spawns to prevent hangs
 - Build: `make build` or `bun run build` (runs TypeScript type-checking then bundles)
 

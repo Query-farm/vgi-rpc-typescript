@@ -1,6 +1,6 @@
 import { DataType, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
 import { IpcStreamReader } from "../wire/reader.js";
-import type { LogMessage } from "./types.js";
+export { dispatchLogOrError } from "../log-batch.js";
 /** Infer an Arrow DataType from a JS value. */
 export declare function inferArrowType(value: any): DataType;
 /**
@@ -26,13 +26,6 @@ export declare function readResponseBatches(body: Uint8Array): Promise<{
     schema: Schema;
     batches: RecordBatch[];
 }>;
-/**
- * Check if a zero-row batch carries log/error metadata.
- * If EXCEPTION → throw RpcError.
- * If other level → call onLog.
- * Returns true if the batch was consumed as a log/error.
- */
-export declare function dispatchLogOrError(batch: RecordBatch, onLog?: (msg: LogMessage) => void): boolean;
 /**
  * Extract all rows from a batch as Record<string, any>[].
  * Converts BigInt to Number when safe.

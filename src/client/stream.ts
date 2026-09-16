@@ -3,7 +3,7 @@
 
 import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
-import { CALL_STATE_KEY, STATE_KEY } from "../constants.js";
+import { CALL_STATE_KEY, CANCEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
@@ -12,6 +12,8 @@ import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget }
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
 import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
+import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
+import { rawBatchOf, rawInputBatch } from "./raw-util.js";
 import type { ExchangeInput, LogMessage, StreamSession } from "./types.js";
 
 type CompressFn = (data: Uint8Array, level: number) => Promise<Uint8Array>;
@@ -83,7 +85,7 @@ export function unpackResumeToken(token: string): { cursor: string; callToken: s
  * {@link HttpStreamSession.exchange} or producer-continuation POST sends the
  * current token and receives the next one in the response metadata.
  */
-export class HttpStreamSession implements StreamSession {
+export class HttpStreamSession implements StreamSession, RawStreamSession {
   private _baseUrl: string;
   private _prefix: string;
   private _method: string;
@@ -100,6 +102,7 @@ export class HttpStreamSession implements StreamSession {
   private _pendingBatches: RecordBatch[];
   private _finished: boolean;
   private _header: Record<string, any> | null;
+  private _rawHeader: RawBatch | null;
   private _compressionLevel?: number;
   private _compressFn?: CompressFn;
   private _decompressFn?: DecompressFn;
@@ -124,6 +127,7 @@ export class HttpStreamSession implements StreamSession {
     pendingBatches: RecordBatch[];
     finished: boolean;
     header: Record<string, any> | null;
+    rawHeader?: RawBatch | null;
     compressionLevel?: number;
     compressFn?: CompressFn;
     decompressFn?: DecompressFn;
@@ -143,6 +147,7 @@ export class HttpStreamSession implements StreamSession {
     this._pendingBatches = opts.pendingBatches;
     this._finished = opts.finished;
     this._header = opts.header;
+    this._rawHeader = opts.rawHeader ?? null;
     this._compressionLevel = opts.compressionLevel;
     this._compressFn = opts.compressFn;
     this._decompressFn = opts.decompressFn;
@@ -196,6 +201,11 @@ export class HttpStreamSession implements StreamSession {
     return this._header;
   }
 
+  /** The stream's header batch and its custom metadata, undecoded. */
+  get rawHeader(): RawBatch | null {
+    return this._rawHeader;
+  }
+
   /**
    * Build request metadata carrying the cursor token and the call token.
    *
@@ -204,9 +214,12 @@ export class HttpStreamSession implements StreamSession {
    * server's call-state cache is warm and fail once it is not — exactly the
    * kind of load-dependent bug worth designing out.
    */
-  private _tokenMetadata(token: string): Map<string, string> {
+  private _tokenMetadata(token: string, options?: { cancel?: boolean }): Map<string, string> {
     const metadata = new Map<string, string>();
     metadata.set(STATE_KEY, token);
+    if (options?.cancel) {
+      metadata.set(CANCEL_KEY, "1");
+    }
     if (this._callStateToken !== null) {
       metadata.set(CALL_STATE_KEY, this._callStateToken);
     }
@@ -278,7 +291,7 @@ export class HttpStreamSession implements StreamSession {
         metadata.set(key, value);
       }
       const batch = new RecordBatch(input.schema, input.data, metadata);
-      return this._doExchange(input.schema, [batch]);
+      return this._rowsOfExchange(await this._doExchange(input.schema, [batch]));
     }
 
     // We need to determine the input schema from the data.
@@ -292,7 +305,7 @@ export class HttpStreamSession implements StreamSession {
       const zeroSchema = this._inputSchema ?? this._outputSchema;
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
       const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
-      return this._doExchange(zeroSchema, [batchWithMeta]);
+      return this._rowsOfExchange(await this._doExchange(zeroSchema, [batchWithMeta]));
     }
 
     // The server's description is the contract. Runtime inference cannot represent an
@@ -331,45 +344,85 @@ export class HttpStreamSession implements StreamSession {
 
     const batch = new RecordBatch(inputSchema, data, this._tokenMetadata(this._stateToken));
 
-    return this._doExchange(inputSchema, [batch]);
+    return this._rowsOfExchange(await this._doExchange(inputSchema, [batch]));
   }
 
   /** Send one producer continuation tick with application custom metadata. */
   async tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]> {
-    if (this._pendingBatches.length > 0) {
-      throw new RpcError("ProtocolError", "Consume the producer's init batch before sending an explicit tick", "");
-    }
-    if (this._finished || this._stateToken === null) return [];
-
-    const responseBody = await this._sendContinuation(this._stateToken, metadata);
-    const { batches } = await readResponseBatches(responseBody);
-    let rows: Record<string, any>[] | null = null;
-    let nextToken: string | null = null;
-    for (let batch of batches) {
-      if (batch.numRows === 0) {
-        const token = batch.metadata?.get(STATE_KEY);
-        if (token) {
-          nextToken = token;
-          continue;
-        }
-        if (isExternalLocationBatch(batch)) {
-          batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
-        } else {
-          dispatchLogOrError(batch, this._onLog);
-          continue;
-        }
-      }
-      if (rows !== null) {
-        throw new RpcError("ProtocolError", "A producer tick returned more than one data batch", "");
-      }
-      rows = extractBatchRows(batch);
-    }
-    this._stateToken = nextToken;
-    if (nextToken === null) this._finished = true;
-    return rows ?? [];
+    const item = await this.tickRaw(metadata);
+    return item === null ? [] : extractBatchRows(item.batch);
   }
 
-  private async _doExchange(schema: Schema, batches: RecordBatch[]): Promise<Record<string, any>[]> {
+  /**
+   * Send one producer tick and return the batch undecoded.
+   *
+   * A tick is one batch forward, whatever it took to get there: `/init` may
+   * already have buffered the first one, in which case this consumes that
+   * rather than issuing a continuation for a batch the client is holding.
+   * Refusing outright — which this did — made `tick()` unusable on the HTTP
+   * transport, because the *first* tick of every producer is the buffered
+   * one. Only explicit `metadata` is still refused while a batch is
+   * buffered, and for a reason that survives: that metadata belongs on a
+   * request this turn does not make.
+   */
+  async tickRaw(metadata?: ReadonlyMap<string, string>): Promise<RawBatch | null> {
+    const next = await this.nextWithTokenRaw(metadata);
+    return next === null ? null : next.item;
+  }
+
+  /**
+   * Send one encoded batch with its custom metadata and read the reply.
+   *
+   * The declared-batch branch of {@link HttpStreamSession.exchange} without
+   * the row decoding: the caller's schema, buffers and metadata cross
+   * verbatim (plus this turn's stream tokens), and the reply comes back as
+   * the server encoded it.
+   */
+  async exchangeRaw(input: RawBatch): Promise<RawBatch | null> {
+    if (this._stateToken === null) {
+      throw new RpcError("ProtocolError", "Stream has finished — no state token available", "");
+    }
+    const batch = rawInputBatch(input, this._tokenMetadata(this._stateToken));
+    const reply = await this._doExchange(batch.schema, [batch]);
+    return reply === null ? null : rawBatchOf(reply);
+  }
+
+  /**
+   * Ask the server to discard this stream's state and stop producing.
+   *
+   * Sends `POST {prefix}/{method}/exchange` carrying `vgi_rpc.cancel`
+   * alongside the current tokens, so the server runs the state's cancel hook
+   * and releases it. Idempotent and best-effort: a transport failure here is
+   * swallowed, because the session is finished either way. Mirrors Python's
+   * `HttpStreamSession.cancel`.
+   */
+  async cancel(): Promise<void> {
+    if (this._finished || this._stateToken === null) {
+      this._finished = true;
+      this._stateToken = null;
+      return;
+    }
+    const token = this._stateToken;
+    this._finished = true;
+    this._stateToken = null;
+    const structType = new Struct([]);
+    const data = makeData({ type: structType, length: 0, children: [], nullCount: 0 });
+    const emptySchema = new Schema([]);
+    const batch = new RecordBatch(emptySchema, data, this._tokenMetadata(token, { cancel: true }));
+    try {
+      const resp = await this._post(
+        this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }),
+        serializeIpcStream(emptySchema, [batch]),
+      );
+      // Drain the acknowledgement so the connection is reusable; a server
+      // that answered at all has already released the state.
+      await this._readResponse(resp);
+    } catch {
+      // Best-effort: the stream is gone regardless.
+    }
+  }
+
+  private async _doExchange(schema: Schema, batches: RecordBatch[]): Promise<RecordBatch | null> {
     const body = serializeIpcStream(schema, batches);
     const resp = await this._post(
       this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }),
@@ -382,34 +435,57 @@ export class HttpStreamSession implements StreamSession {
     const responseBody = await this._readResponse(resp);
     const { batches: responseBatches } = await readResponseBatches(responseBody);
 
-    let resultRows: Record<string, any>[] = [];
-    let gotData = false;
+    let result: RecordBatch | null = null;
     for (const batch of responseBatches) {
-      if (batch.numRows === 0) {
-        // Could be log/error or state token
-        dispatchLogOrError(batch, this._onLog);
-        // Check for state token
-        const token = batch.metadata?.get(STATE_KEY);
-        if (token) {
-          this._stateToken = token;
-        }
+      // Row count does not decide what a batch *is*, and treating it as
+      // though it did lost two legitimate replies: a zero-row output batch
+      // (`exchange_zero_columns`, a filter that matched nothing) and a
+      // pointer batch from a server that externalizes its responses. Both
+      // were silently dropped and surfaced as "exchange returned no batch".
+      // The discriminator is the same one the byte-stream transport uses: a
+      // batch is a log or error batch iff it says so in its metadata, and
+      // anything else is this turn's data.
+      //
+      // An exchange reply carries its cursor on the data batch itself
+      // (`merge_data_metadata` server-side), so there is no separate
+      // token-only batch to sort out here — unlike a producer turn.
+      const pointer = isExternalLocationBatch(batch);
+      if (batch.numRows === 0 && !pointer && dispatchLogOrError(batch, this._onLog)) {
         continue;
       }
-
-      // Data batch — extract state token from metadata
-      if (gotData) {
+      // Resolve before reading the cursor. When the server externalizes a
+      // reply the pointer carries only the location, and the refreshed cursor
+      // travels *inside* the uploaded payload — so a client that read the
+      // token off the pointer kept replaying the previous cursor and every
+      // stateful exchange silently repeated its first turn.
+      const resolved = pointer
+        ? ((await resolveExternalLocation(batch as any, this._externalConfig, this._onLog)) as any as RecordBatch)
+        : batch;
+      const token = resolved.metadata?.get(STATE_KEY) ?? batch.metadata?.get(STATE_KEY);
+      if (result !== null) {
+        // The turn's data batch has been taken. What may still follow it is
+        // the cursor: the server appends the refreshed token as its own
+        // zero-row batch whenever it could not ride on the data (a zero-column
+        // output has nowhere to carry metadata). Anything else really is a
+        // second data batch, which lock-step forbids.
+        if (token && batch.numRows === 0 && !pointer) {
+          this._stateToken = token;
+          continue;
+        }
         throw new RpcError("ProtocolError", "An exchange turn returned more than one data batch", "");
       }
-      gotData = true;
-      const token = batch.metadata?.get(STATE_KEY);
       if (token) {
         this._stateToken = token;
       }
-
-      resultRows = extractBatchRows(batch);
+      result = resolved;
     }
 
-    return resultRows;
+    return result;
+  }
+
+  /** Decode an exchange reply for the row-oriented surface. */
+  private _rowsOfExchange(reply: RecordBatch | null): Record<string, any>[] {
+    return reply === null ? [] : extractBatchRows(reply);
   }
 
   private _buildEmptyBatch(schema: Schema): RecordBatch {
@@ -434,7 +510,7 @@ export class HttpStreamSession implements StreamSession {
     for (let batch of this._pendingBatches) {
       if (batch.numRows === 0) {
         if (isExternalLocationBatch(batch)) {
-          batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
+          batch = (await resolveExternalLocation(batch as any, this._externalConfig, this._onLog)) as any;
         } else {
           dispatchLogOrError(batch, this._onLog);
           continue;
@@ -467,7 +543,7 @@ export class HttpStreamSession implements StreamSession {
           }
           // Check for external location pointer
           if (isExternalLocationBatch(batch)) {
-            batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
+            batch = (await resolveExternalLocation(batch as any, this._externalConfig, this._onLog)) as any;
           } else {
             // Log/error batch
             dispatchLogOrError(batch, this._onLog);
@@ -507,7 +583,21 @@ export class HttpStreamSession implements StreamSession {
    * Mirrors Python's `HttpStreamSession.next_with_token`.
    */
   async nextWithToken(): Promise<RowsWithToken | null> {
+    const next = await this.nextWithTokenRaw();
+    return next === null ? null : { rows: extractBatchRows(next.item.batch), token: next.token };
+  }
+
+  /**
+   * Read one producer batch, undecoded, together with its resume token.
+   *
+   * The batch-level twin of {@link HttpStreamSession.nextWithToken}; see
+   * there for the resume-token contract.
+   */
+  async nextWithTokenRaw(metadata?: ReadonlyMap<string, string>): Promise<RawBatchWithToken | null> {
     const multi = "A producer turn returned more than one data batch";
+    if (metadata !== undefined && this._pendingBatches.length > 0) {
+      throw new RpcError("ProtocolError", "Consume the producer's init batch before sending an explicit tick", "");
+    }
 
     // Init may have preloaded data batches; their resume point is the
     // current state token. Zero-row log/error batches deferred from init are
@@ -516,7 +606,7 @@ export class HttpStreamSession implements StreamSession {
       let batch = this._pendingBatches.shift()!;
       if (batch.numRows === 0) {
         if (isExternalLocationBatch(batch)) {
-          batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
+          batch = (await resolveExternalLocation(batch as any, this._externalConfig, this._onLog)) as any;
         } else {
           dispatchLogOrError(batch, this._onLog);
           continue;
@@ -525,7 +615,7 @@ export class HttpStreamSession implements StreamSession {
       if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
         throw new RpcError("ProtocolError", multi, "");
       }
-      return { rows: extractBatchRows(batch), token: this._resumeToken() };
+      return { item: rawBatchOf(batch), token: this._resumeToken() };
     }
 
     if (this._finished || this._stateToken === null) {
@@ -533,10 +623,10 @@ export class HttpStreamSession implements StreamSession {
       return null;
     }
 
-    const responseBody = await this._sendContinuation(this._stateToken);
+    const responseBody = await this._sendContinuation(this._stateToken, metadata);
     const { batches } = await readResponseBatches(responseBody);
 
-    let dataRows: Record<string, any>[] | null = null;
+    let data: RecordBatch | null = null;
     let nextToken: string | null = null;
     for (let batch of batches) {
       if (batch.numRows === 0) {
@@ -547,25 +637,25 @@ export class HttpStreamSession implements StreamSession {
           continue;
         }
         if (isExternalLocationBatch(batch)) {
-          batch = (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
+          batch = (await resolveExternalLocation(batch as any, this._externalConfig, this._onLog)) as any;
         } else {
           dispatchLogOrError(batch, this._onLog);
           continue;
         }
       }
-      if (dataRows !== null) {
+      if (data !== null) {
         throw new RpcError("ProtocolError", multi, "");
       }
-      dataRows = extractBatchRows(batch);
+      data = batch;
     }
 
     this._stateToken = nextToken;
-    if (dataRows === null) {
+    if (data === null) {
       // No data this turn -> the producer finished (out.finish(), no token).
       this._finished = true;
       return null;
     }
-    return { rows: dataRows, token: this._resumeToken() };
+    return { item: rawBatchOf(data), token: this._resumeToken() };
   }
 
   /**

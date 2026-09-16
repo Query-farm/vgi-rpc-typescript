@@ -14,19 +14,29 @@
  * Mirrors Python's `_externalize_via_upload_url()` and `request_upload_urls()`.
  */
 
-import { Field, Int64, RecordBatchReader, Schema } from "@query-farm/apache-arrow";
+import { RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { makeExternalLocationBatch } from "../external.js";
-import { ARROW_CONTENT_TYPE, reservedPath, serializeIpcStream } from "../http/common.js";
+import {
+  ARROW_CONTENT_TYPE,
+  reservedPath,
+  serializeIpcStream,
+  UPLOAD_URL_METHOD,
+  UPLOAD_URL_PARAMS_SCHEMA,
+} from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { readResponseBodyBounded } from "./decode.js";
 import { buildRequestIpc } from "./ipc.js";
 
-const UPLOAD_URL_METHOD = "__upload_url__";
-const UPLOAD_URL_PARAMS_SCHEMA = new Schema([new Field("count", new Int64(), false)]);
+// The method name and params schema come from the one place that defines the
+// `__upload_url__` wire contract, rather than being restated here. The private
+// copy declared `count` non-nullable while the shared definition (and the
+// reference) declare it nullable, so this client's own server refused every
+// request it made — a disagreement that only a foreign peer, or a client
+// driven against its own server, could ever surface.
 
 export interface UploadUrlPair {
   uploadUrl: string;
@@ -68,7 +78,11 @@ export async function requestUploadUrls(
     responseLimit =
       minPositive(acceptedMaxResponseBytes, capabilities.maxResponseBytes ?? undefined) ?? acceptedMaxResponseBytes;
   }
-  const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA, { count: BigInt(count) }, UPLOAD_URL_METHOD);
+  const body = buildRequestIpc(
+    UPLOAD_URL_PARAMS_SCHEMA as unknown as Schema,
+    { count: BigInt(count) },
+    UPLOAD_URL_METHOD,
+  );
   const headers: Record<string, string> = { "Content-Type": ARROW_CONTENT_TYPE };
   if (authorization) headers.Authorization = authorization;
   headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(acceptedMaxResponseBytes);

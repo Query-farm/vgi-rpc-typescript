@@ -22,6 +22,26 @@ export interface HttpServerCapabilities {
     maxResponseBytes: number | null;
     /** Whether the server honors VGI-Accept-Max-Response-Bytes. */
     acceptMaxResponseBytesSupport: boolean;
+    /** Cap on the externalized bytes of one response, when advertised. */
+    maxExternalizedResponseBytes: number | null;
+    /** Whether the server has a storage backend wired up, and can therefore
+     *  rescue an oversize response by externalizing it. */
+    externalizationEnabled: boolean;
+    /** Content encodings the server can decode on requests and produce on
+     *  responses, as the lowercase wire tokens (`zstd`, `gzip`, `identity`).
+     *
+     *  Present-but-empty is a real answer — "this server compresses nothing" —
+     *  and distinct from an absent header, which means a server predating the
+     *  advertisement and is read as zstd-only. */
+    supportedEncodings: string[];
+    /** Whether the server honours `VGI-Session` sticky sessions. */
+    stickyEnabled: boolean;
+    /** Seconds a session lives when opened without an explicit TTL. */
+    stickyDefaultTtl: number | null;
+    /** Header *names* the server tells clients to echo for the life of a
+     *  session. The values arrive per session as `VGI-Echo-<name>` response
+     *  headers; this is the introspectable list. */
+    stickyEchoHeaders: string[];
     /** Monotonic-time-ish epoch (ms) at which this snapshot should be re-probed. */
     cacheExpiresAt: number | null;
 }

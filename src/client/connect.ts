@@ -3,11 +3,21 @@
 
 import { type RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
-import { CALL_STATE_KEY, LOG_LEVEL_KEY, STATE_KEY } from "../constants.js";
+import { CALL_STATE_KEY, LOG_LEVEL_KEY, PROTOCOL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
-import { ARROW_CONTENT_TYPE, rpcPathFromPrefix } from "../http/common.js";
+import {
+  ARROW_CONTENT_TYPE,
+  ECHO_HEADER_PREFIX,
+  reservedPath,
+  rpcPathFromPrefix,
+  SESSION_ACCEPT_HEADER,
+  SESSION_CLOSE_HEADER,
+  SESSION_ENDPOINT,
+  SESSION_HEADER,
+  serializeIpcStream,
+} from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import {
   discoverHttpCapabilities,
@@ -24,9 +34,11 @@ import {
   readResponseBatches,
   readSequentialStreams,
 } from "./ipc.js";
+import type { RawBatch, RawStreamSession } from "./raw.js";
+import { rawBatchOf, rawInputBatch } from "./raw-util.js";
 import { HttpStreamSession, unpackResumeToken } from "./stream.js";
 import type { HttpConnectOptions, StreamSession } from "./types.js";
-import { externalizeRequestBody } from "./uploadUrl.js";
+import { externalizeRequestBody, requestUploadUrls, type UploadUrlPair } from "./uploadUrl.js";
 
 type CompressFn = (data: Uint8Array, level: number) => Promise<Uint8Array>;
 type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
@@ -37,6 +49,32 @@ export interface RpcClient {
   call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null>;
   /** Open a streaming method, returning a {@link StreamSession} for exchange or producer iteration. */
   stream(method: string, params?: Record<string, any>): Promise<StreamSession>;
+  /**
+   * Invoke a unary method from an already-encoded request batch.
+   *
+   * The batch-level twin of {@link RpcClient.call}, for a caller that holds
+   * encoded Arrow rather than values: `input` crosses verbatim (schema,
+   * buffers and custom metadata alike), and the reply comes back as the
+   * server encoded it. Resolves to `null` when the method returns nothing.
+   *
+   * `input.metadata` is the call's dispatch metadata and must already carry
+   * `vgi_rpc.method` and `vgi_rpc.protocol`; nothing here supplies a default
+   * for either. Unlike {@link RpcClient.call} this applies no parameter
+   * defaults and needs no introspection round trip.
+   */
+  callRaw(method: string, input: RawBatch): Promise<RawBatch | null>;
+  /**
+   * Open a streaming method from an already-encoded request batch.
+   *
+   * `options.isExchange` and `options.hasHeader` come from the method's
+   * declaration — this is the batch-level path, so there is no description to
+   * read them from and no name-shaped guess worth making.
+   */
+  streamRaw(
+    method: string,
+    input: RawBatch,
+    options: { isExchange: boolean; hasHeader: boolean },
+  ): Promise<RawStreamSession>;
   /** Fetch the server's method/protocol description (cached after the first call). */
   describe(): Promise<ServiceDescription>;
   /** Release transport resources; for subprocess clients this also terminates the child process. */
@@ -71,6 +109,46 @@ export interface HttpRpcClient extends RpcClient {
    * Mirrors Python's `_HttpProxy.resume_stream`.
    */
   resumeStream(method: string, token: string, outputSchema?: Schema): Promise<HttpStreamSession>;
+  /** Open a streaming method from an already-encoded request batch. */
+  streamRaw(
+    method: string,
+    input: RawBatch,
+    options: { isExchange: boolean; hasHeader: boolean },
+  ): Promise<HttpStreamSession>;
+  /** Discover what this server advertises on `OPTIONS {prefix}/health`. */
+  capabilities(): Promise<HttpServerCapabilities>;
+  /** Ask the server for `count` pre-signed upload/download URL pairs. */
+  requestUploadUrls(count?: number): Promise<UploadUrlPair[]>;
+  /**
+   * Enter a sticky-session scope on this connection.
+   *
+   * Every subsequent request carries `VGI-Session-Accept: true` (the
+   * server-side opt-in), the session token once the server has minted one,
+   * and any `VGI-Echo-<name>` headers the server asked to have echoed back —
+   * which is how a session survives a load balancer that has no cookie to
+   * work with. Pass `token` to resume a session the server already holds.
+   *
+   * Scoped, not permanent: {@link HttpRpcClient.endSession} closes it.
+   */
+  beginSession(token?: string | null): void;
+  /** The session token in flight, or `null` when no session is open. */
+  currentSessionToken(): string | null;
+  /**
+   * The `VGI-Echo-*` values captured when the session opened, keyed by the
+   * header name to replay them under. Empty when there are none.
+   */
+  currentEchoHeaders(): Record<string, string>;
+  /**
+   * Hand the session token to the caller and stop tracking it, so
+   * {@link HttpRpcClient.endSession} leaves the server-side session alive for
+   * a later {@link HttpRpcClient.beginSession} to resume.
+   */
+  detachSession(): string | null;
+  /**
+   * Leave the sticky-session scope, closing the server-side session with a
+   * best-effort `DELETE {prefix}/__session__` unless it was detached.
+   */
+  endSession(): Promise<void>;
 }
 
 /**
@@ -92,9 +170,73 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   const compressionLevel = options?.compressionLevel;
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
-  const fetchFn = options?.fetch ?? globalThis.fetch;
+  const baseFetch = options?.fetch ?? globalThis.fetch;
   const acceptedMaxResponseBytes = options?.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
   optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
+
+  // --- Sticky sessions -----------------------------------------------------
+  // Headers, not cookies, so several concurrent sessions to one host from one
+  // client multiplex correctly. State lives here rather than in a wrapper
+  // object because every HTTP path in this file — RPC, introspection,
+  // capability discovery, upload URLs — already funnels through one fetch.
+  //
+  // A *stack* rather than one slot: scopes nest, and a nested scope must not
+  // consume the enclosing one's token. Opening an inner session to observe a
+  // rejection and then continuing on the outer session is an ordinary thing
+  // to do, and with one slot the outer session simply vanished at the inner
+  // scope's exit.
+  interface SessionScope {
+    token: string | null;
+    echo: Record<string, string>;
+  }
+  const sessionScopes: SessionScope[] = [];
+
+  function currentScope(): SessionScope | null {
+    return sessionScopes.length === 0 ? null : sessionScopes[sessionScopes.length - 1];
+  }
+
+  function mergeSessionHeaders(scope: SessionScope, init: RequestInit | undefined): Headers {
+    const headers = new Headers(init?.headers);
+    headers.set(SESSION_ACCEPT_HEADER, "true");
+    if (scope.token !== null) headers.set(SESSION_HEADER, scope.token);
+    // Caller-supplied headers win: an operator overriding an echo header
+    // per call has a reason to, and the normal path sets none of them.
+    for (const [name, value] of Object.entries(scope.echo)) {
+      if (!headers.has(name)) headers.set(name, value);
+    }
+    return headers;
+  }
+
+  function captureSessionHeaders(scope: SessionScope, response: Response): void {
+    const token = response.headers.get(SESSION_HEADER);
+    if (token) scope.token = token;
+    const prefixLower = ECHO_HEADER_PREFIX.toLowerCase();
+    response.headers.forEach((value, name) => {
+      if (name.toLowerCase().startsWith(prefixLower)) {
+        scope.echo[name.slice(ECHO_HEADER_PREFIX.length)] = value;
+      }
+    });
+    if ((response.headers.get(SESSION_CLOSE_HEADER) ?? "").trim().toLowerCase() === "true") {
+      scope.token = null;
+      scope.echo = {};
+    }
+  }
+
+  const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const scope = currentScope();
+    if (scope === null) return baseFetch(input, init);
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    // An externalized body goes to storage with a PUT to a signed URL. Those
+    // are not vgi-rpc requests, and unexpected headers can invalidate a
+    // signature, so session headers stop at this connection's own base URL.
+    if (!url.startsWith(baseUrl) || (init?.method ?? "GET").toUpperCase() === "PUT") {
+      return baseFetch(input, init);
+    }
+    const response = await baseFetch(input, { ...init, headers: mergeSessionHeaders(scope, init) });
+    captureSessionHeaders(scope, response);
+    return response;
+  }) as typeof globalThis.fetch;
+
   const effectiveExternalConfig = externalConfig ? { ...externalConfig, fetch: fetchFn } : externalConfig;
 
   let methodCache: Map<string, MethodInfo> | null = options?.description
@@ -308,6 +450,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
     const desc = await httpIntrospect(baseUrl, {
       prefix,
       protocol: options?.protocol,
+      externalLocation: effectiveExternalConfig,
       authorization,
       compressionLevel,
       compressFn,
@@ -320,6 +463,199 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
     serverProtocolVersion = desc.protocolVersion;
     serverProtocolName = desc.protocolName;
     return methodCache;
+  }
+
+  /**
+   * Resolve the `{prefix}/{protocol}` an encoded call routes under.
+   *
+   * A caller holding an already-built request batch has already decided which
+   * protocol it addresses: the routing key is in the batch's
+   * `vgi_rpc.protocol` metadata, and an explicit `protocol` option names it
+   * too. Either is authoritative and costs no round trip. Only when neither
+   * is present does this fall back to introspection, which is what the
+   * row-oriented path always does.
+   */
+  async function rawPrefix(metadata: ReadonlyMap<string, string>): Promise<string> {
+    const named = options?.protocol ?? metadata.get(PROTOCOL_KEY);
+    if (named) return `${prefix}/${named}`;
+    await ensureMethodCache();
+    return rpcPrefix();
+  }
+
+  /** What one `/init` response yielded, before any value decoding. */
+  interface StreamInit {
+    headerBatch: RecordBatch | null;
+    stateToken: string | null;
+    callStateToken: string | null;
+    pendingBatches: RecordBatch[];
+    finished: boolean;
+    outputSchema: Schema | null;
+  }
+
+  /** POST one stream `/init` body and parse the response into {@link StreamInit}. */
+  async function openStreamOverHttp(
+    method: string,
+    body: Uint8Array,
+    hasHeader: boolean,
+    prefixOverride?: string,
+  ): Promise<StreamInit> {
+    const resp = await postWithExternalization(
+      baseUrl + rpcPathFromPrefix(prefixOverride ?? rpcPrefix(), method, { suffix: "/init" }),
+      body,
+    );
+    checkAuth(resp);
+
+    const responseBody = await readResponse(resp);
+
+    let headerBatch: RecordBatch | null = null;
+    let stateToken: string | null = null;
+    // Only /init hands over a call token; the client keeps it for the
+    // life of the stream and echoes it on every subsequent request.
+    let callStateToken: string | null = null;
+    const pendingBatches: RecordBatch[] = [];
+    let dataBatchesInTurn = 0;
+    const queueDataBatch = (batch: RecordBatch): void => {
+      dataBatchesInTurn += 1;
+      if (dataBatchesInTurn > 1) {
+        throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
+      }
+      pendingBatches.push(batch);
+    };
+    let finished = false;
+    let streamSchema: Schema | null = null;
+
+    if (hasHeader) {
+      // Response may contain two concatenated IPC streams:
+      // 1. Header stream
+      // 2. Data stream (with state token and/or data batches)
+      const reader = await readSequentialStreams(responseBody);
+
+      // First stream: header
+      const headerStream = await reader.readStream();
+      if (headerStream) {
+        for (const batch of headerStream.batches as any[]) {
+          if (batch.numRows === 0) {
+            // A header is data like any other, so a server that externalizes
+            // its responses sends it as a pointer — which this dropped,
+            // leaving `session.header` null against exactly the servers whose
+            // headers are worth externalizing.
+            if (isExternalLocationBatch(batch)) {
+              headerBatch = (await resolveExternalLocation(batch, effectiveExternalConfig, onLog)) as any;
+              continue;
+            }
+            dispatchLogOrError(batch, onLog);
+            continue;
+          }
+          headerBatch = batch;
+        }
+      }
+
+      // Second stream: data/state
+      const dataStream = await reader.readStream();
+      if (dataStream) {
+        streamSchema = dataStream.schema as any;
+      }
+      const headerErrorBatches: RecordBatch[] = [];
+      if (dataStream) {
+        for (const batch of dataStream.batches as any[]) {
+          if (batch.numRows === 0) {
+            // Check for state token
+            const token = batch.metadata?.get(STATE_KEY);
+            if (token) {
+              stateToken = token;
+              callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
+              continue;
+            }
+            if (isExternalLocationBatch(batch)) {
+              queueDataBatch(batch);
+              continue;
+            }
+            const level = batch.metadata?.get(LOG_LEVEL_KEY);
+            if (level === "EXCEPTION") {
+              headerErrorBatches.push(batch);
+              continue;
+            }
+            dispatchLogOrError(batch, onLog);
+            continue;
+          }
+          queueDataBatch(batch);
+        }
+      }
+
+      if (headerErrorBatches.length > 0) {
+        if (pendingBatches.length > 0 || stateToken !== null) {
+          pendingBatches.push(...headerErrorBatches);
+        } else {
+          for (const batch of headerErrorBatches) {
+            dispatchLogOrError(batch, onLog);
+          }
+        }
+      }
+
+      if (!dataStream && !stateToken) {
+        finished = true;
+      }
+    } else {
+      // Single IPC stream: data/state (no header)
+      const { schema: responseSchema, batches } = await readResponseBatches(responseBody);
+      streamSchema = responseSchema;
+
+      // Collect error batches separately — only defer them if there are
+      // data batches or state tokens (mid-stream errors). Otherwise throw
+      // immediately (init-only errors like exchange_error_on_init).
+      const errorBatches: RecordBatch[] = [];
+
+      for (const batch of batches) {
+        if (batch.numRows === 0) {
+          // Check for state token
+          const token = batch.metadata?.get(STATE_KEY);
+          if (token) {
+            stateToken = token;
+            callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
+            continue;
+          }
+          if (isExternalLocationBatch(batch)) {
+            queueDataBatch(batch);
+            continue;
+          }
+          // Collect EXCEPTION batches for deferred dispatch
+          const level = batch.metadata?.get(LOG_LEVEL_KEY);
+          if (level === "EXCEPTION") {
+            errorBatches.push(batch);
+            continue;
+          }
+          dispatchLogOrError(batch, onLog);
+          continue;
+        }
+        queueDataBatch(batch);
+      }
+
+      // If we have data batches or a state token, defer errors to iteration.
+      // Otherwise throw immediately (error on init).
+      if (errorBatches.length > 0) {
+        if (pendingBatches.length > 0 || stateToken !== null) {
+          pendingBatches.push(...errorBatches);
+        } else {
+          // No data, no state — this is a pure init error. Throw now.
+          for (const batch of errorBatches) {
+            dispatchLogOrError(batch, onLog);
+          }
+        }
+      }
+    }
+
+    if (pendingBatches.length === 0 && stateToken === null) {
+      finished = true;
+    }
+
+    // Determine output schema: prefer the IPC stream schema from the init
+    // response (it carries the server's actual output schema even for
+    // zero-row token batches), then pending batch schemas, then describe info.
+    const outputSchema =
+      (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null) ??
+      (pendingBatches.length > 0 ? pendingBatches[0].schema : null);
+
+    return { headerBatch, stateToken, callStateToken, pendingBatches, finished, outputSchema };
   }
 
   return {
@@ -350,7 +686,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         if (batch.numRows === 0) {
           // Check for external location pointer batch
           if (isExternalLocationBatch(batch as any)) {
-            batch = (await resolveExternalLocation(batch as any, effectiveExternalConfig)) as any;
+            batch = (await resolveExternalLocation(batch as any, effectiveExternalConfig, onLog)) as any;
           } else {
             dispatchLogOrError(batch, onLog);
             continue;
@@ -394,172 +730,91 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         protocolVersion: serverProtocolVersion,
         protocol: serverProtocolName,
       });
-      const resp = await postWithExternalization(
-        baseUrl + rpcPathFromPrefix(rpcPrefix(), method, { suffix: "/init" }),
-        body,
-      );
-      checkAuth(resp);
-
-      const responseBody = await readResponse(resp);
-
-      // Parse the response: may contain header stream + data stream
-      let header: Record<string, any> | null = null;
-      let stateToken: string | null = null;
-      // Only /init hands over a call token; the client keeps it for the
-      // life of the stream and echoes it on every subsequent request.
-      let callStateToken: string | null = null;
-      const pendingBatches: RecordBatch[] = [];
-      let dataBatchesInTurn = 0;
-      const queueDataBatch = (batch: RecordBatch): void => {
-        dataBatchesInTurn += 1;
-        if (dataBatchesInTurn > 1) {
-          throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
-        }
-        pendingBatches.push(batch);
-      };
-      let finished = false;
-      let streamSchema: Schema | null = null;
-
-      if (info.headerSchema) {
-        // Response may contain two concatenated IPC streams:
-        // 1. Header stream
-        // 2. Data stream (with state token and/or data batches)
-        const reader = await readSequentialStreams(responseBody);
-
-        // First stream: header
-        const headerStream = await reader.readStream();
-        if (headerStream) {
-          for (const batch of headerStream.batches as any[]) {
-            if (batch.numRows === 0) {
-              dispatchLogOrError(batch, onLog);
-              continue;
-            }
-            const rows = extractBatchRows(batch);
-            if (rows.length > 0) {
-              header = rows[0];
-            }
-          }
-        }
-
-        // Second stream: data/state
-        const dataStream = await reader.readStream();
-        if (dataStream) {
-          streamSchema = dataStream.schema as any;
-        }
-        const headerErrorBatches: RecordBatch[] = [];
-        if (dataStream) {
-          for (const batch of dataStream.batches as any[]) {
-            if (batch.numRows === 0) {
-              // Check for state token
-              const token = batch.metadata?.get(STATE_KEY);
-              if (token) {
-                stateToken = token;
-                callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
-                continue;
-              }
-              if (isExternalLocationBatch(batch)) {
-                queueDataBatch(batch);
-                continue;
-              }
-              const level = batch.metadata?.get(LOG_LEVEL_KEY);
-              if (level === "EXCEPTION") {
-                headerErrorBatches.push(batch);
-                continue;
-              }
-              dispatchLogOrError(batch, onLog);
-              continue;
-            }
-            queueDataBatch(batch);
-          }
-        }
-
-        if (headerErrorBatches.length > 0) {
-          if (pendingBatches.length > 0 || stateToken !== null) {
-            pendingBatches.push(...headerErrorBatches);
-          } else {
-            for (const batch of headerErrorBatches) {
-              dispatchLogOrError(batch, onLog);
-            }
-          }
-        }
-
-        if (!dataStream && !stateToken) {
-          finished = true;
-        }
-      } else {
-        // Single IPC stream: data/state (no header)
-        const { schema: responseSchema, batches } = await readResponseBatches(responseBody);
-        streamSchema = responseSchema;
-
-        // Collect error batches separately — only defer them if there are
-        // data batches or state tokens (mid-stream errors). Otherwise throw
-        // immediately (init-only errors like exchange_error_on_init).
-        const errorBatches: RecordBatch[] = [];
-
-        for (const batch of batches) {
-          if (batch.numRows === 0) {
-            // Check for state token
-            const token = batch.metadata?.get(STATE_KEY);
-            if (token) {
-              stateToken = token;
-              callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
-              continue;
-            }
-            if (isExternalLocationBatch(batch)) {
-              queueDataBatch(batch);
-              continue;
-            }
-            // Collect EXCEPTION batches for deferred dispatch
-            const level = batch.metadata?.get(LOG_LEVEL_KEY);
-            if (level === "EXCEPTION") {
-              errorBatches.push(batch);
-              continue;
-            }
-            dispatchLogOrError(batch, onLog);
-            continue;
-          }
-          queueDataBatch(batch);
-        }
-
-        // If we have data batches or a state token, defer errors to iteration.
-        // Otherwise throw immediately (error on init).
-        if (errorBatches.length > 0) {
-          if (pendingBatches.length > 0 || stateToken !== null) {
-            pendingBatches.push(...errorBatches);
-          } else {
-            // No data, no state — this is a pure init error. Throw now.
-            for (const batch of errorBatches) {
-              dispatchLogOrError(batch, onLog);
-            }
-          }
-        }
-      }
-
-      if (pendingBatches.length === 0 && stateToken === null) {
-        finished = true;
-      }
-
-      // Determine output schema: prefer the IPC stream schema from the init
-      // response (it carries the server's actual output schema even for
-      // zero-row token batches), then pending batch schemas, then describe info.
-      const outputSchema =
-        (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null) ??
-        (pendingBatches.length > 0 ? pendingBatches[0].schema : null) ??
-        info.outputSchema ??
-        info.resultSchema;
+      const init = await openStreamOverHttp(method, body, info.headerSchema != null);
+      const header = init.headerBatch === null ? null : (extractBatchRows(init.headerBatch)[0] ?? null);
 
       return new HttpStreamSession({
         baseUrl,
         prefix: rpcPrefix(),
         method,
-        stateToken,
-        callStateToken,
-        outputSchema,
+        stateToken: init.stateToken,
+        callStateToken: init.callStateToken,
+        outputSchema: init.outputSchema ?? info.outputSchema ?? info.resultSchema,
         inputSchema: info.inputSchema,
         onLog,
-        pendingBatches,
-        finished,
+        pendingBatches: init.pendingBatches,
+        finished: init.finished,
         header,
+        rawHeader: init.headerBatch === null ? null : rawBatchOf(init.headerBatch),
+        compressionLevel,
+        compressFn,
+        decompressFn,
+        authorization,
+        externalConfig: effectiveExternalConfig,
+        acceptedMaxResponseBytes: responseReadLimit(),
+        postFn: postWithExternalization,
+      });
+    },
+
+    async callRaw(method: string, input: RawBatch): Promise<RawBatch | null> {
+      await ensureCompression();
+      const batch = rawInputBatch(input);
+      const resp = await postWithExternalization(
+        baseUrl + rpcPathFromPrefix(await rawPrefix(input.metadata), method),
+        serializeIpcStream(batch.schema, [batch]),
+      );
+      checkAuth(resp);
+      const responseBody = await readResponse(resp);
+      const { batches } = await readResponseBatches(responseBody);
+
+      let resultBatch: RecordBatch | null = null;
+      for (let responseBatch of batches) {
+        if (responseBatch.numRows === 0) {
+          if (isExternalLocationBatch(responseBatch as any)) {
+            responseBatch = (await resolveExternalLocation(
+              responseBatch as any,
+              effectiveExternalConfig,
+              onLog,
+            )) as any;
+          } else {
+            dispatchLogOrError(responseBatch, onLog);
+            continue;
+          }
+        }
+        if (resultBatch !== null) {
+          throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
+        }
+        resultBatch = responseBatch;
+      }
+      return resultBatch === null ? null : rawBatchOf(resultBatch);
+    },
+
+    async streamRaw(
+      method: string,
+      input: RawBatch,
+      options: { isExchange: boolean; hasHeader: boolean },
+    ): Promise<HttpStreamSession> {
+      await ensureCompression();
+      const batch = rawInputBatch(input);
+      const prefixForCall = await rawPrefix(input.metadata);
+      const init = await openStreamOverHttp(
+        method,
+        serializeIpcStream(batch.schema, [batch]),
+        options.hasHeader,
+        prefixForCall,
+      );
+      return new HttpStreamSession({
+        baseUrl,
+        prefix: prefixForCall,
+        method,
+        stateToken: init.stateToken,
+        callStateToken: init.callStateToken,
+        outputSchema: init.outputSchema ?? new Schema([]),
+        onLog,
+        pendingBatches: init.pendingBatches,
+        finished: init.finished,
+        header: null,
+        rawHeader: init.headerBatch === null ? null : rawBatchOf(init.headerBatch),
         compressionLevel,
         compressFn,
         decompressFn,
@@ -610,6 +865,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       return httpIntrospect(baseUrl, {
         prefix,
         protocol: options?.protocol,
+        externalLocation: effectiveExternalConfig,
         authorization,
         compressionLevel,
         compressFn,
@@ -618,6 +874,61 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         fetch: fetchFn,
         responseBudgetVerified: true,
       });
+    },
+
+    async capabilities(): Promise<HttpServerCapabilities> {
+      const snapshot = await discoverHttpCapabilities(
+        baseUrl,
+        prefix,
+        authorization,
+        acceptedMaxResponseBytes,
+        fetchFn,
+      );
+      capabilities = snapshot;
+      return snapshot;
+    },
+
+    async requestUploadUrls(count = 1): Promise<UploadUrlPair[]> {
+      return requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn, acceptedMaxResponseBytes);
+    },
+
+    beginSession(token?: string | null): void {
+      sessionScopes.push({ token: token ? token : null, echo: {} });
+    },
+
+    currentSessionToken(): string | null {
+      return currentScope()?.token ?? null;
+    },
+
+    currentEchoHeaders(): Record<string, string> {
+      return { ...(currentScope()?.echo ?? {}) };
+    },
+
+    detachSession(): string | null {
+      const scope = currentScope();
+      if (scope === null) return null;
+      const token = scope.token;
+      scope.token = null;
+      scope.echo = {};
+      return token;
+    },
+
+    async endSession(): Promise<void> {
+      const scope = sessionScopes.pop();
+      if (scope === undefined) return;
+      const token = scope.token;
+      const echo = scope.echo;
+      if (token === null) return;
+      const headers: Record<string, string> = { [SESSION_HEADER]: token };
+      if (authorization) headers.Authorization = authorization;
+      for (const [name, value] of Object.entries(echo)) headers[name] = value;
+      try {
+        // Best-effort: the session's TTL releases it anyway, and a failure
+        // here must not become the caller's error on the way out of a scope.
+        await baseFetch(baseUrl + reservedPath(SESSION_ENDPOINT, { prefix }), { method: "DELETE", headers });
+      } catch {
+        // Ignored, deliberately.
+      }
     },
 
     close(): void {

@@ -2,6 +2,7 @@ import { Schema } from "@query-farm/apache-arrow";
 import { type ExternalLocationConfig } from "../external.js";
 import { IpcStreamReader } from "../wire/reader.js";
 import type { RpcClient } from "./connect.js";
+import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
 import type { ExchangeInput, LogMessage, PipeConnectOptions, StreamSession, SubprocessConnectOptions } from "./types.js";
 interface PipeWritable {
     write(data: Uint8Array): void;
@@ -16,11 +17,19 @@ type WriteFn = (bytes: Uint8Array) => void;
  * and reads one output batch. Holds the connection's single-threaded busy lock
  * until closed.
  */
-export declare class PipeStreamSession implements StreamSession {
-    private _reader;
+export declare class PipeStreamSession implements StreamSession, RawStreamSession {
+    /**
+     * Opening the reader blocks until the peer's first IPC schema message
+     * arrives, and a headerless producer sends nothing until it has been
+     * ticked — so a session that resolved its reader eagerly would deadlock on
+     * open. Held as a thunk and resolved on the first read instead.
+     */
+    private _openReader;
+    private _readerCache;
     private _writeFn;
     private _onLog?;
     private _header;
+    private _rawHeader;
     private _inputWriter;
     private _inputSchema;
     private _outputStreamOpened;
@@ -30,10 +39,11 @@ export declare class PipeStreamSession implements StreamSession {
     private _setDrainPromise;
     private _externalConfig?;
     constructor(opts: {
-        reader: IpcStreamReader;
+        reader: IpcStreamReader | (() => Promise<IpcStreamReader>);
         writeFn: WriteFn;
         onLog?: (msg: LogMessage) => void;
         header: Record<string, any> | null;
+        rawHeader?: RawBatch | null;
         outputSchema: Schema;
         releaseBusy: () => void;
         setDrainPromise: (p: Promise<void>) => void;
@@ -41,6 +51,10 @@ export declare class PipeStreamSession implements StreamSession {
     });
     /** The stream's one-time header row, or `null` if the method declares no header. */
     get header(): Record<string, any> | null;
+    /** The stream's header batch and its custom metadata, undecoded. */
+    get rawHeader(): RawBatch | null;
+    /** The connection's IPC reader, opened on first use. */
+    private _reader;
     /**
      * Read output batches from the server until a data batch is found.
      * Dispatches log/error batches along the way.
@@ -56,6 +70,32 @@ export declare class PipeStreamSession implements StreamSession {
     private _ensureOutputStream;
     /** Send one producer tick, preserving application message metadata. */
     tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]>;
+    /** Send one producer tick and return the server's batch undecoded. */
+    tickRaw(metadata?: ReadonlyMap<string, string>): Promise<RawBatch | null>;
+    /**
+     * A byte-stream transport carries no resumable stream state, so the token
+     * is always `null`. Declared so one caller can drive either transport.
+     */
+    nextWithTokenRaw(): Promise<RawBatchWithToken | null>;
+    /** One producer turn: write the tick batch, read the server's answer. */
+    private _tickBatch;
+    /**
+     * Send one encoded batch with its custom metadata and read the reply.
+     *
+     * The declared-batch branch of {@link PipeStreamSession.exchange} without
+     * the row decoding: input schema and buffers cross verbatim, and the
+     * server's answer comes back as it was encoded.
+     */
+    exchangeRaw(input: RawBatch): Promise<RawBatch | null>;
+    /**
+     * Signal the server to stop processing and discard the stream's state.
+     *
+     * Writes a zero-row batch carrying `vgi_rpc.cancel`, closes the input
+     * stream, and drains whatever the server still had queued. Idempotent and
+     * best-effort: a transport that has already failed is not worth a second
+     * failure during teardown. Mirrors Python's `StreamSession.cancel`.
+     */
+    cancel(): Promise<void>;
     /**
      * Send an exchange request and return the data rows.
      */

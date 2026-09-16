@@ -1,4 +1,5 @@
 import { type RecordBatch, type Schema } from "@query-farm/apache-arrow";
+import { type ExternalLocationConfig } from "../external.js";
 import { type ProtocolListDesc, type ServiceDescriptionDesc } from "../reflection.js";
 import type { LogMessage } from "./types.js";
 /** Describes a single RPC method as reported by `vgi_rpc.Reflection.v1`. */
@@ -7,6 +8,10 @@ export interface MethodInfo {
     name: string;
     /** Whether the method is a single request/response (`unary`) or a streaming method (`stream`). */
     type: "unary" | "stream";
+    /** Whether the method returns a value at all. `false` for a void method,
+     *  whose reply carries no data batch. Absent when the description came from
+     *  a caller-supplied literal rather than from the server. */
+    hasReturn?: boolean;
     /** Arrow schema of the call parameters. */
     paramsSchema: Schema;
     /** Arrow schema of a unary result; empty for a stream, whose per-batch
@@ -43,6 +48,15 @@ export interface ServiceDescription {
     hostedProtocols: string[];
     /** Every method of the described protocol. */
     methods: MethodInfo[];
+    /** The serving process's opaque identity, from the `list_protocols` hop.
+     *
+     *  A property of the *server*, not of the protocol — two processes serving
+     *  one protocol describe it identically — so it is absent when the caller
+     *  named a protocol and the bootstrap hop was skipped. */
+    serverId?: string;
+    /** The wire request-framing version the server reports, from the same hop
+     *  and absent under the same condition. */
+    requestVersion?: string;
 }
 /**
  * Present a reflection reply in this module's client-side shape.
@@ -66,7 +80,7 @@ export declare function pickApplicationProtocol(listing: ProtocolListDesc): stri
  *  column -- the framework's ordinary unary convention. Reflection is an
  *  ordinary protocol now, so its replies are subject to it like any other
  *  method's. */
-export declare function reflectionResult(batches: RecordBatch[], onLog?: (msg: LogMessage) => void): Uint8Array;
+export declare function reflectionResult(batches: RecordBatch[], onLog?: (msg: LogMessage) => void, externalConfig?: ExternalLocationConfig | null): Promise<Uint8Array>;
 /** Build the request body for one reflection call. */
 export declare function reflectionRequest(method: string, protocol?: string): Uint8Array;
 /**
@@ -82,6 +96,9 @@ export declare function httpIntrospect(rawBaseUrl: string, options?: {
     /** Which protocol to describe. Defaults to the first hosted one that is
      *  not framework-reserved, which costs the `list_protocols` hop. */
     protocol?: string;
+    /** External storage config, for a server that externalizes its replies —
+     *  reflection's included. */
+    externalLocation?: ExternalLocationConfig | null;
     authorization?: string;
     compressionLevel?: number;
     compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;

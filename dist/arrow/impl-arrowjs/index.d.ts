@@ -61,6 +61,15 @@ export declare function serializeBatch(batch: VgiBatch): Uint8Array;
  * are structurally compatible.
  */
 export declare function createIncrementalEncoder(s: VgiSchema): IncrementalEncoder;
+/**
+ * Read every record batch out of one IPC stream.
+ *
+ * An externalized payload is a whole stream, not a single batch: the server
+ * uploads the turn's log batches alongside its data batch. A caller that took
+ * only the first would drop the logs and, when a log came first, mistake one
+ * for the data.
+ */
+export declare function deserializeBatches(bytes: Uint8Array): VgiBatch[];
 export declare function deserializeBatch(bytes: Uint8Array): VgiBatch;
 export declare function columnFromArray(values: any[], type: VgiDataType): VgiColumnData;
 /** Build a 1-row batch from {colName: value} dict (Int64 numbers auto-coerced). */

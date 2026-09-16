@@ -1005,6 +1005,10 @@ function createIncrementalEncoder(s) {
     finish: () => new Uint8Array(new Int32Array([-1, 0]).buffer)
   };
 }
+function deserializeBatches(bytes) {
+  const reader = RecordBatchReader.from(bytes);
+  return [...reader].filter((batch) => batch.constructor.name !== "_InternalEmptyPlaceholderRecordBatch");
+}
 function deserializeBatch(bytes) {
   const reader = RecordBatchReader.from(bytes);
   const batches = [...reader];
@@ -1205,6 +1209,43 @@ var isDictionary = (t) => t.typeId === TypeId.Dictionary;
 function isBatch(x) {
   return x != null && typeof x.numRows === "number" && x.schema != null && Array.isArray(x.schema.fields);
 }
+// src/log-batch.ts
+function dispatchLogOrError(batch, onLog) {
+  const meta = batch.metadata;
+  if (!meta)
+    return false;
+  const level = meta.get(LOG_LEVEL_KEY);
+  if (!level)
+    return false;
+  const message = meta.get(LOG_MESSAGE_KEY) ?? "";
+  if (level === "EXCEPTION") {
+    const extraStr = meta.get(LOG_EXTRA_KEY);
+    let errorType = "RpcError";
+    let errorMessage = message;
+    let traceback = "";
+    if (extraStr) {
+      try {
+        const extra = JSON.parse(extraStr);
+        errorType = extra.exception_type ?? "RpcError";
+        errorMessage = extra.exception_message ?? message;
+        traceback = extra.traceback ?? "";
+      } catch {}
+    }
+    throw new RpcError(errorType, errorMessage, traceback);
+  }
+  if (onLog) {
+    const extraStr = meta.get(LOG_EXTRA_KEY);
+    let extra;
+    if (extraStr) {
+      try {
+        extra = JSON.parse(extraStr);
+      } catch {}
+    }
+    onLog({ level, message, extra });
+  }
+  return true;
+}
+
 // src/external.ts
 init_zstd();
 
@@ -1440,7 +1481,7 @@ async function maybeExternalizeBatch(batch, config, onUpload, force = false) {
   const url = await config.storage.upload(ipcData, contentEncoding);
   return makeExternalLocationBatch(batch.schema, url, checksum);
 }
-async function resolveExternalLocation(batch, config) {
+async function resolveExternalLocation(batch, config, onLog) {
   if (!config)
     return batch;
   if (!isExternalLocationBatch(batch))
@@ -1516,8 +1557,13 @@ async function resolveExternalLocation(batch, config) {
       throw new Error(`SHA-256 checksum mismatch for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`);
     }
   }
-  const resolved = deserializeBatch(data);
-  if (resolved.numRows === 0 && resolved.schema.fields.length === 0) {
+  let resolved = null;
+  for (const candidate of deserializeBatches(data)) {
+    if (candidate.numRows === 0 && dispatchLogOrError(candidate, onLog))
+      continue;
+    resolved ??= candidate;
+  }
+  if (resolved === null || resolved.numRows === 0 && resolved.schema.fields.length === 0) {
     throw new Error(`No data batch found in external IPC stream from ${redactExternalUrl(currentUrl)}`);
   }
   return resolved;
@@ -1718,6 +1764,21 @@ var UPLOAD_URL_HEADER = "VGI-Upload-URL-Support";
 var MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes";
 var MAX_RESPONSE_BYTES_HEADER = "VGI-Max-Response-Bytes";
 var ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER2 = "VGI-Accept-Max-Response-Bytes-Support";
+var MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER = "VGI-Max-Externalized-Response-Bytes";
+var EXTERNALIZATION_ENABLED_HEADER = "VGI-Externalization-Enabled";
+var SUPPORTED_ENCODINGS_HEADER2 = "VGI-Supported-Encodings";
+var STICKY_ENABLED_HEADER2 = "VGI-Sticky-Enabled";
+var STICKY_DEFAULT_TTL_HEADER2 = "VGI-Sticky-Default-TTL";
+var STICKY_ECHO_HEADERS_HEADER2 = "VGI-Sticky-Echo-Headers";
+function headerValue(headers, name) {
+  return headers.get(name) ?? headers.get(name.toLowerCase());
+}
+function headerList(headers, name) {
+  const raw = headerValue(headers, name);
+  if (raw == null)
+    return [];
+  return raw.split(",").map((token) => token.trim()).filter((token) => token.length > 0);
+}
 function parseHeaderInt(headers, name, responseBudget = false) {
   const raw = headers.get(name) ?? headers.get(name.toLowerCase());
   if (raw == null)
@@ -1741,12 +1802,20 @@ function parseCapabilitiesFromHeaders(headers) {
       }
     }
   }
+  const encodingsRaw = headerValue(headers, SUPPORTED_ENCODINGS_HEADER2);
+  const supportedEncodings = encodingsRaw == null ? ["zstd"] : headerList(headers, SUPPORTED_ENCODINGS_HEADER2).map((token) => token.toLowerCase());
   return {
     maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
     uploadUrlSupport,
     maxUploadBytes: parseHeaderInt(headers, MAX_UPLOAD_BYTES_HEADER),
     maxResponseBytes: parseHeaderInt(headers, MAX_RESPONSE_BYTES_HEADER, true),
     acceptMaxResponseBytesSupport: (headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER2) ?? headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER2.toLowerCase())) === "true",
+    maxExternalizedResponseBytes: parseHeaderInt(headers, MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER, true),
+    externalizationEnabled: headerValue(headers, EXTERNALIZATION_ENABLED_HEADER) === "true",
+    supportedEncodings,
+    stickyEnabled: headerValue(headers, STICKY_ENABLED_HEADER2) === "true",
+    stickyDefaultTtl: parseHeaderInt(headers, STICKY_DEFAULT_TTL_HEADER2),
+    stickyEchoHeaders: headerList(headers, STICKY_ECHO_HEADERS_HEADER2),
     cacheExpiresAt
   };
 }
@@ -1782,6 +1851,13 @@ function isCapabilitySnapshotFresh(snapshot) {
 }
 
 // src/client/decode.ts
+function looksZstdEncoded(body) {
+  if (body.byteLength < 4)
+    return false;
+  if (body[0] === 40 && body[1] === 181 && body[2] === 47 && body[3] === 253)
+    return true;
+  return (body[0] & 240) === 80 && body[1] === 42 && body[2] === 77 && body[3] === 24;
+}
 var DEFAULT_MAX_RESPONSE_REPRESENTATION_BYTES = 256 * 1024 * 1024;
 async function readResponseBodyBounded(response, maxDecodedBytes, maxRepresentationBytes = DEFAULT_MAX_RESPONSE_REPRESENTATION_BYTES) {
   const resolved = resolveResponseEncoding(response.headers);
@@ -1850,6 +1926,8 @@ async function decodeResponseBody(headers, body, zstdDecompress2, maxDecodedByte
     return new Uint8Array(await gzipDecompress(body, maxDecodedBytes));
   }
   if (codec === "zstd") {
+    if (!custom && !looksZstdEncoded(body))
+      return body;
     if (!zstdDecompress2) {
       throw new RpcError("ProtocolError", "Server sent a zstd-encoded response but this client has no zstd decoder. " + "Install the optional zstd dependency, or configure the server not to negotiate zstd.", "");
     }
@@ -3408,41 +3486,6 @@ async function readResponseBatches(body) {
   const batches = reader.readAll();
   return { schema: schema2, batches };
 }
-function dispatchLogOrError(batch, onLog) {
-  const meta = batch.metadata;
-  if (!meta)
-    return false;
-  const level = meta.get(LOG_LEVEL_KEY);
-  if (!level)
-    return false;
-  const message = meta.get(LOG_MESSAGE_KEY) ?? "";
-  if (level === "EXCEPTION") {
-    const extraStr = meta.get(LOG_EXTRA_KEY);
-    let errorType = "RpcError";
-    let errorMessage = message;
-    let traceback = "";
-    if (extraStr) {
-      try {
-        const extra = JSON.parse(extraStr);
-        errorType = extra.exception_type ?? "RpcError";
-        errorMessage = extra.exception_message ?? message;
-        traceback = extra.traceback ?? "";
-      } catch {}
-    }
-    throw new RpcError(errorType, errorMessage, traceback);
-  }
-  if (onLog) {
-    const extraStr = meta.get(LOG_EXTRA_KEY);
-    let extra;
-    if (extraStr) {
-      try {
-        extra = JSON.parse(extraStr);
-      } catch {}
-    }
-    onLog({ level, message, extra });
-  }
-  return true;
-}
 function extractBatchRows(batch) {
   const rows = [];
   for (let r = 0;r < batch.numRows; r++) {
@@ -3482,6 +3525,7 @@ function adaptMethod(wire) {
   const info = {
     name: wire.name,
     type,
+    hasReturn: wire.has_return,
     paramsSchema: deserializeSchema2(wire.params_schema_ipc),
     resultSchema: deserializeSchema2(wire.result_schema_ipc)
   };
@@ -3497,7 +3541,9 @@ function adaptServiceDescription(wire, listing) {
     protocolVersion: wire.protocol_version,
     protocolHash: wire.protocol_hash,
     hostedProtocols: listing ? listing.protocols.map((p) => p.protocol) : [],
-    methods: wire.methods.map(adaptMethod)
+    methods: wire.methods.map(adaptMethod),
+    serverId: listing?.server_id,
+    requestVersion: listing?.request_version
   };
 }
 function pickApplicationProtocol(listing) {
@@ -3507,10 +3553,14 @@ function pickApplicationProtocol(listing) {
   }
   return application.protocol;
 }
-function reflectionResult(batches, onLog) {
+async function reflectionResult(batches, onLog, externalConfig) {
   let dataBatch = null;
   for (const batch of batches) {
     if (batch.numRows === 0) {
+      if (isExternalLocationBatch(batch)) {
+        dataBatch = await resolveExternalLocation(batch, externalConfig, onLog);
+        continue;
+      }
       dispatchLogOrError(batch, onLog);
       continue;
     }
@@ -3577,7 +3627,7 @@ async function httpIntrospect(rawBaseUrl, options) {
     const rawBody = await readResponseBodyBounded(response, responseLimit);
     const decoded = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn, responseLimit));
     const { batches } = await readResponseBatches(decoded);
-    return reflectionResult(batches);
+    return reflectionResult(batches, undefined, options?.externalLocation);
   }
   let listing;
   let protocol = options?.protocol;
@@ -3588,8 +3638,21 @@ async function httpIntrospect(rawBaseUrl, options) {
   return adaptServiceDescription(decodeServiceDescription(await call(REFLECTION_DESCRIBE, protocol)), listing);
 }
 
+// src/client/raw-util.ts
+import { makeData, RecordBatch, Schema, Struct } from "@query-farm/apache-arrow";
+function rawBatchOf(batch) {
+  return { batch, metadata: new Map(batch.metadata ?? []) };
+}
+function rawInputBatch(input, extra) {
+  const metadata = new Map(input.metadata);
+  if (extra)
+    for (const [key, value] of extra)
+      metadata.set(key, value);
+  return new RecordBatch(input.batch.schema, input.batch.data, metadata);
+}
+
 // src/client/stream.ts
-import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
+import { Field, makeData as makeData2, RecordBatch as RecordBatch2, Schema as Schema2, Struct as Struct2, vectorFromArray } from "@query-farm/apache-arrow";
 function packResumeToken(cursor, callToken) {
   return callToken === null ? cursor : `${cursor.length}:${cursor}${callToken}`;
 }
@@ -3619,6 +3682,7 @@ class HttpStreamSession {
   _pendingBatches;
   _finished;
   _header;
+  _rawHeader;
   _compressionLevel;
   _compressFn;
   _decompressFn;
@@ -3639,6 +3703,7 @@ class HttpStreamSession {
     this._pendingBatches = opts.pendingBatches;
     this._finished = opts.finished;
     this._header = opts.header;
+    this._rawHeader = opts.rawHeader ?? null;
     this._compressionLevel = opts.compressionLevel;
     this._compressFn = opts.compressFn;
     this._decompressFn = opts.decompressFn;
@@ -3676,9 +3741,15 @@ class HttpStreamSession {
   get header() {
     return this._header;
   }
-  _tokenMetadata(token) {
+  get rawHeader() {
+    return this._rawHeader;
+  }
+  _tokenMetadata(token, options) {
     const metadata = new Map;
     metadata.set(STATE_KEY, token);
+    if (options?.cancel) {
+      metadata.set(CANCEL_KEY, "1");
+    }
     if (this._callStateToken !== null) {
       metadata.set(CALL_STATE_KEY, this._callStateToken);
     }
@@ -3727,14 +3798,14 @@ class HttpStreamSession {
       for (const [key, value] of this._tokenMetadata(this._stateToken)) {
         metadata.set(key, value);
       }
-      const batch2 = new RecordBatch(input.schema, input.data, metadata);
-      return this._doExchange(input.schema, [batch2]);
+      const batch2 = new RecordBatch2(input.schema, input.data, metadata);
+      return this._rowsOfExchange(await this._doExchange(input.schema, [batch2]));
     }
     if (input.length === 0) {
       const zeroSchema = this._inputSchema ?? this._outputSchema;
       const emptyBatch = this._buildEmptyBatch(zeroSchema);
-      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
-      return this._doExchange(zeroSchema, [batchWithMeta]);
+      const batchWithMeta = new RecordBatch2(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
+      return this._rowsOfExchange(await this._doExchange(zeroSchema, [batchWithMeta]));
     }
     let inputSchema = this._inputSchema;
     if (!inputSchema) {
@@ -3751,55 +3822,55 @@ class HttpStreamSession {
         const nullable = input.some((row) => row[key] == null);
         return new Field(key, arrowType, nullable);
       });
-      inputSchema = new Schema(fields);
+      inputSchema = new Schema2(fields);
     }
     const children = inputSchema.fields.map((f) => {
       const values = input.map((row) => row[f.name]);
       return vectorFromArray(values, f.type).data[0];
     });
-    const structType = new Struct(inputSchema.fields);
-    const data = makeData({
+    const structType = new Struct2(inputSchema.fields);
+    const data = makeData2({
       type: structType,
       length: input.length,
       children,
       nullCount: 0
     });
-    const batch = new RecordBatch(inputSchema, data, this._tokenMetadata(this._stateToken));
-    return this._doExchange(inputSchema, [batch]);
+    const batch = new RecordBatch2(inputSchema, data, this._tokenMetadata(this._stateToken));
+    return this._rowsOfExchange(await this._doExchange(inputSchema, [batch]));
   }
   async tick(metadata) {
-    if (this._pendingBatches.length > 0) {
-      throw new RpcError("ProtocolError", "Consume the producer's init batch before sending an explicit tick", "");
+    const item = await this.tickRaw(metadata);
+    return item === null ? [] : extractBatchRows(item.batch);
+  }
+  async tickRaw(metadata) {
+    const next = await this.nextWithTokenRaw(metadata);
+    return next === null ? null : next.item;
+  }
+  async exchangeRaw(input) {
+    if (this._stateToken === null) {
+      throw new RpcError("ProtocolError", "Stream has finished — no state token available", "");
     }
-    if (this._finished || this._stateToken === null)
-      return [];
-    const responseBody = await this._sendContinuation(this._stateToken, metadata);
-    const { batches } = await readResponseBatches(responseBody);
-    let rows = null;
-    let nextToken = null;
-    for (let batch of batches) {
-      if (batch.numRows === 0) {
-        const token = batch.metadata?.get(STATE_KEY);
-        if (token) {
-          nextToken = token;
-          continue;
-        }
-        if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
-        } else {
-          dispatchLogOrError(batch, this._onLog);
-          continue;
-        }
-      }
-      if (rows !== null) {
-        throw new RpcError("ProtocolError", "A producer tick returned more than one data batch", "");
-      }
-      rows = extractBatchRows(batch);
-    }
-    this._stateToken = nextToken;
-    if (nextToken === null)
+    const batch = rawInputBatch(input, this._tokenMetadata(this._stateToken));
+    const reply = await this._doExchange(batch.schema, [batch]);
+    return reply === null ? null : rawBatchOf(reply);
+  }
+  async cancel() {
+    if (this._finished || this._stateToken === null) {
       this._finished = true;
-    return rows ?? [];
+      this._stateToken = null;
+      return;
+    }
+    const token = this._stateToken;
+    this._finished = true;
+    this._stateToken = null;
+    const structType = new Struct2([]);
+    const data = makeData2({ type: structType, length: 0, children: [], nullCount: 0 });
+    const emptySchema = new Schema2([]);
+    const batch = new RecordBatch2(emptySchema, data, this._tokenMetadata(token, { cancel: true }));
+    try {
+      const resp = await this._post(this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }), serializeIpcStream(emptySchema, [batch]));
+      await this._readResponse(resp);
+    } catch {}
   }
   async _doExchange(schema2, batches) {
     const body = serializeIpcStream(schema2, batches);
@@ -3809,47 +3880,49 @@ class HttpStreamSession {
     }
     const responseBody = await this._readResponse(resp);
     const { batches: responseBatches } = await readResponseBatches(responseBody);
-    let resultRows = [];
-    let gotData = false;
+    let result = null;
     for (const batch of responseBatches) {
-      if (batch.numRows === 0) {
-        dispatchLogOrError(batch, this._onLog);
-        const token2 = batch.metadata?.get(STATE_KEY);
-        if (token2) {
-          this._stateToken = token2;
-        }
+      const pointer = isExternalLocationBatch(batch);
+      if (batch.numRows === 0 && !pointer && dispatchLogOrError(batch, this._onLog)) {
         continue;
       }
-      if (gotData) {
+      const resolved = pointer ? await resolveExternalLocation(batch, this._externalConfig, this._onLog) : batch;
+      const token = resolved.metadata?.get(STATE_KEY) ?? batch.metadata?.get(STATE_KEY);
+      if (result !== null) {
+        if (token && batch.numRows === 0 && !pointer) {
+          this._stateToken = token;
+          continue;
+        }
         throw new RpcError("ProtocolError", "An exchange turn returned more than one data batch", "");
       }
-      gotData = true;
-      const token = batch.metadata?.get(STATE_KEY);
       if (token) {
         this._stateToken = token;
       }
-      resultRows = extractBatchRows(batch);
+      result = resolved;
     }
-    return resultRows;
+    return result;
+  }
+  _rowsOfExchange(reply) {
+    return reply === null ? [] : extractBatchRows(reply);
   }
   _buildEmptyBatch(schema2) {
     const children = schema2.fields.map((f) => {
-      return makeData({ type: f.type, length: 0, nullCount: 0 });
+      return makeData2({ type: f.type, length: 0, nullCount: 0 });
     });
-    const structType = new Struct(schema2.fields);
-    const data = makeData({
+    const structType = new Struct2(schema2.fields);
+    const data = makeData2({
       type: structType,
       length: 0,
       children,
       nullCount: 0
     });
-    return new RecordBatch(schema2, data);
+    return new RecordBatch2(schema2, data);
   }
   async* [Symbol.asyncIterator]() {
     for (let batch of this._pendingBatches) {
       if (batch.numRows === 0) {
         if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
+          batch = await resolveExternalLocation(batch, this._externalConfig, this._onLog);
         } else {
           dispatchLogOrError(batch, this._onLog);
           continue;
@@ -3879,7 +3952,7 @@ class HttpStreamSession {
             continue;
           }
           if (isExternalLocationBatch(batch)) {
-            batch = await resolveExternalLocation(batch, this._externalConfig);
+            batch = await resolveExternalLocation(batch, this._externalConfig, this._onLog);
           } else {
             dispatchLogOrError(batch, this._onLog);
             continue;
@@ -3897,12 +3970,19 @@ class HttpStreamSession {
     }
   }
   async nextWithToken() {
+    const next = await this.nextWithTokenRaw();
+    return next === null ? null : { rows: extractBatchRows(next.item.batch), token: next.token };
+  }
+  async nextWithTokenRaw(metadata) {
     const multi = "A producer turn returned more than one data batch";
+    if (metadata !== undefined && this._pendingBatches.length > 0) {
+      throw new RpcError("ProtocolError", "Consume the producer's init batch before sending an explicit tick", "");
+    }
     while (this._pendingBatches.length > 0) {
       let batch = this._pendingBatches.shift();
       if (batch.numRows === 0) {
         if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
+          batch = await resolveExternalLocation(batch, this._externalConfig, this._onLog);
         } else {
           dispatchLogOrError(batch, this._onLog);
           continue;
@@ -3911,15 +3991,15 @@ class HttpStreamSession {
       if (this._pendingBatches.some((b) => b.numRows > 0 || isExternalLocationBatch(b))) {
         throw new RpcError("ProtocolError", multi, "");
       }
-      return { rows: extractBatchRows(batch), token: this._resumeToken() };
+      return { item: rawBatchOf(batch), token: this._resumeToken() };
     }
     if (this._finished || this._stateToken === null) {
       this._finished = true;
       return null;
     }
-    const responseBody = await this._sendContinuation(this._stateToken);
+    const responseBody = await this._sendContinuation(this._stateToken, metadata);
     const { batches } = await readResponseBatches(responseBody);
-    let dataRows = null;
+    let data = null;
     let nextToken = null;
     for (let batch of batches) {
       if (batch.numRows === 0) {
@@ -3929,23 +4009,23 @@ class HttpStreamSession {
           continue;
         }
         if (isExternalLocationBatch(batch)) {
-          batch = await resolveExternalLocation(batch, this._externalConfig);
+          batch = await resolveExternalLocation(batch, this._externalConfig, this._onLog);
         } else {
           dispatchLogOrError(batch, this._onLog);
           continue;
         }
       }
-      if (dataRows !== null) {
+      if (data !== null) {
         throw new RpcError("ProtocolError", multi, "");
       }
-      dataRows = extractBatchRows(batch);
+      data = batch;
     }
     this._stateToken = nextToken;
-    if (dataRows === null) {
+    if (data === null) {
       this._finished = true;
       return null;
     }
-    return { rows: dataRows, token: this._resumeToken() };
+    return { item: rawBatchOf(data), token: this._resumeToken() };
   }
   seekToToken(token) {
     const { cursor, callToken } = unpackResumeToken(token);
@@ -3955,18 +4035,18 @@ class HttpStreamSession {
     this._finished = false;
   }
   async _sendContinuation(token, applicationMetadata) {
-    const emptySchema = new Schema([]);
+    const emptySchema = new Schema2([]);
     const metadata = new Map(applicationMetadata ?? []);
     for (const [key, value] of this._tokenMetadata(token))
       metadata.set(key, value);
-    const structType = new Struct(emptySchema.fields);
-    const data = makeData({
+    const structType = new Struct2(emptySchema.fields);
+    const data = makeData2({
       type: structType,
       length: 1,
       children: [],
       nullCount: 0
     });
-    const batch = new RecordBatch(emptySchema, data, metadata);
+    const batch = new RecordBatch2(emptySchema, data, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
     const resp = await this._post(this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }), body);
     if (resp.status === 401) {
@@ -3978,9 +4058,7 @@ class HttpStreamSession {
 }
 
 // src/client/uploadUrl.ts
-import { Field as Field2, Int64 as Int642, RecordBatchReader as RecordBatchReader4, Schema as Schema2 } from "@query-farm/apache-arrow";
-var UPLOAD_URL_METHOD2 = "__upload_url__";
-var UPLOAD_URL_PARAMS_SCHEMA2 = new Schema2([new Field2("count", new Int642, false)]);
+import { RecordBatchReader as RecordBatchReader4 } from "@query-farm/apache-arrow";
 async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn = globalThis.fetch, acceptedMaxResponseBytes = DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES, responseBudgetVerified = false) {
   optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
   let responseLimit = acceptedMaxResponseBytes;
@@ -3991,12 +4069,12 @@ async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn 
     }
     responseLimit = minPositive(acceptedMaxResponseBytes, capabilities.maxResponseBytes ?? undefined) ?? acceptedMaxResponseBytes;
   }
-  const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA2, { count: BigInt(count) }, UPLOAD_URL_METHOD2);
+  const body = buildRequestIpc(UPLOAD_URL_PARAMS_SCHEMA, { count: BigInt(count) }, UPLOAD_URL_METHOD);
   const headers = { "Content-Type": ARROW_CONTENT_TYPE };
   if (authorization)
     headers.Authorization = authorization;
   headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(acceptedMaxResponseBytes);
-  const resp = await fetchFn(baseUrl + reservedPath(`${UPLOAD_URL_METHOD2}/init`, { prefix }), {
+  const resp = await fetchFn(baseUrl + reservedPath(`${UPLOAD_URL_METHOD}/init`, { prefix }), {
     method: "POST",
     headers,
     body
@@ -4065,8 +4143,8 @@ async function buildPointerRequestBody(originalBody, downloadUrl) {
     if (!merged.has(k))
       merged.set(k, v);
   }
-  const { RecordBatch: RecordBatch2 } = await import("@query-farm/apache-arrow");
-  const pointerWithMeta = new RecordBatch2(schema2, pointer.data, merged);
+  const { RecordBatch: RecordBatch3 } = await import("@query-farm/apache-arrow");
+  const pointerWithMeta = new RecordBatch3(schema2, pointer.data, merged);
   return serializeIpcStream(schema2, [pointerWithMeta]);
 }
 async function externalizeRequestBody(body, opts) {
@@ -4096,9 +4174,51 @@ function httpConnect(rawBaseUrl, options) {
   const compressionLevel = options?.compressionLevel;
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
-  const fetchFn = options?.fetch ?? globalThis.fetch;
+  const baseFetch = options?.fetch ?? globalThis.fetch;
   const acceptedMaxResponseBytes = options?.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
   optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
+  const sessionScopes = [];
+  function currentScope() {
+    return sessionScopes.length === 0 ? null : sessionScopes[sessionScopes.length - 1];
+  }
+  function mergeSessionHeaders(scope, init) {
+    const headers = new Headers(init?.headers);
+    headers.set(SESSION_ACCEPT_HEADER, "true");
+    if (scope.token !== null)
+      headers.set(SESSION_HEADER, scope.token);
+    for (const [name, value] of Object.entries(scope.echo)) {
+      if (!headers.has(name))
+        headers.set(name, value);
+    }
+    return headers;
+  }
+  function captureSessionHeaders(scope, response) {
+    const token = response.headers.get(SESSION_HEADER);
+    if (token)
+      scope.token = token;
+    const prefixLower = ECHO_HEADER_PREFIX.toLowerCase();
+    response.headers.forEach((value, name) => {
+      if (name.toLowerCase().startsWith(prefixLower)) {
+        scope.echo[name.slice(ECHO_HEADER_PREFIX.length)] = value;
+      }
+    });
+    if ((response.headers.get(SESSION_CLOSE_HEADER) ?? "").trim().toLowerCase() === "true") {
+      scope.token = null;
+      scope.echo = {};
+    }
+  }
+  const fetchFn = async (input, init) => {
+    const scope = currentScope();
+    if (scope === null)
+      return baseFetch(input, init);
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (!url.startsWith(baseUrl) || (init?.method ?? "GET").toUpperCase() === "PUT") {
+      return baseFetch(input, init);
+    }
+    const response = await baseFetch(input, { ...init, headers: mergeSessionHeaders(scope, init) });
+    captureSessionHeaders(scope, response);
+    return response;
+  };
   const effectiveExternalConfig = externalConfig ? { ...externalConfig, fetch: fetchFn } : externalConfig;
   let methodCache = options?.description ? new Map(options.description.methods.map((method) => [method.name, method])) : null;
   let serverProtocolVersion = options?.description?.protocolVersion ?? "";
@@ -4243,6 +4363,7 @@ function httpConnect(rawBaseUrl, options) {
     const desc = await httpIntrospect(baseUrl, {
       prefix,
       protocol: options?.protocol,
+      externalLocation: effectiveExternalConfig,
       authorization,
       compressionLevel,
       compressFn,
@@ -4255,6 +4376,130 @@ function httpConnect(rawBaseUrl, options) {
     serverProtocolVersion = desc.protocolVersion;
     serverProtocolName = desc.protocolName;
     return methodCache;
+  }
+  async function rawPrefix(metadata) {
+    const named = options?.protocol ?? metadata.get(PROTOCOL_KEY);
+    if (named)
+      return `${prefix}/${named}`;
+    await ensureMethodCache();
+    return rpcPrefix();
+  }
+  async function openStreamOverHttp(method, body, hasHeader, prefixOverride) {
+    const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(prefixOverride ?? rpcPrefix(), method, { suffix: "/init" }), body);
+    checkAuth(resp);
+    const responseBody = await readResponse(resp);
+    let headerBatch = null;
+    let stateToken = null;
+    let callStateToken = null;
+    const pendingBatches = [];
+    let dataBatchesInTurn = 0;
+    const queueDataBatch = (batch) => {
+      dataBatchesInTurn += 1;
+      if (dataBatchesInTurn > 1) {
+        throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
+      }
+      pendingBatches.push(batch);
+    };
+    let finished = false;
+    let streamSchema = null;
+    if (hasHeader) {
+      const reader = await readSequentialStreams(responseBody);
+      const headerStream = await reader.readStream();
+      if (headerStream) {
+        for (const batch of headerStream.batches) {
+          if (batch.numRows === 0) {
+            if (isExternalLocationBatch(batch)) {
+              headerBatch = await resolveExternalLocation(batch, effectiveExternalConfig, onLog);
+              continue;
+            }
+            dispatchLogOrError(batch, onLog);
+            continue;
+          }
+          headerBatch = batch;
+        }
+      }
+      const dataStream = await reader.readStream();
+      if (dataStream) {
+        streamSchema = dataStream.schema;
+      }
+      const headerErrorBatches = [];
+      if (dataStream) {
+        for (const batch of dataStream.batches) {
+          if (batch.numRows === 0) {
+            const token = batch.metadata?.get(STATE_KEY);
+            if (token) {
+              stateToken = token;
+              callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
+              continue;
+            }
+            if (isExternalLocationBatch(batch)) {
+              queueDataBatch(batch);
+              continue;
+            }
+            const level = batch.metadata?.get(LOG_LEVEL_KEY);
+            if (level === "EXCEPTION") {
+              headerErrorBatches.push(batch);
+              continue;
+            }
+            dispatchLogOrError(batch, onLog);
+            continue;
+          }
+          queueDataBatch(batch);
+        }
+      }
+      if (headerErrorBatches.length > 0) {
+        if (pendingBatches.length > 0 || stateToken !== null) {
+          pendingBatches.push(...headerErrorBatches);
+        } else {
+          for (const batch of headerErrorBatches) {
+            dispatchLogOrError(batch, onLog);
+          }
+        }
+      }
+      if (!dataStream && !stateToken) {
+        finished = true;
+      }
+    } else {
+      const { schema: responseSchema, batches } = await readResponseBatches(responseBody);
+      streamSchema = responseSchema;
+      const errorBatches = [];
+      for (const batch of batches) {
+        if (batch.numRows === 0) {
+          const token = batch.metadata?.get(STATE_KEY);
+          if (token) {
+            stateToken = token;
+            callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
+            continue;
+          }
+          if (isExternalLocationBatch(batch)) {
+            queueDataBatch(batch);
+            continue;
+          }
+          const level = batch.metadata?.get(LOG_LEVEL_KEY);
+          if (level === "EXCEPTION") {
+            errorBatches.push(batch);
+            continue;
+          }
+          dispatchLogOrError(batch, onLog);
+          continue;
+        }
+        queueDataBatch(batch);
+      }
+      if (errorBatches.length > 0) {
+        if (pendingBatches.length > 0 || stateToken !== null) {
+          pendingBatches.push(...errorBatches);
+        } else {
+          for (const batch of errorBatches) {
+            dispatchLogOrError(batch, onLog);
+          }
+        }
+      }
+    }
+    if (pendingBatches.length === 0 && stateToken === null) {
+      finished = true;
+    }
+    const outputSchema = (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null) ?? (pendingBatches.length > 0 ? pendingBatches[0].schema : null);
+    return { headerBatch, stateToken, callStateToken, pendingBatches, finished, outputSchema };
   }
   return {
     async call(method, params) {
@@ -4277,7 +4522,7 @@ function httpConnect(rawBaseUrl, options) {
       for (let batch of batches) {
         if (batch.numRows === 0) {
           if (isExternalLocationBatch(batch)) {
-            batch = await resolveExternalLocation(batch, effectiveExternalConfig);
+            batch = await resolveExternalLocation(batch, effectiveExternalConfig, onLog);
           } else {
             dispatchLogOrError(batch, onLog);
             continue;
@@ -4311,131 +4556,71 @@ function httpConnect(rawBaseUrl, options) {
         protocolVersion: serverProtocolVersion,
         protocol: serverProtocolName
       });
-      const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(rpcPrefix(), method, { suffix: "/init" }), body);
-      checkAuth(resp);
-      const responseBody = await readResponse(resp);
-      let header = null;
-      let stateToken = null;
-      let callStateToken = null;
-      const pendingBatches = [];
-      let dataBatchesInTurn = 0;
-      const queueDataBatch = (batch) => {
-        dataBatchesInTurn += 1;
-        if (dataBatchesInTurn > 1) {
-          throw new RpcError("ProtocolError", "A stream init returned more than one data batch", "");
-        }
-        pendingBatches.push(batch);
-      };
-      let finished = false;
-      let streamSchema = null;
-      if (info.headerSchema) {
-        const reader = await readSequentialStreams(responseBody);
-        const headerStream = await reader.readStream();
-        if (headerStream) {
-          for (const batch of headerStream.batches) {
-            if (batch.numRows === 0) {
-              dispatchLogOrError(batch, onLog);
-              continue;
-            }
-            const rows = extractBatchRows(batch);
-            if (rows.length > 0) {
-              header = rows[0];
-            }
-          }
-        }
-        const dataStream = await reader.readStream();
-        if (dataStream) {
-          streamSchema = dataStream.schema;
-        }
-        const headerErrorBatches = [];
-        if (dataStream) {
-          for (const batch of dataStream.batches) {
-            if (batch.numRows === 0) {
-              const token = batch.metadata?.get(STATE_KEY);
-              if (token) {
-                stateToken = token;
-                callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
-                continue;
-              }
-              if (isExternalLocationBatch(batch)) {
-                queueDataBatch(batch);
-                continue;
-              }
-              const level = batch.metadata?.get(LOG_LEVEL_KEY);
-              if (level === "EXCEPTION") {
-                headerErrorBatches.push(batch);
-                continue;
-              }
-              dispatchLogOrError(batch, onLog);
-              continue;
-            }
-            queueDataBatch(batch);
-          }
-        }
-        if (headerErrorBatches.length > 0) {
-          if (pendingBatches.length > 0 || stateToken !== null) {
-            pendingBatches.push(...headerErrorBatches);
-          } else {
-            for (const batch of headerErrorBatches) {
-              dispatchLogOrError(batch, onLog);
-            }
-          }
-        }
-        if (!dataStream && !stateToken) {
-          finished = true;
-        }
-      } else {
-        const { schema: responseSchema, batches } = await readResponseBatches(responseBody);
-        streamSchema = responseSchema;
-        const errorBatches = [];
-        for (const batch of batches) {
-          if (batch.numRows === 0) {
-            const token = batch.metadata?.get(STATE_KEY);
-            if (token) {
-              stateToken = token;
-              callStateToken = batch.metadata?.get(CALL_STATE_KEY) ?? callStateToken;
-              continue;
-            }
-            if (isExternalLocationBatch(batch)) {
-              queueDataBatch(batch);
-              continue;
-            }
-            const level = batch.metadata?.get(LOG_LEVEL_KEY);
-            if (level === "EXCEPTION") {
-              errorBatches.push(batch);
-              continue;
-            }
-            dispatchLogOrError(batch, onLog);
-            continue;
-          }
-          queueDataBatch(batch);
-        }
-        if (errorBatches.length > 0) {
-          if (pendingBatches.length > 0 || stateToken !== null) {
-            pendingBatches.push(...errorBatches);
-          } else {
-            for (const batch of errorBatches) {
-              dispatchLogOrError(batch, onLog);
-            }
-          }
-        }
-      }
-      if (pendingBatches.length === 0 && stateToken === null) {
-        finished = true;
-      }
-      const outputSchema = (streamSchema && streamSchema.fields.length > 0 ? streamSchema : null) ?? (pendingBatches.length > 0 ? pendingBatches[0].schema : null) ?? info.outputSchema ?? info.resultSchema;
+      const init = await openStreamOverHttp(method, body, info.headerSchema != null);
+      const header = init.headerBatch === null ? null : extractBatchRows(init.headerBatch)[0] ?? null;
       return new HttpStreamSession({
         baseUrl,
         prefix: rpcPrefix(),
         method,
-        stateToken,
-        callStateToken,
-        outputSchema,
+        stateToken: init.stateToken,
+        callStateToken: init.callStateToken,
+        outputSchema: init.outputSchema ?? info.outputSchema ?? info.resultSchema,
         inputSchema: info.inputSchema,
         onLog,
-        pendingBatches,
-        finished,
+        pendingBatches: init.pendingBatches,
+        finished: init.finished,
         header,
+        rawHeader: init.headerBatch === null ? null : rawBatchOf(init.headerBatch),
+        compressionLevel,
+        compressFn,
+        decompressFn,
+        authorization,
+        externalConfig: effectiveExternalConfig,
+        acceptedMaxResponseBytes: responseReadLimit(),
+        postFn: postWithExternalization
+      });
+    },
+    async callRaw(method, input) {
+      await ensureCompression();
+      const batch = rawInputBatch(input);
+      const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(await rawPrefix(input.metadata), method), serializeIpcStream(batch.schema, [batch]));
+      checkAuth(resp);
+      const responseBody = await readResponse(resp);
+      const { batches } = await readResponseBatches(responseBody);
+      let resultBatch = null;
+      for (let responseBatch of batches) {
+        if (responseBatch.numRows === 0) {
+          if (isExternalLocationBatch(responseBatch)) {
+            responseBatch = await resolveExternalLocation(responseBatch, effectiveExternalConfig, onLog);
+          } else {
+            dispatchLogOrError(responseBatch, onLog);
+            continue;
+          }
+        }
+        if (resultBatch !== null) {
+          throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
+        }
+        resultBatch = responseBatch;
+      }
+      return resultBatch === null ? null : rawBatchOf(resultBatch);
+    },
+    async streamRaw(method, input, options2) {
+      await ensureCompression();
+      const batch = rawInputBatch(input);
+      const prefixForCall = await rawPrefix(input.metadata);
+      const init = await openStreamOverHttp(method, serializeIpcStream(batch.schema, [batch]), options2.hasHeader, prefixForCall);
+      return new HttpStreamSession({
+        baseUrl,
+        prefix: prefixForCall,
+        method,
+        stateToken: init.stateToken,
+        callStateToken: init.callStateToken,
+        outputSchema: init.outputSchema ?? new Schema3([]),
+        onLog,
+        pendingBatches: init.pendingBatches,
+        finished: init.finished,
+        header: null,
+        rawHeader: init.headerBatch === null ? null : rawBatchOf(init.headerBatch),
         compressionLevel,
         compressFn,
         decompressFn,
@@ -4476,6 +4661,7 @@ function httpConnect(rawBaseUrl, options) {
       return httpIntrospect(baseUrl, {
         prefix,
         protocol: options?.protocol,
+        externalLocation: effectiveExternalConfig,
         authorization,
         compressionLevel,
         compressFn,
@@ -4484,6 +4670,49 @@ function httpConnect(rawBaseUrl, options) {
         fetch: fetchFn,
         responseBudgetVerified: true
       });
+    },
+    async capabilities() {
+      const snapshot = await discoverHttpCapabilities(baseUrl, prefix, authorization, acceptedMaxResponseBytes, fetchFn);
+      capabilities = snapshot;
+      return snapshot;
+    },
+    async requestUploadUrls(count = 1) {
+      return requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn, acceptedMaxResponseBytes);
+    },
+    beginSession(token) {
+      sessionScopes.push({ token: token ? token : null, echo: {} });
+    },
+    currentSessionToken() {
+      return currentScope()?.token ?? null;
+    },
+    currentEchoHeaders() {
+      return { ...currentScope()?.echo ?? {} };
+    },
+    detachSession() {
+      const scope = currentScope();
+      if (scope === null)
+        return null;
+      const token = scope.token;
+      scope.token = null;
+      scope.echo = {};
+      return token;
+    },
+    async endSession() {
+      const scope = sessionScopes.pop();
+      if (scope === undefined)
+        return;
+      const token = scope.token;
+      const echo = scope.echo;
+      if (token === null)
+        return;
+      const headers = { [SESSION_HEADER]: token };
+      if (authorization)
+        headers.Authorization = authorization;
+      for (const [name, value] of Object.entries(echo))
+        headers[name] = value;
+      try {
+        await baseFetch(baseUrl + reservedPath(SESSION_ENDPOINT, { prefix }), { method: "DELETE", headers });
+      } catch {}
     },
     close() {}
   };
@@ -4494,12 +4723,12 @@ import { randomBytes as randomBytes2 } from "node:crypto";
 
 // src/client/pipe.ts
 import {
-  Field as Field3,
-  makeData as makeData2,
-  RecordBatch as RecordBatch2,
+  Field as Field2,
+  makeData as makeData3,
+  RecordBatch as RecordBatch3,
   RecordBatchStreamWriter as RecordBatchStreamWriter2,
   Schema as Schema4,
-  Struct as Struct2,
+  Struct as Struct3,
   vectorFromArray as vectorFromArray2
 } from "@query-farm/apache-arrow";
 
@@ -4662,8 +4891,8 @@ function fieldsMatch(left, right) {
   if (left.name !== right.name || left.nullable !== right.nullable || String(left.type) !== String(right.type)) {
     return false;
   }
-  const leftChildren = left.type.children;
-  const rightChildren = right.type.children;
+  const leftChildren = left.type.children ?? [];
+  const rightChildren = right.type.children ?? [];
   return leftChildren.length === rightChildren.length && leftChildren.every((child2, index) => fieldsMatch(child2, rightChildren[index]));
 }
 function schemasMatch(left, right) {
@@ -4703,10 +4932,12 @@ class PipeIncrementalWriter {
 }
 
 class PipeStreamSession {
-  _reader;
+  _openReader;
+  _readerCache;
   _writeFn;
   _onLog;
   _header;
+  _rawHeader;
   _inputWriter = null;
   _inputSchema = null;
   _outputStreamOpened = false;
@@ -4716,10 +4947,12 @@ class PipeStreamSession {
   _setDrainPromise;
   _externalConfig;
   constructor(opts) {
-    this._reader = opts.reader;
+    this._openReader = typeof opts.reader === "function" ? opts.reader : async () => opts.reader;
+    this._readerCache = typeof opts.reader === "function" ? null : opts.reader;
     this._writeFn = opts.writeFn;
     this._onLog = opts.onLog;
     this._header = opts.header;
+    this._rawHeader = opts.rawHeader ?? null;
     this._outputSchema = opts.outputSchema;
     this._releaseBusy = opts.releaseBusy;
     this._setDrainPromise = opts.setDrainPromise;
@@ -4728,14 +4961,21 @@ class PipeStreamSession {
   get header() {
     return this._header;
   }
+  get rawHeader() {
+    return this._rawHeader;
+  }
+  async _reader() {
+    this._readerCache ??= await this._openReader();
+    return this._readerCache;
+  }
   async _readOutputBatch() {
     while (true) {
-      const batch = await this._reader.readNextBatch();
+      const batch = await (await this._reader()).readNextBatch();
       if (batch === null)
         return null;
       if (batch.numRows === 0) {
         if (isExternalLocationBatch(batch)) {
-          return await resolveExternalLocation(batch, this._externalConfig);
+          return await resolveExternalLocation(batch, this._externalConfig, this._onLog);
         }
         if (dispatchLogOrError(batch, this._onLog)) {
           continue;
@@ -4748,12 +4988,24 @@ class PipeStreamSession {
     if (this._outputStreamOpened)
       return;
     this._outputStreamOpened = true;
-    const schema2 = await this._reader.openNextStream();
+    const schema2 = await (await this._reader()).openNextStream();
     if (!schema2) {
       throw new RpcError("ProtocolError", "Expected output stream but got EOF", "");
     }
   }
   async tick(metadata) {
+    const outputBatch = await this._tickBatch(metadata);
+    return outputBatch === null ? [] : extractBatchRows(outputBatch);
+  }
+  async tickRaw(metadata) {
+    const outputBatch = await this._tickBatch(metadata);
+    return outputBatch === null ? null : rawBatchOf(outputBatch);
+  }
+  async nextWithTokenRaw() {
+    const item = await this.tickRaw();
+    return item === null ? null : { item, token: null };
+  }
+  async _tickBatch(metadata) {
     if (this._closed) {
       throw new RpcError("ProtocolError", "Stream session is closed", "");
     }
@@ -4761,19 +5013,80 @@ class PipeStreamSession {
     if (!this._inputWriter) {
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
     }
-    const tickData = makeData2({ type: new Struct2([]), length: 0, children: [], nullCount: 0 });
-    const tickBatch = new RecordBatch2(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
+    const tickData = makeData3({ type: new Struct3([]), length: 0, children: [], nullCount: 0 });
+    const tickBatch = new RecordBatch3(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
     this._inputWriter.write(tickBatch);
     await this._ensureOutputStream();
-    const outputBatch = await this._readOutputBatch();
+    let outputBatch;
+    try {
+      outputBatch = await this._readOutputBatch();
+    } catch (e) {
+      await this._cleanup();
+      throw e;
+    }
     if (outputBatch === null) {
       this._closed = true;
       this._inputWriter.close();
       this._inputWriter = null;
       this._releaseBusy();
-      return [];
+      return null;
     }
-    return extractBatchRows(outputBatch);
+    return outputBatch;
+  }
+  async exchangeRaw(input) {
+    if (this._closed) {
+      throw new RpcError("ProtocolError", "Stream session is closed", "");
+    }
+    const batch = rawInputBatch(input);
+    const inputSchema = batch.schema;
+    if (this._inputSchema && !schemasMatch(this._inputSchema, inputSchema)) {
+      throw new RpcError("ProtocolError", `Exchange input schema changed: expected ${this._inputSchema}, got ${inputSchema}`, "");
+    }
+    this._inputSchema ??= inputSchema;
+    if (!this._inputWriter) {
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
+    }
+    this._inputWriter.write(batch);
+    await this._ensureOutputStream();
+    try {
+      const outputBatch = await this._readOutputBatch();
+      return outputBatch === null ? null : rawBatchOf(outputBatch);
+    } catch (e) {
+      await this._cleanup();
+      throw e;
+    }
+  }
+  async cancel() {
+    if (this._closed)
+      return;
+    this._closed = true;
+    const cancelMetadata = new Map([[CANCEL_KEY, "1"]]);
+    try {
+      const schema2 = this._inputSchema ?? new Schema4([]);
+      if (!this._inputWriter) {
+        this._inputWriter = new PipeIncrementalWriter(this._writeFn, schema2);
+      }
+      const children = schema2.fields.map((f) => makeData3({ type: f.type, length: 0, nullCount: 0 }));
+      const data = makeData3({ type: new Struct3(schema2.fields), length: 0, children, nullCount: 0 });
+      this._inputWriter.write(new RecordBatch3(schema2, data, cancelMetadata));
+      this._inputWriter.close();
+      this._inputWriter = null;
+    } catch {
+      this._releaseBusy();
+      return;
+    }
+    try {
+      if (!this._outputStreamOpened) {
+        this._outputStreamOpened = true;
+        const schema2 = await (await this._reader()).openNextStream();
+        if (!schema2) {
+          this._releaseBusy();
+          return;
+        }
+      }
+      while (await (await this._reader()).readNextBatch() !== null) {}
+    } catch {}
+    this._releaseBusy();
   }
   async exchange(input) {
     if (this._closed) {
@@ -4791,16 +5104,16 @@ class PipeStreamSession {
     } else if (input.length === 0) {
       inputSchema = this._inputSchema ?? this._outputSchema;
       const children = inputSchema.fields.map((f) => {
-        return makeData2({ type: f.type, length: 0, nullCount: 0 });
+        return makeData3({ type: f.type, length: 0, nullCount: 0 });
       });
-      const structType = new Struct2(inputSchema.fields);
-      const data = makeData2({
+      const structType = new Struct3(inputSchema.fields);
+      const data = makeData3({
         type: structType,
         length: 0,
         children,
         nullCount: 0
       });
-      batch = new RecordBatch2(inputSchema, data);
+      batch = new RecordBatch3(inputSchema, data);
     } else {
       const keys = Object.keys(input[0]);
       const fields = keys.map((key) => {
@@ -4812,7 +5125,7 @@ class PipeStreamSession {
           }
         }
         const arrowType = inferArrowType(sample);
-        return new Field3(key, arrowType, true);
+        return new Field2(key, arrowType, true);
       });
       inputSchema = new Schema4(fields);
       if (this._inputSchema) {
@@ -4827,14 +5140,14 @@ class PipeStreamSession {
         const values = input.map((row) => row[f.name]);
         return vectorFromArray2(values, f.type).data[0];
       });
-      const structType = new Struct2(inputSchema.fields);
-      const data = makeData2({
+      const structType = new Struct3(inputSchema.fields);
+      const data = makeData3({
         type: structType,
         length: input.length,
         children,
         nullCount: 0
       });
-      batch = new RecordBatch2(inputSchema, data);
+      batch = new RecordBatch3(inputSchema, data);
     }
     if (!this._inputWriter) {
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
@@ -4862,7 +5175,7 @@ class PipeStreamSession {
     }
     try {
       if (this._outputStreamOpened) {
-        while (await this._reader.readNextBatch() !== null) {}
+        while (await (await this._reader()).readNextBatch() !== null) {}
       }
     } catch {}
     this._releaseBusy();
@@ -4887,7 +5200,7 @@ class PipeStreamSession {
       }
       try {
         if (this._outputStreamOpened) {
-          while (await this._reader.readNextBatch() !== null) {}
+          while (await (await this._reader()).readNextBatch() !== null) {}
         }
       } catch {}
       this._closed = true;
@@ -4909,12 +5222,12 @@ class PipeStreamSession {
     const drainPromise = (async () => {
       try {
         if (!this._outputStreamOpened) {
-          const schema2 = await this._reader.openNextStream();
+          const schema2 = await (await this._reader()).openNextStream();
           if (schema2) {
-            while (await this._reader.readNextBatch() !== null) {}
+            while (await (await this._reader()).readNextBatch() !== null) {}
           }
         } else {
-          while (await this._reader.readNextBatch() !== null) {}
+          while (await (await this._reader()).readNextBatch() !== null) {}
         }
       } catch {} finally {
         this._releaseBusy();
@@ -4933,6 +5246,8 @@ function pipeConnect(readable, writable, options) {
   let serverProtocolVersion = "";
   let describedHash = "";
   let hostedProtocols = [];
+  let describedServerId;
+  let describedRequestVersion;
   const requestedProtocol = options?.protocol;
   let _busy = false;
   let _drainPromise = null;
@@ -4983,7 +5298,7 @@ function pipeConnect(readable, writable, options) {
         if (!response) {
           throw new RpcError("TransportError", `EOF reading the '${method}' reflection response`, "");
         }
-        return reflectionResult(response.batches, onLog);
+        return reflectionResult(response.batches, onLog, externalConfig);
       };
       let listing;
       let target = requestedProtocol;
@@ -4996,6 +5311,8 @@ function pipeConnect(readable, writable, options) {
       serverProtocolVersion = desc.protocolVersion;
       describedHash = desc.protocolHash;
       hostedProtocols = desc.hostedProtocols;
+      describedServerId = desc.serverId;
+      describedRequestVersion = desc.requestVersion;
       methodCache = new Map(desc.methods.map((m) => [m.name, m]));
       return methodCache;
     } finally {
@@ -5026,7 +5343,7 @@ function pipeConnect(readable, writable, options) {
         for (let batch of response.batches) {
           if (batch.numRows === 0) {
             if (isExternalLocationBatch(batch)) {
-              batch = await resolveExternalLocation(batch, externalConfig);
+              batch = await resolveExternalLocation(batch, externalConfig, onLog);
             } else {
               dispatchLogOrError(batch, onLog);
               continue;
@@ -5048,6 +5365,75 @@ function pipeConnect(readable, writable, options) {
         return rows[0];
       } finally {
         releaseBusy();
+      }
+    },
+    async callRaw(_method, input) {
+      await acquireBusy();
+      try {
+        const batch = rawInputBatch(input);
+        writeFn(serializeIpcStream(batch.schema, [batch]));
+        const r = await ensureReader();
+        const response = await r.readStream();
+        if (!response) {
+          throw new RpcError("TransportError", "EOF reading response", "");
+        }
+        let resultBatch = null;
+        for (let batch2 of response.batches) {
+          if (batch2.numRows === 0) {
+            if (isExternalLocationBatch(batch2)) {
+              batch2 = await resolveExternalLocation(batch2, externalConfig, onLog);
+            } else {
+              dispatchLogOrError(batch2, onLog);
+              continue;
+            }
+          }
+          if (resultBatch !== null) {
+            throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
+          }
+          resultBatch = batch2;
+        }
+        return resultBatch === null ? null : rawBatchOf(resultBatch);
+      } finally {
+        releaseBusy();
+      }
+    },
+    async streamRaw(_method, input, options2) {
+      await acquireBusy();
+      try {
+        const batch = rawInputBatch(input);
+        writeFn(serializeIpcStream(batch.schema, [batch]));
+        let rawHeader = null;
+        if (options2.hasHeader) {
+          const headerStream = await (await ensureReader()).readStream();
+          if (headerStream) {
+            for (const headerBatch of headerStream.batches) {
+              if (headerBatch.numRows === 0) {
+                dispatchLogOrError(headerBatch, onLog);
+                continue;
+              }
+              rawHeader ??= rawBatchOf(headerBatch);
+            }
+          }
+        }
+        return new PipeStreamSession({
+          reader: ensureReader,
+          writeFn,
+          onLog,
+          header: null,
+          rawHeader,
+          outputSchema: new Schema4([]),
+          releaseBusy,
+          setDrainPromise,
+          externalConfig
+        });
+      } catch (e) {
+        try {
+          const r = await ensureReader();
+          writeFn(serializeIpcStream(new Schema4([]), []));
+          await r.readStream();
+        } catch {}
+        releaseBusy();
+        throw e;
       }
     },
     async stream(method, params) {
@@ -5111,7 +5497,9 @@ function pipeConnect(readable, writable, options) {
         protocolVersion: serverProtocolVersion,
         protocolHash: describedHash,
         hostedProtocols,
-        methods: [...methods.values()]
+        methods: [...methods.values()],
+        serverId: describedServerId,
+        requestVersion: describedRequestVersion
       };
     },
     close() {
@@ -12384,8 +12772,8 @@ function normalizeHtu(htu) {
   return url.href;
 }
 async function validateDPoP(request, accessToken, accessTokenClaims, options) {
-  const headerValue = request.headers.get("dpop");
-  if (headerValue === null) {
+  const headerValue2 = request.headers.get("dpop");
+  if (headerValue2 === null) {
     throw OPE("operation indicated DPoP use but the request has no DPoP HTTP Header", INVALID_REQUEST, { headers: request.headers });
   }
   if (request.headers.get("authorization")?.toLowerCase().startsWith("dpop ") === false) {
@@ -12395,7 +12783,7 @@ async function validateDPoP(request, accessToken, accessTokenClaims, options) {
     throw OPE("operation indicated DPoP use but the JWT Access Token has no jkt confirmation claim", INVALID_REQUEST, { claims: accessTokenClaims });
   }
   const clockSkew2 = getClockSkew(options);
-  const proof = await validateJwt(headerValue, checkSigningAlgorithm.bind(undefined, options?.signingAlgorithms, undefined, supported), clockSkew2, getClockTolerance(options), undefined).then(checkJwtType.bind(undefined, "dpop+jwt")).then(validatePresence.bind(undefined, ["iat", "jti", "ath", "htm", "htu"]));
+  const proof = await validateJwt(headerValue2, checkSigningAlgorithm.bind(undefined, options?.signingAlgorithms, undefined, supported), clockSkew2, getClockTolerance(options), undefined).then(checkJwtType.bind(undefined, "dpop+jwt")).then(validatePresence.bind(undefined, ["iat", "jti", "ath", "htm", "htu"]));
   const now = epochTime() + clockSkew2;
   const diff = Math.abs(now - proof.claims.iat);
   if (diff > 300) {
@@ -12445,7 +12833,7 @@ async function validateDPoP(request, accessToken, accessTokenClaims, options) {
       });
     }
   }
-  const { 0: protectedHeader, 1: payload, 2: encodedSignature } = headerValue.split(".");
+  const { 0: protectedHeader, 1: payload, 2: encodedSignature } = headerValue2.split(".");
   const signature = b64u(encodedSignature);
   const key = await importJwk(alg, jwk);
   if (key.type !== "public") {
@@ -12643,9 +13031,9 @@ function extractCn(subject) {
   }
   return "";
 }
-function parseXfcc(headerValue) {
+function parseXfcc(headerValue2) {
   const elements = [];
-  for (const rawElement of splitRespectingQuotes(headerValue, ",")) {
+  for (const rawElement of splitRespectingQuotes(headerValue2, ",")) {
     const trimmed = rawElement.trim();
     if (!trimmed)
       continue;
@@ -12694,11 +13082,11 @@ function mtlsAuthenticateXfcc(options) {
   const domain = options?.domain ?? "mtls";
   const selectElement = options?.selectElement ?? "first";
   return async function authenticate(request) {
-    const headerValue = request.headers.get("x-forwarded-client-cert");
-    if (!headerValue) {
+    const headerValue2 = request.headers.get("x-forwarded-client-cert");
+    if (!headerValue2) {
       throw new Error("Missing x-forwarded-client-cert header");
     }
-    const elements = parseXfcc(headerValue);
+    const elements = parseXfcc(headerValue2);
     if (elements.length === 0) {
       throw new Error("Empty x-forwarded-client-cert header");
     }
@@ -16287,4 +16675,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=15B23D6DFAADDDB864756E2164756E21
+//# debugId=532AB256C1A9BCF864756E2164756E21

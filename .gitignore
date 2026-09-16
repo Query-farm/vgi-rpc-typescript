@@ -6,6 +6,8 @@ dist/
 dist/*
 !dist/identity.d.ts
 !dist/identity.d.ts.map
+!dist/log-batch.d.ts
+!dist/log-batch.d.ts.map
 !dist/tailscale.d.ts
 !dist/tailscale.d.ts.map
 !dist/client/
@@ -14,6 +16,10 @@ dist/client/*
 !dist/client/socks5h.d.ts.map
 !dist/client/iroh.d.ts
 !dist/client/iroh.d.ts.map
+!dist/client/raw.d.ts
+!dist/client/raw.d.ts.map
+!dist/client/raw-util.d.ts
+!dist/client/raw-util.d.ts.map
 !dist/http/
 dist/http/*
 !dist/http/spiffe.d.ts

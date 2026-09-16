@@ -7,6 +7,7 @@
  * download URL and SHA-256 checksum in metadata.
  */
 import { type VgiBatch, type VgiSchema } from "./arrow/index.js";
+import type { LogMessage } from "./client/types.js";
 /** Pluggable storage backend for uploading large batches. */
 export interface ExternalStorage {
     /** Upload IPC data and return a URL for retrieval. */
@@ -77,5 +78,5 @@ export declare function maybeExternalizeBatch(batch: VgiBatch, config?: External
  * Resolve an external pointer batch by fetching the data from the URL.
  * Returns the original batch unchanged if not a pointer or no config.
  */
-export declare function resolveExternalLocation(batch: VgiBatch, config?: ExternalLocationConfig | null): Promise<VgiBatch>;
+export declare function resolveExternalLocation(batch: VgiBatch, config?: ExternalLocationConfig | null, onLog?: (message: LogMessage) => void): Promise<VgiBatch>;
 //# sourceMappingURL=external.d.ts.map

@@ -1,5 +1,6 @@
 import { RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { type ExternalLocationConfig } from "../external.js";
+import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
 import type { ExchangeInput, LogMessage, StreamSession } from "./types.js";
 type CompressFn = (data: Uint8Array, level: number) => Promise<Uint8Array>;
 type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
@@ -57,7 +58,7 @@ export declare function unpackResumeToken(token: string): {
  * {@link HttpStreamSession.exchange} or producer-continuation POST sends the
  * current token and receives the next one in the response metadata.
  */
-export declare class HttpStreamSession implements StreamSession {
+export declare class HttpStreamSession implements StreamSession, RawStreamSession {
     private _baseUrl;
     private _prefix;
     private _method;
@@ -74,6 +75,7 @@ export declare class HttpStreamSession implements StreamSession {
     private _pendingBatches;
     private _finished;
     private _header;
+    private _rawHeader;
     private _compressionLevel?;
     private _compressFn?;
     private _decompressFn?;
@@ -97,6 +99,7 @@ export declare class HttpStreamSession implements StreamSession {
         pendingBatches: RecordBatch[];
         finished: boolean;
         header: Record<string, any> | null;
+        rawHeader?: RawBatch | null;
         compressionLevel?: number;
         compressFn?: CompressFn;
         decompressFn?: DecompressFn;
@@ -108,6 +111,8 @@ export declare class HttpStreamSession implements StreamSession {
     private _post;
     /** The stream's one-time header row, or `null` if the method declares no header. */
     get header(): Record<string, any> | null;
+    /** The stream's header batch and its custom metadata, undecoded. */
+    get rawHeader(): RawBatch | null;
     /**
      * Build request metadata carrying the cursor token and the call token.
      *
@@ -128,7 +133,41 @@ export declare class HttpStreamSession implements StreamSession {
     exchange(input: ExchangeInput): Promise<Record<string, any>[]>;
     /** Send one producer continuation tick with application custom metadata. */
     tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]>;
+    /**
+     * Send one producer tick and return the batch undecoded.
+     *
+     * A tick is one batch forward, whatever it took to get there: `/init` may
+     * already have buffered the first one, in which case this consumes that
+     * rather than issuing a continuation for a batch the client is holding.
+     * Refusing outright — which this did — made `tick()` unusable on the HTTP
+     * transport, because the *first* tick of every producer is the buffered
+     * one. Only explicit `metadata` is still refused while a batch is
+     * buffered, and for a reason that survives: that metadata belongs on a
+     * request this turn does not make.
+     */
+    tickRaw(metadata?: ReadonlyMap<string, string>): Promise<RawBatch | null>;
+    /**
+     * Send one encoded batch with its custom metadata and read the reply.
+     *
+     * The declared-batch branch of {@link HttpStreamSession.exchange} without
+     * the row decoding: the caller's schema, buffers and metadata cross
+     * verbatim (plus this turn's stream tokens), and the reply comes back as
+     * the server encoded it.
+     */
+    exchangeRaw(input: RawBatch): Promise<RawBatch | null>;
+    /**
+     * Ask the server to discard this stream's state and stop producing.
+     *
+     * Sends `POST {prefix}/{method}/exchange` carrying `vgi_rpc.cancel`
+     * alongside the current tokens, so the server runs the state's cancel hook
+     * and releases it. Idempotent and best-effort: a transport failure here is
+     * swallowed, because the session is finished either way. Mirrors Python's
+     * `HttpStreamSession.cancel`.
+     */
+    cancel(): Promise<void>;
     private _doExchange;
+    /** Decode an exchange reply for the row-oriented surface. */
+    private _rowsOfExchange;
     private _buildEmptyBatch;
     /**
      * Iterate over producer stream batches.
@@ -154,6 +193,13 @@ export declare class HttpStreamSession implements StreamSession {
      * Mirrors Python's `HttpStreamSession.next_with_token`.
      */
     nextWithToken(): Promise<RowsWithToken | null>;
+    /**
+     * Read one producer batch, undecoded, together with its resume token.
+     *
+     * The batch-level twin of {@link HttpStreamSession.nextWithToken}; see
+     * there for the resume-token contract.
+     */
+    nextWithTokenRaw(metadata?: ReadonlyMap<string, string>): Promise<RawBatchWithToken | null>;
     /**
      * Reposition a freshly-initialised session to resume from `token`.
      *

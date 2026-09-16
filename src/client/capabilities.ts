@@ -35,6 +35,26 @@ export interface HttpServerCapabilities {
   maxResponseBytes: number | null;
   /** Whether the server honors VGI-Accept-Max-Response-Bytes. */
   acceptMaxResponseBytesSupport: boolean;
+  /** Cap on the externalized bytes of one response, when advertised. */
+  maxExternalizedResponseBytes: number | null;
+  /** Whether the server has a storage backend wired up, and can therefore
+   *  rescue an oversize response by externalizing it. */
+  externalizationEnabled: boolean;
+  /** Content encodings the server can decode on requests and produce on
+   *  responses, as the lowercase wire tokens (`zstd`, `gzip`, `identity`).
+   *
+   *  Present-but-empty is a real answer — "this server compresses nothing" —
+   *  and distinct from an absent header, which means a server predating the
+   *  advertisement and is read as zstd-only. */
+  supportedEncodings: string[];
+  /** Whether the server honours `VGI-Session` sticky sessions. */
+  stickyEnabled: boolean;
+  /** Seconds a session lives when opened without an explicit TTL. */
+  stickyDefaultTtl: number | null;
+  /** Header *names* the server tells clients to echo for the life of a
+   *  session. The values arrive per session as `VGI-Echo-<name>` response
+   *  headers; this is the introspectable list. */
+  stickyEchoHeaders: string[];
   /** Monotonic-time-ish epoch (ms) at which this snapshot should be re-probed. */
   cacheExpiresAt: number | null;
 }
@@ -44,6 +64,27 @@ const UPLOAD_URL_HEADER = "VGI-Upload-URL-Support";
 const MAX_UPLOAD_BYTES_HEADER = "VGI-Max-Upload-Bytes";
 const MAX_RESPONSE_BYTES_HEADER = "VGI-Max-Response-Bytes";
 const ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER = "VGI-Accept-Max-Response-Bytes-Support";
+const MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER = "VGI-Max-Externalized-Response-Bytes";
+const EXTERNALIZATION_ENABLED_HEADER = "VGI-Externalization-Enabled";
+const SUPPORTED_ENCODINGS_HEADER = "VGI-Supported-Encodings";
+const STICKY_ENABLED_HEADER = "VGI-Sticky-Enabled";
+const STICKY_DEFAULT_TTL_HEADER = "VGI-Sticky-Default-TTL";
+const STICKY_ECHO_HEADERS_HEADER = "VGI-Sticky-Echo-Headers";
+
+/** Read a header case-insensitively, returning `null` when it is absent. */
+function headerValue(headers: Headers, name: string): string | null {
+  return headers.get(name) ?? headers.get(name.toLowerCase());
+}
+
+/** Split a comma-separated header into its non-empty, trimmed tokens. */
+function headerList(headers: Headers, name: string): string[] {
+  const raw = headerValue(headers, name);
+  if (raw == null) return [];
+  return raw
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
 
 function parseHeaderInt(headers: Headers, name: string, responseBudget = false): number | null {
   const raw = headers.get(name) ?? headers.get(name.toLowerCase());
@@ -71,6 +112,14 @@ export function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabi
     }
   }
 
+  // Absent means a server predating the advertisement, which only ever spoke
+  // zstd; present-but-empty means a server that positively speaks none.
+  const encodingsRaw = headerValue(headers, SUPPORTED_ENCODINGS_HEADER);
+  const supportedEncodings =
+    encodingsRaw == null
+      ? ["zstd"]
+      : headerList(headers, SUPPORTED_ENCODINGS_HEADER).map((token) => token.toLowerCase());
+
   return {
     maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
     uploadUrlSupport,
@@ -79,6 +128,12 @@ export function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabi
     acceptMaxResponseBytesSupport:
       (headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER) ??
         headers.get(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER.toLowerCase())) === "true",
+    maxExternalizedResponseBytes: parseHeaderInt(headers, MAX_EXTERNALIZED_RESPONSE_BYTES_HEADER, true),
+    externalizationEnabled: headerValue(headers, EXTERNALIZATION_ENABLED_HEADER) === "true",
+    supportedEncodings,
+    stickyEnabled: headerValue(headers, STICKY_ENABLED_HEADER) === "true",
+    stickyDefaultTtl: parseHeaderInt(headers, STICKY_DEFAULT_TTL_HEADER),
+    stickyEchoHeaders: headerList(headers, STICKY_ECHO_HEADERS_HEADER),
     cacheExpiresAt,
   };
 }

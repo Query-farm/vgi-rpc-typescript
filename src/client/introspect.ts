@@ -6,6 +6,7 @@ import { deserializeSchema as deserializeSchemaImpl } from "#vgi-rpc-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { RESERVED_PROTOCOL_PREFIX } from "../binding.js";
 import { RpcError } from "../errors.js";
+import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { clientAcceptEncoding, VGI_ACCEPT_ENCODING_HEADER } from "../http/codec.js";
 import { ARROW_CONTENT_TYPE, rpcPath } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
@@ -31,6 +32,10 @@ export interface MethodInfo {
   name: string;
   /** Whether the method is a single request/response (`unary`) or a streaming method (`stream`). */
   type: "unary" | "stream";
+  /** Whether the method returns a value at all. `false` for a void method,
+   *  whose reply carries no data batch. Absent when the description came from
+   *  a caller-supplied literal rather than from the server. */
+  hasReturn?: boolean;
   /** Arrow schema of the call parameters. */
   paramsSchema: Schema;
   /** Arrow schema of a unary result; empty for a stream, whose per-batch
@@ -68,6 +73,15 @@ export interface ServiceDescription {
   hostedProtocols: string[];
   /** Every method of the described protocol. */
   methods: MethodInfo[];
+  /** The serving process's opaque identity, from the `list_protocols` hop.
+   *
+   *  A property of the *server*, not of the protocol — two processes serving
+   *  one protocol describe it identically — so it is absent when the caller
+   *  named a protocol and the bootstrap hop was skipped. */
+  serverId?: string;
+  /** The wire request-framing version the server reports, from the same hop
+   *  and absent under the same condition. */
+  requestVersion?: string;
 }
 
 /**
@@ -95,6 +109,7 @@ function adaptMethod(wire: MethodInfoDesc): MethodInfo {
   const info: MethodInfo = {
     name: wire.name,
     type,
+    hasReturn: wire.has_return,
     paramsSchema: deserializeSchema(wire.params_schema_ipc),
     resultSchema: deserializeSchema(wire.result_schema_ipc),
   };
@@ -118,6 +133,8 @@ export function adaptServiceDescription(wire: ServiceDescriptionDesc, listing?: 
     protocolHash: wire.protocol_hash,
     hostedProtocols: listing ? listing.protocols.map((p) => p.protocol) : [],
     methods: wire.methods.map(adaptMethod),
+    serverId: listing?.server_id,
+    requestVersion: listing?.request_version,
   };
 }
 
@@ -147,10 +164,23 @@ export function pickApplicationProtocol(listing: ProtocolListDesc): string {
  *  column -- the framework's ordinary unary convention. Reflection is an
  *  ordinary protocol now, so its replies are subject to it like any other
  *  method's. */
-export function reflectionResult(batches: RecordBatch[], onLog?: (msg: LogMessage) => void): Uint8Array {
+export async function reflectionResult(
+  batches: RecordBatch[],
+  onLog?: (msg: LogMessage) => void,
+  externalConfig?: ExternalLocationConfig | null,
+): Promise<Uint8Array> {
   let dataBatch: RecordBatch | null = null;
   for (const batch of batches) {
     if (batch.numRows === 0) {
+      // Reflection is an ordinary protocol, so a server that externalizes its
+      // responses returns a pointer batch for it like any other method — and
+      // a client that skipped it introspected nothing and reported an empty
+      // reflection reply, which reads as a server fault rather than a client
+      // one.
+      if (isExternalLocationBatch(batch as never)) {
+        dataBatch = (await resolveExternalLocation(batch as never, externalConfig, onLog)) as never;
+        continue;
+      }
       dispatchLogOrError(batch, onLog);
       continue;
     }
@@ -202,6 +232,9 @@ export async function httpIntrospect(
     /** Which protocol to describe. Defaults to the first hosted one that is
      *  not framework-reserved, which costs the `list_protocols` hop. */
     protocol?: string;
+    /** External storage config, for a server that externalizes its replies —
+     *  reflection's included. */
+    externalLocation?: ExternalLocationConfig | null;
     authorization?: string;
     compressionLevel?: number;
     compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;
@@ -274,7 +307,7 @@ export async function httpIntrospect(
     const rawBody = await readResponseBodyBounded(response, responseLimit);
     const decoded = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn, responseLimit));
     const { batches } = await readResponseBatches(decoded);
-    return reflectionResult(batches);
+    return reflectionResult(batches, undefined, options?.externalLocation);
   }
 
   let listing: ProtocolListDesc | undefined;

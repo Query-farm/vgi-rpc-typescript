@@ -169,6 +169,20 @@ export function serializeBatch(batch: VgiBatch): Uint8Array {
   return tableToIPC(t, { format: "stream", batchMetadata } as any) as Uint8Array;
 }
 
+/**
+ * Read every record batch out of one IPC stream.
+ *
+ * flechette decodes a stream into a single `Table`, concatenating its record
+ * batches and surfacing only the first one's custom metadata, so there is no
+ * per-batch view to return here: this yields the one batch
+ * {@link deserializeBatch} would. The caller loses a multi-batch externalized
+ * payload's log batches under this backend — the same shape of gap as the
+ * incremental-writer one, and for the same reason.
+ */
+export function deserializeBatches(bytes: Uint8Array): VgiBatch[] {
+  return [deserializeBatch(bytes)];
+}
+
 export function deserializeBatch(bytes: Uint8Array): VgiBatch {
   const table: any = tableFromIPC(bytes, EXTRACT_OPTS);
   // The patched flechette decoder surfaces per-record-batch custom_metadata

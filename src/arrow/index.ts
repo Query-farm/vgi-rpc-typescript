@@ -16,6 +16,7 @@ export {
   dateDay,
   decimal,
   deserializeBatch,
+  deserializeBatches,
   deserializeSchema,
   dictionary,
   durationMicro,

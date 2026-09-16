@@ -10,6 +10,7 @@ import {
   Struct,
   vectorFromArray,
 } from "@query-farm/apache-arrow";
+import { CANCEL_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
 import { serializeIpcStream } from "../http/common.js";
@@ -32,6 +33,8 @@ import {
   type ServiceDescription,
 } from "./introspect.js";
 import { buildRequestIpc, dispatchLogOrError, extractBatchRows, inferArrowType } from "./ipc.js";
+import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
+import { rawBatchOf, rawInputBatch } from "./raw-util.js";
 import type {
   ExchangeInput,
   LogMessage,
@@ -56,8 +59,12 @@ function fieldsMatch(left: Field, right: Field): boolean {
   if (left.name !== right.name || left.nullable !== right.nullable || String(left.type) !== String(right.type)) {
     return false;
   }
-  const leftChildren = left.type.children;
-  const rightChildren = right.type.children;
+  // arrow-js leaves `children` unset on a primitive type rather than giving
+  // it an empty array, so reading `.length` off it throws the moment two
+  // declared exchange batches are compared -- which only happens on the
+  // *second* exchange of a session, and so stayed invisible.
+  const leftChildren = left.type.children ?? [];
+  const rightChildren = right.type.children ?? [];
   return (
     leftChildren.length === rightChildren.length &&
     leftChildren.every((child: Field, index: number) => fieldsMatch(child, rightChildren[index]))
@@ -121,11 +128,19 @@ class PipeIncrementalWriter {
  * and reads one output batch. Holds the connection's single-threaded busy lock
  * until closed.
  */
-export class PipeStreamSession implements StreamSession {
-  private _reader: IpcStreamReader;
+export class PipeStreamSession implements StreamSession, RawStreamSession {
+  /**
+   * Opening the reader blocks until the peer's first IPC schema message
+   * arrives, and a headerless producer sends nothing until it has been
+   * ticked — so a session that resolved its reader eagerly would deadlock on
+   * open. Held as a thunk and resolved on the first read instead.
+   */
+  private _openReader: () => Promise<IpcStreamReader>;
+  private _readerCache: IpcStreamReader | null;
   private _writeFn: WriteFn;
   private _onLog?: (msg: LogMessage) => void;
   private _header: Record<string, any> | null;
+  private _rawHeader: RawBatch | null;
   private _inputWriter: PipeIncrementalWriter | null = null;
   private _inputSchema: Schema | null = null;
   private _outputStreamOpened = false;
@@ -136,19 +151,22 @@ export class PipeStreamSession implements StreamSession {
   private _externalConfig?: ExternalLocationConfig;
 
   constructor(opts: {
-    reader: IpcStreamReader;
+    reader: IpcStreamReader | (() => Promise<IpcStreamReader>);
     writeFn: WriteFn;
     onLog?: (msg: LogMessage) => void;
     header: Record<string, any> | null;
+    rawHeader?: RawBatch | null;
     outputSchema: Schema;
     releaseBusy: () => void;
     setDrainPromise: (p: Promise<void>) => void;
     externalConfig?: ExternalLocationConfig;
   }) {
-    this._reader = opts.reader;
+    this._openReader = typeof opts.reader === "function" ? opts.reader : async () => opts.reader as IpcStreamReader;
+    this._readerCache = typeof opts.reader === "function" ? null : opts.reader;
     this._writeFn = opts.writeFn;
     this._onLog = opts.onLog;
     this._header = opts.header;
+    this._rawHeader = opts.rawHeader ?? null;
     this._outputSchema = opts.outputSchema;
     this._releaseBusy = opts.releaseBusy;
     this._setDrainPromise = opts.setDrainPromise;
@@ -160,6 +178,17 @@ export class PipeStreamSession implements StreamSession {
     return this._header;
   }
 
+  /** The stream's header batch and its custom metadata, undecoded. */
+  get rawHeader(): RawBatch | null {
+    return this._rawHeader;
+  }
+
+  /** The connection's IPC reader, opened on first use. */
+  private async _reader(): Promise<IpcStreamReader> {
+    this._readerCache ??= await this._openReader();
+    return this._readerCache;
+  }
+
   /**
    * Read output batches from the server until a data batch is found.
    * Dispatches log/error batches along the way.
@@ -167,13 +196,13 @@ export class PipeStreamSession implements StreamSession {
    */
   private async _readOutputBatch(): Promise<RecordBatch | null> {
     while (true) {
-      const batch = await this._reader.readNextBatch();
+      const batch = await (await this._reader()).readNextBatch();
       if (batch === null) return null; // Server closed output stream
 
       if (batch.numRows === 0) {
         // Check for external location pointer batch
         if (isExternalLocationBatch(batch as any)) {
-          return (await resolveExternalLocation(batch as any, this._externalConfig)) as any;
+          return (await resolveExternalLocation(batch as any, this._externalConfig, this._onLog)) as any;
         }
         // Check if it's a log/error batch. If so, dispatch and continue.
         // Otherwise it's a zero-row data batch — return it.
@@ -195,7 +224,7 @@ export class PipeStreamSession implements StreamSession {
   private async _ensureOutputStream(): Promise<void> {
     if (this._outputStreamOpened) return;
     this._outputStreamOpened = true;
-    const schema = await this._reader.openNextStream();
+    const schema = await (await this._reader()).openNextStream();
     if (!schema) {
       throw new RpcError("ProtocolError", "Expected output stream but got EOF", "");
     }
@@ -203,6 +232,27 @@ export class PipeStreamSession implements StreamSession {
 
   /** Send one producer tick, preserving application message metadata. */
   async tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]> {
+    const outputBatch = await this._tickBatch(metadata);
+    return outputBatch === null ? [] : extractBatchRows(outputBatch);
+  }
+
+  /** Send one producer tick and return the server's batch undecoded. */
+  async tickRaw(metadata?: ReadonlyMap<string, string>): Promise<RawBatch | null> {
+    const outputBatch = await this._tickBatch(metadata);
+    return outputBatch === null ? null : rawBatchOf(outputBatch);
+  }
+
+  /**
+   * A byte-stream transport carries no resumable stream state, so the token
+   * is always `null`. Declared so one caller can drive either transport.
+   */
+  async nextWithTokenRaw(): Promise<RawBatchWithToken | null> {
+    const item = await this.tickRaw();
+    return item === null ? null : { item, token: null };
+  }
+
+  /** One producer turn: write the tick batch, read the server's answer. */
+  private async _tickBatch(metadata?: ReadonlyMap<string, string>): Promise<RecordBatch | null> {
     if (this._closed) {
       throw new RpcError("ProtocolError", "Stream session is closed", "");
     }
@@ -214,15 +264,104 @@ export class PipeStreamSession implements StreamSession {
     const tickBatch = new RecordBatch(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
     this._inputWriter.write(tickBatch);
     await this._ensureOutputStream();
-    const outputBatch = await this._readOutputBatch();
+    let outputBatch: RecordBatch | null;
+    try {
+      outputBatch = await this._readOutputBatch();
+    } catch (e) {
+      // A mid-stream error batch throws out of here, and the connection's
+      // busy lock is held by this session. Without the unwind the pipe stays
+      // wedged and the *next* call on the same connection fails with
+      // "transport is busy" — reporting the recovery as the failure.
+      // `exchange()` already did this; `tick()` did not, because nothing drove
+      // it outside the iterator, whose `finally` covers the same ground.
+      await this._cleanup();
+      throw e;
+    }
     if (outputBatch === null) {
       this._closed = true;
       this._inputWriter.close();
       this._inputWriter = null;
       this._releaseBusy();
-      return [];
+      return null;
     }
-    return extractBatchRows(outputBatch);
+    return outputBatch;
+  }
+
+  /**
+   * Send one encoded batch with its custom metadata and read the reply.
+   *
+   * The declared-batch branch of {@link PipeStreamSession.exchange} without
+   * the row decoding: input schema and buffers cross verbatim, and the
+   * server's answer comes back as it was encoded.
+   */
+  async exchangeRaw(input: RawBatch): Promise<RawBatch | null> {
+    if (this._closed) {
+      throw new RpcError("ProtocolError", "Stream session is closed", "");
+    }
+    const batch = rawInputBatch(input);
+    const inputSchema = batch.schema;
+    if (this._inputSchema && !schemasMatch(this._inputSchema, inputSchema)) {
+      throw new RpcError(
+        "ProtocolError",
+        `Exchange input schema changed: expected ${this._inputSchema}, got ${inputSchema}`,
+        "",
+      );
+    }
+    this._inputSchema ??= inputSchema;
+    if (!this._inputWriter) {
+      this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
+    }
+    this._inputWriter.write(batch);
+    await this._ensureOutputStream();
+    try {
+      const outputBatch = await this._readOutputBatch();
+      return outputBatch === null ? null : rawBatchOf(outputBatch);
+    } catch (e) {
+      await this._cleanup();
+      throw e;
+    }
+  }
+
+  /**
+   * Signal the server to stop processing and discard the stream's state.
+   *
+   * Writes a zero-row batch carrying `vgi_rpc.cancel`, closes the input
+   * stream, and drains whatever the server still had queued. Idempotent and
+   * best-effort: a transport that has already failed is not worth a second
+   * failure during teardown. Mirrors Python's `StreamSession.cancel`.
+   */
+  async cancel(): Promise<void> {
+    if (this._closed) return;
+    this._closed = true;
+    const cancelMetadata = new Map([[CANCEL_KEY, "1"]]);
+    try {
+      const schema = this._inputSchema ?? new Schema([]);
+      if (!this._inputWriter) {
+        this._inputWriter = new PipeIncrementalWriter(this._writeFn, schema);
+      }
+      const children = schema.fields.map((f) => makeData({ type: f.type, length: 0, nullCount: 0 }));
+      const data = makeData({ type: new Struct(schema.fields), length: 0, children, nullCount: 0 });
+      this._inputWriter.write(new RecordBatch(schema, data, cancelMetadata));
+      this._inputWriter.close();
+      this._inputWriter = null;
+    } catch {
+      this._releaseBusy();
+      return;
+    }
+    try {
+      if (!this._outputStreamOpened) {
+        this._outputStreamOpened = true;
+        const schema = await (await this._reader()).openNextStream();
+        if (!schema) {
+          this._releaseBusy();
+          return;
+        }
+      }
+      while ((await (await this._reader()).readNextBatch()) !== null) {}
+    } catch {
+      // Suppress errors during drain — the stream is over either way.
+    }
+    this._releaseBusy();
   }
 
   /**
@@ -357,7 +496,7 @@ export class PipeStreamSession implements StreamSession {
     }
     try {
       if (this._outputStreamOpened) {
-        while ((await this._reader.readNextBatch()) !== null) {}
+        while ((await (await this._reader()).readNextBatch()) !== null) {}
       }
     } catch {
       // Suppress errors during drain
@@ -393,7 +532,7 @@ export class PipeStreamSession implements StreamSession {
       // Drain any remaining output batches
       try {
         if (this._outputStreamOpened) {
-          while ((await this._reader.readNextBatch()) !== null) {}
+          while ((await (await this._reader()).readNextBatch()) !== null) {}
         }
       } catch {
         // Suppress errors during drain
@@ -429,12 +568,12 @@ export class PipeStreamSession implements StreamSession {
     const drainPromise = (async () => {
       try {
         if (!this._outputStreamOpened) {
-          const schema = await this._reader.openNextStream();
+          const schema = await (await this._reader()).openNextStream();
           if (schema) {
-            while ((await this._reader.readNextBatch()) !== null) {}
+            while ((await (await this._reader()).readNextBatch()) !== null) {}
           }
         } else {
-          while ((await this._reader.readNextBatch()) !== null) {}
+          while ((await (await this._reader()).readNextBatch()) !== null) {}
         }
       } catch {
         // Suppress errors during drain
@@ -475,6 +614,8 @@ export function pipeConnect(
   let serverProtocolVersion = "";
   let describedHash = "";
   let hostedProtocols: string[] = [];
+  let describedServerId: string | undefined;
+  let describedRequestVersion: string | undefined;
   // Naming a protocol skips the `list_protocols` hop -- worth it against a
   // server whose primary is not the one this client wants, and against one
   // hosting several.
@@ -554,7 +695,7 @@ export function pipeConnect(
         if (!response) {
           throw new RpcError("TransportError", `EOF reading the '${method}' reflection response`, "");
         }
-        return reflectionResult(response.batches as any, onLog);
+        return reflectionResult(response.batches as any, onLog, externalConfig);
       };
 
       // Two round trips: what does this server host, then describe one of
@@ -573,6 +714,8 @@ export function pipeConnect(
       serverProtocolVersion = desc.protocolVersion;
       describedHash = desc.protocolHash;
       hostedProtocols = desc.hostedProtocols;
+      describedServerId = desc.serverId;
+      describedRequestVersion = desc.requestVersion;
       methodCache = new Map(desc.methods.map((m) => [m.name, m]));
       return methodCache;
     } finally {
@@ -613,7 +756,7 @@ export function pipeConnect(
         for (let batch of response.batches as any[]) {
           if (batch.numRows === 0) {
             if (isExternalLocationBatch(batch)) {
-              batch = await resolveExternalLocation(batch, externalConfig);
+              batch = await resolveExternalLocation(batch, externalConfig, onLog);
             } else {
               dispatchLogOrError(batch, onLog);
               continue;
@@ -637,6 +780,98 @@ export function pipeConnect(
         return rows[0];
       } finally {
         releaseBusy();
+      }
+    },
+
+    async callRaw(_method: string, input: RawBatch): Promise<RawBatch | null> {
+      await acquireBusy();
+      try {
+        // No introspection: a byte-stream request carries its own routing —
+        // `vgi_rpc.protocol` and `vgi_rpc.method` are in `input.metadata`, and
+        // the caller holding encoded Arrow already knows the schema. The
+        // first write still precedes `ensureReader()` for the same reason
+        // `ensureMethodCache` does: the reader blocks on a schema message the
+        // server does not send until it has a request.
+        const batch = rawInputBatch(input);
+        writeFn(serializeIpcStream(batch.schema, [batch]));
+        const r = await ensureReader();
+        const response = await r.readStream();
+        if (!response) {
+          throw new RpcError("TransportError", "EOF reading response", "");
+        }
+        let resultBatch: RecordBatch | null = null;
+        for (let batch of response.batches as any[]) {
+          if (batch.numRows === 0) {
+            if (isExternalLocationBatch(batch)) {
+              batch = await resolveExternalLocation(batch, externalConfig, onLog);
+            } else {
+              dispatchLogOrError(batch, onLog);
+              continue;
+            }
+          }
+          if (resultBatch !== null) {
+            throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
+          }
+          resultBatch = batch;
+        }
+        return resultBatch === null ? null : rawBatchOf(resultBatch);
+      } finally {
+        releaseBusy();
+      }
+    },
+
+    async streamRaw(
+      _method: string,
+      input: RawBatch,
+      options: { isExchange: boolean; hasHeader: boolean },
+    ): Promise<RawStreamSession> {
+      await acquireBusy();
+      try {
+        const batch = rawInputBatch(input);
+        writeFn(serializeIpcStream(batch.schema, [batch]));
+
+        // Only a header-bearing method writes anything before its first tick,
+        // so only that case may open the reader here. Opening it for a
+        // headerless producer would block on a schema message the server does
+        // not send until the client has ticked -- a deadlock the row-oriented
+        // path never hits only because introspection opened the reader first.
+        let rawHeader: RawBatch | null = null;
+        if (options.hasHeader) {
+          const headerStream = await (await ensureReader()).readStream();
+          if (headerStream) {
+            for (const headerBatch of headerStream.batches as any[]) {
+              if (headerBatch.numRows === 0) {
+                dispatchLogOrError(headerBatch, onLog);
+                continue;
+              }
+              rawHeader ??= rawBatchOf(headerBatch);
+            }
+          }
+        }
+
+        return new PipeStreamSession({
+          reader: ensureReader,
+          writeFn,
+          onLog,
+          header: null,
+          rawHeader,
+          outputSchema: new Schema([]),
+          releaseBusy,
+          setDrainPromise,
+          externalConfig,
+        });
+      } catch (e) {
+        // Same unwind as `stream()`: the server is blocked reading our input
+        // stream, so send an empty one and drain its output before releasing.
+        try {
+          const r = await ensureReader();
+          writeFn(serializeIpcStream(new Schema([]), []));
+          void (await r.readStream());
+        } catch {
+          // Suppress errors during cleanup.
+        }
+        releaseBusy();
+        throw e;
       }
     },
 
@@ -723,6 +958,8 @@ export function pipeConnect(
         protocolHash: describedHash,
         hostedProtocols,
         methods: [...methods.values()],
+        serverId: describedServerId,
+        requestVersion: describedRequestVersion,
       };
     },
 

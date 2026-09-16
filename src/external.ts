@@ -10,8 +10,10 @@
  * download URL and SHA-256 checksum in metadata.
  */
 
-import { deserializeBatch, serializeBatch, type VgiBatch, type VgiSchema } from "./arrow/index.js";
+import { deserializeBatches, serializeBatch, type VgiBatch, type VgiSchema } from "./arrow/index.js";
+import type { LogMessage } from "./client/types.js";
 import { LOCATION_KEY, LOCATION_SHA256_KEY, LOG_LEVEL_KEY } from "./constants.js";
+import { dispatchLogOrError } from "./log-batch.js";
 import { zstdCompress, zstdDecompress } from "./util/zstd.js";
 import { buildEmptyBatch } from "./wire/response.js";
 
@@ -278,6 +280,7 @@ export async function maybeExternalizeBatch(
 export async function resolveExternalLocation(
   batch: VgiBatch,
   config?: ExternalLocationConfig | null,
+  onLog?: (message: LogMessage) => void,
 ): Promise<VgiBatch> {
   if (!config) return batch;
   if (!isExternalLocationBatch(batch)) return batch;
@@ -370,9 +373,20 @@ export async function resolveExternalLocation(
     }
   }
 
-  // Parse IPC stream
-  const resolved = deserializeBatch(data);
-  if (resolved.numRows === 0 && resolved.schema.fields.length === 0) {
+  // Parse IPC stream.
+  //
+  // A whole stream, not a single batch: the server uploads the turn's log
+  // batches alongside its data batch, and the refreshed stream cursor rides
+  // on the data batch inside the payload rather than on the pointer. Taking
+  // only the first batch dropped every log a server emitted on an
+  // externalized turn, and — when a log came first — handed the caller a log
+  // batch as its data.
+  let resolved: VgiBatch | null = null;
+  for (const candidate of deserializeBatches(data)) {
+    if (candidate.numRows === 0 && dispatchLogOrError(candidate as never, onLog)) continue;
+    resolved ??= candidate;
+  }
+  if (resolved === null || (resolved.numRows === 0 && resolved.schema.fields.length === 0)) {
     throw new Error(`No data batch found in external IPC stream from ${redactExternalUrl(currentUrl)}`);
   }
   return resolved;

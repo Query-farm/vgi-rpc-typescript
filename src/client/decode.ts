@@ -11,8 +11,14 @@
  *   (undici/Node, Bun, Deno, browsers) transparently decodes the codecs it
  *   knows — gzip, deflate, br — before `arrayBuffer()` ever returns, and may
  *   leave the header in place while doing so. Decoding those a second time
- *   would corrupt the body. `zstd` is the exception: no runtime decodes it
- *   transparently, so that one is ours to undo.
+ *   would corrupt the body. `zstd` used to be exempt from that list because no
+ *   runtime decoded it; that is no longer true — Bun 1.3 decodes a
+ *   `Content-Encoding: zstd` body transparently and leaves the header behind,
+ *   and does so even when the caller set `Accept-Encoding` itself, so there is
+ *   no way to opt out of it. Which runtimes decode which codecs is therefore
+ *   not something this file can know from the header alone, so the zstd case
+ *   is settled by looking at the bytes: a body still carrying a zstd frame
+ *   magic is ours to undo, and one that is not has already been undone.
  *
  * - **`X-VGI-Content-Encoding`** — VGI's own header, used when something
  *   between us and the server would mangle the standard one: a browser
@@ -32,6 +38,22 @@ import { gzipDecompress } from "../util/gzip.js";
 
 /** Decompressor for a codec the platform will not undo for us. */
 export type DecompressFn = (data: Uint8Array, maxOutputSize?: number) => Promise<Uint8Array>;
+
+/**
+ * Whether `body` still carries a zstd frame.
+ *
+ * A zstd stream begins with either the standard frame magic `28 B5 2F FD` or a
+ * skippable frame magic `5? 2A 4D 18` (RFC 8878 §3.1.1/§3.1.2), both
+ * little-endian. A body the fetch layer already decoded begins with whatever
+ * the payload begins with — for VGI that is an Arrow IPC stream's `FF FF FF
+ * FF` continuation marker — so the two are distinguishable without guessing
+ * which runtime is hosting us.
+ */
+export function looksZstdEncoded(body: Uint8Array): boolean {
+  if (body.byteLength < 4) return false;
+  if (body[0] === 0x28 && body[1] === 0xb5 && body[2] === 0x2f && body[3] === 0xfd) return true;
+  return (body[0] & 0xf0) === 0x50 && body[1] === 0x2a && body[2] === 0x4d && body[3] === 0x18;
+}
 
 /** Independent cap for bytes that are still compressed/encoded after Fetch.
  * The accepted response budget applies to decoded Arrow bytes; this ceiling
@@ -147,6 +169,12 @@ export async function decodeResponseBody(
     return new Uint8Array(await gzipDecompress(body, maxDecodedBytes));
   }
   if (codec === "zstd") {
+    // The standard header may name a codec the fetch layer has already undone
+    // (Bun does exactly this), and it leaves the header in place when it does.
+    // The custom header is never touched by anything in the transport, so a
+    // body under it is always still encoded and a mismatch there is a real
+    // error worth surfacing rather than silently passing through.
+    if (!custom && !looksZstdEncoded(body)) return body;
     if (!zstdDecompress) {
       throw new RpcError(
         "ProtocolError",

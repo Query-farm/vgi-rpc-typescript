@@ -27,6 +27,7 @@ export {
   parseUseIdTokenAsBearer,
 } from "./oauth.js";
 export { PipeStreamSession, pipeConnect, subprocessConnect } from "./pipe.js";
+export type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
 export { HttpStreamSession, type RowsWithToken } from "./stream.js";
 export type {
   ExchangeInput,
