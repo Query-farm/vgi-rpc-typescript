@@ -3,7 +3,14 @@
 
 import { describe, expect, test } from "bun:test";
 import { Field, Int64, RecordBatch, RecordBatchStreamWriter, Schema, vectorFromArray } from "@query-farm/apache-arrow";
-import { LOCATION_KEY, LOCATION_SHA256_KEY, LOG_LEVEL_KEY } from "../src/constants.js";
+import { withBatchMetadata } from "../src/arrow/index.js";
+import {
+  LOCATION_FETCH_MS_KEY,
+  LOCATION_KEY,
+  LOCATION_SHA256_KEY,
+  LOCATION_SOURCE_KEY,
+  LOG_LEVEL_KEY,
+} from "../src/constants.js";
 import {
   type ExternalLocationConfig,
   type ExternalStorage,
@@ -194,6 +201,40 @@ describe("resolveExternalLocation", () => {
     const pointer = makeExternalLocationBatch(TEST_SCHEMA, "https://mock/test");
     const result = await resolveExternalLocation(pointer, null);
     expect(result.numRows).toBe(0); // pointer unchanged
+  });
+
+  // WIRE_PROTOCOL.md §12: the resolved batch's metadata is the *inner* data
+  // batch's, merged with fetch provenance. Without the provenance keys a
+  // caller has no way to say where a resolved batch came from — the pointer
+  // that named its origin is gone by then — and the conformance suite's
+  // byte-stream group asserts `vgi_rpc.location.source` on every resolved
+  // batch for exactly that reason.
+  test("stamps fetch provenance onto the inner batch's own metadata", async () => {
+    const url = "https://mock.storage/provenance";
+    const inner = withBatchMetadata(makeBatch(3), new Map([["app.key", "carried-inside"]]));
+    const ipcBytes = serializeIpc(inner as RecordBatch);
+    const checksum = await sha256Hex(ipcBytes);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(ipcBytes)) as typeof fetch;
+    try {
+      const pointer = makeExternalLocationBatch(TEST_SCHEMA, url, checksum);
+      const config: ExternalLocationConfig = { storage: new MockStorage(), urlValidator: null };
+      const resolved = await resolveExternalLocation(pointer, config);
+
+      expect(resolved.numRows).toBe(3);
+      // The original URL, unredacted — it is application metadata, not a
+      // diagnostic string, and never the last redirect target.
+      expect(resolved.metadata?.get(LOCATION_SOURCE_KEY)).toBe(url);
+      expect(resolved.metadata?.get(LOCATION_FETCH_MS_KEY)).toMatch(/^\d+\.\d$/);
+      // Merged, not replaced: whatever the writer attached rides inside.
+      expect(resolved.metadata?.get("app.key")).toBe("carried-inside");
+      // And the pointer-only keys do not leak onto the resolved batch.
+      expect(resolved.metadata?.get(LOCATION_KEY)).toBeUndefined();
+      expect(resolved.metadata?.get(LOCATION_SHA256_KEY)).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

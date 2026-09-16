@@ -790,6 +790,8 @@ var CALL_STATE_KEY = "vgi_rpc.call_state#b64";
 var CANCEL_KEY = "vgi_rpc.cancel";
 var LOCATION_KEY = "vgi_rpc.location";
 var LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
+var LOCATION_FETCH_MS_KEY = "vgi_rpc.location.fetch_ms";
+var LOCATION_SOURCE_KEY = "vgi_rpc.location.source";
 var RPC_ERROR_HEADER = "X-VGI-RPC-Error";
 var REQUEST_ID_HEADER = "X-Request-ID";
 var ERROR_KIND_KEY = "vgi_rpc.error_kind";
@@ -1358,6 +1360,9 @@ function buildEmptyBatch(schema2, metadata) {
 }
 
 // src/external.ts
+function performanceNow() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
 var DEFAULT_THRESHOLD = 1048576;
 var DEFAULT_MAX_FETCH_BYTES = 256 * 1024 * 1024;
 var DEFAULT_MAX_REDIRECTS = 5;
@@ -1491,6 +1496,7 @@ async function resolveExternalLocation(batch, config, onLog) {
     return batch;
   const { maxFetchBytes, maxDecompressedBytes, maxRedirects } = validateFetchConfig(config);
   const validator = config.urlValidator === null ? undefined : config.urlValidator ?? httpsOnlyValidator;
+  const startedAt = performanceNow();
   let currentUrl = url;
   let response;
   let controller;
@@ -1566,7 +1572,10 @@ async function resolveExternalLocation(batch, config, onLog) {
   if (resolved === null || resolved.numRows === 0 && resolved.schema.fields.length === 0) {
     throw new Error(`No data batch found in external IPC stream from ${redactExternalUrl(currentUrl)}`);
   }
-  return resolved;
+  const provenance = new Map(resolved.metadata ?? []);
+  provenance.set(LOCATION_FETCH_MS_KEY, (performanceNow() - startedAt).toFixed(1));
+  provenance.set(LOCATION_SOURCE_KEY, url);
+  return withBatchMetadata(resolved, provenance);
 }
 
 // src/http/codec.ts
@@ -5408,6 +5417,10 @@ function pipeConnect(readable, writable, options) {
           if (headerStream) {
             for (const headerBatch of headerStream.batches) {
               if (headerBatch.numRows === 0) {
+                if (isExternalLocationBatch(headerBatch)) {
+                  rawHeader ??= rawBatchOf(await resolveExternalLocation(headerBatch, externalConfig, onLog));
+                  continue;
+                }
                 dispatchLogOrError(headerBatch, onLog);
                 continue;
               }
@@ -5455,10 +5468,14 @@ function pipeConnect(readable, writable, options) {
         if (info.headerSchema) {
           const headerStream = await r.readStream();
           if (headerStream) {
-            for (const batch of headerStream.batches) {
+            for (let batch of headerStream.batches) {
               if (batch.numRows === 0) {
-                dispatchLogOrError(batch, onLog);
-                continue;
+                if (isExternalLocationBatch(batch)) {
+                  batch = await resolveExternalLocation(batch, externalConfig, onLog);
+                } else {
+                  dispatchLogOrError(batch, onLog);
+                  continue;
+                }
               }
               const rows = extractBatchRows(batch);
               if (rows.length > 0) {
@@ -16675,4 +16692,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=532AB256C1A9BCF864756E2164756E21
+//# debugId=F852735DEBA221A164756E2164756E21

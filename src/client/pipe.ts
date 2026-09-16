@@ -841,6 +841,15 @@ export function pipeConnect(
           if (headerStream) {
             for (const headerBatch of headerStream.batches as any[]) {
               if (headerBatch.numRows === 0) {
+                // A header is data like any other, so a server that
+                // externalizes its responses sends it as a pointer — zero-row,
+                // like a log batch, and dropped by the check below until it is
+                // resolved first. `connect.ts` learned this over HTTP; the
+                // byte-stream reader is separate code and had not.
+                if (isExternalLocationBatch(headerBatch)) {
+                  rawHeader ??= rawBatchOf((await resolveExternalLocation(headerBatch, externalConfig, onLog)) as any);
+                  continue;
+                }
                 dispatchLogOrError(headerBatch, onLog);
                 continue;
               }
@@ -902,10 +911,18 @@ export function pipeConnect(
         if (info.headerSchema) {
           const headerStream = await r.readStream();
           if (headerStream) {
-            for (const batch of headerStream.batches as any[]) {
+            for (let batch of headerStream.batches as any[]) {
               if (batch.numRows === 0) {
-                dispatchLogOrError(batch, onLog);
-                continue;
+                // See the raw-stream reader above: an externalized header
+                // arrives as a zero-row pointer, and resolving it is what
+                // keeps `session.header` from being null against precisely
+                // the servers whose headers are big enough to externalize.
+                if (isExternalLocationBatch(batch)) {
+                  batch = await resolveExternalLocation(batch, externalConfig, onLog);
+                } else {
+                  dispatchLogOrError(batch, onLog);
+                  continue;
+                }
               }
               const rows = extractBatchRows(batch);
               if (rows.length > 0) {

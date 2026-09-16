@@ -50,6 +50,15 @@ export declare const CALL_STATE_KEY = "vgi_rpc.call_state#b64";
 export declare const CANCEL_KEY = "vgi_rpc.cancel";
 export declare const LOCATION_KEY = "vgi_rpc.location";
 export declare const LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
+/** How long resolving an external pointer took, in milliseconds, stamped on
+ *  the *resolved* batch — never on the pointer. WIRE_PROTOCOL.md §12. */
+export declare const LOCATION_FETCH_MS_KEY = "vgi_rpc.location.fetch_ms";
+/** Where a resolved batch came from: the *original* pointer URL, not the last
+ *  redirect target, and unredacted — §12 classes it as application metadata
+ *  rather than a diagnostic string. Stamped on the resolved batch, which by
+ *  then is the only record of its own origin: the pointer that named it has
+ *  been discarded. */
+export declare const LOCATION_SOURCE_KEY = "vgi_rpc.location.source";
 /** HTTP response header set when an RPC error is returned over the HTTP transport. */
 export declare const RPC_ERROR_HEADER = "X-VGI-RPC-Error";
 /** Per-request correlation header. Read from the request when the caller

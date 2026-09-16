@@ -10,9 +10,15 @@
  * download URL and SHA-256 checksum in metadata.
  */
 
-import { deserializeBatches, serializeBatch, type VgiBatch, type VgiSchema } from "./arrow/index.js";
+import { deserializeBatches, serializeBatch, type VgiBatch, type VgiSchema, withBatchMetadata } from "./arrow/index.js";
 import type { LogMessage } from "./client/types.js";
-import { LOCATION_KEY, LOCATION_SHA256_KEY, LOG_LEVEL_KEY } from "./constants.js";
+import {
+  LOCATION_FETCH_MS_KEY,
+  LOCATION_KEY,
+  LOCATION_SHA256_KEY,
+  LOCATION_SOURCE_KEY,
+  LOG_LEVEL_KEY,
+} from "./constants.js";
 import { dispatchLogOrError } from "./log-batch.js";
 import { zstdCompress, zstdDecompress } from "./util/zstd.js";
 import { buildEmptyBatch } from "./wire/response.js";
@@ -72,6 +78,12 @@ export interface ExternalLocationConfig {
   maxRedirects?: number;
   /** Request implementation for external downloads. Defaults to global `fetch`. */
   fetch?: typeof globalThis.fetch;
+}
+
+/** Monotonic milliseconds, falling back to `Date.now` where `performance` is
+ *  absent (older embedders; every runtime this ships to has it). */
+function performanceNow(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
 const DEFAULT_THRESHOLD = 1_048_576; // 1 MB
@@ -290,6 +302,7 @@ export async function resolveExternalLocation(
 
   const { maxFetchBytes, maxDecompressedBytes, maxRedirects } = validateFetchConfig(config);
   const validator = config.urlValidator === null ? undefined : (config.urlValidator ?? httpsOnlyValidator);
+  const startedAt = performanceNow();
   let currentUrl = url;
   let response: Response | undefined;
   let controller: AbortController | undefined;
@@ -389,5 +402,15 @@ export async function resolveExternalLocation(
   if (resolved === null || (resolved.numRows === 0 && resolved.schema.fields.length === 0)) {
     throw new Error(`No data batch found in external IPC stream from ${redactExternalUrl(currentUrl)}`);
   }
-  return resolved;
+
+  // Provenance rides on the resolved batch's own metadata, merged — never
+  // replacing it. The pointer is gone by now, so without these two keys a
+  // caller has no way to say where the batch came from or what the fetch
+  // cost. `source` is the *original* pointer URL rather than the last
+  // redirect target, and is deliberately unredacted: §12 calls it application
+  // metadata, unlike the diagnostic strings `redactExternalUrl` guards.
+  const provenance = new Map<string, string>(resolved.metadata ?? []);
+  provenance.set(LOCATION_FETCH_MS_KEY, (performanceNow() - startedAt).toFixed(1));
+  provenance.set(LOCATION_SOURCE_KEY, url);
+  return withBatchMetadata(resolved, provenance);
 }
