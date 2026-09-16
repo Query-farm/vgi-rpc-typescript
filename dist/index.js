@@ -14024,11 +14024,14 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
       }
       for (const emitted of out.batches) {
         let batch = emitted.batch;
+        if (emitted.metadata && emitted.metadata.size > 0) {
+          const merged = new Map(batch.metadata ?? []);
+          for (const [key, value] of emitted.metadata)
+            merged.set(key, value);
+          batch = withBatchMetadata(batch, merged);
+        }
         if (externalConfig) {
           batch = await maybeExternalizeBatch(batch, externalConfig);
-        }
-        if (emitted.metadata && emitted.metadata.size > 0) {
-          batch = withBatchMetadata(batch, emitted.metadata);
         }
         await stream.write(batch);
       }
@@ -16692,4 +16695,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=F852735DEBA221A164756E2164756E21
+//# debugId=F4B97FE1C7EF153E64756E2164756E21

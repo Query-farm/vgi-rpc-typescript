@@ -186,14 +186,25 @@ export async function dispatchStream(
 
       for (const emitted of out.batches) {
         let batch = emitted.batch;
-        if (externalConfig) {
-          batch = await maybeExternalizeBatch(batch, externalConfig);
-        }
         // Attach per-emit metadata (e.g. vgi_batch_index,
         // vgi_partition_values#b64) as the RecordBatch message's
         // custom_metadata so the C++ extension can read it off the wire.
+        //
+        // Before externalization, and merged rather than replacing — both
+        // matter, and both were wrong. WIRE_PROTOCOL.md §12: the pointer
+        // carries only `vgi_rpc.location` and `vgi_rpc.location.sha256`, and
+        // everything the writer attached rides on the data batch *inside* the
+        // fetched object. Stamping the pointer instead put this metadata where
+        // a resolving reader throws it away, and — since `withBatchMetadata`
+        // replaces the map — erased the two location keys along with it,
+        // leaving a zero-row batch no resolver recognises.
         if (emitted.metadata && emitted.metadata.size > 0) {
-          batch = withBatchMetadata(batch, emitted.metadata);
+          const merged = new Map<string, string>(batch.metadata ?? []);
+          for (const [key, value] of emitted.metadata) merged.set(key, value);
+          batch = withBatchMetadata(batch, merged);
+        }
+        if (externalConfig) {
+          batch = await maybeExternalizeBatch(batch, externalConfig);
         }
         await stream.write(batch);
       }
