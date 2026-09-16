@@ -137,6 +137,52 @@ The conformance worker (`examples/conformance.ts`) accepts `--access-log <path>`
 
 `conformance/check_access_log_streams.py` covers what neither the schema nor `--require-request-data` can reach: that a log contains stream records at all, that `stream_id` distinguishes streams and chains a stream's turns, and that `request_data` rides on `/init` and nothing else. `--require-request-data` inspects only unary records, and any 32 hex characters satisfy the schema's `stream_id` — so both reported PASS over 113 stream records that named no stream.
 
+## Conformance in client role
+
+Every conformance leg above points the Python reference *client* at this port's
+server. `conformance/client-driver.ts` is the other direction: a small
+executable speaking a newline-delimited JSON control protocol on stdin/stdout,
+which lets the shared Python suite drive **this port's client**
+(`httpConnect` / `pipeConnect` / `tcpConnect`) instead.
+
+The contract is `tools/cross-port/specs/CLIENT_DRIVER_PROTOCOL.md` in the
+reference repository — seventeen ops, the Arrow IPC framing, the two error
+channels, log relay, and what must *not* live in a driver. The Python half of
+the bridge (`vgi_rpc.conformance.client_driver`) is shared across ports and is
+not ours; `ts_client_proxy.py` is the four lines of glue that name our driver.
+
+**Why it is a separate gate.** This port's server accepts both bare and
+namespaced request paths, so a client addressing the wrong one passes against
+it and fails against a strict peer. That is not hypothetical — the Rust port
+shipped exactly that defect for weeks, green against its own server and **730
+failures** the moment it met the Python reference. A permissive server cannot
+validate a client, so the run that counts is the one against the reference:
+
+```bash
+# The gate: this port's client against the Python reference server.
+VGI_CONFORMANCE_ROLE=client VGI_CONFORMANCE_SERVER=python \
+  VGI_CLIENT_DRIVER="bun run conformance/client-driver.ts" \
+  python -m pytest test_ts_conformance.py -q
+
+# A regression check, not a conformance claim. Useful because when the two
+# legs disagree, the gap localises the defect to one side in one run.
+VGI_CONFORMANCE_ROLE=client VGI_CONFORMANCE_SERVER=typescript \
+  VGI_CLIENT_DRIVER="bun run conformance/client-driver.ts" \
+  python -m pytest test_ts_conformance.py -q
+```
+
+`VGI_CONFORMANCE_SERVER=python` needs a *checkout* of `vgi-rpc-python`, not
+just the installed package: the `serve_conformance_*.py` fixtures live in the
+repository. `VGI_RPC_PYTHON_REPO` points at it (default
+`~/Development/vgi-rpc-python`).
+
+**The client's batch-level surface.** A driver must relay Arrow IPC bytes, not
+values — decoding in the driver would let it paper over a client defect. So
+`RpcClient` carries `callRaw` / `streamRaw` beside `call` / `stream`, and the
+row-oriented methods are implemented on top of them: whatever the driver
+exercises is the same code path an ordinary caller takes. `RawStreamSession`
+adds `tickRaw`, `exchangeRaw`, `nextWithTokenRaw` and `cancel`.
+
 ## CI
 
 GitHub Actions workflow at `.github/workflows/ci.yml`:

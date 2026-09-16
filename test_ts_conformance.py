@@ -28,6 +28,30 @@ from vgi_rpc.http import http_connect
 from vgi_rpc.log import Message
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
+# --- Which half is under test, and against what -----------------------------
+#
+# ROLE "server" (the default) is the original arrangement: the Python reference
+# *client* drives this port's server.
+#
+# ROLE "client" is the other direction — this port's client, driven through the
+# JSONL driver in `conformance/client-driver.ts`. It is the direction nothing
+# tested until now: `httpConnect`/`pipeConnect` had only ever run against this
+# repository's own server, which accepts both bare and namespaced request
+# paths. A permissive server cannot validate a client, and the same blindness
+# let a sibling port ship a client sending bare paths for weeks — green at
+# home, 730 failures against the reference.
+#
+# SERVER picks the peer. `VGI_CONFORMANCE_SERVER=python` is therefore the gate
+# that counts in client role; `typescript` is a regression check whose value is
+# in *localising* a failure when the two disagree, not in proving conformance.
+ROLE = os.environ.get("VGI_CONFORMANCE_ROLE", "server")
+SERVER = os.environ.get("VGI_CONFORMANCE_SERVER", "typescript")
+
+if ROLE == "client" and SERVER not in ("typescript", "python"):
+    raise RuntimeError(f"VGI_CONFORMANCE_SERVER={SERVER!r} is not one of 'typescript', 'python'")
+if ROLE == "server" and SERVER != "typescript":
+    raise RuntimeError("VGI_CONFORMANCE_SERVER only applies in client role")
+
 _TS_DIR = os.path.dirname(os.path.abspath(__file__))
 _BUNDLE_DIR = os.path.join(_TS_DIR, ".conformance-bundles")
 BUN_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance.ts")]
@@ -62,6 +86,58 @@ BUN_FLECHETTE_HTTP_WORKER = [
 ]
 
 
+# --- The reference peer -----------------------------------------------------
+#
+# Only needed in client role with SERVER=python. The *scripts* live in the
+# reference repository (not in its wheel), so a client run against the
+# reference needs a checkout of it as well as the installed package.
+#
+#   VGI_RPC_PYTHON_REPO  checkout root of vgi-rpc-python
+#   VGI_RPC_PYTHON_BIN   interpreter that has vgi_rpc importable
+#   VGI_RPC_CONFORMANCE_CLI  the `vgi-rpc-conformance` entry point
+_REF_REPO = Path(os.environ.get("VGI_RPC_PYTHON_REPO") or Path.home() / "Development" / "vgi-rpc-python")
+# Default to the interpreter running this suite: it is the one that already
+# imports `vgi_rpc`, which is exactly what the serve scripts need. CI installs
+# the reference into that same interpreter.
+_REF_PY = os.environ.get("VGI_RPC_PYTHON_BIN") or sys.executable
+_PY_TESTS = Path(os.environ.get("VGI_PY_TESTS_DIR") or _REF_REPO / "tests")
+_PY_SERVE_HTTP = str(_PY_TESTS / "serve_conformance_http.py")
+_PY_SERVE_STRICT = str(_PY_TESTS / "serve_conformance_http_strict.py")
+_PY_SERVE_AUTH = str(_PY_TESTS / "serve_conformance_http_auth.py")
+_PY_SERVE_PROOF = str(_PY_TESTS / "serve_conformance_http_proof.py")
+
+
+def _ref_conformance_cli() -> str:
+    """Resolve the reference `vgi-rpc-conformance` entry point."""
+    explicit = os.environ.get("VGI_RPC_CONFORMANCE_CLI")
+    if explicit:
+        return explicit
+    vendored = _REF_REPO / ".venv" / "bin" / "vgi-rpc-conformance"
+    if vendored.exists():
+        return str(vendored)
+    found = shutil.which("vgi-rpc-conformance")
+    if found:
+        return found
+    raise RuntimeError(
+        "vgi-rpc-conformance is not on PATH and no VGI_RPC_CONFORMANCE_CLI was set; "
+        "a client run against the reference server needs it"
+    )
+
+
+def _stdio_worker_cmd() -> list[str]:
+    """The argv the driver spawns for a byte-stream connection."""
+    if SERVER == "python":
+        return [_ref_conformance_cli(), "--pipe", "--describe"]
+    return BUN_WORKER
+
+
+def _free_port() -> int:
+    """Reserve a loopback port for a server that cannot report its own."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 def _start_http_server(
     cmd: list[str],
     *,
@@ -86,6 +162,28 @@ def _start_http_server(
             break  # Server is up, just returned an error status
 
     return proc, port
+
+
+def _start_variant(
+    variant: str,
+    ts_cmd: list[str],
+    py_args: list[str] | None = None,
+    *,
+    timeout: float = 10.0,
+) -> tuple[subprocess.Popen[bytes], int]:
+    """Start the HTTP worker backing one fixture, for whichever SERVER is under test.
+
+    Every HTTP fixture routes through here so a client-role run can be pointed
+    at the reference server without each fixture growing its own branch. A
+    `py_args` of ``None`` means the reference has no equivalent configuration,
+    which is a skip rather than a failure — the fixture's group is about a
+    server property this run is not exercising.
+    """
+    if SERVER == "python":
+        if py_args is None:
+            pytest.skip(f"the Python reference server has no {variant!r} HTTP variant")
+        return _start_http_server([_REF_PY, *py_args], timeout=timeout)
+    return _start_http_server(ts_cmd, timeout=timeout)
 
 
 def _wait_for_tcp(host: str, port: int, timeout: float = 10.0) -> None:
@@ -161,7 +259,7 @@ def ts_flechette_transport() -> Iterator[SubprocessTransport]:
 @pytest.fixture(scope="session")
 def ts_http_port() -> Iterator[int]:
     """Start Bun conformance HTTP server."""
-    proc, port = _start_http_server(BUN_HTTP_WORKER)
+    proc, port = _start_variant("plain", BUN_HTTP_WORKER, [_PY_SERVE_HTTP, "--http"])
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -185,6 +283,8 @@ def conformance_http_port(ts_http_port: int) -> int:
 @pytest.fixture
 def conformance_resource_soak_target() -> Iterator[Any]:
     """Expose one isolated Bun HTTP worker to the shared resource soak."""
+    if ROLE != "server":
+        pytest.skip("the resource soak measures this port's server, not its client")
     from vgi_rpc.conformance._resource_soak_pytest import (
         ResourceSoakLimits,
         ResourceSoakTarget,
@@ -234,7 +334,11 @@ def conformance_http_no_compression_port() -> Iterator[int]:
     *skips* if it is absent, so a rename here silently stops testing the TS
     worker rather than failing.
     """
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--response-compression", "off"])
+    proc, port = _start_variant(
+        "no_compression",
+        [*BUN_HTTP_WORKER, "--response-compression", "off"],
+        [_PY_SERVE_HTTP, "--http", "--no-compression"],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -243,7 +347,11 @@ def conformance_http_no_compression_port() -> Iterator[int]:
 @pytest.fixture(scope="session")
 def conformance_http_small_request_cap_port() -> Iterator[int]:
     """Bun HTTP worker with the shared suite's canonical 4 KiB request cap."""
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--max-request-bytes", "4096"])
+    proc, port = _start_variant(
+        "small_request_cap",
+        [*BUN_HTTP_WORKER, "--max-request-bytes", "4096"],
+        [_PY_SERVE_HTTP, "--http", "--max-request-bytes", "4096"],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -256,10 +364,12 @@ def conformance_http_serve_start_fail_once_port() -> Iterator[int]:
     Readiness is intentionally TCP-only: an HTTP probe would itself consume
     the injected first lifecycle failure before the shared test can observe it.
     """
-    with _start_discovery_server(
-        [*BUN_HTTP_WORKER, "--fail-serve-start-once"],
-        "PORT:",
-    ) as raw_port:
+    cmd = (
+        [_REF_PY, _PY_SERVE_HTTP, "--http", "--fail-serve-start-once"]
+        if SERVER == "python"
+        else [*BUN_HTTP_WORKER, "--fail-serve-start-once"]
+    )
+    with _start_discovery_server(cmd, "PORT:") as raw_port:
         port = int(raw_port)
         _wait_for_tcp("127.0.0.1", port)
         yield port
@@ -268,6 +378,8 @@ def conformance_http_serve_start_fail_once_port() -> Iterator[int]:
 @pytest.fixture(scope="session")
 def conformance_transport_kind_probes() -> Iterator[tuple[tuple[str, Callable[[], str]], ...]]:
     """Expose real wire probes for every TypeScript server transport."""
+    if ROLE != "server":
+        pytest.skip("transport-kind probes measure this port's server, not its client")
 
     class _KindProbe(Protocol):
         # The wire routing key, declared rather than inherited from the class
@@ -347,10 +459,20 @@ def conformance_transport_kind_probes() -> Iterator[tuple[tuple[str, Callable[[]
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _start_auth_worker() -> tuple[subprocess.Popen[bytes], int]:
+    """Start the reject-all authenticating worker for whichever SERVER is under test."""
+    py_port = _free_port()
+    return _start_variant(
+        "auth",
+        BUN_HTTP_AUTH_WORKER,
+        [_PY_SERVE_AUTH, "--port", str(py_port)],
+    )
+
+
 @pytest.fixture(scope="session")
 def conformance_http_auth_port() -> Iterator[int]:
     """Bun conformance HTTP server with reject-all authenticate, for TestHealth."""
-    proc, port = _start_http_server(BUN_HTTP_AUTH_WORKER)
+    proc, port = _start_auth_worker()
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -368,7 +490,7 @@ def conformance_http_auth_reason_port() -> Iterator[int]:
     The reject-all worker already reads the header, so it serves double duty;
     it runs as a second process only because both fixtures are session-scoped.
     """
-    proc, port = _start_http_server(BUN_HTTP_AUTH_WORKER)
+    proc, port = _start_auth_worker()
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -387,7 +509,11 @@ def conformance_http_cold_call_cache_port() -> Iterator[int]:
     The fixture name is load-bearing: the shared suite looks it up with
     ``getfixturevalue`` and silently skips if it is missing.
     """
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--no-call-state-cache"])
+    proc, port = _start_variant(
+        "cold_call_cache",
+        [*BUN_HTTP_WORKER, "--no-call-state-cache"],
+        [_PY_SERVE_HTTP, "--http", "--no-call-state-cache"],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -410,7 +536,11 @@ def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Ite
     ``getfixturevalue`` and skips the correlation case if it is missing.
     """
     log_path = tmp_path_factory.mktemp("accesslog") / "conformance.jsonl"
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--access-log", str(log_path)])
+    proc, port = _start_variant(
+        "access_log",
+        [*BUN_HTTP_WORKER, "--access-log", str(log_path)],
+        [_PY_SERVE_HTTP, "--http", "--access-log", str(log_path)],
+    )
     yield port, log_path
     proc.terminate()
     proc.wait(timeout=5)
@@ -433,7 +563,11 @@ def conformance_http_introspect_port() -> Iterator[int]:
     The fixture name is load-bearing — the suite looks it up with
     ``getfixturevalue`` and skips the whole group if it is missing.
     """
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--introspect"])
+    proc, port = _start_variant(
+        "introspect",
+        [*BUN_HTTP_WORKER, "--introspect"],
+        [_PY_SERVE_HTTP, "--http", "--introspect"],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -458,7 +592,11 @@ def conformance_http_identity_port() -> Iterator[int]:
     The fixture name is load-bearing — the group looks it up with
     ``getfixturevalue`` and skips, loudly and by name, if it is missing.
     """
-    proc, port = _start_http_server([*BUN_HTTP_IDENTITY_WORKER, "--identity", "both"])
+    proc, port = _start_variant(
+        "identity",
+        [*BUN_HTTP_IDENTITY_WORKER, "--identity", "both"],
+        [_PY_SERVE_HTTP, "--http", "--identity", "both"],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -473,7 +611,11 @@ def conformance_http_identity_introspect_only_port() -> Iterator[int]:
     with it — is only observable against a second worker configured with one
     hook, so it cannot be folded into the fixture above.
     """
-    proc, port = _start_http_server([*BUN_HTTP_IDENTITY_WORKER, "--identity", "introspect-only"])
+    proc, port = _start_variant(
+        "identity_introspect_only",
+        [*BUN_HTTP_IDENTITY_WORKER, "--identity", "introspect-only"],
+        [_PY_SERVE_HTTP, "--http", "--identity", "introspect-only"],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -498,14 +640,23 @@ def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
     set -- the size caps and the upload-URL trio -- which are exactly the
     exposures a port is most likely to miss.
     """
-    proc, port = _start_http_server(
+    proc, port = _start_variant(
+        "cors",
         [
             *BUN_HTTP_WORKER,
             "--fake-storage",
             conformance_fake_storage,
             "--cors-origin",
             "https://conformance.example",
-        ]
+        ],
+        [
+            _PY_SERVE_HTTP,
+            "--http",
+            "--fake-storage",
+            conformance_fake_storage,
+            "--cors-origin",
+            "https://conformance.example",
+        ],
     )
     yield port
     proc.terminate()
@@ -530,7 +681,11 @@ def conformance_http_sticky_short_ttl_port() -> Iterator[int]:
     Backs ``TestSticky::test_expired_session_surfaces_session_lost``; the main
     worker's 300s default is not something a test can sit out.
     """
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--sticky-ttl", "1"])
+    proc, port = _start_variant(
+        "sticky_short_ttl",
+        [*BUN_HTTP_WORKER, "--sticky-ttl", "1"],
+        [_PY_SERVE_HTTP, "--http", "--sticky-ttl", "1"],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -545,11 +700,17 @@ def conformance_http_sticky_peer_ports() -> Iterator[tuple[int, int]]:
     explicit ``--server-id`` both peers would look like the same worker and the
     test would have nothing to reject.
     """
-    proc_a, port_a = _start_http_server(
-        [*BUN_HTTP_WORKER, "--token-key", _STICKY_PEER_TOKEN_KEY, "--server-id", "conformance-peer-a"]
+    # The reference mints a random server id per process, so its two peers
+    # differ without an explicit flag; the Bun worker hardcodes one and needs it.
+    proc_a, port_a = _start_variant(
+        "sticky_peer_a",
+        [*BUN_HTTP_WORKER, "--token-key", _STICKY_PEER_TOKEN_KEY, "--server-id", "conformance-peer-a"],
+        [_PY_SERVE_HTTP, "--http", "--token-key", _STICKY_PEER_TOKEN_KEY],
     )
-    proc_b, port_b = _start_http_server(
-        [*BUN_HTTP_WORKER, "--token-key", _STICKY_PEER_TOKEN_KEY, "--server-id", "conformance-peer-b"]
+    proc_b, port_b = _start_variant(
+        "sticky_peer_b",
+        [*BUN_HTTP_WORKER, "--token-key", _STICKY_PEER_TOKEN_KEY, "--server-id", "conformance-peer-b"],
+        [_PY_SERVE_HTTP, "--http", "--token-key", _STICKY_PEER_TOKEN_KEY],
     )
     try:
         yield port_a, port_b
@@ -568,7 +729,11 @@ def conformance_http_sticky_auth_port() -> Iterator[int]:
     flag, not ``BUN_HTTP_AUTH_WORKER`` — that one is reject-all and has no
     sticky sessions.
     """
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--sticky-auth"])
+    proc, port = _start_variant(
+        "sticky_auth",
+        [*BUN_HTTP_WORKER, "--sticky-auth"],
+        [_PY_SERVE_HTTP, "--http", "--sticky-auth"],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -598,7 +763,27 @@ def proof_worker_factory() -> Iterator[Callable[..., Any]]:
         ]
         if not config.replay_cache:
             cmd.append("--proof-no-replay-cache")
-        proc, port = _start_http_server(cmd)
+        py_port = _free_port()
+        py_args = [
+            _PY_SERVE_PROOF,
+            "--port",
+            str(py_port),
+            # The Bun proof worker mounts under /vgi and the fixture below
+            # reports that prefix for both; the reference defaults to none.
+            "--prefix",
+            "/vgi",
+            "--proof-mode",
+            config.mode,
+            "--proof-origin-id",
+            config.origin_id,
+            "--proof-secrets",
+            config.secrets,
+            "--proof-skew",
+            str(config.skew_seconds),
+        ]
+        if not config.replay_cache:
+            py_args.append("--proof-no-replay-cache")
+        proc, port = _start_variant("proof", cmd, py_args)
         try:
             # The Bun proof worker mounts under /vgi, mirroring the other ports.
             yield ProofWorker(port=port, prefix="/vgi", config=config)
@@ -624,7 +809,11 @@ def conformance_fake_storage() -> Iterator[str]:
 @pytest.fixture(scope="session")
 def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterator[int]:
     """Bun conformance HTTP server wired to the fake storage (no compression)."""
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--fake-storage", conformance_fake_storage])
+    proc, port = _start_variant(
+        "storage",
+        [*BUN_HTTP_WORKER, "--fake-storage", conformance_fake_storage],
+        [_PY_SERVE_HTTP, "--http", "--fake-storage", conformance_fake_storage],
+    )
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -633,8 +822,10 @@ def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterato
 @pytest.fixture(scope="session")
 def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> Iterator[int]:
     """Bun conformance HTTP server wired to the fake storage with zstd compression."""
-    proc, port = _start_http_server(
-        [*BUN_HTTP_WORKER, "--fake-storage", conformance_fake_storage, "--compression", "zstd"]
+    proc, port = _start_variant(
+        "zstd_storage",
+        [*BUN_HTTP_WORKER, "--fake-storage", conformance_fake_storage, "--compression", "zstd"],
+        [_PY_SERVE_HTTP, "--http", "--fake-storage", conformance_fake_storage, "--compression", "zstd"],
     )
     yield port
     proc.terminate()
@@ -644,19 +835,21 @@ def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> It
 @pytest.fixture(scope="session")
 def conformance_http_external_security_port(conformance_fake_storage: str) -> Iterator[int]:
     """Bun worker with independent external-fetch caps and per-hop URL policy."""
-    proc, port = _start_http_server(
-        [
-            *BUN_HTTP_WORKER,
-            "--fake-storage",
-            conformance_fake_storage,
-            "--max-request-bytes",
-            "1048576",
-            "--max-fetch-bytes",
-            "4096",
-            "--max-decompressed-fetch-bytes",
-            "8192",
-            "--reject-localhost-redirects",
-        ]
+    _external_security_flags = [
+        "--fake-storage",
+        conformance_fake_storage,
+        "--max-request-bytes",
+        "1048576",
+        "--max-fetch-bytes",
+        "4096",
+        "--max-decompressed-fetch-bytes",
+        "8192",
+        "--reject-localhost-redirects",
+    ]
+    proc, port = _start_variant(
+        "external_security",
+        [*BUN_HTTP_WORKER, *_external_security_flags],
+        [_PY_SERVE_HTTP, "--http", *_external_security_flags],
     )
     yield port
     proc.terminate()
@@ -674,16 +867,18 @@ def conformance_http_externalize_always_port(conformance_fake_storage: str) -> I
     so the entire conformance suite verifies that externalization is
     observationally indistinguishable from inline transmission.
     """
-    proc, port = _start_http_server(
-        [
-            *BUN_HTTP_WORKER,
-            "--fake-storage",
-            conformance_fake_storage,
-            "--externalize-threshold",
-            "1",
-            "--max-request-bytes",
-            "1048576",
-        ]
+    _externalize_always_flags = [
+        "--fake-storage",
+        conformance_fake_storage,
+        "--externalize-threshold",
+        "1",
+        "--max-request-bytes",
+        "1048576",
+    ]
+    proc, port = _start_variant(
+        "externalize_always",
+        [*BUN_HTTP_WORKER, *_externalize_always_flags],
+        [_PY_SERVE_HTTP, "--http", *_externalize_always_flags],
     )
     yield port
     proc.terminate()
@@ -693,7 +888,9 @@ def conformance_http_externalize_always_port(conformance_fake_storage: str) -> I
 @pytest.fixture(scope="session")
 def ts_http_zstd_port() -> Iterator[int]:
     """Start Bun conformance HTTP server with zstd response compression."""
-    proc, port = _start_http_server(BUN_HTTP_ZSTD_WORKER)
+    # The reference compresses responses by default, so its plain server is
+    # the zstd peer; the Bun worker needs the dedicated entry point.
+    proc, port = _start_variant("zstd", BUN_HTTP_ZSTD_WORKER, [_PY_SERVE_HTTP, "--http"])
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -707,7 +904,7 @@ def conformance_http_strict_cap_port() -> Iterator[int]:
     both inline and externalized responses so producer/unary/exchange tests
     that emit oversized payloads provably trip the strict-fail path.
     """
-    proc, port = _start_http_server([*BUN_HTTP_WORKER, "--strict"])
+    proc, port = _start_variant("strict", [*BUN_HTTP_WORKER, "--strict"], [_PY_SERVE_STRICT])
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -731,16 +928,18 @@ def conformance_http_externalized_cap_port(conformance_fake_storage: str) -> Ite
     payload still externalises, which is what lets the under-cap control travel
     the same channel without tripping the cap.
     """
-    proc, port = _start_http_server(
-        [
-            *BUN_HTTP_WORKER,
-            "--fake-storage",
-            conformance_fake_storage,
-            "--max-externalized-response-bytes",
-            str(64 * 1024),
-            "--max-response-bytes",
-            str(8 * 1024 * 1024),
-        ]
+    _externalized_cap_flags = [
+        "--fake-storage",
+        conformance_fake_storage,
+        "--max-externalized-response-bytes",
+        str(64 * 1024),
+        "--max-response-bytes",
+        str(8 * 1024 * 1024),
+    ]
+    proc, port = _start_variant(
+        "externalized_cap",
+        [*BUN_HTTP_WORKER, *_externalized_cap_flags],
+        [_PY_SERVE_STRICT, *_externalized_cap_flags],
     )
     yield port
     proc.terminate()
@@ -825,17 +1024,93 @@ _TRANSPORTS = _DEFAULT_TRANSPORTS + (
     ["flechette-pipe", "flechette-http"] if os.environ.get("VGI_TEST_FLECHETTE") == "1" else []
 )
 
+# In client role the parameter names a *client* configuration, not a server
+# build: the node/deno/flechette entries are alternate builds of this port's
+# server and say nothing about its client, and `subprocess` is `pipe` with a
+# shared transport the driver does not have. What is left is one byte-stream
+# connection plus the three HTTP shapes whose client paths differ —
+# uncompressed, zstd request bodies, and every response arriving as a pointer.
+_CLIENT_TRANSPORTS = ["pipe", "http", "http-zstd", "http_externalize_always"]
+
+if ROLE == "client":
+    _TRANSPORTS = _CLIENT_TRANSPORTS
+
+    # Route the HTTP feature tests — external location, sticky sessions,
+    # response caps, upload URLs — through the driver. They import
+    # `http_connect` / `http_capabilities` / `request_upload_urls` *inside* the
+    # test body, so without this they would quietly exercise the Python client
+    # and prove nothing about this port.
+    import ts_client_proxy as _shim
+
+    _shim.DRIVER.install_http_overrides()
+
+
+def _client_factory(
+    param: str,
+    on_log: Callable[[Message], None] | None,
+    http_port: int | None,
+    zstd_port: int | None,
+    ext_port: int | None,
+) -> contextlib.AbstractContextManager[Any]:
+    """Open one driver-backed connection for a `conformance_conn` parameter."""
+    from vgi_rpc.external import ExternalLocationConfig
+
+    from ts_client_proxy import TsClientProxy
+
+    external_config = None
+    compression_level: int | None = None
+    if param == "pipe":
+        transport: str = "stdio"
+        target: Any = _stdio_worker_cmd()
+    elif param == "http":
+        transport, target = "http", f"http://127.0.0.1:{http_port}"
+    elif param == "http-zstd":
+        transport, target = "http", f"http://127.0.0.1:{zstd_port}"
+        compression_level = 3
+    elif param == "http_externalize_always":
+        transport, target = "http", f"http://127.0.0.1:{ext_port}"
+        # The fake storage vends http:// download URLs; the client's default
+        # validator is HTTPS-only. Resolution itself stays the *client's* job.
+        external_config = ExternalLocationConfig(url_validator=None)
+    else:
+        raise AssertionError(f"unknown client transport {param!r}")
+
+    @contextlib.contextmanager
+    def _conn() -> Iterator[Any]:
+        proxy = TsClientProxy(
+            transport,
+            target,
+            on_log,
+            external_config=external_config,
+            compression_level=compression_level,
+        )
+        try:
+            yield proxy
+        finally:
+            proxy.close()
+
+    return _conn()
+
 
 @pytest.fixture(params=_TRANSPORTS)
 def conformance_conn(
     request: pytest.FixtureRequest,
-    ts_transport: SubprocessTransport,
     ts_http_port: int,
     ts_http_zstd_port: int,
 ) -> ConnFactory:
     def factory(
         on_log: Callable[[Message], None] | None = None,
     ) -> contextlib.AbstractContextManager[Any]:
+        if ROLE == "client":
+            return _client_factory(
+                request.param,
+                on_log,
+                ts_http_port,
+                ts_http_zstd_port,
+                request.getfixturevalue("conformance_http_externalize_always_port")
+                if request.param == "http_externalize_always"
+                else None,
+            )
         if request.param == "pipe":
 
             @contextlib.contextmanager
@@ -924,7 +1199,7 @@ def conformance_conn(
             # "subprocess" — shared transport
             @contextlib.contextmanager
             def _conn() -> Iterator[_RpcProxy]:
-                yield _RpcProxy(ConformanceService, ts_transport, on_log)
+                yield _RpcProxy(ConformanceService, request.getfixturevalue("ts_transport"), on_log)
 
             return _conn()
 
@@ -932,15 +1207,28 @@ def conformance_conn(
 
 
 @pytest.fixture(params=["pipe", "subprocess"])
-def conformance_raw_conn(
-    request: pytest.FixtureRequest,
-    ts_transport: SubprocessTransport,
-) -> ConnFactory:
+def conformance_raw_conn(request: pytest.FixtureRequest) -> ConnFactory:
     """Connect only through the default persistent byte-stream transports."""
 
     def factory(
         on_log: Callable[[Message], None] | None = None,
     ) -> contextlib.AbstractContextManager[Any]:
+        if ROLE == "client":
+            # Deliberately *not* driver-backed. This fixture feeds hand-built,
+            # deliberately malformed request bytes straight onto a transport
+            # and then checks the connection still works — a statement about
+            # the server, which a client cannot be made to utter. Under client
+            # role it therefore drives the server under test with the
+            # reference transport, exactly as server role does.
+            @contextlib.contextmanager
+            def _raw_server_conn() -> Iterator[_RpcProxy]:
+                transport = SubprocessTransport(_stdio_worker_cmd())
+                try:
+                    yield _RpcProxy(ConformanceService, transport, on_log)
+                finally:
+                    transport.close()
+
+            return _raw_server_conn()
         if request.param == "pipe":
 
             @contextlib.contextmanager
@@ -955,7 +1243,7 @@ def conformance_raw_conn(
 
         @contextlib.contextmanager
         def _shared_conn() -> Iterator[_RpcProxy]:
-            yield _RpcProxy(ConformanceService, ts_transport, on_log)
+            yield _RpcProxy(ConformanceService, request.getfixturevalue("ts_transport"), on_log)
 
         return _shared_conn()
 
@@ -965,7 +1253,6 @@ def conformance_raw_conn(
 @pytest.fixture(params=_TRANSPORTS)
 def conformance_describe(
     request: pytest.FixtureRequest,
-    ts_transport: SubprocessTransport,
     ts_http_port: int,
     ts_http_zstd_port: int,
 ) -> "ServiceDescription":
@@ -983,6 +1270,20 @@ def conformance_describe(
     from vgi_rpc.introspect import introspect
 
     param = request.param
+    if ROLE == "client":
+        # Introspection under test is the *client's*: the driver relays the
+        # description its client decoded, rather than a second one this side
+        # decoded from the same bytes.
+        with _client_factory(
+            param,
+            None,
+            ts_http_port,
+            ts_http_zstd_port,
+            request.getfixturevalue("conformance_http_externalize_always_port")
+            if param == "http_externalize_always"
+            else None,
+        ) as proxy:
+            return proxy.describe()
     if param in ("pipe", "flechette-pipe"):
         cmd = BUN_FLECHETTE_WORKER if param == "flechette-pipe" else BUN_WORKER
         transport = SubprocessTransport(cmd)
@@ -991,7 +1292,7 @@ def conformance_describe(
         finally:
             transport.close()
     if param == "subprocess":
-        return introspect(ts_transport)
+        return introspect(request.getfixturevalue("ts_transport"))
     # Everything else is HTTP — resolve the right port for the variant.
     if param == "http":
         port = ts_http_port

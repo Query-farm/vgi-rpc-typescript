@@ -282,6 +282,68 @@ jobs:
           VGI_RPC_PYTHON_BIN: python3
         run: timeout 120 bun test test/client.test.ts test/client-native-conformance.test.ts
 
+  # The other direction: this port's *client*, driven by the shared suite
+  # through the JSONL driver in `conformance/client-driver.ts`.
+  #
+  # Its own job, because the thing it proves is different in kind. Every other
+  # conformance leg points the reference client at this port's server. Nothing
+  # pointed this port's client at a foreign server, and this port's server
+  # accepts both bare and namespaced request paths — so a client that addressed
+  # the wrong one would pass here and fail everywhere else. That is not
+  # hypothetical: it is what the Rust port shipped for weeks, green at home and
+  # 730 failures against the reference.
+  client-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check out vgi-rpc-python
+        # The `serve_conformance_*.py` fixtures live in the repository, not in
+        # the wheel, so a run against the reference *server* needs the
+        # checkout as well as the installed package. Unpinned, deliberately:
+        # a reference change that breaks this port should turn it red the day
+        # it lands, not eleven days later.
+        uses: actions/checkout@v7
+        with:
+          repository: Query-farm/vgi-rpc-python
+          path: .vgi-rpc-python
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install JS dependencies
+        run: bun install
+
+      - name: Install Python dependencies
+        run: pip install ".vgi-rpc-python[http,cli,external,conformance]" pytest
+
+      # `VGI_CLIENT_DRIVER` is split with shlex, so an interpreted driver needs
+      # no wrapper script.
+      - name: Drive this port's client against the PYTHON REFERENCE server
+        # This is the gate. A green run against our own server proves the two
+        # halves of one port agree with each other; it does not prove either
+        # agrees with the protocol.
+        env:
+          VGI_CLIENT_DRIVER: bun run conformance/client-driver.ts
+          VGI_CONFORMANCE_ROLE: client
+          VGI_CONFORMANCE_SERVER: python
+          VGI_RPC_PYTHON_REPO: ${{ github.workspace }}/.vgi-rpc-python
+        run: timeout 900 python -m pytest test_ts_conformance.py -q
+
+      - name: Drive this port's client against this port's own server
+        # Not a conformance claim — a regression check. When the two legs
+        # disagree the gap localises the defect to one side in one run.
+        env:
+          VGI_CLIENT_DRIVER: bun run conformance/client-driver.ts
+          VGI_CONFORMANCE_ROLE: client
+          VGI_CONFORMANCE_SERVER: typescript
+        run: timeout 900 python -m pytest test_ts_conformance.py -q
+
   # Two tools in the Python reference compare *ports to each other*, which is
   # the one thing no single repository's own suite can do. Until they ran here
   # they ran on a maintainer's laptop, so the cross-implementation checks were
