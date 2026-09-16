@@ -9,7 +9,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
@@ -27,6 +27,9 @@ from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.http import http_connect
 from vgi_rpc.log import Message
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
+
+if TYPE_CHECKING:
+    from vgi_rpc.conformance._external_bytestream_pytest import ByteStreamExternalTarget
 
 # --- Which half is under test, and against what -----------------------------
 #
@@ -804,6 +807,89 @@ def conformance_fake_storage() -> Iterator[str]:
         yield base_url
     finally:
         shutdown()
+
+
+@pytest.fixture(scope="session")
+def conformance_bytestream_external_target(
+    conformance_fake_storage: str,
+) -> Iterator["ByteStreamExternalTarget"]:
+    """Supply an externalizing byte-stream connection for ``TestExternalByteStream``.
+
+    The shared group looks this fixture up by literal name and *fails* — rather
+    than skipping — when a runner that has ``conformance_fake_storage`` (and so
+    a pointer resolver) withholds it, because silent skipping is how the
+    byte-stream half of externalization stayed untested across four ports.
+
+    Both ends are wired to ``conformance_fake_storage`` with a one-byte
+    threshold, so every data-bearing batch is replaced on the wire by a
+    pointer and the group's upload assertions have something to see. Which
+    pair that is follows the role:
+
+    * server role — the Python reference client against this port's stdio
+      worker, which pins this port's server-side externalization;
+    * client role, ``SERVER=typescript`` — this port's client, through the
+      JSONL driver, against the same worker;
+    * client role, ``SERVER=python`` — this port's client against
+      ``conformance/serve_reference_stdio_external.py``, which hands
+      ``RpcServer`` the ``external_location`` the reference CLI never exposes
+      on ``--pipe``.
+
+    That last leg is the one worth having, and the reason it is a real peer
+    rather than a skip: this port's server uploads one batch per object, so
+    its own payloads are single-batch by construction and the resolver's
+    multi-batch path — a turn's log batches followed by its data batch, the
+    shape §12 describes — runs only against the reference.
+    """
+    from vgi_rpc.conformance._external_bytestream_pytest import ByteStreamExternalTarget
+    from vgi_rpc.external import ExternalLocationConfig
+
+    if ROLE == "client" and SERVER == "python":
+        worker_cmd = [
+            _REF_PY,
+            str(Path(_TS_DIR) / "conformance" / "serve_reference_stdio_external.py"),
+            conformance_fake_storage,
+            "1",
+        ]
+    else:
+        worker_cmd = [*BUN_WORKER, "--fake-storage", conformance_fake_storage, "--externalize-threshold", "1"]
+
+    # The fake store vends http://127.0.0.1 download URLs; the client's default
+    # validator is HTTPS-only and would refuse them. Resolution stays the
+    # client's job either way.
+    external_config = ExternalLocationConfig(url_validator=None)
+
+    if ROLE == "client":
+
+        @contextlib.contextmanager
+        def _connect(on_log: Callable[[Message], None] | None = None) -> Iterator[Any]:
+            from ts_client_proxy import TsClientProxy
+
+            proxy = TsClientProxy("stdio", worker_cmd, on_log, external_config=external_config)
+            try:
+                yield proxy
+            finally:
+                proxy.close()
+
+    else:
+
+        @contextlib.contextmanager
+        def _connect(on_log: Callable[[Message], None] | None = None) -> Iterator[Any]:
+            transport = SubprocessTransport(worker_cmd)
+            try:
+                yield _RpcProxy(ConformanceService, transport, on_log, external_config=external_config)
+            finally:
+                transport.close()
+
+    def uploaded_objects() -> int:
+        response = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0)
+        response.raise_for_status()
+        return int(response.json()["object_count"])
+
+    if ROLE != "client":
+        name = "typescript-stdio"
+    else:
+        name = f"typescript-client-over-{'python' if SERVER == 'python' else 'typescript'}-stdio"
+    yield ByteStreamExternalTarget(name=name, connect=_connect, uploaded_objects=uploaded_objects)
 
 
 @pytest.fixture(scope="session")

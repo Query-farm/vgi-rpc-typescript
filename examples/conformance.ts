@@ -30,12 +30,24 @@
  *                         socket.write + drain), and AF_UNIX is where Bun's
  *                         large-write behaviour diverges from TCP's, so
  *                         `vgi-rpc-test --unix` is not redundant with --tcp.
+ *   --fake-storage <url>  Externalize response batches to the conformance fake
+ *                         object store at <url>. Byte-stream transports resolve
+ *                         pointers through the same code path HTTP does, and
+ *                         nothing exercised it until `TestExternalByteStream`;
+ *                         this flag is what gives that group a server.
+ *   --externalize-threshold <n>
+ *                         Byte size above which a batch is externalized.
+ *                         Defaults to 1 — every data batch goes through
+ *                         storage, which is what makes the group's upload
+ *                         assertions mean something.
  *
  * Run: bun run examples/conformance.ts
  */
 import { openSync } from "node:fs";
+import type { ExternalLocationConfig } from "../src/external.js";
 import { AccessLogHook, FdSink, serveTcp, serveUnix, VgiRpcServer } from "../src/index.js";
 import { protocol } from "./conformance-protocol.js";
+import { FakeStorage } from "./fake-storage.js";
 
 const args = process.argv.slice(2);
 let accessLogPath: string | undefined;
@@ -44,6 +56,8 @@ let accessLogAsync = false;
 let accessLogDebug = false;
 let tcpArg: string | undefined;
 let unixArg: string | undefined;
+let fakeStorageUrl: string | undefined;
+let externalizeThreshold = 1;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--access-log" && i + 1 < args.length) {
     accessLogPath = args[++i];
@@ -57,7 +71,26 @@ for (let i = 0; i < args.length; i++) {
     tcpArg = args[++i];
   } else if (args[i] === "--unix" && i + 1 < args.length) {
     unixArg = args[++i];
+  } else if (args[i] === "--fake-storage" && i + 1 < args.length) {
+    fakeStorageUrl = args[++i];
+  } else if (args[i] === "--externalize-threshold" && i + 1 < args.length) {
+    externalizeThreshold = Number.parseInt(args[++i], 10);
   }
+}
+
+let externalLocation: ExternalLocationConfig | undefined;
+if (fakeStorageUrl) {
+  if (!Number.isSafeInteger(externalizeThreshold) || externalizeThreshold < 1) {
+    process.stderr.write(`--externalize-threshold expects a positive integer, got '${externalizeThreshold}'\n`);
+    process.exit(2);
+  }
+  externalLocation = {
+    storage: new FakeStorage(fakeStorageUrl),
+    externalizeThresholdBytes: externalizeThreshold,
+    // The fake store vends http://127.0.0.1 URLs; the default validator is
+    // HTTPS-only and would (correctly) refuse them.
+    urlValidator: null,
+  };
 }
 
 let dispatchHook: AccessLogHook | undefined;
@@ -82,6 +115,7 @@ if (unixArg !== undefined) {
     unixPath: unixArg,
     enableDescribe: true,
     dispatchHook,
+    externalLocation,
     protocolVersion: protocol.protocolVersion,
     idleTimeout: 0,
   });
@@ -107,6 +141,7 @@ if (unixArg !== undefined) {
     port,
     enableDescribe: true,
     dispatchHook,
+    externalLocation,
     protocolVersion: protocol.protocolVersion,
     idleTimeout: 0,
   });
@@ -116,6 +151,6 @@ if (unixArg !== undefined) {
   // rather than a reserved method name; `enableDescribe` (the default) is what
   // hosts it, registered after the application protocol so it appears in its
   // own output without being special-cased.
-  const server = new VgiRpcServer(protocol, { enableDescribe: true, dispatchHook });
+  const server = new VgiRpcServer(protocol, { enableDescribe: true, dispatchHook, externalLocation });
   server.run();
 }

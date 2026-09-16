@@ -28,12 +28,13 @@
 import { openSync } from "node:fs";
 import { AccessLogHook, FdSink } from "../src/access-log.js";
 import { AuthContext } from "../src/auth.js";
-import type { ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider } from "../src/external.js";
+import type { ExternalLocationConfig } from "../src/external.js";
 import type { AuthenticateFn } from "../src/http/auth.js";
 import { AuthUnavailableError, createHttpHandler } from "../src/http/index.js";
 import type { TokenIdentity } from "../src/http/introspect.js";
 import type { DispatchHook, HookToken, ServeStartHook } from "../src/types.js";
 import { protocol } from "./conformance-protocol.js";
+import { FakeStorage } from "./fake-storage.js";
 
 /** Decode a hex string into bytes — used only for the `--token-key` fixture flag. */
 function hexToBytes(hex: string): Uint8Array {
@@ -175,62 +176,6 @@ const maxExternalizedResponseBytes = maxExternalizedResponseBytesArg ?? STRICT_D
 // both flags explicitly so server-side externalization fires on every batch
 // while clients can still send normal-sized inline requests.
 const maxRequestBytes = maxRequestBytesArg ?? externalizeThreshold;
-
-// ---------------------------------------------------------------------------
-// FakeStorage adapter — speaks the 4-endpoint contract documented in
-// vgi_rpc.conformance.fake_storage (POST /alloc, PUT /blob/{id}, ...).
-// ---------------------------------------------------------------------------
-
-class FakeStorage implements ExternalStorage, UploadUrlProvider {
-  constructor(private readonly baseUrl: string) {}
-
-  async upload(data: Uint8Array, contentEncoding: string): Promise<string> {
-    const allocResp = await fetch(`${this.baseUrl}/alloc`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: contentEncoding ? JSON.stringify({ content_encoding: contentEncoding }) : "{}",
-    });
-    if (!allocResp.ok) {
-      throw new Error(`fake-storage /alloc failed: ${allocResp.status}`);
-    }
-    const allocation = (await allocResp.json()) as {
-      object_url: string;
-      upload_url?: string;
-      download_url?: string;
-    };
-    const uploadUrl = allocation.upload_url ?? allocation.object_url;
-    const downloadUrl = allocation.download_url ?? allocation.object_url;
-
-    const putHeaders: Record<string, string> = { "Content-Type": "application/octet-stream" };
-    if (contentEncoding) putHeaders["Content-Encoding"] = contentEncoding;
-    const putResp = await fetch(uploadUrl, { method: "PUT", headers: putHeaders, body: data });
-    if (!putResp.ok) {
-      throw new Error(`fake-storage PUT failed: ${putResp.status}`);
-    }
-    return downloadUrl;
-  }
-
-  async generateUploadUrl(): Promise<UploadUrl> {
-    const allocResp = await fetch(`${this.baseUrl}/alloc`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    if (!allocResp.ok) {
-      throw new Error(`fake-storage /alloc failed: ${allocResp.status}`);
-    }
-    const allocation = (await allocResp.json()) as {
-      object_url: string;
-      upload_url?: string;
-      download_url?: string;
-    };
-    return {
-      uploadUrl: allocation.upload_url ?? allocation.object_url,
-      downloadUrl: allocation.download_url ?? allocation.object_url,
-      expiresAt: new Date(Date.now() + 3600_000),
-    };
-  }
-}
 
 let externalLocation: ExternalLocationConfig | undefined;
 let fakeStorage: FakeStorage | undefined;
