@@ -281,3 +281,92 @@ jobs:
         env:
           VGI_RPC_PYTHON_BIN: python3
         run: timeout 120 bun test test/client.test.ts test/client-native-conformance.test.ts
+
+  # Two tools in the Python reference compare *ports to each other*, which is
+  # the one thing no single repository's own suite can do. Until they ran here
+  # they ran on a maintainer's laptop, so the cross-implementation checks were
+  # the ones nothing enforced: four ports described `vgi_rpc.Reflection.v1` as
+  # having zero methods, six logged six different wrong `protocol_hash` values,
+  # and a client sent bare paths that only a stricter server rejected. This
+  # port is where the last of those hid longest — its server accepted both bare
+  # and namespaced paths, so a non-conformant peer stayed invisible for weeks.
+  # Agreement with the reference is exactly what that could not show.
+  #
+  # Kept as its own job rather than appended to `conformance`: this is seconds
+  # of work behind that job's ~20 minutes of timeouts, it wants to report red
+  # under its own name rather than as the tail of a long log, and the setup it
+  # duplicates is five lines of boilerplate.
+  cross-port-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install JS dependencies
+        # `examples/conformance.ts` imports `../src/index.js` directly, so the
+        # worker `describe_diff` spawns needs no build step — matching its
+        # SUBPROCESS_WORKERS entry, which gives this port a `cmd` and no
+        # `build`.
+        run: bun install
+
+      - name: Arrange the reference as a sibling checkout
+        run: |
+          REPOS="$(dirname "$GITHUB_WORKSPACE")"
+          # Both tools resolve a port as $VGI_RPC_REPOS/vgi-rpc-<name>, so this
+          # checkout has to already sit at that path. On GitHub's runners the
+          # workspace is .../work/<repo>/<repo>, so it does — but assert it
+          # here instead of assuming, because the failure it prevents is a
+          # layout mistake and both tools would otherwise report it as
+          # something else: describe_diff as a worker that would not spawn,
+          # identity_consistency as a repository that does not exist.
+          test -f "$REPOS/vgi-rpc-typescript/package.json" \
+            || { echo "expected this checkout at $REPOS/vgi-rpc-typescript"; ls -la "$REPOS"; exit 1; }
+          # main, deliberately unpinned. A pinned ref is how the Java port's
+          # Iroh lane reported green for eleven days against a reference that
+          # had moved. A reference change that breaks this port should turn
+          # this port red the day it lands.
+          git clone --depth 1 https://github.com/Query-farm/vgi-rpc-python "$REPOS/vgi-rpc-python"
+          echo "VGI_RPC_REPOS=$REPOS" >> "$GITHUB_ENV"
+
+      - name: Install the reference
+        # Same extras as the `conformance` job above: the tools import
+        # vgi_rpc.conformance and the reflection internals, and drive the
+        # in-process Python worker that serves as the comparison baseline.
+        run: pip install -e "$VGI_RPC_REPOS/vgi-rpc-python[http,cli,external,conformance]"
+
+      - name: Compare every hosted protocol against the reference
+        # Spawns this port's conformance worker, asks it over
+        # vgi_rpc.Reflection.v1 what it hosts, describes each protocol, and
+        # compares `protocol_hash` against Python's. Exits non-zero on drift,
+        # and also on an unreachable worker — fewer than two reachable ports is
+        # a failure, not a skip.
+        run: |
+          cd "$VGI_RPC_REPOS/vgi-rpc-python"
+          timeout 300 python tools/cross-port/describe_diff.py --only typescript
+
+      - name: Audit vgi_rpc.Identity.v1 against the reference
+        # A source-level grep, because Identity's security properties — guard
+        # order, window sizes, transient-vs-definitive — live in code the
+        # protocol hash does not cover.
+        #
+        # --verbose for the file list: the tool exits non-zero when a port's
+        # repository is missing (vgi-rpc-python 1eedad2 — before that it
+        # reported a clean run about a column it never filled in), but a
+        # passing exit code and an audit that read something are still
+        # different claims. The assertion below is on the latter: this port
+        # named, with a file count above zero. A regex over zero files matches
+        # nothing and agrees with everything.
+        run: |
+          cd "$VGI_RPC_REPOS/vgi-rpc-python"
+          set -o pipefail
+          timeout 120 python tools/cross-port/identity_consistency.py --only typescript --verbose \
+            | tee "$RUNNER_TEMP/identity.txt"
+          grep -qE '^=== typescript: [1-9][0-9]* identity file\(s\)' "$RUNNER_TEMP/identity.txt" \
+            || { echo "identity_consistency audited no TypeScript sources"; exit 1; }
