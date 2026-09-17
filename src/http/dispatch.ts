@@ -939,6 +939,21 @@ async function produceStreamResponse(
   if (!producerError) {
     for (const emitted of out.batches) {
       let batch = emitted.batch;
+      // Per-emit metadata goes on *before* externalization, and merged rather
+      // than replacing. WIRE_PROTOCOL.md §12: a pointer carries only
+      // `vgi_rpc.location` and `vgi_rpc.location.sha256`, and everything the
+      // writer attached rides on the data batch inside the fetched object — a
+      // resolving reader returns the inner batch's metadata and throws the
+      // pointer's away. Stamping after the upload put this metadata where no
+      // reader would ever see it; the same defect was fixed in the byte-stream
+      // dispatcher (`src/dispatch/stream.ts`) and lived on here. The stream's
+      // continuation token is unaffected: it rides on its own empty cursor
+      // batch below, which is never externalized.
+      if (emitted.metadata && emitted.metadata.size > 0) {
+        const md = new Map<string, string>(batch.metadata ?? []);
+        for (const [k, v] of emitted.metadata) md.set(k, v);
+        batch = withBatchMetadata(batch, md);
+      }
       // Externalised uploads are checked before they happen. The collector
       // permits only one DATA batch, but log/control batches may surround it.
       if (externalizationEnabled && ctx.externalLocation) {
@@ -948,11 +963,6 @@ async function produceStreamResponse(
           externalOvershoot = error as Error;
           break;
         }
-      }
-      if (emitted.metadata && emitted.metadata.size > 0) {
-        const md = new Map<string, string>(batch.metadata ?? []);
-        for (const [k, v] of emitted.metadata) md.set(k, v);
-        batch = withBatchMetadata(batch, md);
       }
       allBatches.push(batch);
     }

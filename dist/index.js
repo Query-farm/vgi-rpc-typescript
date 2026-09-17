@@ -9012,6 +9012,12 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
   if (!producerError) {
     for (const emitted of out.batches) {
       let batch = emitted.batch;
+      if (emitted.metadata && emitted.metadata.size > 0) {
+        const md = new Map(batch.metadata ?? []);
+        for (const [k, v] of emitted.metadata)
+          md.set(k, v);
+        batch = withBatchMetadata(batch, md);
+      }
       if (externalizationEnabled && ctx.externalLocation) {
         try {
           batch = await externalizeForResponseBudget(batch, ctx, method.name);
@@ -9019,12 +9025,6 @@ async function produceStreamResponse(method, state, outputSchema, inputSchema, c
           externalOvershoot = error;
           break;
         }
-      }
-      if (emitted.metadata && emitted.metadata.size > 0) {
-        const md = new Map(batch.metadata ?? []);
-        for (const [k, v] of emitted.metadata)
-          md.set(k, v);
-        batch = withBatchMetadata(batch, md);
       }
       allBatches.push(batch);
     }
@@ -16695,4 +16695,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=F4B97FE1C7EF153E64756E2164756E21
+//# debugId=BD54D3D48D3E22E064756E2164756E21

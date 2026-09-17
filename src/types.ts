@@ -569,8 +569,9 @@ export class OutputCollector implements CallContext {
 
   /** Emit a pre-built batch as the data batch for this call. */
   emit(batch: VgiBatch, metadata?: Map<string, string>): void;
-  /** Emit a data batch from column arrays keyed by field name. Int64 Number values are coerced to BigInt. */
-  emit(columns: Record<string, any[]>): void;
+  /** Emit a data batch from column arrays keyed by field name, optionally
+   *  carrying per-emit custom metadata. Int64 Number values are coerced to BigInt. */
+  emit(columns: Record<string, any[]>, metadata?: Map<string, string>): void;
   emit(batchOrColumns: VgiBatch | Record<string, any[]>, metadata?: Map<string, string>): void {
     let batch: VgiBatch;
     if (isBatch(batchOrColumns)) {

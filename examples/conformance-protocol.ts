@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance protocol — 87-method reference RPC service exercising all framework
+ * Conformance protocol — 88-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * This module exports the Protocol instance so it can be reused by both the
@@ -784,6 +784,46 @@ protocol.producer<{ rowsPerBatch: number; batchCount: number; current: number }>
     state.current++;
   },
   paramTypes: { rows_per_batch: "int", batch_count: "int" },
+});
+
+// Emitted on every batch of `produce_annotated_batches`. Deliberately
+// non-ASCII: a port that round-trips batch metadata through a latin-1 or
+// C-string path fails here rather than in someone's production data.
+const ANNOTATED_EMIT_LABEL = "\u00fcn\u00efcode-\u03bb";
+
+const ANNOTATED_SCHEMA = schema([field("value", int64())]);
+
+// Pins the one place per-emit custom metadata and externalization meet. This
+// port shipped a defect there: `dispatchStream` externalized a batch and
+// *then* stamped the per-emit metadata onto the result -- i.e. onto the
+// pointer -- and since `withBatchMetadata` replaces rather than merges, that
+// erased `vgi_rpc.location`. Nothing could reach it, because no conformance
+// method emitted per-batch metadata. `batch_index` varies per batch and the
+// suite checks which batch carried which value, so a port that caches the
+// first turn's metadata fails rather than passing on a constant label.
+protocol.producer<{ count: number; rowsPerBatch: number; current: number }>("produce_annotated_batches", {
+  params: { count: int, rows_per_batch: int },
+  outputSchema: ANNOTATED_SCHEMA,
+  init: ({ count, rows_per_batch }) => ({ count, rowsPerBatch: rows_per_batch, current: 0 }),
+  produce: (state, out) => {
+    if (state.current >= state.count) {
+      out.finish();
+      return;
+    }
+    const base = state.current * 1_000_000;
+    const values: number[] = [];
+    for (let row = 0; row < state.rowsPerBatch; row++) values.push(base + row);
+    out.emit(
+      { value: values },
+      new Map([
+        ["conformance.batch_index", String(state.current)],
+        ["conformance.batch_total", String(state.count)],
+        ["conformance.emit_label", ANNOTATED_EMIT_LABEL],
+      ]),
+    );
+    state.current++;
+  },
+  paramTypes: { count: "int", rows_per_batch: "int" },
 });
 
 protocol.producer<{ count: number; current: number }>("produce_with_logs", {

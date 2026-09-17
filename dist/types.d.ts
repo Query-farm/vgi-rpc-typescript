@@ -422,8 +422,9 @@ export declare class OutputCollector implements CallContext {
     get dataBatchIdx(): number | null;
     /** Emit a pre-built batch as the data batch for this call. */
     emit(batch: VgiBatch, metadata?: Map<string, string>): void;
-    /** Emit a data batch from column arrays keyed by field name. Int64 Number values are coerced to BigInt. */
-    emit(columns: Record<string, any[]>): void;
+    /** Emit a data batch from column arrays keyed by field name, optionally
+     *  carrying per-emit custom metadata. Int64 Number values are coerced to BigInt. */
+    emit(columns: Record<string, any[]>, metadata?: Map<string, string>): void;
     /** Single-row convenience. Wraps each value in `[value]` then calls `emit()`. */
     emitRow(values: Record<string, any>): void;
     /** Signal stream completion for producer streams. Throws if called on exchange streams. */

@@ -455,7 +455,7 @@ See the [Wire Protocol Specification](https://vgi-rpc.query.farm/wire-protocol) 
 | [`calculator.ts`](examples/calculator.ts) | Unary methods: add, multiply, divide |
 | [`greeter.ts`](examples/greeter.ts) | String parameters and results |
 | [`streaming.ts`](examples/streaming.ts) | Producer and exchange stream patterns |
-| [`conformance.ts`](examples/conformance.ts) | 87-method reference service for wire-protocol conformance testing |
+| [`conformance.ts`](examples/conformance.ts) | 88-method reference service for wire-protocol conformance testing |
 
 ## Development
 
