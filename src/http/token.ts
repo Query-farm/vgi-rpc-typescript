@@ -55,8 +55,13 @@ export interface TokenScope {
 // AAD prefixes. The state and call lines are versioned independently because
 // they change for independent reasons; the prefix is fixed-length and
 // therefore prefix-unambiguous with respect to the variable-length identity
-// tail that follows. The version numbering matches the Python reference so
-// the two ports construct byte-identical associated data.
+// tail that follows. The version numbering currently matches the Python
+// reference, so the two ports happen to construct byte-identical associated
+// data -- but that is not a contract and must not be relied on. Associated
+// data never crosses the wire and a sealed token is only ever opened by the
+// implementation that minted it, so this construction is internal to this
+// worker framework and MAY diverge (WIRE_PROTOCOL.md §5c). Several ports
+// already stamp different prefixes.
 const AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v6\0");
 const BOUND_AAD_PREFIX = _UTF8.encode("vgi_rpc.state.v7\0");
 const CALL_AAD_PREFIX = _UTF8.encode("vgi_rpc.call.v3\0");
