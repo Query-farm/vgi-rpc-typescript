@@ -547,8 +547,6 @@ describe("reserved endpoints belong to the server, not to a protocol", () => {
       prefix: PREFIX,
       authenticate,
       compressionLevel: null,
-      introspectResolver: () => ({ principal: "bob" }),
-      introspectPrincipals: ["alice"],
     });
   });
 
@@ -599,9 +597,12 @@ describe("reserved endpoints belong to the server, not to a protocol", () => {
     expect((await resp.json()).protocol).toBe(APP_PROTOCOL);
   });
 
-  test("the legacy __introspect_token__ JSON route is still served", async () => {
-    // Identity now also rides `vgi_rpc.Identity.v1`, but the prefix-level JSON
-    // route a proxy was built against does not move under a protocol segment.
+  test("the retired __introspect_token__ JSON route is not served", async () => {
+    // `vgi_rpc.Identity.v1` is the only introspection surface (IDENTITY_V1_SPEC
+    // §8). The prefix-level JSON route it replaced is gone -- no handler, no
+    // options, no capability header -- so a request for it is a flat
+    // one-segment path like any other, which no longer routes: the same 404
+    // the reference answers, and nothing on it resolves a credential.
     const resp = await handler(
       new Request(`${BASE}${PREFIX}/__introspect_token__`, {
         method: "POST",
@@ -609,7 +610,16 @@ describe("reserved endpoints belong to the server, not to a protocol", () => {
         body: JSON.stringify({ token: "opaque-credential" }),
       }),
     );
-    expect(resp.status).toBe(200);
-    expect((await resp.json()).principal).toBe("bob");
+    expect(resp.status).toBe(404);
+    expect(resp.headers.get("Content-Type") ?? "").not.toContain("application/json");
+    expect(resp.headers.get("VGI-Token-Introspection")).toBeNull();
+  });
+
+  test("health no longer advertises token introspection", async () => {
+    // A client learns whether a worker introspects from reflection
+    // (`vgi_rpc.Identity.v1` hosted), not from a capability header.
+    const resp = await handler(new Request(`${BASE}${PREFIX}/health`, { method: "OPTIONS" }));
+    expect(resp.headers.get("VGI-Token-Introspection")).toBeNull();
+    expect(resp.headers.get("Access-Control-Expose-Headers") ?? "").not.toContain("VGI-Token-Introspection");
   });
 });

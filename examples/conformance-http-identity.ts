@@ -107,12 +107,11 @@ const INTROSPECTOR_PRINCIPAL = "conformance-introspector";
  *  to it silently. */
 const MAX_AUTH_AGE = 900.0;
 
-/** Deliberately far above the default 20. Nearly every case in the group is an
- *  introspection, and a production-tuned limiter would fire mid-group with
- *  every resulting failure reading as the wrong guard. The limiter is tested
- *  port-locally (`test/token-identity.test.ts`) instead, where its refusal is
- *  distinguishable by message and so cannot be tested vacuously. */
-const INTROSPECT_RATE_LIMIT = 100_000;
+// There is no introspection rate limit to configure: introspection is not rate
+// limited (IDENTITY_V1_SPEC §4, "No rate limiter"), and the shared group's
+// `TestIntrospectionIsNotThrottled` asserts it with a concurrent burst of 60.
+// This fixture used to raise a limiter to 100,000 to keep it out of the group's
+// way; it went with the limiter.
 
 // ---------------------------------------------------------------------------
 // What the resolver answers (§3.3)
@@ -261,7 +260,6 @@ if (mode !== "off") {
       // not the protocol, and must shrink the protocol_hash with it.
       ...(mode === "both" ? { mintGrant: conformanceMintGrant } : {}),
       introspectPrincipals: [INTROSPECTOR_PRINCIPAL],
-      introspectRateLimit: INTROSPECT_RATE_LIMIT,
       maxAuthAge: MAX_AUTH_AGE,
     }),
   );

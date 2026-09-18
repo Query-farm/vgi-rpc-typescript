@@ -550,33 +550,6 @@ def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Ite
 
 
 @pytest.fixture(scope="session")
-def conformance_http_introspect_port() -> Iterator[int]:
-    """Bun conformance HTTP server with token introspection enabled.
-
-    Backs the shared ``TestTokenIntrospection`` group. It needs its own process
-    because the endpoint is absent unless explicitly enabled — which
-    ``TestTokenIntrospectionOffMode`` asserts against the plain worker.
-
-    ``--introspect`` also turns on the ``X-Conformance-Principal`` authenticator,
-    so the introspector allowlist has a caller identity to check. The resolver's
-    fixed constants live in ``examples/conformance-http.ts`` and must match
-    ``_INTROSPECTOR`` / ``_SUBJECT_TOKEN`` / ``_SUBJECT_PRINCIPAL`` /
-    ``_JWS_TRAP_TOKEN`` in the shared suite.
-
-    The fixture name is load-bearing — the suite looks it up with
-    ``getfixturevalue`` and skips the whole group if it is missing.
-    """
-    proc, port = _start_variant(
-        "introspect",
-        [*BUN_HTTP_WORKER, "--introspect"],
-        [_PY_SERVE_HTTP, "--http", "--introspect"],
-    )
-    yield port
-    proc.terminate()
-    proc.wait(timeout=5)
-
-
-@pytest.fixture(scope="session")
 def conformance_http_identity_port() -> Iterator[int]:
     """Bun worker hosting ``vgi_rpc.Identity.v1`` with *both* hooks configured.
 

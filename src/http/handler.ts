@@ -79,12 +79,6 @@ import {
 } from "./common.js";
 import { httpDispatchStreamExchange, httpDispatchStreamInit, httpDispatchUnary } from "./dispatch.js";
 import {
-  createIntrospector,
-  INTROSPECT_ENABLED_HEADER,
-  INTROSPECT_ENDPOINT,
-  introspectionDisabledResponse,
-} from "./introspect.js";
-import {
   configureOAuthPkce,
   handleBrowserGetRedirect,
   handleEarlyReturnTo,
@@ -578,27 +572,6 @@ export function createHttpHandler(
   const proxyAuthHeaders = [...(proxyProofRequired ? [PROOF_HEADER] : []), ...(options?.proxyAuthHeaders ?? [])];
   const proxyHint = buildProxyHint(proxyAuthHeaders);
 
-  // -------- Token introspection --------
-  // Validated here, before any request exists, so a misconfiguration fails at
-  // construction rather than at the first proxy preflight. Absent a resolver
-  // the endpoint holds nothing and looks nothing up — no worker grows a
-  // credential-to-identity oracle by upgrading a dependency.
-  const introspectPath = `${prefix}${INTROSPECT_ENDPOINT}`;
-  const introspector = options?.introspectResolver
-    ? createIntrospector({
-        resolver: options.introspectResolver,
-        principals: options.introspectPrincipals,
-        ttlSeconds: options.introspectTtlSeconds,
-        rateLimit: options.introspectRateLimit,
-      })
-    : null;
-  if (!introspector && options?.introspectPrincipals) {
-    throw new Error(
-      "introspectPrincipals was given without introspectResolver; the endpoint stays " +
-        "disabled, so the allowlist would have no effect. Pass both or neither.",
-    );
-  }
-
   // -------- Sticky session machinery --------
   const stickyEnabled = options?.enableSticky === true;
   const stickyDefaultTtl = options?.stickyDefaultTtl ?? 300;
@@ -691,11 +664,6 @@ export function createHttpHandler(
     if (proxyProofRequired) {
       headers.set(PROOF_REQUIRED_HEADER, "true");
     }
-    // Absent, never "false", when disabled: a proxy preflights this at boot
-    // rather than discovering at first login that the worker cannot answer.
-    if (introspector) {
-      headers.set(INTROSPECT_ENABLED_HEADER, "true");
-    }
     if (stickyEnabled) {
       headers.set(STICKY_ENABLED_HEADER, "true");
       headers.set(STICKY_DEFAULT_TTL_HEADER, String(Math.floor(stickyDefaultTtl)));
@@ -746,7 +714,6 @@ export function createHttpHandler(
       ? ["VGI-Upload-URL-Support", ...(maxUploadBytes != null ? ["VGI-Max-Upload-Bytes"] : [])]
       : []),
     ...(proxyProofRequired ? [PROOF_REQUIRED_HEADER] : []),
-    ...(introspector ? [INTROSPECT_ENABLED_HEADER] : []),
     // Not just the advert: a client that cannot read VGI-Session never learns
     // the token it is meant to replay, and one that cannot read the
     // VGI-Echo-<name> values cannot route the rest of the session. Sticky
@@ -1404,16 +1371,6 @@ export function createHttpHandler(
       return new Response("Method Not Allowed", { status: 405 });
     }
 
-    // POST {prefix}/__introspect_token__ on a worker that never enabled it.
-    // Answered ahead of authentication on purpose: "this worker does not do
-    // introspection" is not a secret, and a caller must learn it at preflight
-    // rather than after arranging credentials it will never need.
-    if (!introspector && path === introspectPath) {
-      const response = introspectionDisabledResponse();
-      addCorsHeaders(response.headers);
-      return response;
-    }
-
     // Build per-request dispatch context. `streamObserver` is where the
     // dispatcher reports the two stream facts the handler cannot see for
     // itself — the chain id sealed inside the tokens, and a cancel flag that
@@ -1459,16 +1416,6 @@ export function createHttpHandler(
       stickyContext?: StickySink;
       streamObserver: { streamId?: string; cancelled?: boolean };
     };
-
-    // POST {prefix}/__introspect_token__ — JSON in, JSON out, so it sits ahead
-    // of the Arrow media-type gate. It needs the caller's identity (the
-    // allowlist is the whole point) but none of the dispatch machinery below.
-    if (introspector && path === introspectPath) {
-      const response = await introspector.handle(request, ctx.authContext);
-      addCorsHeaders(response.headers);
-      addCapabilityHeaders(response.headers);
-      return response;
-    }
 
     // Hoisted ahead of sticky resolution so the SessionLost path's
     // `compressIfAccepted` call can see it. Honours the client's stated

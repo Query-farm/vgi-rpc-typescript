@@ -73,8 +73,6 @@ export {
   type CertValidateFn,
   chainAuthenticate,
   createHttpHandler,
-  createIntrospector,
-  DEFAULT_INTROSPECT_TTL_SECONDS,
   decodeContentEncoding,
   type EnvoyXfccSpiffeOptions,
   type ExtraRouteContext,
@@ -84,9 +82,6 @@ export {
   gcpLoadBalancerSpiffeProvider,
   type HttpHandlerOptions,
   headersFromNodeRawHeaders,
-  INTROSPECT_ENABLED_HEADER,
-  INTROSPECT_ENDPOINT,
-  type Introspector,
   type JwtAuthenticateOptions,
   jsonStateSerializer,
   jwtAuthenticate,
@@ -168,16 +163,14 @@ export {
 } from "./schema.js";
 export { type ServeStreamOptions, serveStream } from "./serve-stream.js";
 export { VgiRpcServer } from "./server.js";
-// `vgi_rpc.Identity.v1` -- the framework-owned identity protocol. Its payload
-// types and credential-shaped constants are also what the HTTP
-// `__introspect_token__` route uses, so they are exported from here rather than
-// from `./http/index.js`: one definition, two surfaces.
+// `vgi_rpc.Identity.v1` -- the framework-owned identity protocol, and the only
+// introspection surface: the HTTP `__introspect_token__` route it replaced is
+// retired (IDENTITY_V1_SPEC §8).
 export {
   buildIdentityProtocol,
   checkFreshness,
   checkIntrospector,
   DEFAULT_IDENTITY_TTL_SECONDS,
-  DEFAULT_INTROSPECT_RATE_LIMIT,
   DEFAULT_MAX_AUTH_AGE_SECONDS,
   encodeIssuedGrant,
   encodeTokenIdentity,
@@ -193,7 +186,6 @@ export {
   isJwsShaped,
   MAX_TOKEN_BYTES,
   normalisePrincipals,
-  RateLimiter,
   rejectJwsShaped,
   StaleAuthError,
   TOKEN_IDENTITY_SCHEMA,

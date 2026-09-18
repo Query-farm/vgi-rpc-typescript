@@ -27,7 +27,6 @@ import {
   IntrospectionRefusedError,
   type IssuedGrant,
   MAX_TOKEN_BYTES,
-  RateLimiter,
   rejectJwsShaped,
   StaleAuthError,
   type TokenIdentity,
@@ -268,7 +267,7 @@ describe("introspection is locked down", () => {
   });
 
   test("the authorization guard runs before the credential is even measured", async () => {
-    // Steps 2–3 come before step 4 on purpose, and the order is load-bearing:
+    // Step 2 comes before step 3 on purpose, and the order is load-bearing:
     // an unauthorized caller presenting an over-long or JWS-shaped subject must
     // still get `introspection_refused`, never `token_unresolved`. Reordering
     // for tidiness would leak that the subject was malformed to someone with no
@@ -279,16 +278,6 @@ describe("introspection is locked down", () => {
       expect(err).toBeInstanceOf(IntrospectionRefusedError);
       expect(err.errorKind).toBe("introspection_refused");
     }
-  });
-
-  test("the rate limit is checked before the credential too", async () => {
-    // Same reason: an over-budget caller must not be told anything about the
-    // subject, including that it was the wrong shape.
-    const impl = introspecting({ introspectRateLimit: 1 });
-    await impl.introspectToken("good", auth("proxy"));
-    const err = await impl.introspectToken("aaa.bbb.ccc", auth("proxy")).catch((e) => e);
-    expect(err).toBeInstanceOf(IntrospectionRefusedError);
-    expect(err.message).toMatch(/rate limit/);
   });
 
   test("rejections are uniform", async () => {
@@ -338,11 +327,11 @@ describe("introspection is locked down", () => {
     expect(err).not.toBeInstanceOf(TokenUnresolvedError);
   });
 
-  test("the HTTP route's unavailable error keeps its transient classification", async () => {
-    // One resolver type serves both this protocol and the older
-    // `__introspect_token__` route, whose "not knowable" is spelled
-    // `AuthUnavailableError`. Propagating it untranslated would put an outage
-    // on the wire with no `error_kind` at all — and `error_kind` is the only
+  test("the HTTP layer's unavailable error keeps its transient classification", async () => {
+    // A resolver backed by the HTTP auth layer spells "not knowable"
+    // `AuthUnavailableError`, as the retired `__introspect_token__` route did.
+    // Propagating it untranslated would put an outage on the wire with no
+    // `error_kind` at all — and `error_kind` is the only
     // definitive-versus-transient signal a caller gets.
     const impl = new IdentityImpl({
       resolveToken: () => {
@@ -376,12 +365,21 @@ describe("introspection is locked down", () => {
     expect((await advanced(new Request("http://worker.test/"))).principal).toBe("fallback");
   });
 
-  test("rate limited", async () => {
-    // Bounds, rather than closes, the oracle an allowlisted caller still has.
-    const impl = introspecting({ introspectRateLimit: 2 });
-    expect((await impl.introspectToken("good", auth("proxy"))).principal).toBe("bob");
-    expect((await impl.introspectToken("good", auth("proxy"))).principal).toBe("bob");
-    await expect(impl.introspectToken("good", auth("proxy"))).rejects.toThrow(/rate limit/);
+  test("introspection is not rate limited", async () => {
+    // The allowlisted caller is answered however often it asks. The caller is
+    // the asker -- a proxy -- introspecting on behalf of every client that
+    // presents a bearer, so a per-caller limit was one budget for every user's
+    // login, drainable by unauthenticated junk credentials. And its refusal was
+    // `introspection_refused`, which a caller may cache as definitive.
+    const impl = introspecting();
+    for (let i = 0; i < 500; i++) {
+      expect((await impl.introspectToken("good", auth("proxy"))).principal).toBe("bob");
+    }
+    // Concurrently too, inside one would-be window.
+    const burst = await Promise.all(
+      Array.from({ length: 60 }, () => impl.introspectToken("good", auth("proxy")).catch((e) => e)),
+    );
+    expect(burst.filter((r) => !(r && typeof r === "object" && "principal" in r))).toEqual([]);
   });
 
   test("an allowlist is mandatory", () => {
@@ -519,39 +517,6 @@ describe("diagnostics", () => {
     // Hoisted onto the error batch as `vgi_rpc.error_kind`, which reads the
     // instance property — a static alone would never reach the wire.
     expect(new TokenUnresolvedError("unresolved").errorKind).toBe("token_unresolved");
-  });
-});
-
-describe("the rate limiter", () => {
-  // Fixed-window, because the state is two integers rather than an aged float.
-
-  test("admits up to the limit", () => {
-    const limiter = new RateLimiter(3);
-    expect([0, 1, 2, 3].map(() => limiter.allow("a", 100_000))).toEqual([true, true, true, false]);
-  });
-
-  test("the window rolls", () => {
-    const limiter = new RateLimiter(1);
-    expect(limiter.allow("a", 100_000)).toBe(true);
-    expect(limiter.allow("a", 100_500)).toBe(false);
-    expect(limiter.allow("a", 101_500)).toBe(true);
-  });
-
-  test("callers are independent", () => {
-    // One caller exhausting its budget must not refuse another.
-    const limiter = new RateLimiter(1);
-    expect(limiter.allow("a", 100_000)).toBe(true);
-    expect(limiter.allow("b", 100_000)).toBe(true);
-    expect(limiter.allow("a", 100_000)).toBe(false);
-  });
-
-  test("cycling keys cannot grow the map", () => {
-    // Whole-map reset rather than per-key ageing, which would let a caller
-    // cycling keys grow the map without bound between sweeps.
-    const limiter = new RateLimiter(1);
-    for (let i = 0; i < 1000; i++) limiter.allow(`k${i}`, 100_000);
-    limiter.allow("fresh", 200_000);
-    expect(limiter.size).toBe(1);
   });
 });
 
@@ -719,12 +684,17 @@ describe("the guards fire on the dispatch path, not only in isolation", () => {
     expect(seen).toEqual([]);
   });
 
-  test("the rate limit is enforced by introspectToken", async () => {
-    const { impl, seen } = probe({ introspectRateLimit: 1 });
-    await impl.introspectToken("resolvable", auth("proxy"));
-    await expect(impl.introspectToken("resolvable", auth("proxy"))).rejects.toThrow(IntrospectionRefusedError);
-    // One call got through; the second never reached the resolver.
-    expect(seen).toEqual(["resolvable"]);
+  test("every call from the allowlisted caller reaches the resolver", async () => {
+    // The absence of a throttle, in the resolvable-probe form: nothing sits
+    // between the allowlist and the resolver, so a burst three times the
+    // retired 20-per-second default is resolved in full. Mutation-checked by
+    // reinstating a per-caller limit, which turns this red on `seen`.
+    const { impl, seen } = probe();
+    const burst = await Promise.all(
+      Array.from({ length: 60 }, (_, i) => impl.introspectToken(`resolvable-${i}`, auth("proxy"))),
+    );
+    expect(burst.every((identity) => identity.principal === "bob")).toBe(true);
+    expect(seen.length).toBe(60);
   });
 
   test("freshness is enforced by issueGrant, not only by checkFreshness", async () => {

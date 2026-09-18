@@ -19,10 +19,6 @@
  * drives. CORS is strictly opt-in, so the plain worker keeps answering
  * preflights with no `Access-Control-Allow-Origin` for `TestCorsOffMode`.
  *
- * Pass `--introspect` for the token-introspection variant `TestTokenIntrospection`
- * drives. Also opt-in, so the plain worker keeps answering `404 not_enabled` for
- * `TestTokenIntrospectionOffMode`.
- *
  * Run: bun run examples/conformance-http.ts
  */
 import { openSync } from "node:fs";
@@ -30,8 +26,7 @@ import { AccessLogHook, FdSink } from "../src/access-log.js";
 import { AuthContext } from "../src/auth.js";
 import type { ExternalLocationConfig } from "../src/external.js";
 import type { AuthenticateFn } from "../src/http/auth.js";
-import { AuthUnavailableError, createHttpHandler } from "../src/http/index.js";
-import type { TokenIdentity } from "../src/http/introspect.js";
+import { createHttpHandler } from "../src/http/index.js";
 import type { DispatchHook, HookToken, ServeStartHook } from "../src/types.js";
 import { protocol } from "./conformance-protocol.js";
 import { FakeStorage } from "./fake-storage.js";
@@ -84,10 +79,6 @@ let callStateCacheEntries: number | undefined;
 // Backs TestCors. Left unset the handler emits no CORS headers at all, which
 // is what TestCorsOffMode asserts against the plain worker.
 let corsOrigin: string | undefined;
-// Backs TestTokenIntrospection. Left off the endpoint stays disabled and
-// answers a definitive 404, which is what TestTokenIntrospectionOffMode
-// asserts against the plain worker.
-let introspect = false;
 // Access-log fixture flags, mirroring the Python reference's CLI. The sample
 // rate is validated when the hook is built — i.e. at startup, so `100` meaning
 // "100%" is a launch failure rather than a deployment that silently logs
@@ -116,8 +107,6 @@ for (let i = 0; i < args.length; i++) {
     callStateCacheEntries = 0;
   } else if (a === "--cors-origin" && i + 1 < args.length) {
     corsOrigin = args[++i];
-  } else if (a === "--introspect") {
-    introspect = true;
   } else if (a === "--response-compression" && i + 1 < args.length) {
     const v = args[++i];
     responseCompressionLevel = v === "off" || v === "none" ? null : Number.parseInt(v, 10);
@@ -286,46 +275,6 @@ const principalHeaderAuth: AuthenticateFn = (request: Request) => {
   return principal ? new AuthContext("conformance", true, principal) : AuthContext.anonymous();
 };
 
-// ---------------------------------------------------------------------------
-// Token-introspection fixture wiring
-// ---------------------------------------------------------------------------
-
-/** Fixed conformance values a runner supplying `conformance_http_introspect_port`
- *  MUST configure: the shared tests post the subject credential and assert the
- *  principal, so these are part of the fixture's contract, not decoration. */
-const CONFORMANCE_INTROSPECTOR = "conformance-introspector";
-const CONFORMANCE_SUBJECT_TOKEN = "conformance-opaque-subject-token";
-const CONFORMANCE_SUBJECT_PRINCIPAL = "subject@conformance.example";
-const CONFORMANCE_SUBJECT_TOKEN_NAME = "conformance-subject";
-/** A JWS-shaped credential the resolver *would* resolve. Deliberately
- *  resolvable: if the fixture only offered an unknown JWS, a port with no shape
- *  guard would reject it as unknown and pass the test for the wrong reason.
- *  Made resolvable, the guard becomes observable — a port that fails to reject
- *  JWS shapes answers 200 and fails. */
-const CONFORMANCE_JWS_TRAP_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl";
-/** The credential whose resolution is *unknowable* rather than unknown. The
- *  shared suite posts it to check that a backing-store outage surfaces as a
- *  transient 503 and not as the endpoint's own definitive 404 — which a caller
- *  may negative-cache, so a briefly unreachable store would be remembered as a
- *  bad credential for the cache's lifetime. */
-const CONFORMANCE_UNAVAILABLE_TOKEN = "conformance-unavailable-token";
-
-/** Resolve the fixed credentials the shared tests post.
- *
- *  Three answers, deliberately: an identity, `null` for "does not resolve", and
- *  a thrown {@link AuthUnavailableError} for "I could not find out". The third is
- *  not a flavour of the second — `null` becomes the definitive 404 a caller may
- *  negative-cache. */
-function conformanceResolver(token: string): TokenIdentity | null {
-  if (token === CONFORMANCE_UNAVAILABLE_TOKEN) {
-    throw new AuthUnavailableError("conformance: mapping store unreachable");
-  }
-  if (token === CONFORMANCE_SUBJECT_TOKEN || token === CONFORMANCE_JWS_TRAP_TOKEN) {
-    return { principal: CONFORMANCE_SUBJECT_PRINCIPAL, tokenName: CONFORMANCE_SUBJECT_TOKEN_NAME, ttlSeconds: 300 };
-  }
-  return null;
-}
-
 const handler = createHttpHandler(protocol, {
   serverId: serverIdArg ?? "conformance-http",
   protocolName: "ConformanceService",
@@ -333,11 +282,8 @@ const handler = createHttpHandler(protocol, {
   stickyDefaultTtl: stickyTtlArg ?? 300,
   ...(tokenKeyHex ? { tokenKey: hexToBytes(tokenKeyHex) } : {}),
   ...(callStateCacheEntries !== undefined ? { callStateCacheEntries } : {}),
-  // `--introspect` implies principal-header auth so the introspector allowlist
-  // has something to check.
-  ...(stickyAuth || introspect ? { authenticate: principalHeaderAuth } : {}),
+  ...(stickyAuth ? { authenticate: principalHeaderAuth } : {}),
   ...(corsOrigin ? { corsOrigins: corsOrigin } : {}),
-  ...(introspect ? { introspectResolver: conformanceResolver, introspectPrincipals: [CONFORMANCE_INTROSPECTOR] } : {}),
   stickyEchoHeaders: { "x-vgi-conformance-echo": "conformance-fixed-marker" },
   _onStickyHandle: (h) => {
     stickyDrainHandle = h;

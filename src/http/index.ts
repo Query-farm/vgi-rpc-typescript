@@ -17,14 +17,6 @@ export {
   UPLOAD_URL_RESPONSE_SCHEMA,
 } from "./common.js";
 export { createHttpHandler } from "./handler.js";
-export type { Introspector, TokenIdentity, TokenResolver } from "./introspect.js";
-export {
-  createIntrospector,
-  DEFAULT_INTROSPECT_TTL_SECONDS,
-  INTROSPECT_ENABLED_HEADER,
-  INTROSPECT_ENDPOINT,
-  tokenDigest,
-} from "./introspect.js";
 export type { JwtAuthenticateOptions } from "./jwt.js";
 export { jwtAuthenticate } from "./jwt.js";
 export type { CertValidateFn, XfccElement, XfccValidateFn } from "./mtls.js";

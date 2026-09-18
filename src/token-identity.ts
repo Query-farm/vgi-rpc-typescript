@@ -7,9 +7,10 @@
 // protocol: a bearer token is not a VGI concept, the auth primitives it builds
 // on (`AuthContext`, `chainAuthenticate`, `AuthUnavailableError`) are already
 // here, and implementing it once is the whole point. It was previously an HTTP
-// JSON route, `POST {prefix}/__introspect_token__` (still served by
-// `src/http/introspect.ts`), which meant it existed only on one transport and
-// had to be hand-written in every port.
+// JSON route, `POST {prefix}/__introspect_token__`, which meant it existed only
+// on one transport and had to be hand-written in every port. That route is
+// retired (IDENTITY_V1_SPEC §8): this protocol is the only introspection
+// surface, so there is one set of guards to keep right rather than two.
 //
 // Two methods share this module's guards, and they are guarded *differently*
 // on purpose.
@@ -20,14 +21,24 @@
 // using credentials the worker does not hold -- storage credentials,
 // entitlement lookups, policy-tier selection. "Trust it as much as you trust
 // the worker" is the wrong frame: it must be trusted *more*. So every rejection
-// is uniform, the caller must be on an allowlist with no permissive default, a
-// JWS-shaped subject never reaches the resolver, and the whole thing is rate
-// limited.
+// is uniform, the caller must be on an allowlist with no permissive default, and
+// a JWS-shaped subject never reaches the resolver.
+//
+// It is deliberately **not rate limited**. The allowlist is the control: the
+// only callers are trusted askers, in practice a proxy. A per-caller limit there
+// bounds only guessing, which is hopeless against a random credential at any
+// rate, and not the real harm of a leaked introspector credential -- resolving a
+// *stolen* credential to its owner takes one call. What it did do was harm: the
+// asker calls on behalf of everyone who presents a bearer, so a per-caller
+// budget is one budget for every user's login, drainable by unauthenticated junk
+// credentials. Throttling untrusted traffic belongs where it arrives -- at the
+// asker, per client -- and a throttled answer is never `introspection_refused`,
+// which a caller may cache as definitive.
 //
 // `issue_grant` mints a credential for the *calling* user, so it is not an
-// oracle about anybody else. It therefore needs no allowlist and no rate limit,
-// and its rejections are deliberately *actionable*: a console that cannot tell
-// "your login is too old" from "no" cannot know to re-prompt.
+// oracle about anybody else. It therefore needs no allowlist, and its
+// rejections are deliberately *actionable*: a console that cannot tell "your
+// login is too old" from "no" cannot know to re-prompt.
 //
 // Errors carry a stable `errorKind`. That is load-bearing rather than
 // decorative: these used to be a bespoke HTTP route whose callers classified
@@ -87,9 +98,6 @@ export const MAX_TOKEN_BYTES = 4096;
  *  -- for any path the asker serves without re-presenting the credential. */
 export const DEFAULT_IDENTITY_TTL_SECONDS = 300;
 
-/** Introspections admitted per caller per one-second window, by default. */
-export const DEFAULT_INTROSPECT_RATE_LIMIT = 20;
-
 /** How recently a caller must have authenticated to mint a grant, in seconds. */
 export const DEFAULT_MAX_AUTH_AGE_SECONDS = 900;
 
@@ -116,12 +124,16 @@ export async function tokenDigest(token: string): Promise<string> {
 // `IdentityUnavailableError` depends on; see its docstring.
 
 /**
- * The caller may not introspect.
+ * The caller may not introspect -- it is not on the allowlist.
  *
  * Definitive: a caller may cache this. Authentication is not the same
  * capability as introspection -- a deployment where any valid credential may
  * introspect lets any user test guesses of any other user's credential at
  * unlimited rate, and resolve a stolen one to its owner.
+ *
+ * Never a throttle. Because a caller may cache this kind, a throttled answer
+ * reported as it would negative-cache valid credentials; anything transient is
+ * {@link IdentityUnavailableError}.
  */
 export class IntrospectionRefusedError extends Error {
   /** Typed `vgi_rpc.error_kind` marker for this error class. */
@@ -222,49 +234,6 @@ export class IdentityUnavailableError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * Fixed-window request limiter, keyed by caller.
- *
- * Present because introspection is a credential-to-identity oracle even when
- * correctly restricted: an allowlisted caller whose own credential leaks can
- * still test guesses. Rate limiting does not close that, it bounds it.
- *
- * Fixed-window rather than a token bucket: a window admits at most twice the
- * rate across a boundary, which is a rounding error here, and the state is two
- * integers per caller rather than a float that has to be aged.
- *
- * `now` is milliseconds (`Date.now()` by default) so the injectable clock and
- * the ambient one agree on units.
- */
-export class RateLimiter {
-  private readonly counts = new Map<string, number>();
-  private windowStart = 0;
-
-  constructor(
-    private readonly perWindow: number,
-    private readonly windowMs = 1000,
-  ) {}
-
-  /** Return `true` if `key` may make a request in the current window. */
-  allow(key: string, now: number = Date.now()): boolean {
-    if (now - this.windowStart >= this.windowMs) {
-      // Whole-map reset rather than per-key ageing: an attacker cycling keys
-      // cannot grow the map beyond one window's worth.
-      this.counts.clear();
-      this.windowStart = now;
-    }
-    const count = this.counts.get(key) ?? 0;
-    if (count >= this.perWindow) return false;
-    this.counts.set(key, count + 1);
-    return true;
-  }
-
-  /** Number of callers tracked in the current window. Diagnostics only. */
-  get size(): number {
-    return this.counts.size;
-  }
-}
-
-/**
  * Validate the introspector allowlist, returning it as a set.
  *
  * Throws when the allowlist is missing or empty. There is no permissive
@@ -356,10 +325,7 @@ export function trimForShapeTest(token: string): string {
  *  happened to match before a single trailing newline and refused it, but not
  *  before two, so it was neither strict nor consistent; seven regex dialects
  *  disagree about anchors and always will. Trimming first depends on none of
- *  them, and can only ever *add* refusals.
- *
- *  Shared with the HTTP `__introspect_token__` route so the two surfaces cannot
- *  drift into refusing different credentials. */
+ *  them, and can only ever *add* refusals. */
 export function isJwsShaped(token: string): boolean {
   return JWS_SHAPED.test(trimForShapeTest(token));
 }
@@ -484,8 +450,7 @@ export interface IssuedGrant {
  * Throw {@link IdentityUnavailableError} when the answer is not knowable -- a
  * backing store that is down is not the same as a credential that is unknown,
  * and a caller that negative-caches the second must not cache the first. The
- * HTTP `__introspect_token__` route shares this type and spells that
- * `AuthUnavailableError`; either is accepted on either surface.
+ * HTTP layer's `AuthUnavailableError` is accepted too, and translated.
  */
 export type TokenResolver = (credential: string) => TokenIdentity | null | Promise<TokenIdentity | null>;
 
@@ -558,10 +523,9 @@ export interface IdentityOptions {
   /** `(principal, purpose, scopes, ttlSeconds) -> IssuedGrant`. */
   mintGrant?: GrantMinter;
   /** Who may call `introspect_token`. Required whenever `resolveToken` is
-   *  supplied; there is no permissive default. */
+   *  supplied; there is no permissive default. The allowlist is the control:
+   *  introspection is not rate limited (see the module comment). */
   introspectPrincipals?: Iterable<string>;
-  /** Introspections allowed per caller per second. */
-  introspectRateLimit?: number;
   /** How recently a caller must have authenticated to mint a grant, in
    *  seconds. */
   maxAuthAge?: number;
@@ -571,7 +535,7 @@ export interface IdentityOptions {
  * Applies this module's guards, then delegates to worker-supplied hooks.
  *
  * The framework owns the guards and owns none of the policy. It decides who may
- * ask, how often, and what shape of credential is refused outright; the worker
+ * ask and what shape of credential is refused outright; the worker
  * decides what a credential resolves to and whether a grant is minted. That
  * split is deliberate -- the guards are the part that is identical in every
  * deployment and catastrophic to get wrong, and the policy is the part that is
@@ -589,7 +553,6 @@ export class IdentityImpl {
   private readonly resolveTokenHook?: TokenResolver;
   private readonly mintGrantHook?: GrantMinter;
   private readonly principals: ReadonlySet<string>;
-  private readonly limiter: RateLimiter;
   private readonly maxAuthAge: number;
 
   constructor(options: IdentityOptions = {}) {
@@ -600,7 +563,6 @@ export class IdentityImpl {
     // every introspection should fail to start rather than serve traffic until
     // someone tries.
     this.principals = this.resolveTokenHook ? normalisePrincipals(options.introspectPrincipals) : new Set<string>();
-    this.limiter = new RateLimiter(options.introspectRateLimit ?? DEFAULT_INTROSPECT_RATE_LIMIT);
   }
 
   /**
@@ -620,34 +582,30 @@ export class IdentityImpl {
   /**
    * Resolve `token`, after checking the caller may ask.
    *
-   * The guard order is load-bearing and must not be tidied: authorization and
-   * the rate limit come **before** anything looks at the subject credential --
-   * including its length and its shape -- so an unauthorized caller learns
-   * nothing about it, not even how long looking at it took.
+   * The guard order is load-bearing and must not be tidied: authorization
+   * comes **before** anything looks at the subject credential -- including its
+   * length and its shape -- so an unauthorized caller learns nothing about it,
+   * not even how long looking at it took.
    */
   async introspectToken(token: string, auth: AuthContext): Promise<TokenIdentity> {
     if (!this.resolveTokenHook) {
       throw new IntrospectionRefusedError("this worker does not resolve credentials");
     }
 
-    const caller = checkIntrospector(auth, this.principals);
-    if (!this.limiter.allow(caller)) {
-      throw new IntrospectionRefusedError("introspection rate limit exceeded");
-    }
+    checkIntrospector(auth, this.principals);
     rejectJwsShaped(token);
 
     let identity: TokenIdentity | null;
     try {
       identity = await this.resolveTokenHook(token);
     } catch (err) {
-      // The HTTP `__introspect_token__` route and this protocol share one
-      // resolver type, and that route's "I could not find out" is
-      // `AuthUnavailableError`. Translated rather than propagated as-is:
-      // transient-versus-definitive reaches a caller only through
-      // `error_kind`, and an untranslated error carries none -- so a resolver
-      // written against the older surface would report an outage as an
-      // unclassified failure, which is precisely the distinction this taxonomy
-      // exists to preserve.
+      // A resolver backed by the HTTP auth layer spells "I could not find out"
+      // `AuthUnavailableError` (as the retired `__introspect_token__` route
+      // did). Translated rather than propagated as-is: transient-versus-
+      // definitive reaches a caller only through `error_kind`, and an
+      // untranslated error carries none -- so such a resolver would report an
+      // outage as an unclassified failure, which is precisely the distinction
+      // this taxonomy exists to preserve.
       if (err instanceof AuthUnavailableError) {
         throw new IdentityUnavailableError(err.detail, err.retryAfter);
       }
