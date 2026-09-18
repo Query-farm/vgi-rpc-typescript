@@ -113,7 +113,8 @@ export interface StatusRow {
   socket: string;
   /** Unix epoch seconds the worker was launched, or `null` when unknown. */
   startedAt: number | null;
-  /** Whether a probe connection to {@link StatusRow.socket} currently succeeds. */
+  /** Whether a worker is listening on {@link StatusRow.socket} -- a busy one,
+   *  whose accept queue is full, included. See {@link probeSocket}. */
   alive: boolean;
 }
 
@@ -126,28 +127,80 @@ export interface GcResult {
   skippedInUse: string[];
 }
 
-/** Probe whether anyone is currently accepting on `sockPath`. */
+/** Pauses between re-probes of a refused socket -- see {@link probeSocket}. A
+ *  socket left by a dead worker costs this once (350 ms), before it is
+ *  replaced. The same schedule as `vgi_rpc.launcher` and the C++ launcher. */
+const PROBE_REFUSED_BACKOFF_MS: readonly number[] = [50, 100, 200];
+
+/** Connect error codes meaning the listener's accept queue is full: a live,
+ *  busy worker. Linux reports it for a non-blocking AF_UNIX connect. */
+const ACCEPT_QUEUE_FULL: ReadonlySet<string> = new Set(["EAGAIN", "EWOULDBLOCK"]);
+
+/** What one connect to a launched worker's socket found. */
+type ProbeOutcome = "alive" | "refused" | "dead";
+
+/** One connect to `sockPath`, classified; closed at once. Never rejects. */
+function probeOnce(net: typeof import("node:net"), sockPath: string, timeoutMs: number): Promise<ProbeOutcome> {
+  return new Promise<ProbeOutcome>((resolve) => {
+    const sock = net.createConnection({ path: sockPath });
+    const timer = setTimeout(() => {
+      sock.destroy();
+      resolve("dead");
+    }, timeoutMs);
+    sock.once("connect", () => {
+      clearTimeout(timer);
+      sock.end();
+      resolve("alive");
+    });
+    sock.once("error", (err: Error & { code?: string }) => {
+      clearTimeout(timer);
+      sock.destroy();
+      const code = err?.code ?? "";
+      resolve(ACCEPT_QUEUE_FULL.has(code) ? "alive" : code === "ECONNREFUSED" ? "refused" : "dead");
+    });
+  });
+}
+
+/**
+ * Probe whether a worker is listening on `sockPath`.
+ *
+ * A listener whose accept queue is full is alive, only busy -- and a false
+ * "dead" here is destructive, because `launch()` then unlinks the socket
+ * out from under the live worker and spawns a duplicate (and {@link gcStateDir}
+ * reaps a live worker's files). A 32-process run of the Python reference
+ * produced 64 workers for 2 commands that way.
+ *
+ * So one connect is classified three ways:
+ *
+ * - connected, or `EAGAIN`/`EWOULDBLOCK` (Linux's report of a full queue on a
+ *   non-blocking AF_UNIX connect) -- **alive**;
+ * - `ECONNREFUSED` -- re-probed after 50, 100 and 200 ms before it is believed,
+ *   because a full queue can report as a refusal too, indistinguishable from
+ *   no listener at all;
+ * - anything else (absent, timed out, unreachable) -- **dead**.
+ *
+ * Which runtimes can tell a full queue from a refusal is measured, not
+ * assumed: on Linux, Node reports it as `EAGAIN`, but Bun (1.4.2) reports it as
+ * `ECONNREFUSED`, exactly like macOS does for every runtime. Under Bun, then, a
+ * busy worker is recognised only if it frees a slot within the re-probe window
+ * -- the same guarantee the reference gives on macOS.
+ *
+ * This asks "is anything listening", not "is it responsive": a connect lands in
+ * the queue of a worker that never accepts, so a successful one never proved
+ * that either. `timeoutMs` bounds each connect. Mirrors `vgi_rpc.launcher._probe`
+ * and the C++ launcher's `ProbeAlive`.
+ */
 export async function probeSocket(sockPath: string, timeoutMs = 2000): Promise<boolean> {
   if (!existsSync(sockPath)) return false;
   // Lazy require so workerd / browser bundles that never call probeSocket
   // don't trip on `node:net`.
   const net = await import("node:net");
-  return new Promise<boolean>((resolve) => {
-    const sock = net.createConnection({ path: sockPath });
-    const timer = setTimeout(() => {
-      sock.destroy();
-      resolve(false);
-    }, timeoutMs);
-    sock.once("connect", () => {
-      clearTimeout(timer);
-      sock.end();
-      resolve(true);
-    });
-    sock.once("error", () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-  });
+  for (let attempt = 0; ; attempt++) {
+    const outcome = await probeOnce(net, sockPath, timeoutMs);
+    if (outcome !== "refused") return outcome === "alive";
+    if (attempt >= PROBE_REFUSED_BACKOFF_MS.length) return false;
+    await new Promise((r) => setTimeout(r, PROBE_REFUSED_BACKOFF_MS[attempt]));
+  }
 }
 
 function tryReadMeta(metaPath: string): { cmd: string[]; cwd: string; startedAt: number | null } {
