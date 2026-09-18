@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance protocol — 88-method reference RPC service exercising all framework
+ * Conformance protocol — 89-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * This module exports the Protocol instance so it can be reused by both the
@@ -37,6 +37,7 @@ import {
   timeMicro,
   timestampMicro,
   utf8,
+  type VgiBatch,
 } from "../src/arrow/index.js";
 import { Protocol } from "../src/index.js";
 import {
@@ -1021,6 +1022,53 @@ protocol.exchange<{ callCount: number }>("exchange_zero_columns", {
     // exactly one data batch is emitted per call — emit({}) is the
     // zero-column equivalent.
     out.emit({});
+  },
+});
+
+// Reports, per input, the metadata `exchange` was handed: `seen` is the value
+// of `vgi.conformance.input` (empty when absent) and `keys` every key present,
+// sorted and comma-joined. The pair lets the suite check both halves of the
+// rule -- the input's own metadata arrives, the HTTP cursor and call token do
+// not. Read off the input batch, as a real handler does (vgi-typescript's
+// table-in-out reads `vgi.cache.if_none_match` from `input.metadata`).
+//
+// This port hands the same metadata to handlers a second way,
+// `ctx.inputMetadata`, and the two disagreeing is a defect of its own: over
+// HTTP the context copy was never set at all while the batch carried the
+// tokens. Refusing a turn on which they differ puts that accessor under every
+// transport the suite runs as well.
+const INPUT_METADATA_KEY = "vgi.conformance.input";
+const INPUT_METADATA_INPUT = schema([field("value", float64())]);
+const INPUT_METADATA_OUTPUT = schema([field("seen", utf8()), field("keys", utf8())]);
+
+function sortedKeys(metadata: ReadonlyMap<string, string> | null | undefined): string {
+  return metadata ? [...metadata.keys()].sort().join(",") : "";
+}
+
+function sameMetadata(
+  a: ReadonlyMap<string, string> | null | undefined,
+  b: ReadonlyMap<string, string> | null | undefined,
+): boolean {
+  if ((a?.size ?? 0) !== (b?.size ?? 0)) return false;
+  for (const [key, value] of a ?? []) if (b?.get(key) !== value) return false;
+  return true;
+}
+
+protocol.exchange<Record<string, never>>("exchange_input_metadata", {
+  params: {},
+  inputSchema: INPUT_METADATA_INPUT,
+  outputSchema: INPUT_METADATA_OUTPUT,
+  doc: "Report the custom metadata each exchange input batch was handed with.",
+  init: () => ({}),
+  exchange: (_state, input: VgiBatch, out) => {
+    const metadata = input.metadata;
+    const keys = sortedKeys(metadata);
+    if (!sameMetadata(metadata, out.inputMetadata)) {
+      throw new RuntimeError(
+        `ctx.inputMetadata [${sortedKeys(out.inputMetadata)}] disagrees with the input batch's metadata [${keys}]`,
+      );
+    }
+    out.emitRow({ seen: metadata?.get(INPUT_METADATA_KEY) ?? "", keys });
   },
 });
 
