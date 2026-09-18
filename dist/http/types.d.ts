@@ -2,7 +2,6 @@ import type { ExternalLocationConfig, UploadUrlProvider } from "../external.js";
 import type { PeerAuthenticationPolicy, PeerIdentityProvider, PeerResolutionOptions } from "../identity.js";
 import type { DispatchHook, ServeStartHook } from "../types.js";
 import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
-import type { TokenResolver } from "./introspect.js";
 /** Configuration options for createHttpHandler(). */
 export interface HttpHandlerOptions {
     /** URL path prefix for all endpoints. Default: "" (root). */
@@ -170,32 +169,6 @@ export interface HttpHandlerOptions {
      *  them on every subsequent request in the session — used for
      *  client-driven routing (e.g. `fly-force-instance-id` on Fly.io). */
     stickyEchoHeaders?: Record<string, string>;
-    /** Enables `POST {prefix}/__introspect_token__`, which resolves an opaque
-     *  bearer credential to a principal for a reverse proxy that must know the
-     *  caller's identity before it can authorize.
-     *
-     *  Omitted (the default) leaves the endpoint **disabled** — it answers a
-     *  definitive `404 {"error": "not_enabled"}` and holds no resolver — so no
-     *  worker grows a credential-to-identity oracle by upgrading a dependency.
-     *
-     *  The callable returns a `TokenIdentity` or `null`, and throws
-     *  `AuthUnavailableError` when the answer is not knowable, which a caller
-     *  must retry rather than cache. It never returns claims; see
-     *  `src/http/introspect.ts` for why. */
-    introspectResolver?: TokenResolver;
-    /** Principals permitted to introspect. Required whenever
-     *  {@link introspectResolver} is set, with **no permissive default**:
-     *  authentication and introspection are different capabilities, and a
-     *  deployment where any valid credential may introspect lets any user
-     *  resolve any other user's credential to its owner. */
-    introspectPrincipals?: Iterable<string>;
-    /** Cache window advertised as `ttl_seconds` when a resolved `TokenIdentity`
-     *  names none. Default: 300. */
-    introspectTtlSeconds?: number;
-    /** Introspection requests allowed per caller per second (default 20). Bounds,
-     *  rather than closes, the oracle an allowlisted-but-compromised caller still
-     *  has. */
-    introspectRateLimit?: number;
     /** Internal — invoked once at handler creation with a {@link DrainHandle}
      *  when sticky is enabled. Conformance fixtures use this to wire up the
      *  test-only `/__test_drain__` admin endpoint without the library

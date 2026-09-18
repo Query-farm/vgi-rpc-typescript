@@ -101,8 +101,14 @@ export interface CallContext extends LogContext {
     readonly auth: AuthContext;
     /** Immutable, off-wire transport peer identity evidence for this call. */
     readonly peerEvidence?: PeerEvidenceSet;
-    /** Application custom metadata carried by this stream input batch/tick.
-     * Framework continuation and cancellation keys are removed on HTTP. */
+    /** Application custom metadata carried by this stream turn's input: the
+     * exchange input batch (the same keys as `input.metadata`) or the producer
+     * tick, its own on every turn and every transport. Over HTTP the transport's
+     * bookkeeping -- the cursor, the call token and the cancel marker -- is
+     * removed, a producer's first turn carries the `/init` request's metadata,
+     * and an externalized input carries the fetched payload's metadata plus
+     * `vgi_rpc.location.source` / `vgi_rpc.location.fetch_ms`, never the
+     * pointer's. */
     readonly inputMetadata?: ReadonlyMap<string, string>;
     /** Coarse identifier of the bound transport, or `undefined` until the
      *  server begins serving (the value is committed by the lifecycle hook

@@ -8625,15 +8625,17 @@ function countExternalized(ctx) {
 }
 async function readInboundRequest(body, ctx) {
   const { schema: schema2, batch } = await readRequestFromBody(body);
-  if (!ctx.externalLocation || !isExternalLocationBatch(batch))
-    return { schema: schema2, batch };
+  if (!ctx.externalLocation || !isExternalLocationBatch(batch)) {
+    return { schema: schema2, batch, dataMetadata: batch.metadata ?? undefined };
+  }
   const resolved = await resolveExternalLocation(batch, ctx.externalLocation);
   const mergedMetadata = new Map(resolved.metadata ?? []);
   for (const [key, value] of batch.metadata ?? [])
     mergedMetadata.set(key, value);
   return {
     schema: resolved.schema,
-    batch: withBatchMetadata(resolved, mergedMetadata)
+    batch: withBatchMetadata(resolved, mergedMetadata),
+    dataMetadata: resolved.metadata ?? undefined
   };
 }
 function parseHttpRequest(schema2, batch) {
@@ -8799,7 +8801,7 @@ async function httpDispatchStreamInit(method, body, ctx) {
       responseLimitBytes: ctx.maxResponseBytes,
       preferredResponseBytes: ctx.preferredResponseBytes
     });
-    return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes, { callId: initCallId, callToken: initCallToken }, stripFrameworkTickMetadata(reqBatch.metadata));
+    return produceStreamResponse(method, state, resolvedOutputSchema, resolvedInputSchema, ctx, parsed.requestId, headerBytes, { callId: initCallId, callToken: initCallToken }, stripFrameworkMetadata(reqBatch.metadata));
   } else {
     const stateBytes = ctx.stateSerializer.serialize(state);
     const schemaBytes = serializeSchema2(resolvedOutputSchema);
@@ -8819,20 +8821,20 @@ async function httpDispatchStreamInit(method, body, ctx) {
     return arrowResponse(responseBody);
   }
 }
-var FRAMEWORK_TICK_KEYS = new Set([STATE_KEY, CALL_STATE_KEY, CANCEL_KEY]);
-function stripFrameworkTickMetadata(meta) {
+var FRAMEWORK_STREAM_KEYS = new Set([STATE_KEY, CALL_STATE_KEY, CANCEL_KEY]);
+function stripFrameworkMetadata(meta) {
   if (!meta)
     return;
   const out = new Map;
   for (const [k, v] of meta) {
-    if (!FRAMEWORK_TICK_KEYS.has(k))
+    if (!FRAMEWORK_STREAM_KEYS.has(k))
       out.set(k, v);
   }
   return out.size > 0 ? out : undefined;
 }
 async function httpDispatchStreamExchange(method, body, ctx) {
   const isProducer = !!method.producerFn;
-  const { batch: reqBatch } = await readInboundRequest(body, ctx);
+  const { batch: reqBatch, dataMetadata } = await readInboundRequest(body, ctx);
   const tokenBase64 = reqBatch.metadata?.get(STATE_KEY);
   if (!tokenBase64) {
     throw new HttpRpcError("Missing state token in exchange request", 400);
@@ -8889,8 +8891,10 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     return arrowResponse(serializeIpcStream(outputSchema, []));
   }
   if (effectiveProducer) {
-    return produceStreamResponse(method, state, outputSchema, inputSchema, ctx, null, null, { callId: unpacked.callId, callToken: null }, stripFrameworkTickMetadata(reqBatch.metadata));
+    return produceStreamResponse(method, state, outputSchema, inputSchema, ctx, null, null, { callId: unpacked.callId, callToken: null }, stripFrameworkMetadata(reqBatch.metadata));
   } else {
+    const inputMetadata = stripFrameworkMetadata(dataMetadata) ?? new Map;
+    const inputBatch = withBatchMetadata(reqBatch, inputMetadata);
     const externalizationEnabled = !!ctx.externalLocation?.storage;
     const out = new OutputCollector(outputSchema, effectiveProducer, ctx.serverId, null, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
       remainingResponseBytes: ctx.maxResponseBytes,
@@ -8898,14 +8902,15 @@ async function httpDispatchStreamExchange(method, body, ctx) {
       preferredResponseBytes: ctx.preferredResponseBytes,
       remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
       externalizationEnabled,
+      inputMetadata,
       peerEvidence: ctx.peerEvidence
     });
     if (ctx.stickyContext)
       out.attachStickyContext(ctx.stickyContext);
-    let conformedBatch = reqBatch;
-    if (!effectiveProducer && inputSchema !== EMPTY_SCHEMA2 && reqBatch.schema !== inputSchema) {
+    let conformedBatch = inputBatch;
+    if (!effectiveProducer && inputSchema !== EMPTY_SCHEMA2 && inputBatch.schema !== inputSchema) {
       try {
-        conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
+        conformedBatch = conformBatchToSchema(inputBatch, inputSchema);
       } catch (e) {
         if (e instanceof TypeError)
           throw e;
@@ -9074,379 +9079,6 @@ function concatBytes3(...arrays) {
     offset += arr.length;
   }
   return result;
-}
-
-// src/token-identity.ts
-var IDENTITY_PROTOCOL_NAME = "vgi_rpc.Identity.v1";
-var JWS_SHAPED = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
-var MAX_TOKEN_BYTES = 4096;
-var DEFAULT_IDENTITY_TTL_SECONDS = 300;
-var DEFAULT_INTROSPECT_RATE_LIMIT = 20;
-var DEFAULT_MAX_AUTH_AGE_SECONDS = 900;
-async function tokenDigest(token) {
-  return sha256Hex2(new TextEncoder().encode(token));
-}
-
-class IntrospectionRefusedError extends Error {
-  static errorKind = "introspection_refused";
-  errorKind = "introspection_refused";
-  constructor(message) {
-    super(message);
-    this.name = "IntrospectionRefusedError";
-  }
-}
-
-class TokenUnresolvedError extends Error {
-  static errorKind = "token_unresolved";
-  errorKind = "token_unresolved";
-  constructor(message) {
-    super(message);
-    this.name = "TokenUnresolvedError";
-  }
-}
-
-class StaleAuthError extends Error {
-  static errorKind = "stale_auth";
-  errorKind = "stale_auth";
-  constructor(message) {
-    super(message);
-    this.name = "StaleAuthError";
-  }
-}
-
-class GrantRefusedError extends Error {
-  static errorKind = "grant_refused";
-  errorKind = "grant_refused";
-  constructor(message) {
-    super(message);
-    this.name = "GrantRefusedError";
-  }
-}
-
-class IdentityUnavailableError extends Error {
-  static errorKind = "identity_unavailable";
-  errorKind = "identity_unavailable";
-  retryAfter;
-  detail;
-  constructor(detail = "", retryAfter = 5) {
-    super(detail || "identity lookup unavailable");
-    this.name = "IdentityUnavailableError";
-    this.detail = detail;
-    this.retryAfter = retryAfter;
-  }
-}
-
-class RateLimiter {
-  perWindow;
-  windowMs;
-  counts = new Map;
-  windowStart = 0;
-  constructor(perWindow, windowMs = 1000) {
-    this.perWindow = perWindow;
-    this.windowMs = windowMs;
-  }
-  allow(key, now = Date.now()) {
-    if (now - this.windowStart >= this.windowMs) {
-      this.counts.clear();
-      this.windowStart = now;
-    }
-    const count = this.counts.get(key) ?? 0;
-    if (count >= this.perWindow)
-      return false;
-    this.counts.set(key, count + 1);
-    return true;
-  }
-  get size() {
-    return this.counts.size;
-  }
-}
-function normalisePrincipals(principals) {
-  const allowed = new Set([...principals ?? []].filter((p) => p));
-  if (allowed.size === 0) {
-    throw new Error("introspectPrincipals must name at least one principal. Introspection is a " + "distinct capability from authentication: allowing any authenticated caller " + "lets any user resolve any other user's credential to its owner.");
-  }
-  return allowed;
-}
-function checkIntrospector(auth, principals) {
-  const caller = auth.principal ?? "";
-  if (!auth.authenticated || !principals.has(caller)) {
-    throw new IntrospectionRefusedError("caller is not an introspector");
-  }
-  return caller;
-}
-var TRIM_FLOOR = new Set([
-  "\t",
-  `
-`,
-  "\v",
-  "\f",
-  "\r",
-  " ",
-  "",
-  " "
-]);
-function isTrimmable(unit) {
-  return TRIM_FLOOR.has(unit) || unit.trim() === "";
-}
-function trimForShapeTest(token) {
-  let start = 0;
-  let end = token.length;
-  while (start < end && isTrimmable(token[start]))
-    start++;
-  while (end > start && isTrimmable(token[end - 1]))
-    end--;
-  return token.slice(start, end);
-}
-function isJwsShaped(token) {
-  return JWS_SHAPED.test(trimForShapeTest(token));
-}
-function rejectJwsShaped(token) {
-  if (!trimForShapeTest(token) || utf8Length2(token) > MAX_TOKEN_BYTES || isJwsShaped(token)) {
-    throw new TokenUnresolvedError("unresolved");
-  }
-}
-function utf8Length2(token) {
-  return new TextEncoder().encode(token).length;
-}
-function checkFreshness(auth, maxAuthAge, now) {
-  if (!auth.authenticated || !auth.principal) {
-    throw new StaleAuthError("caller is not authenticated");
-  }
-  const raw = auth.claims?.auth_time;
-  if (raw === undefined || raw === null) {
-    throw new StaleAuthError("credential carries no auth_time; only a recently authenticated user may mint a grant");
-  }
-  const authTime = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(authTime)) {
-    throw new StaleAuthError("credential carries an unusable auth_time");
-  }
-  const age = (now ?? Date.now() / 1000) - authTime;
-  if (age > maxAuthAge) {
-    throw new StaleAuthError(`last authentication was ${age.toFixed(0)}s ago, which exceeds the ` + `${maxAuthAge.toFixed(0)}s ceiling for minting a grant; re-authenticate`);
-  }
-  return authTime;
-}
-var TOKEN_IDENTITY_SCHEMA = schema([
-  field("principal", utf8(), false),
-  field("token_name", utf8(), false),
-  field("ttl_seconds", int64(), false)
-]);
-var ISSUED_GRANT_SCHEMA = schema([
-  field("token", utf8(), false),
-  field("expires_at", float64(), false),
-  field("grant_id", utf8(), false)
-]);
-function encodeTokenIdentity(identity) {
-  return serializeBatch(batchFromColumns(TOKEN_IDENTITY_SCHEMA, {
-    principal: [identity.principal],
-    token_name: [identity.tokenName ?? ""],
-    ttl_seconds: [BigInt(Math.trunc(identity.ttlSeconds ?? DEFAULT_IDENTITY_TTL_SECONDS))]
-  }));
-}
-function encodeIssuedGrant(grant) {
-  return serializeBatch(batchFromColumns(ISSUED_GRANT_SCHEMA, {
-    token: [grant.token],
-    expires_at: [grant.expiresAt],
-    grant_id: [grant.grantId ?? ""]
-  }));
-}
-
-class IdentityImpl {
-  resolveTokenHook;
-  mintGrantHook;
-  principals;
-  limiter;
-  maxAuthAge;
-  constructor(options = {}) {
-    this.resolveTokenHook = options.resolveToken;
-    this.mintGrantHook = options.mintGrant;
-    this.maxAuthAge = options.maxAuthAge ?? DEFAULT_MAX_AUTH_AGE_SECONDS;
-    this.principals = this.resolveTokenHook ? normalisePrincipals(options.introspectPrincipals) : new Set;
-    this.limiter = new RateLimiter(options.introspectRateLimit ?? DEFAULT_INTROSPECT_RATE_LIMIT);
-  }
-  offeredMethods() {
-    const offered = new Set;
-    if (this.resolveTokenHook)
-      offered.add("introspect_token");
-    if (this.mintGrantHook)
-      offered.add("issue_grant");
-    return offered;
-  }
-  async introspectToken(token, auth) {
-    if (!this.resolveTokenHook) {
-      throw new IntrospectionRefusedError("this worker does not resolve credentials");
-    }
-    const caller = checkIntrospector(auth, this.principals);
-    if (!this.limiter.allow(caller)) {
-      throw new IntrospectionRefusedError("introspection rate limit exceeded");
-    }
-    rejectJwsShaped(token);
-    let identity;
-    try {
-      identity = await this.resolveTokenHook(token);
-    } catch (err2) {
-      if (err2 instanceof AuthUnavailableError) {
-        throw new IdentityUnavailableError(err2.detail, err2.retryAfter);
-      }
-      throw err2;
-    }
-    if (identity == null) {
-      throw new TokenUnresolvedError("unresolved");
-    }
-    return identity;
-  }
-  async issueGrant(purpose, scopes, ttlSeconds, auth) {
-    if (!this.mintGrantHook) {
-      throw new GrantRefusedError("this worker does not mint grants");
-    }
-    checkFreshness(auth, this.maxAuthAge);
-    return this.mintGrantHook(auth.principal ?? "", purpose, scopes, ttlSeconds);
-  }
-}
-function toScopes(raw) {
-  if (raw == null)
-    return [];
-  const items = Array.isArray(raw) ? raw : [...raw];
-  return items.map((v) => v == null ? "" : String(v));
-}
-function buildIdentityProtocol(identity) {
-  const offered = identity.offeredMethods();
-  if (offered.size === 0)
-    return null;
-  const p = new Protocol(IDENTITY_PROTOCOL_NAME);
-  if (offered.has("introspect_token")) {
-    p.unary("introspect_token", {
-      params: { token: utf8() },
-      result: { result: binary() },
-      doc: "Resolve an opaque bearer credential to the identity it authenticates as.",
-      handler: async (params, ctx) => {
-        const auth = ctx.auth;
-        return { result: encodeTokenIdentity(await identity.introspectToken(String(params.token ?? ""), auth)) };
-      }
-    });
-  }
-  if (offered.has("issue_grant")) {
-    p.unary("issue_grant", {
-      params: { purpose: utf8(), scopes: list(field("item", utf8(), true)), ttl_seconds: int64() },
-      result: { result: binary() },
-      doc: "Mint a standing delegation credential for the calling user.",
-      handler: async (params, ctx) => {
-        const auth = ctx.auth;
-        const grant = await identity.issueGrant(String(params.purpose ?? ""), toScopes(params.scopes), Number(params.ttl_seconds ?? 0), auth);
-        return { result: encodeIssuedGrant(grant) };
-      }
-    });
-  }
-  return p;
-}
-
-// src/http/introspect.ts
-var INTROSPECT_ENDPOINT = "/__introspect_token__";
-var INTROSPECT_ENABLED_HEADER = "VGI-Token-Introspection";
-var MAX_BODY_BYTES = 8192;
-var DEFAULT_INTROSPECT_TTL_SECONDS = DEFAULT_IDENTITY_TTL_SECONDS;
-function createIntrospector(options) {
-  const principals = new Set([...options.principals ?? []].filter((p) => p));
-  if (principals.size === 0) {
-    throw new Error("introspectPrincipals must name at least one principal. Introspection is a " + "distinct capability from authentication: allowing any authenticated caller " + "lets any user resolve any other user's credential to its owner.");
-  }
-  const ttlSeconds = options.ttlSeconds ?? DEFAULT_INTROSPECT_TTL_SECONDS;
-  if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
-    throw new Error("introspectTtlSeconds must be a finite, positive number of seconds");
-  }
-  const limiter = new RateLimiter(options.rateLimit ?? 20);
-  return {
-    handle: (request, auth) => introspect(request, auth, options.resolver, principals, ttlSeconds, limiter)
-  };
-}
-function refuse(status, error, extra) {
-  const headers = new Headers({
-    "Content-Type": "application/json",
-    "Cache-Control": "no-store",
-    ...extra
-  });
-  return new Response(JSON.stringify({ error }), { status, headers });
-}
-function introspectionDisabledResponse() {
-  return refuse(404, "not_enabled");
-}
-async function readSubjectToken(request) {
-  const declared = request.headers.get("Content-Length");
-  if (declared && Number(declared) > MAX_BODY_BYTES)
-    return null;
-  const raw = new Uint8Array(await request.arrayBuffer());
-  if (raw.byteLength > MAX_BODY_BYTES)
-    return null;
-  let body;
-  try {
-    body = JSON.parse(new TextDecoder().decode(raw));
-  } catch {
-    return null;
-  }
-  if (typeof body !== "object" || body === null || Array.isArray(body))
-    return null;
-  const token = body.token;
-  if (typeof token !== "string" || !trimForShapeTest(token) || utf8Length2(token) > MAX_TOKEN_BYTES)
-    return null;
-  return token;
-}
-async function introspect(request, auth, resolver, principals, defaultTtlSeconds, limiter) {
-  const caller = auth?.principal ?? "";
-  if (!auth?.authenticated || !principals.has(caller)) {
-    console.warn("[introspect] refused: caller is not an introspector", { principal: caller });
-    return refuse(403, "not_an_introspector");
-  }
-  if (!limiter.allow(caller)) {
-    console.warn("[introspect] rate limit exceeded", { principal: caller });
-    return refuse(429, "rate_limited", { "Retry-After": "1" });
-  }
-  const token = await readSubjectToken(request);
-  if (token === null) {
-    return refuse(404, "unresolved");
-  }
-  const digest = await tokenDigest(token);
-  if (isJwsShaped(token)) {
-    console.warn("[introspect] refused: JWS-shaped subject", { principal: caller, tokenDigest: digest });
-    return refuse(404, "unresolved");
-  }
-  let identity;
-  try {
-    identity = await resolver(token);
-  } catch (err2) {
-    if (!(err2 instanceof AuthUnavailableError) && !(err2 instanceof IdentityUnavailableError)) {
-      throw err2;
-    }
-    console.warn("[introspect] unavailable", {
-      principal: caller,
-      tokenDigest: digest,
-      error: "authentication authority unavailable"
-    });
-    return new Response(JSON.stringify({ error: "unavailable" }), {
-      status: 503,
-      headers: new Headers({
-        "Content-Type": "application/json",
-        "Retry-After": String(err2.retryAfter)
-      })
-    });
-  }
-  if (identity == null) {
-    console.info("[introspect] credential did not resolve", { principal: caller, tokenDigest: digest });
-    return refuse(404, "unresolved");
-  }
-  console.info("[introspect] resolved", {
-    principal: caller,
-    tokenDigest: digest,
-    resolvedPrincipal: identity.principal
-  });
-  const body = JSON.stringify({
-    principal: identity.principal,
-    token_name: identity.tokenName ?? "",
-    ttl_seconds: identity.ttlSeconds ?? defaultTtlSeconds
-  });
-  return new Response(body, {
-    status: 200,
-    headers: new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" })
-  });
 }
 
 // src/http/pages.ts
@@ -10891,16 +10523,6 @@ function createHttpHandler(target, options) {
   const proxyProofRequired = options?.proxyProofRequired === true;
   const proxyAuthHeaders = [...proxyProofRequired ? [PROOF_HEADER] : [], ...options?.proxyAuthHeaders ?? []];
   const proxyHint = buildProxyHint(proxyAuthHeaders);
-  const introspectPath = `${prefix}${INTROSPECT_ENDPOINT}`;
-  const introspector = options?.introspectResolver ? createIntrospector({
-    resolver: options.introspectResolver,
-    principals: options.introspectPrincipals,
-    ttlSeconds: options.introspectTtlSeconds,
-    rateLimit: options.introspectRateLimit
-  }) : null;
-  if (!introspector && options?.introspectPrincipals) {
-    throw new Error("introspectPrincipals was given without introspectResolver; the endpoint stays " + "disabled, so the allowlist would have no effect. Pass both or neither.");
-  }
   const stickyEnabled = options?.enableSticky === true;
   const stickyDefaultTtl = options?.stickyDefaultTtl ?? 300;
   const stickyEchoHeadersArr = stickyEnabled ? Object.entries(options?.stickyEchoHeaders ?? {}) : [];
@@ -10941,9 +10563,6 @@ function createHttpHandler(target, options) {
     if (proxyProofRequired) {
       headers.set(PROOF_REQUIRED_HEADER, "true");
     }
-    if (introspector) {
-      headers.set(INTROSPECT_ENABLED_HEADER, "true");
-    }
     if (stickyEnabled) {
       headers.set(STICKY_ENABLED_HEADER, "true");
       headers.set(STICKY_DEFAULT_TTL_HEADER, String(Math.floor(stickyDefaultTtl)));
@@ -10983,7 +10602,6 @@ function createHttpHandler(target, options) {
     ...maxRequestBytes != null ? ["VGI-Max-Request-Bytes"] : [],
     ...uploadUrlProvider ? ["VGI-Upload-URL-Support", ...maxUploadBytes != null ? ["VGI-Max-Upload-Bytes"] : []] : [],
     ...proxyProofRequired ? [PROOF_REQUIRED_HEADER] : [],
-    ...introspector ? [INTROSPECT_ENABLED_HEADER] : [],
     ...stickyEnabled ? [
       STICKY_ENABLED_HEADER,
       STICKY_DEFAULT_TTL_HEADER,
@@ -11379,11 +10997,6 @@ function createHttpHandler(target, options) {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
-    if (!introspector && path === introspectPath) {
-      const response = introspectionDisabledResponse();
-      addCorsHeaders(response.headers);
-      return response;
-    }
     const streamObserver = {};
     let identity;
     try {
@@ -11412,12 +11025,6 @@ function createHttpHandler(target, options) {
       egress,
       streamObserver
     };
-    if (introspector && path === introspectPath) {
-      const response = await introspector.handle(request, ctx.authContext);
-      addCorsHeaders(response.headers);
-      addCapabilityHeaders(response.headers);
-      return response;
-    }
     const responseEncoding = negotiateResponseEncoding(request);
     let stickyLockRelease = null;
     let stickySink = null;
@@ -14066,6 +13673,239 @@ async function dispatchUnary(method, params, writer, serverId, requestId, extern
   }
 }
 
+// src/token-identity.ts
+var IDENTITY_PROTOCOL_NAME = "vgi_rpc.Identity.v1";
+var JWS_SHAPED = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
+var MAX_TOKEN_BYTES = 4096;
+var DEFAULT_IDENTITY_TTL_SECONDS = 300;
+var DEFAULT_MAX_AUTH_AGE_SECONDS = 900;
+async function tokenDigest(token) {
+  return sha256Hex2(new TextEncoder().encode(token));
+}
+
+class IntrospectionRefusedError extends Error {
+  static errorKind = "introspection_refused";
+  errorKind = "introspection_refused";
+  constructor(message) {
+    super(message);
+    this.name = "IntrospectionRefusedError";
+  }
+}
+
+class TokenUnresolvedError extends Error {
+  static errorKind = "token_unresolved";
+  errorKind = "token_unresolved";
+  constructor(message) {
+    super(message);
+    this.name = "TokenUnresolvedError";
+  }
+}
+
+class StaleAuthError extends Error {
+  static errorKind = "stale_auth";
+  errorKind = "stale_auth";
+  constructor(message) {
+    super(message);
+    this.name = "StaleAuthError";
+  }
+}
+
+class GrantRefusedError extends Error {
+  static errorKind = "grant_refused";
+  errorKind = "grant_refused";
+  constructor(message) {
+    super(message);
+    this.name = "GrantRefusedError";
+  }
+}
+
+class IdentityUnavailableError extends Error {
+  static errorKind = "identity_unavailable";
+  errorKind = "identity_unavailable";
+  retryAfter;
+  detail;
+  constructor(detail = "", retryAfter = 5) {
+    super(detail || "identity lookup unavailable");
+    this.name = "IdentityUnavailableError";
+    this.detail = detail;
+    this.retryAfter = retryAfter;
+  }
+}
+function normalisePrincipals(principals) {
+  const allowed = new Set([...principals ?? []].filter((p) => p));
+  if (allowed.size === 0) {
+    throw new Error("introspectPrincipals must name at least one principal. Introspection is a " + "distinct capability from authentication: allowing any authenticated caller " + "lets any user resolve any other user's credential to its owner.");
+  }
+  return allowed;
+}
+function checkIntrospector(auth, principals) {
+  const caller = auth.principal ?? "";
+  if (!auth.authenticated || !principals.has(caller)) {
+    throw new IntrospectionRefusedError("caller is not an introspector");
+  }
+  return caller;
+}
+var TRIM_FLOOR = new Set([
+  "\t",
+  `
+`,
+  "\v",
+  "\f",
+  "\r",
+  " ",
+  "",
+  " "
+]);
+function isTrimmable(unit) {
+  return TRIM_FLOOR.has(unit) || unit.trim() === "";
+}
+function trimForShapeTest(token) {
+  let start = 0;
+  let end = token.length;
+  while (start < end && isTrimmable(token[start]))
+    start++;
+  while (end > start && isTrimmable(token[end - 1]))
+    end--;
+  return token.slice(start, end);
+}
+function isJwsShaped(token) {
+  return JWS_SHAPED.test(trimForShapeTest(token));
+}
+function rejectJwsShaped(token) {
+  if (!trimForShapeTest(token) || utf8Length2(token) > MAX_TOKEN_BYTES || isJwsShaped(token)) {
+    throw new TokenUnresolvedError("unresolved");
+  }
+}
+function utf8Length2(token) {
+  return new TextEncoder().encode(token).length;
+}
+function checkFreshness(auth, maxAuthAge, now) {
+  if (!auth.authenticated || !auth.principal) {
+    throw new StaleAuthError("caller is not authenticated");
+  }
+  const raw = auth.claims?.auth_time;
+  if (raw === undefined || raw === null) {
+    throw new StaleAuthError("credential carries no auth_time; only a recently authenticated user may mint a grant");
+  }
+  const authTime = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(authTime)) {
+    throw new StaleAuthError("credential carries an unusable auth_time");
+  }
+  const age = (now ?? Date.now() / 1000) - authTime;
+  if (age > maxAuthAge) {
+    throw new StaleAuthError(`last authentication was ${age.toFixed(0)}s ago, which exceeds the ` + `${maxAuthAge.toFixed(0)}s ceiling for minting a grant; re-authenticate`);
+  }
+  return authTime;
+}
+var TOKEN_IDENTITY_SCHEMA = schema([
+  field("principal", utf8(), false),
+  field("token_name", utf8(), false),
+  field("ttl_seconds", int64(), false)
+]);
+var ISSUED_GRANT_SCHEMA = schema([
+  field("token", utf8(), false),
+  field("expires_at", float64(), false),
+  field("grant_id", utf8(), false)
+]);
+function encodeTokenIdentity(identity) {
+  return serializeBatch(batchFromColumns(TOKEN_IDENTITY_SCHEMA, {
+    principal: [identity.principal],
+    token_name: [identity.tokenName ?? ""],
+    ttl_seconds: [BigInt(Math.trunc(identity.ttlSeconds ?? DEFAULT_IDENTITY_TTL_SECONDS))]
+  }));
+}
+function encodeIssuedGrant(grant) {
+  return serializeBatch(batchFromColumns(ISSUED_GRANT_SCHEMA, {
+    token: [grant.token],
+    expires_at: [grant.expiresAt],
+    grant_id: [grant.grantId ?? ""]
+  }));
+}
+
+class IdentityImpl {
+  resolveTokenHook;
+  mintGrantHook;
+  principals;
+  maxAuthAge;
+  constructor(options = {}) {
+    this.resolveTokenHook = options.resolveToken;
+    this.mintGrantHook = options.mintGrant;
+    this.maxAuthAge = options.maxAuthAge ?? DEFAULT_MAX_AUTH_AGE_SECONDS;
+    this.principals = this.resolveTokenHook ? normalisePrincipals(options.introspectPrincipals) : new Set;
+  }
+  offeredMethods() {
+    const offered = new Set;
+    if (this.resolveTokenHook)
+      offered.add("introspect_token");
+    if (this.mintGrantHook)
+      offered.add("issue_grant");
+    return offered;
+  }
+  async introspectToken(token, auth) {
+    if (!this.resolveTokenHook) {
+      throw new IntrospectionRefusedError("this worker does not resolve credentials");
+    }
+    checkIntrospector(auth, this.principals);
+    rejectJwsShaped(token);
+    let identity;
+    try {
+      identity = await this.resolveTokenHook(token);
+    } catch (err2) {
+      if (err2 instanceof AuthUnavailableError) {
+        throw new IdentityUnavailableError(err2.detail, err2.retryAfter);
+      }
+      throw err2;
+    }
+    if (identity == null) {
+      throw new TokenUnresolvedError("unresolved");
+    }
+    return identity;
+  }
+  async issueGrant(purpose, scopes, ttlSeconds, auth) {
+    if (!this.mintGrantHook) {
+      throw new GrantRefusedError("this worker does not mint grants");
+    }
+    checkFreshness(auth, this.maxAuthAge);
+    return this.mintGrantHook(auth.principal ?? "", purpose, scopes, ttlSeconds);
+  }
+}
+function toScopes(raw) {
+  if (raw == null)
+    return [];
+  const items = Array.isArray(raw) ? raw : [...raw];
+  return items.map((v) => v == null ? "" : String(v));
+}
+function buildIdentityProtocol(identity) {
+  const offered = identity.offeredMethods();
+  if (offered.size === 0)
+    return null;
+  const p = new Protocol(IDENTITY_PROTOCOL_NAME);
+  if (offered.has("introspect_token")) {
+    p.unary("introspect_token", {
+      params: { token: utf8() },
+      result: { result: binary() },
+      doc: "Resolve an opaque bearer credential to the identity it authenticates as.",
+      handler: async (params, ctx) => {
+        const auth = ctx.auth;
+        return { result: encodeTokenIdentity(await identity.introspectToken(String(params.token ?? ""), auth)) };
+      }
+    });
+  }
+  if (offered.has("issue_grant")) {
+    p.unary("issue_grant", {
+      params: { purpose: utf8(), scopes: list(field("item", utf8(), true)), ttl_seconds: int64() },
+      result: { result: binary() },
+      doc: "Mint a standing delegation credential for the calling user.",
+      handler: async (params, ctx) => {
+        const auth = ctx.auth;
+        const grant = await identity.issueGrant(String(params.purpose ?? ""), toScopes(params.scopes), Number(params.ttl_seconds ?? 0), auth);
+        return { result: encodeIssuedGrant(grant) };
+      }
+    });
+  }
+  return p;
+}
+
 // src/server.ts
 var EMPTY_SCHEMA5 = schema([]);
 function randomStreamId() {
@@ -14612,26 +14452,40 @@ function writeMeta(metaPath, workerArgv, cwd, sockPath) {
     writeFileSync(metaPath, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 384 });
   } catch {}
 }
-async function probeSocket(sockPath, timeoutMs = 2000) {
-  if (!existsSync(sockPath))
-    return false;
-  const net = await import("node:net");
+var PROBE_REFUSED_BACKOFF_MS = [50, 100, 200];
+var ACCEPT_QUEUE_FULL = new Set(["EAGAIN", "EWOULDBLOCK"]);
+function probeOnce(net, sockPath, timeoutMs) {
   return new Promise((resolve) => {
     const sock = net.createConnection({ path: sockPath });
     const timer = setTimeout(() => {
       sock.destroy();
-      resolve(false);
+      resolve("dead");
     }, timeoutMs);
     sock.once("connect", () => {
       clearTimeout(timer);
       sock.end();
-      resolve(true);
+      resolve("alive");
     });
-    sock.once("error", () => {
+    sock.once("error", (err2) => {
       clearTimeout(timer);
-      resolve(false);
+      sock.destroy();
+      const code = err2?.code ?? "";
+      resolve(ACCEPT_QUEUE_FULL.has(code) ? "alive" : code === "ECONNREFUSED" ? "refused" : "dead");
     });
   });
+}
+async function probeSocket(sockPath, timeoutMs = 2000) {
+  if (!existsSync(sockPath))
+    return false;
+  const net = await import("node:net");
+  for (let attempt = 0;; attempt++) {
+    const outcome = await probeOnce(net, sockPath, timeoutMs);
+    if (outcome !== "refused")
+      return outcome === "alive";
+    if (attempt >= PROBE_REFUSED_BACKOFF_MS.length)
+      return false;
+    await new Promise((r) => setTimeout(r, PROBE_REFUSED_BACKOFF_MS[attempt]));
+  }
 }
 function tryReadMeta(metaPath) {
   try {
@@ -16599,7 +16453,6 @@ export {
   defaultStateDir,
   decodeContentEncoding,
   createSocks5hFetch,
-  createIntrospector,
   createHttpHandler,
   checkIntrospector,
   checkFreshness,
@@ -16633,7 +16486,6 @@ export {
   SERVER_SCOPE,
   SERVER_ID_KEY,
   RpcError,
-  RateLimiter,
   RPC_METHOD_KEY,
   RPC_ERROR_HEADER,
   REQUEST_VERSION_KEY,
@@ -16669,8 +16521,6 @@ export {
   IROH_HTTP_ALPN,
   IROH_FORWARDED_ENDPOINT_HEADER,
   IROH_ARROW_MUX_ALPN,
-  INTROSPECT_ENDPOINT,
-  INTROSPECT_ENABLED_HEADER,
   IDENTITY_PROTOCOL_NAME,
   HttpStreamSession,
   GrantRefusedError,
@@ -16681,8 +16531,6 @@ export {
   ERROR_KIND_KEY,
   DEFAULT_MAX_PROXY_V2_BYTES,
   DEFAULT_MAX_AUTH_AGE_SECONDS,
-  DEFAULT_INTROSPECT_TTL_SECONDS,
-  DEFAULT_INTROSPECT_RATE_LIMIT,
   DEFAULT_IDENTITY_TTL_SECONDS,
   AuthUnavailableError,
   AuthReason,
@@ -16695,4 +16543,4 @@ export {
   ARROW_CONTENT_TYPE
 };
 
-//# debugId=BD54D3D48D3E22E064756E2164756E21
+//# debugId=E8A9CC351B9CF85764756E2164756E21

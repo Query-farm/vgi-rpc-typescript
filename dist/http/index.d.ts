@@ -4,8 +4,6 @@ export type { BearerValidateFn } from "./bearer.js";
 export { bearerAuthenticate, bearerAuthenticateStatic, chainAuthenticate } from "./bearer.js";
 export { ARROW_CONTENT_TYPE, decodeContentEncoding, MAX_UPLOAD_URL_COUNT, reservedPath, rpcPath, rpcPathFromPrefix, UPLOAD_URL_METHOD, UPLOAD_URL_PARAMS_SCHEMA, UPLOAD_URL_RESPONSE_SCHEMA, } from "./common.js";
 export { createHttpHandler } from "./handler.js";
-export type { Introspector, TokenIdentity, TokenResolver } from "./introspect.js";
-export { createIntrospector, DEFAULT_INTROSPECT_TTL_SECONDS, INTROSPECT_ENABLED_HEADER, INTROSPECT_ENDPOINT, tokenDigest, } from "./introspect.js";
 export type { JwtAuthenticateOptions } from "./jwt.js";
 export { jwtAuthenticate } from "./jwt.js";
 export type { CertValidateFn, XfccElement, XfccValidateFn } from "./mtls.js";

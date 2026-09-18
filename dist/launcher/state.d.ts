@@ -37,7 +37,8 @@ export interface StatusRow {
     socket: string;
     /** Unix epoch seconds the worker was launched, or `null` when unknown. */
     startedAt: number | null;
-    /** Whether a probe connection to {@link StatusRow.socket} currently succeeds. */
+    /** Whether a worker is listening on {@link StatusRow.socket} -- a busy one,
+     *  whose accept queue is full, included. See {@link probeSocket}. */
     alive: boolean;
 }
 /** Outcome of a {@link gcStateDir} sweep. */
@@ -48,7 +49,35 @@ export interface GcResult {
      *  worker is alive). */
     skippedInUse: string[];
 }
-/** Probe whether anyone is currently accepting on `sockPath`. */
+/**
+ * Probe whether a worker is listening on `sockPath`.
+ *
+ * A listener whose accept queue is full is alive, only busy -- and a false
+ * "dead" here is destructive, because `launch()` then unlinks the socket
+ * out from under the live worker and spawns a duplicate (and {@link gcStateDir}
+ * reaps a live worker's files). A 32-process run of the Python reference
+ * produced 64 workers for 2 commands that way.
+ *
+ * So one connect is classified three ways:
+ *
+ * - connected, or `EAGAIN`/`EWOULDBLOCK` (Linux's report of a full queue on a
+ *   non-blocking AF_UNIX connect) -- **alive**;
+ * - `ECONNREFUSED` -- re-probed after 50, 100 and 200 ms before it is believed,
+ *   because a full queue can report as a refusal too, indistinguishable from
+ *   no listener at all;
+ * - anything else (absent, timed out, unreachable) -- **dead**.
+ *
+ * Which runtimes can tell a full queue from a refusal is measured, not
+ * assumed: on Linux, Node reports it as `EAGAIN`, but Bun (1.4.2) reports it as
+ * `ECONNREFUSED`, exactly like macOS does for every runtime. Under Bun, then, a
+ * busy worker is recognised only if it frees a slot within the re-probe window
+ * -- the same guarantee the reference gives on macOS.
+ *
+ * This asks "is anything listening", not "is it responsive": a connect lands in
+ * the queue of a worker that never accepts, so a successful one never proved
+ * that either. `timeoutMs` bounds each connect. Mirrors `vgi_rpc.launcher._probe`
+ * and the C++ launcher's `ProbeAlive`.
+ */
 export declare function probeSocket(sockPath: string, timeoutMs?: number): Promise<boolean>;
 /** List one row per `<hash>.lock` in `stateDir`.  Read-only; takes no locks. */
 export declare function statusRows(stateDir: string): Promise<StatusRow[]>;

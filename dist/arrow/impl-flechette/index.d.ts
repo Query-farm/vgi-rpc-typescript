@@ -78,7 +78,13 @@ export declare function singleRowBatchWithMetadata(s: VgiSchema, values: Record<
 export declare function isOpaqueData(_val: unknown): boolean;
 /** Re-emit a batch with a different per-record-batch metadata map (same
  *  schema + data). Shallow-clones the Table so the caller's reference is
- *  not mutated. */
+ *  not mutated.
+ *
+ *  Replaces, as arrow-js's `RecordBatch` constructor does -- an empty map
+ *  clears what the source carried. `attachBatchMetadata` treats empty as
+ *  "nothing to attach", which is right for a freshly built table and wrong
+ *  here: the clone kept the source's map, so an HTTP exchange input whose only
+ *  keys were the stream tokens reached its method still carrying them. */
 export declare function withBatchMetadata(batch: VgiBatch, metadata: Map<string, string>): VgiBatch;
 /**
  * Serialize a sequence of batches into a single multi-batch IPC stream.
