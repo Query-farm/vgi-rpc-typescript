@@ -35,7 +35,7 @@ jobs:
         run: bun install
 
       - name: Run unit tests
-        run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/large-payload.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts test/http/exchange-input-metadata.test.ts
+        run: bun test test/wire.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/large-payload.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts test/http/exchange-input-metadata.test.ts test/flechette-declared-schema.test.ts
 
       # Batch metadata is encoded differently per backend, and the bug this
       # guards against was flechette-only: its encoder needs an explicit
@@ -45,9 +45,12 @@ jobs:
       # the same reason: flechette's `withBatchMetadata` kept the source map
       # when handed an empty one, so an HTTP exchange input carrying nothing
       # but the stream tokens reached its method still carrying them there --
-      # and flechette is the backend workerd serves HTTP on.
+      # and flechette is the backend workerd serves HTTP on. The declared-schema
+      # test pins that flechette writes the schema it was given (nullability,
+      # field metadata, order), which a strict peer checks exactly; it spawns
+      # both backends itself, and runs here too so it holds on either runner.
       - name: Run batch-metadata guard (flechette backend)
-        run: bun --conditions=flechette test test/batch-metadata.test.ts test/http/exchange-input-metadata.test.ts
+        run: bun --conditions=flechette test test/batch-metadata.test.ts test/http/exchange-input-metadata.test.ts test/flechette-declared-schema.test.ts
 
       - name: Run client tests (bun transports only)
         run: timeout 180 bun test test/client.test.ts test/client-native-conformance.test.ts test/iroh-client.test.ts

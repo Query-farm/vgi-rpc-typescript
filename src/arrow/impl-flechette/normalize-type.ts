@@ -28,7 +28,9 @@ import {
   float,
   int,
   interval,
+  largeBinary,
   largeList,
+  largeUtf8,
   list,
   map,
   nullType,
@@ -74,12 +76,17 @@ function _buildFlechetteType(type: any): any {
       return int(type.bitWidth, type.isSigned ?? type.signed ?? true);
     case Type.Float:
       return float(type.precision);
+    // Large variants stay large: flechette builds and encodes them, and
+    // folding them into Binary/Utf8 put a different type on the wire than
+    // the one declared (arrow-js writes LargeBinary/LargeUtf8).
     case Type.Binary:
-    case Type.LargeBinary:
       return binary();
+    case Type.LargeBinary:
+      return largeBinary();
     case Type.Utf8:
-    case Type.LargeUtf8:
       return utf8();
+    case Type.LargeUtf8:
+      return largeUtf8();
     case Type.FixedSizeBinary:
       return fixedSizeBinary(type.byteWidth ?? type.stride);
     case Type.Decimal:

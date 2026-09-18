@@ -32,7 +32,6 @@ import {
   uint64 as f_uint64,
   utf8 as f_utf8,
   Table,
-  tableFromColumns,
   tableFromIPC,
   tablesToIPC,
   tableToIPC,
@@ -217,22 +216,74 @@ export function columnFromArray(values: any[], type: VgiDataType): VgiColumnData
   return f_columnFromArray(values, toFlechetteType(type) as any, EXTRACT_OPTS) as VgiColumnData;
 }
 
-// flechette's `tableFromColumns` discards per-field `nullable`/`metadata` —
-// it always builds nullable=true fields. The vgi-rpc wire protocol cares:
-// the C++ extension validates response schemas exactly, and a `nullable`
-// mismatch on a `not null` field rejects the whole batch. Build the Table
-// directly with a schema that preserves the source VgiSchema's flags.
+// flechette's `tableFromColumns` builds its schema from a name->column record:
+// every field comes out nullable=true with no metadata, the schema loses its
+// metadata, and field order follows object-key order -- which puts
+// integer-like names first and collapses duplicate names. Peers check the
+// declared schema exactly (a vgi-rpc server rejects a request whose parameter
+// schema differs in nullability; the C++ extension rejects a response batch the
+// same way), so no batch this backend builds goes through it. Every table gets
+// its schema here instead: the declared VgiSchema's names, order, nullability,
+// field metadata and schema metadata, over the columns' own (encodable) types.
 function buildTablePreservingNullable(s: VgiSchema, cols: Column<any>[]): VgiBatch {
+  return new Table(declaredFlechetteSchema(s, cols) as any, cols) as unknown as VgiBatch;
+}
+
+function declaredFlechetteSchema(s: VgiSchema, cols: readonly Column<any>[]): any {
   const fields = s.fields.map((f, i) =>
     f_field(f.name, cols[i].type as any, (f as any).nullable ?? true, (f as any).metadata ?? null),
   );
-  const flechSchema = {
+  return {
     version: 5,
     endianness: 0,
     fields,
     metadata: (s as any).metadata ?? null,
   };
-  return new Table(flechSchema as any, cols) as unknown as VgiBatch;
+}
+
+function sameMetadata(a: Map<string, string> | null | undefined, b: Map<string, string> | null | undefined): boolean {
+  const sizeA = a?.size ?? 0;
+  if (sizeA !== (b?.size ?? 0)) return false;
+  if (sizeA === 0) return true;
+  for (const [k, v] of a!) if (b!.get(k) !== v) return false;
+  return true;
+}
+
+/**
+ * The batch with `s` as its schema, for a writer that must put `s` on the wire.
+ *
+ * arrow-js's writers write the schema they are opened with and then only each
+ * batch's data, so the declared schema is what a peer sees whatever schema a
+ * batch was built with. flechette writes the schema of the (first) table it is
+ * handed, so a writer here re-homes each batch's columns under `s` -- names,
+ * order, nullability and metadata from `s`, types from the columns, whose data
+ * is what gets encoded. A batch already carrying an equivalent schema is
+ * returned as is, and one whose field count differs is left alone (there is
+ * nothing to line up; the peer's schema check reports it).
+ */
+function withDeclaredSchema(s: VgiSchema, batch: VgiBatch): VgiBatch {
+  const t = batch as any;
+  const have: any[] = t?.schema?.fields ?? [];
+  const want: readonly any[] = s.fields;
+  if (have.length !== want.length || !Array.isArray(t.children) || t.children.length !== want.length) return batch;
+  let same = sameMetadata(t.schema.metadata, (s as any).metadata);
+  for (let i = 0; same && i < want.length; i++) {
+    same =
+      have[i].name === want[i].name &&
+      (have[i].nullable ?? true) === (want[i].nullable ?? true) &&
+      sameMetadata(have[i].metadata, want[i].metadata);
+  }
+  if (same) return batch;
+  const rehomed = new Table(declaredFlechetteSchema(s, t.children), t.children) as any;
+  // What the encoders and readers of this facade hang off a table besides its
+  // schema and columns: per-batch metadata, and the row count a zero-column
+  // batch can only carry as an override (see deserializeBatch).
+  for (const key of ["_vgiRecordMetadata", "_vgiRecordMetadataPerBatch", "metadata"]) {
+    if (t[key] !== undefined) rehomed[key] = t[key];
+  }
+  const rows = Object.getOwnPropertyDescriptor(t, "numRows");
+  if (rows) Object.defineProperty(rehomed, "numRows", rows);
+  return rehomed as VgiBatch;
 }
 
 // flechette's Map builder iterates values via for-of and rejects plain
@@ -300,11 +351,8 @@ export function emptyColumnData(type: VgiDataType): VgiColumnData {
  * it as the Message FlatBuffer's `custom_metadata` field.
  */
 export function emptyBatchWithMetadata(s: VgiSchema, metadata?: Map<string, string>): VgiBatch {
-  const cols: Record<string, Column<any>> = {};
-  for (const f of s.fields) {
-    cols[f.name] = f_columnFromArray([], toFlechetteType(f.type) as any, EXTRACT_OPTS);
-  }
-  const t = tableFromColumns(cols) as any;
+  const cols = s.fields.map((f) => f_columnFromArray([], toFlechetteType(f.type) as any, EXTRACT_OPTS));
+  const t = buildTablePreservingNullable(s, cols) as any;
   attachBatchMetadata(t, metadata);
   return t as unknown as VgiBatch;
 }
@@ -315,16 +363,9 @@ export function singleRowBatchWithMetadata(
   values: Record<string, any>,
   metadata?: Map<string, string>,
 ): VgiBatch {
-  const cols: Record<string, Column<any>> = {};
-  for (const f of s.fields) {
-    let val = values[f.name];
-    if (f.type.typeId === 2 /* Int */ && (f.type as any).bitWidth === 64 && typeof val === "number") {
-      val = BigInt(val);
-    }
-    requireEncodable(val, f.name);
-    cols[f.name] = f_columnFromArray([val], toFlechetteType(f.type) as any, EXTRACT_OPTS);
-  }
-  const t = tableFromColumns(cols) as any;
+  // The same batch `singleRowBatch` builds -- declared schema, Map coercion --
+  // plus the per-record-batch metadata.
+  const t = singleRowBatch(s, values) as any;
   attachBatchMetadata(t, metadata);
   return t as unknown as VgiBatch;
 }
@@ -377,12 +418,14 @@ export function withBatchMetadata(batch: VgiBatch, metadata: Map<string, string>
  * `tableToIPC` outputs produces multiple EOS markers, dropping batches
  * past the first.
  */
-export function serializeBatches(_schema: VgiSchema, batches: VgiBatch[]): Uint8Array {
+export function serializeBatches(schema: VgiSchema, batches: VgiBatch[]): Uint8Array {
   if (batches.length === 0) {
     // 0-batch case: emit just the schema with EOS so readers don't choke.
-    return serializeSchema(_schema);
+    return serializeSchema(schema);
   }
-  return tablesToIPC(batches as any[], { format: "stream" }) as Uint8Array;
+  // `tablesToIPC` writes the first table's schema for the whole stream; make
+  // that the declared one, as arrow-js's writer does (see withDeclaredSchema).
+  return tablesToIPC(batches.map((b) => withDeclaredSchema(schema, b)) as any[], { format: "stream" }) as Uint8Array;
 }
 
 /** Arrow Type ids: Int=2, Float=3. */
@@ -491,7 +534,9 @@ export function createIncrementalEncoder(s: VgiSchema): IncrementalEncoder {
   return {
     start: () => new Uint8Array(0),
     writeBatch(batch: VgiBatch): Uint8Array {
-      const full = serializeBatch(batch); // [schema][dict…][recordbatch][EOS]
+      // The stream's schema message comes from this batch (first call), so it
+      // must be the declared one -- see withDeclaredSchema.
+      const full = serializeBatch(withDeclaredSchema(s, batch)); // [schema][dict…][recordbatch][EOS]
       const spans = splitIpcMessages(full); // excludes the trailing EOS
       const bodyEnd = spans.length ? spans[spans.length - 1].frameEnd : full.length;
       if (!schemaEmitted) {
