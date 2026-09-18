@@ -282,15 +282,27 @@ function countExternalized(ctx: DispatchContext): ((bytes: number) => void) | un
 }
 
 /** Read one inbound request and transparently resolve an external-location
- * pointer. The pointer's metadata is the request envelope (dispatch metadata
- * for unary/init, stream tokens for exchange), so it remains authoritative
- * after the fetched data batch replaces it. */
+ * pointer.
+ *
+ * Two views of the request come back, because they answer different questions.
+ *
+ * - `batch` carries the request *envelope*: the pointer's metadata (dispatch
+ *   metadata for unary/init, stream tokens for exchange) laid over the fetched
+ *   data batch's, so it stays authoritative after the data replaces it.
+ * - `dataMetadata` is what the data batch itself carried. For a pointer that is
+ *   the fetched payload's metadata plus the reader's `vgi_rpc.location.source`
+ *   / `vgi_rpc.location.fetch_ms` stamp -- never the pointer's (WIRE_PROTOCOL.md
+ *   §12). An exchange method is handed this as its input's metadata, not the
+ *   envelope: the pointer's keys are the transport's, and a key both carry
+ *   must read as the payload's. */
 async function readInboundRequest(
   body: Uint8Array,
   ctx: DispatchContext,
-): Promise<{ schema: VgiSchema; batch: VgiBatch }> {
+): Promise<{ schema: VgiSchema; batch: VgiBatch; dataMetadata: ReadonlyMap<string, string> | undefined }> {
   const { schema, batch } = await readRequestFromBody(body);
-  if (!ctx.externalLocation || !isExternalLocationBatch(batch)) return { schema, batch };
+  if (!ctx.externalLocation || !isExternalLocationBatch(batch)) {
+    return { schema, batch, dataMetadata: batch.metadata ?? undefined };
+  }
 
   const resolved = await resolveExternalLocation(batch, ctx.externalLocation);
   const mergedMetadata = new Map<string, string>(resolved.metadata ?? []);
@@ -298,6 +310,7 @@ async function readInboundRequest(
   return {
     schema: resolved.schema,
     batch: withBatchMetadata(resolved, mergedMetadata),
+    dataMetadata: resolved.metadata ?? undefined,
   };
 }
 
@@ -561,7 +574,7 @@ export async function httpDispatchStreamInit(
       parsed.requestId,
       headerBytes,
       { callId: initCallId, callToken: initCallToken },
-      stripFrameworkTickMetadata(reqBatch.metadata),
+      stripFrameworkMetadata(reqBatch.metadata),
     );
   } else {
     // Exchange: serialize state into signed token, return zero-row batch with token
@@ -589,26 +602,27 @@ export async function httpDispatchStreamInit(
   }
 }
 
-/** Dispatch a stream exchange HTTP request (producer continuation or exchange round). */
-/** Framework keys the transport puts on a continuation request, which must not
- *  reach user code as tick metadata.
+/** Framework keys the transport puts on a stream request, which must not
+ *  reach user code as an exchange input's or a producer tick's metadata.
  *
  *  The pipe transport keeps stream/call state in the connection and never puts
  *  it on a batch, so a worker that sees these over HTTP is seeing a transport
  *  artefact — and STATE_KEY in particular is the sealed cursor token, which has
  *  no business in application-visible metadata. vgi-rpc-python and -go and
- *  -rust all strip the same three. */
-const FRAMEWORK_TICK_KEYS = new Set([STATE_KEY, CALL_STATE_KEY, CANCEL_KEY]);
+ *  -rust all strip the same three, and nothing else: every other key passes,
+ *  `vgi_rpc.*` included. */
+const FRAMEWORK_STREAM_KEYS = new Set([STATE_KEY, CALL_STATE_KEY, CANCEL_KEY]);
 
-function stripFrameworkTickMetadata(meta: Map<string, string> | null | undefined): Map<string, string> | undefined {
+function stripFrameworkMetadata(meta: ReadonlyMap<string, string> | null | undefined): Map<string, string> | undefined {
   if (!meta) return undefined;
   const out = new Map<string, string>();
   for (const [k, v] of meta) {
-    if (!FRAMEWORK_TICK_KEYS.has(k)) out.set(k, v);
+    if (!FRAMEWORK_STREAM_KEYS.has(k)) out.set(k, v);
   }
   return out.size > 0 ? out : undefined;
 }
 
+/** Dispatch a stream exchange HTTP request (producer continuation or exchange round). */
 export async function httpDispatchStreamExchange(
   method: MethodDefinition,
   body: Uint8Array,
@@ -616,7 +630,7 @@ export async function httpDispatchStreamExchange(
 ): Promise<Response> {
   const isProducer = !!method.producerFn;
 
-  const { batch: reqBatch } = await readInboundRequest(body, ctx);
+  const { batch: reqBatch, dataMetadata } = await readInboundRequest(body, ctx);
 
   // Get state token from batch metadata
   const tokenBase64 = reqBatch.metadata?.get(STATE_KEY);
@@ -720,12 +734,26 @@ export async function httpDispatchStreamExchange(
       null,
       null,
       { callId: unpacked.callId, callToken: null },
-      stripFrameworkTickMetadata(reqBatch.metadata),
+      stripFrameworkMetadata(reqBatch.metadata),
     );
   } else {
     // Exchange path — also handles exchange-registered methods acting as
     // producers (__isProducer=true). Use producer mode on the OutputCollector
     // when effectiveProducer so finish() is allowed.
+    //
+    // The metadata this input reaches the method with, on the batch and on
+    // `ctx.inputMetadata` alike: what the input batch carried, less the
+    // transport's bookkeeping. It is application data, per input -- DuckDB puts
+    // the conditional-revalidation validators (`vgi.cache.if_none_match`) on
+    // every exchange input -- and the pipe hands it over with the batch. The
+    // request batch was handed over as-is instead, so over HTTP a method saw the
+    // cursor and the call token beside its own keys, `ctx.inputMetadata` was
+    // never set at all, and an externalized input carried the pointer's
+    // metadata rather than the payload's (`dataMetadata`, see
+    // `readInboundRequest`). The reference does the same in
+    // `_run_http_exchange_turn`.
+    const inputMetadata = stripFrameworkMetadata(dataMetadata) ?? new Map<string, string>();
+    const inputBatch = withBatchMetadata(reqBatch, inputMetadata);
     const externalizationEnabled = !!ctx.externalLocation?.storage;
     const out = new OutputCollector(
       outputSchema,
@@ -743,6 +771,7 @@ export async function httpDispatchStreamExchange(
         preferredResponseBytes: ctx.preferredResponseBytes,
         remainingExternalizedResponseBytes: externalizationEnabled ? ctx.maxExternalizedResponseBytes : undefined,
         externalizationEnabled,
+        inputMetadata,
         peerEvidence: ctx.peerEvidence,
       },
     );
@@ -755,10 +784,10 @@ export async function httpDispatchStreamExchange(
     // checked against the declared input schema. Any conformance failure
     // falls through with the original batch; the handler owns input-shape
     // validation if it cares. Mirrors dispatch/stream.ts.
-    let conformedBatch = reqBatch;
-    if (!effectiveProducer && inputSchema !== EMPTY_SCHEMA && reqBatch.schema !== inputSchema) {
+    let conformedBatch = inputBatch;
+    if (!effectiveProducer && inputSchema !== EMPTY_SCHEMA && inputBatch.schema !== inputSchema) {
       try {
-        conformedBatch = conformBatchToSchema(reqBatch, inputSchema);
+        conformedBatch = conformBatchToSchema(inputBatch, inputSchema);
       } catch (e) {
         // Field name/count mismatch is a hard contract violation — surface it
         // as an error rather than letting handlers see a wrong-shape batch

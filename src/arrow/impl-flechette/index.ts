@@ -350,11 +350,22 @@ export function isOpaqueData(_val: unknown): boolean {
 
 /** Re-emit a batch with a different per-record-batch metadata map (same
  *  schema + data). Shallow-clones the Table so the caller's reference is
- *  not mutated. */
+ *  not mutated.
+ *
+ *  Replaces, as arrow-js's `RecordBatch` constructor does -- an empty map
+ *  clears what the source carried. `attachBatchMetadata` treats empty as
+ *  "nothing to attach", which is right for a freshly built table and wrong
+ *  here: the clone kept the source's map, so an HTTP exchange input whose only
+ *  keys were the stream tokens reached its method still carrying them. */
 export function withBatchMetadata(batch: VgiBatch, metadata: Map<string, string>): VgiBatch {
   const t = batch as any;
   const clone = Object.assign(Object.create(Object.getPrototypeOf(t)), t);
-  attachBatchMetadata(clone, metadata);
+  if (metadata.size === 0) {
+    clone._vgiRecordMetadata = undefined;
+    clone.metadata = metadata;
+  } else {
+    attachBatchMetadata(clone, metadata);
+  }
   return clone as unknown as VgiBatch;
 }
 
