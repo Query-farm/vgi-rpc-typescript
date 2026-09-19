@@ -4,7 +4,7 @@
  *
  * @internal
  */
-import { RecordBatch } from "@query-farm/apache-arrow";
+import type { RecordBatch } from "@query-farm/apache-arrow";
 import type { RawBatch } from "./raw.js";
 /**
  * Pair a decoded batch with its own custom metadata.
@@ -22,13 +22,4 @@ export declare function rawBatchOf(batch: RecordBatch): RawBatch;
  * @internal
  */
 export declare function rawInputBatch(input: RawBatch, extra?: ReadonlyMap<string, string>): RecordBatch;
-/**
- * Build a zero-row, zero-column batch carrying only `metadata`.
- *
- * The wire shape for a producer tick, a cancel signal, and an HTTP
- * continuation: no data, and every meaning in the custom metadata.
- *
- * @internal
- */
-export declare function emptyRawBatch(metadata?: ReadonlyMap<string, string>): RecordBatch;
 //# sourceMappingURL=raw-util.d.ts.map

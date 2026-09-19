@@ -1,19 +1,15 @@
 import { createRequire } from "node:module";
-var __defProp = Object.defineProperty;
-var __returnValue = (v) => v;
-function __exportSetter(name, newValue) {
-  this[name] = __returnValue.bind(null, newValue);
-}
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, {
-      get: all[name],
-      enumerable: true,
-      configurable: true,
-      set: __exportSetter.bind(all, name)
-    });
+var __esm = (fn, res, err) => () => {
+  if (fn)
+    try {
+      res = fn(fn = 0);
+    } catch (e) {
+      err = [e];
+    }
+  if (err)
+    throw err[0];
+  return res;
 };
-var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
 // node_modules/fzstd/esm/index.mjs
@@ -626,12 +622,6 @@ var init_esm = __esm(() => {
 });
 
 // src/util/zstd.ts
-var exports_zstd = {};
-__export(exports_zstd, {
-  zstdDecompress: () => zstdDecompress,
-  zstdCompress: () => zstdCompress,
-  isZstdCompressAvailable: () => isZstdCompressAvailable
-});
 function _loadZlibOrNull() {
   const req = import.meta.require ?? globalThis.require ?? null;
   if (!req)
@@ -769,100 +759,6 @@ function minPositive(...values) {
       result = value;
   }
   return result;
-}
-
-// src/client/connect.ts
-import { Schema as Schema3 } from "@query-farm/apache-arrow";
-
-// src/constants.ts
-var RPC_METHOD_KEY = "vgi_rpc.method";
-var PROTOCOL_KEY = "vgi_rpc.protocol";
-var LOG_LEVEL_KEY = "vgi_rpc.log_level";
-var LOG_MESSAGE_KEY = "vgi_rpc.log_message";
-var LOG_EXTRA_KEY = "vgi_rpc.log_extra";
-var REQUEST_VERSION_KEY = "vgi_rpc.request_version";
-var REQUEST_VERSION = "1";
-var SERVER_ID_KEY = "vgi_rpc.server_id";
-var REQUEST_ID_KEY = "vgi_rpc.request_id";
-var PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
-var STATE_KEY = "vgi_rpc.stream_state#b64";
-var CALL_STATE_KEY = "vgi_rpc.call_state#b64";
-var CANCEL_KEY = "vgi_rpc.cancel";
-var LOCATION_KEY = "vgi_rpc.location";
-var LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
-var LOCATION_FETCH_MS_KEY = "vgi_rpc.location.fetch_ms";
-var LOCATION_SOURCE_KEY = "vgi_rpc.location.source";
-var RPC_ERROR_HEADER = "X-VGI-RPC-Error";
-var REQUEST_ID_HEADER = "X-Request-ID";
-var ERROR_KIND_KEY = "vgi_rpc.error_kind";
-
-// src/errors.ts
-class RpcError extends Error {
-  errorType;
-  errorMessage;
-  remoteTraceback;
-  constructor(errorType, errorMessage, remoteTraceback) {
-    super(`${errorType}: ${errorMessage}`);
-    this.errorType = errorType;
-    this.errorMessage = errorMessage;
-    this.remoteTraceback = remoteTraceback;
-    this.name = "RpcError";
-  }
-}
-
-class VersionError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "VersionError";
-  }
-}
-var ERROR_KIND_METHOD_NOT_IMPLEMENTED = "method_not_implemented";
-var ERROR_KIND_SESSION_LOST = "session_lost";
-var ERROR_KIND_SERVER_DRAINING = "server_draining";
-var ERROR_KIND_PROTOCOL_VERSION_MISMATCH = "protocol_version_mismatch";
-
-class ProtocolVersionError extends VersionError {
-  static errorKind = ERROR_KIND_PROTOCOL_VERSION_MISMATCH;
-  errorKind = ERROR_KIND_PROTOCOL_VERSION_MISMATCH;
-  constructor(message) {
-    super(message);
-    this.name = "ProtocolVersionError";
-  }
-}
-var SEMVER_REGEX = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-function parseProtocolVersion(value) {
-  const m = SEMVER_REGEX.exec(value);
-  if (!m) {
-    throw new Error(`Invalid protocol version '${value}': expected canonical semver ` + "MAJOR.MINOR.PATCH with non-negative integers and no leading zeros " + "(no prereleases or build metadata).");
-  }
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
-}
-
-class MethodNotImplementedError extends Error {
-  static errorKind = ERROR_KIND_METHOD_NOT_IMPLEMENTED;
-  errorKind = ERROR_KIND_METHOD_NOT_IMPLEMENTED;
-  constructor(message) {
-    super(message);
-    this.name = "MethodNotImplementedError";
-  }
-}
-
-class SessionLostError extends Error {
-  static errorKind = ERROR_KIND_SESSION_LOST;
-  errorKind = ERROR_KIND_SESSION_LOST;
-  constructor(message) {
-    super(message);
-    this.name = "SessionLostError";
-  }
-}
-
-class ServerDrainingError extends Error {
-  static errorKind = ERROR_KIND_SERVER_DRAINING;
-  errorKind = ERROR_KIND_SERVER_DRAINING;
-  constructor(message) {
-    super(message);
-    this.name = "ServerDrainingError";
-  }
 }
 
 // src/arrow/impl-arrowjs/index.ts
@@ -1103,9 +999,9 @@ function withBatchMetadata(batch, metadata) {
   const a = batch;
   return new A_RecordBatch(a.schema, a.data, metadata);
 }
-function serializeBatches(schema2, batches) {
+function serializeBatches(schema, batches) {
   const writer = new RecordBatchStreamWriter;
-  writer.reset(undefined, schema2);
+  writer.reset(undefined, schema);
   for (const batch of batches) {
     writer._writeRecordBatch(batch);
   }
@@ -1120,11 +1016,11 @@ var _needsValueCast = (src, dst) => {
   return true;
 };
 var _isNumeric = (t) => t.typeId === A_Type.Int || t.typeId === A_Type.Float;
-function conformBatchToSchema(batch, schema2) {
+function conformBatchToSchema(batch, schema) {
   const a = batch;
   if (a.numRows === 0)
     return batch;
-  const s = schema2;
+  const s = schema;
   if (a.schema.fields.length !== s.fields.length) {
     throw new TypeError(`Field count mismatch: expected ${s.fields.length}, got ${a.schema.fields.length}`);
   }
@@ -1168,6 +1064,97 @@ function conformBatchToSchema(batch, schema2) {
     nullBitmap: a.data.nullBitmap
   });
   return new A_RecordBatch(s, data, a.metadata);
+}
+
+// src/constants.ts
+var RPC_METHOD_KEY = "vgi_rpc.method";
+var PROTOCOL_KEY = "vgi_rpc.protocol";
+var LOG_LEVEL_KEY = "vgi_rpc.log_level";
+var LOG_MESSAGE_KEY = "vgi_rpc.log_message";
+var LOG_EXTRA_KEY = "vgi_rpc.log_extra";
+var REQUEST_VERSION_KEY = "vgi_rpc.request_version";
+var REQUEST_VERSION = "1";
+var SERVER_ID_KEY = "vgi_rpc.server_id";
+var REQUEST_ID_KEY = "vgi_rpc.request_id";
+var PROTOCOL_VERSION_KEY = "vgi_rpc.protocol_version";
+var STATE_KEY = "vgi_rpc.stream_state#b64";
+var CALL_STATE_KEY = "vgi_rpc.call_state#b64";
+var CANCEL_KEY = "vgi_rpc.cancel";
+var LOCATION_KEY = "vgi_rpc.location";
+var LOCATION_SHA256_KEY = "vgi_rpc.location.sha256";
+var LOCATION_FETCH_MS_KEY = "vgi_rpc.location.fetch_ms";
+var LOCATION_SOURCE_KEY = "vgi_rpc.location.source";
+var RPC_ERROR_HEADER = "X-VGI-RPC-Error";
+var REQUEST_ID_HEADER = "X-Request-ID";
+var ERROR_KIND_KEY = "vgi_rpc.error_kind";
+
+// src/errors.ts
+class RpcError extends Error {
+  errorType;
+  errorMessage;
+  remoteTraceback;
+  constructor(errorType, errorMessage, remoteTraceback) {
+    super(`${errorType}: ${errorMessage}`);
+    this.errorType = errorType;
+    this.errorMessage = errorMessage;
+    this.remoteTraceback = remoteTraceback;
+    this.name = "RpcError";
+  }
+}
+
+class VersionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "VersionError";
+  }
+}
+var ERROR_KIND_METHOD_NOT_IMPLEMENTED = "method_not_implemented";
+var ERROR_KIND_SESSION_LOST = "session_lost";
+var ERROR_KIND_SERVER_DRAINING = "server_draining";
+var ERROR_KIND_PROTOCOL_VERSION_MISMATCH = "protocol_version_mismatch";
+
+class ProtocolVersionError extends VersionError {
+  static errorKind = ERROR_KIND_PROTOCOL_VERSION_MISMATCH;
+  errorKind = ERROR_KIND_PROTOCOL_VERSION_MISMATCH;
+  constructor(message) {
+    super(message);
+    this.name = "ProtocolVersionError";
+  }
+}
+var SEMVER_REGEX = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+function parseProtocolVersion(value) {
+  const m = SEMVER_REGEX.exec(value);
+  if (!m) {
+    throw new Error(`Invalid protocol version '${value}': expected canonical semver ` + "MAJOR.MINOR.PATCH with non-negative integers and no leading zeros " + "(no prereleases or build metadata).");
+  }
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+class MethodNotImplementedError extends Error {
+  static errorKind = ERROR_KIND_METHOD_NOT_IMPLEMENTED;
+  errorKind = ERROR_KIND_METHOD_NOT_IMPLEMENTED;
+  constructor(message) {
+    super(message);
+    this.name = "MethodNotImplementedError";
+  }
+}
+
+class SessionLostError extends Error {
+  static errorKind = ERROR_KIND_SESSION_LOST;
+  errorKind = ERROR_KIND_SESSION_LOST;
+  constructor(message) {
+    super(message);
+    this.name = "SessionLostError";
+  }
+}
+
+class ServerDrainingError extends Error {
+  static errorKind = ERROR_KIND_SERVER_DRAINING;
+  errorKind = ERROR_KIND_SERVER_DRAINING;
+  constructor(message) {
+    super(message);
+    this.name = "ServerDrainingError";
+  }
 }
 // src/arrow/predicates.ts
 var TypeId = {
@@ -1253,21 +1240,21 @@ init_zstd();
 
 // src/wire/response.ts
 var _int64FieldsCache = new WeakMap;
-function int64FieldNames(schema2) {
-  let names = _int64FieldsCache.get(schema2);
+function int64FieldNames(schema) {
+  let names = _int64FieldsCache.get(schema);
   if (names === undefined) {
     const out = [];
-    for (const f of schema2.fields) {
+    for (const f of schema.fields) {
       if (isInt(f.type) && f.type.bitWidth === 64)
         out.push(f.name);
     }
     names = out;
-    _int64FieldsCache.set(schema2, names);
+    _int64FieldsCache.set(schema, names);
   }
   return names;
 }
-function coerceInt64(schema2, values) {
-  const int64Fields = int64FieldNames(schema2);
+function coerceInt64(schema, values) {
+  const int64Fields = int64FieldNames(schema);
   if (int64Fields.length === 0)
     return values;
   let result = null;
@@ -1295,25 +1282,25 @@ function coerceInt64(schema2, values) {
   }
   return result ?? values;
 }
-function buildResultBatch(schema2, values, serverId, requestId) {
+function buildResultBatch(schema, values, serverId, requestId) {
   const metadata = new Map;
   metadata.set(SERVER_ID_KEY, serverId);
   if (requestId !== null) {
     metadata.set(REQUEST_ID_KEY, requestId);
   }
-  if (schema2.fields.length === 0) {
-    return buildEmptyBatch(schema2, metadata);
+  if (schema.fields.length === 0) {
+    return buildEmptyBatch(schema, metadata);
   }
-  for (const f of schema2.fields) {
+  for (const f of schema.fields) {
     if (values[f.name] === undefined && !f.nullable) {
       const got = Object.keys(values);
       throw new TypeError(`Handler result missing required field '${f.name}'. Got keys: [${got.join(", ")}]`);
     }
   }
-  const coerced = coerceInt64(schema2, values);
-  return singleRowBatchWithMetadata(schema2, coerced, metadata);
+  const coerced = coerceInt64(schema, values);
+  return singleRowBatchWithMetadata(schema, coerced, metadata);
 }
-function buildErrorBatch(schema2, error, serverId, requestId) {
+function buildErrorBatch(schema, error, serverId, requestId) {
   const metadata = new Map;
   metadata.set(LOG_LEVEL_KEY, "EXCEPTION");
   const rpcErrorType = error.errorType;
@@ -1338,9 +1325,9 @@ function buildErrorBatch(schema2, error, serverId, requestId) {
   if (requestId !== null) {
     metadata.set(REQUEST_ID_KEY, requestId);
   }
-  return buildEmptyBatch(schema2, metadata);
+  return buildEmptyBatch(schema, metadata);
 }
-function buildLogBatch(schema2, level, message, extra, serverId, requestId) {
+function buildLogBatch(schema, level, message, extra, serverId, requestId) {
   const metadata = new Map;
   metadata.set(LOG_LEVEL_KEY, level);
   metadata.set(LOG_MESSAGE_KEY, message);
@@ -1353,10 +1340,10 @@ function buildLogBatch(schema2, level, message, extra, serverId, requestId) {
   if (requestId != null) {
     metadata.set(REQUEST_ID_KEY, requestId);
   }
-  return buildEmptyBatch(schema2, metadata);
+  return buildEmptyBatch(schema, metadata);
 }
-function buildEmptyBatch(schema2, metadata) {
-  return emptyBatchWithMetadata(schema2, metadata);
+function buildEmptyBatch(schema, metadata) {
+  return emptyBatchWithMetadata(schema, metadata);
 }
 
 // src/external.ts
@@ -1453,13 +1440,13 @@ function isExternalLocationBatch(batch) {
     return false;
   return meta.has(LOCATION_KEY) && !meta.has(LOG_LEVEL_KEY);
 }
-function makeExternalLocationBatch(schema2, url, sha256) {
+function makeExternalLocationBatch(schema, url, sha256) {
   const metadata = new Map;
   metadata.set(LOCATION_KEY, url);
   if (sha256) {
     metadata.set(LOCATION_SHA256_KEY, sha256);
   }
-  return buildEmptyBatch(schema2, metadata);
+  return buildEmptyBatch(schema, metadata);
 }
 function serializeBatchToIpc(batch) {
   return serializeBatch(batch);
@@ -1746,9 +1733,9 @@ class HttpRpcError extends Error {
     this.name = "HttpRpcError";
   }
 }
-function serializeIpcStream(schema2, batches) {
-  const conformed = batches.map((b) => conformBatchToSchema(b, schema2));
-  return serializeBatches(schema2, conformed);
+function serializeIpcStream(schema, batches) {
+  const conformed = batches.map((b) => conformBatchToSchema(b, schema));
+  return serializeBatches(schema, conformed);
 }
 function arrowResponse(body, status = 200, extraHeaders) {
   const headers = extraHeaders ?? new Headers;
@@ -1927,7 +1914,7 @@ function resolveResponseEncoding(headers) {
   }
   return { codec: null, custom: false };
 }
-async function decodeResponseBody(headers, body, zstdDecompress2, maxDecodedBytes) {
+async function decodeResponseBody(headers, body, zstdDecompress, maxDecodedBytes) {
   const { codec, custom } = resolveResponseEncoding(headers);
   if (!codec)
     return body;
@@ -1937,10 +1924,10 @@ async function decodeResponseBody(headers, body, zstdDecompress2, maxDecodedByte
   if (codec === "zstd") {
     if (!custom && !looksZstdEncoded(body))
       return body;
-    if (!zstdDecompress2) {
+    if (!zstdDecompress) {
       throw new RpcError("ProtocolError", "Server sent a zstd-encoded response but this client has no zstd decoder. " + "Install the optional zstd dependency, or configure the server not to negotiate zstd.", "");
     }
-    const decoded = new Uint8Array(await zstdDecompress2(body, maxDecodedBytes));
+    const decoded = new Uint8Array(await zstdDecompress(body, maxDecodedBytes));
     if (maxDecodedBytes != null && decoded.byteLength > maxDecodedBytes) {
       throw new RpcError("TransportError", `Decoded HTTP response exceeds accepted limit (${decoded.byteLength} > ${maxDecodedBytes})`, "");
     }
@@ -2106,10 +2093,10 @@ async function sha256(data) {
   return new Uint8Array(digest);
 }
 async function sha256Hex2(data) {
-  const bytes2 = await sha256(data);
+  const bytes = await sha256(data);
   let s = "";
-  for (let i = 0;i < bytes2.length; i++)
-    s += bytes2[i].toString(16).padStart(2, "0");
+  for (let i = 0;i < bytes.length; i++)
+    s += bytes[i].toString(16).padStart(2, "0");
   return s;
 }
 
@@ -2507,19 +2494,19 @@ class PeerEvidenceSet {
     if (applicationAuth)
       fields.push("application_auth", applicationAuth.domain ?? "", applicationAuth.principal ?? "");
     let size = 0;
-    const encoded = fields.map((field2) => {
-      const bytes2 = new TextEncoder().encode(field2);
-      size += 8 + bytes2.length;
-      return bytes2;
+    const encoded = fields.map((field) => {
+      const bytes = new TextEncoder().encode(field);
+      size += 8 + bytes.length;
+      return bytes;
     });
     const input = new Uint8Array(size);
     const view = new DataView(input.buffer);
     let offset = 0;
-    for (const bytes2 of encoded) {
-      view.setBigUint64(offset, BigInt(bytes2.length));
+    for (const bytes of encoded) {
+      view.setBigUint64(offset, BigInt(bytes.length));
       offset += 8;
-      input.set(bytes2, offset);
-      offset += bytes2.length;
+      input.set(bytes, offset);
+      offset += bytes.length;
     }
     return sha256Hex2(input);
   }
@@ -2639,16 +2626,16 @@ function withEvidenceBinding(auth, binding) {
 
 // src/types.ts
 var MethodType;
-((MethodType2) => {
-  MethodType2["UNARY"] = "unary";
-  MethodType2["STREAM"] = "stream";
+((MethodType) => {
+  MethodType["UNARY"] = "unary";
+  MethodType["STREAM"] = "stream";
 })(MethodType ||= {});
 var TransportKind;
-((TransportKind2) => {
-  TransportKind2["PIPE"] = "pipe";
-  TransportKind2["HTTP"] = "http";
-  TransportKind2["UNIX"] = "unix";
-  TransportKind2["TCP"] = "tcp";
+((TransportKind) => {
+  TransportKind["PIPE"] = "pipe";
+  TransportKind["HTTP"] = "http";
+  TransportKind["UNIX"] = "unix";
+  TransportKind["TCP"] = "tcp";
 })(TransportKind ||= {});
 var EMPTY_COOKIES = new Map;
 function cookieNotUnaryHttpError() {
@@ -2922,11 +2909,11 @@ function unitToken(unit) {
   }
   throw new UnsupportedArrowTypeError(`time unit ${String(unit)}`);
 }
-function anonChild(field2, name) {
-  return `${name}${field2.nullable ? "?" : ""}:${typeToken(field2.type)}`;
+function anonChild(field, name) {
+  return `${name}${field.nullable ? "?" : ""}:${typeToken(field.type)}`;
 }
-function child(field2) {
-  return anonChild(field2, field2.name);
+function child(field) {
+  return anonChild(field, field.name);
 }
 function typeToken(type) {
   const t = type;
@@ -3104,12 +3091,12 @@ var SERVICE_DESCRIPTION_SCHEMA = schema([
   ...PROTOCOL_SUMMARY_FIELDS,
   field("methods", list(field("item", struct(METHOD_INFO_FIELDS), true)), false)
 ]);
-function encodeReflectionPayload(value, schema2) {
+function encodeReflectionPayload(value, schema) {
   const columns = {};
-  for (const f of schema2.fields) {
+  for (const f of schema.fields) {
     columns[f.name] = [value[f.name]];
   }
-  return serializeBatch(batchFromColumns(schema2, columns));
+  return serializeBatch(batchFromColumns(schema, columns));
 }
 function decodeFailure(what, detail) {
   return new Error(`Could not decode a '${REFLECTION_PROTOCOL_NAME}' ${what}: ${detail}. ` + `The reply came from a server this client cannot read; check that it hosts ` + `a compatible major version of the reflection protocol.`);
@@ -3200,10 +3187,10 @@ function decodeServiceDescription(payload) {
     methods: listRows(batch, "methods", "service description").map(decodeMethod)
   };
 }
-function schemaIpc(schema2) {
-  if (!schema2)
+function schemaIpc(schema) {
+  if (!schema)
     return new Uint8Array(0);
-  return serializeSchema(schema2);
+  return serializeSchema(schema);
 }
 function streamKindFor(method) {
   if (method.type === "unary" /* UNARY */)
@@ -3375,8 +3362,8 @@ class IpcStreamReader {
       }
     }
     this.initialized = true;
-    const schema2 = this.reader.schema;
-    if (!schema2) {
+    const schema = this.reader.schema;
+    if (!schema) {
       return null;
     }
     const batches = [];
@@ -3388,7 +3375,7 @@ class IpcStreamReader {
         break;
       batches.push(result.value);
     }
-    return { schema: schema2, batches };
+    return { schema, batches };
   }
   async openNextStream() {
     if (this.initialized) {
@@ -3463,7 +3450,7 @@ function coerceForArrow(type, value) {
   }
   return value;
 }
-function buildRequestIpc(schema2, params, method, options) {
+function buildRequestIpc(schema, params, method, options) {
   const metadata = new Map;
   metadata.set(RPC_METHOD_KEY, method);
   if (options?.protocol) {
@@ -3473,41 +3460,41 @@ function buildRequestIpc(schema2, params, method, options) {
   if (options?.protocolVersion) {
     metadata.set(PROTOCOL_VERSION_KEY, options.protocolVersion);
   }
-  if (schema2.fields.length === 0) {
-    const batch2 = emptyBatchWithMetadata(schema2, metadata);
-    return serializeIpcStream(schema2, [batch2]);
+  if (schema.fields.length === 0) {
+    const batch = emptyBatchWithMetadata(schema, metadata);
+    return serializeIpcStream(schema, [batch]);
   }
   const coerced = {};
-  for (const f of schema2.fields) {
+  for (const f of schema.fields) {
     const raw = params[f.name];
     coerced[f.name] = raw === undefined ? null : coerceForArrow(f.type, raw);
   }
-  const batch = singleRowBatchWithMetadata(schema2, coerced, metadata);
-  return serializeIpcStream(schema2, [batch]);
+  const batch = singleRowBatchWithMetadata(schema, coerced, metadata);
+  return serializeIpcStream(schema, [batch]);
 }
 async function readResponseBatches(body) {
   const reader = await RecordBatchReader3.from(body);
   await reader.open();
-  const schema2 = reader.schema;
-  if (!schema2) {
+  const schema = reader.schema;
+  if (!schema) {
     throw new RpcError("ProtocolError", "Empty IPC stream: no schema", "");
   }
   const batches = reader.readAll();
-  return { schema: schema2, batches };
+  return { schema, batches };
 }
 function extractBatchRows(batch) {
   const rows = [];
   for (let r = 0;r < batch.numRows; r++) {
     const row = {};
     for (let i = 0;i < batch.schema.fields.length; i++) {
-      const field2 = batch.schema.fields[i];
+      const field = batch.schema.fields[i];
       let value = batch.getChildAt(i)?.get(r);
       if (typeof value === "bigint") {
         if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
           value = Number(value);
         }
       }
-      row[field2.name] = value;
+      row[field.name] = value;
     }
     rows.push(row);
   }
@@ -3524,10 +3511,10 @@ async function readSequentialStreams(body) {
 }
 
 // src/client/introspect.ts
-function deserializeSchema2(bytes3) {
-  if (bytes3.length === 0)
+function deserializeSchema2(bytes) {
+  if (bytes.length === 0)
     return new ArrowSchema([]);
-  return deserializeSchema(bytes3);
+  return deserializeSchema(bytes);
 }
 function adaptMethod(wire) {
   const type = wire.method_type === "stream" ? "stream" : "unary";
@@ -3589,7 +3576,7 @@ function reflectionRequest(method, protocol) {
   if (method === REFLECTION_DESCRIBE) {
     return buildRequestIpc(REFLECTION_DESCRIBE_PARAMS, { protocol }, REFLECTION_DESCRIBE, { protocol: REFLECTION_PROTOCOL_NAME });
   }
-  return buildRequestIpc(new ArrowSchema([]), {}, method, { protocol: REFLECTION_PROTOCOL_NAME });
+  return buildRequestIpc(schema([]), {}, method, { protocol: REFLECTION_PROTOCOL_NAME });
 }
 async function httpIntrospect(rawBaseUrl, options) {
   const baseUrl = rawBaseUrl.replace(/\/+$/, "");
@@ -3620,8 +3607,8 @@ async function httpIntrospect(rawBaseUrl, options) {
   }
   headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(maxResponse);
   const fetchFn = options?.fetch ?? globalThis.fetch;
-  async function call(method, protocol2) {
-    const body = reflectionRequest(method, protocol2);
+  async function call(method, protocol) {
+    const body = reflectionRequest(method, protocol);
     const sendBody = level != null && compressFn ? await compressFn(body, level) : body;
     const response = await fetchFn(baseUrl + rpcPath(REFLECTION_PROTOCOL_NAME, method, { prefix }), {
       method: "POST",
@@ -3647,8 +3634,66 @@ async function httpIntrospect(rawBaseUrl, options) {
   return adaptServiceDescription(decodeServiceDescription(await call(REFLECTION_DESCRIBE, protocol)), listing);
 }
 
+// src/client/outbound.ts
+function ownerOf(batch) {
+  if (backend.name === "arrow-js")
+    return "active";
+  const b = batch;
+  return b != null && typeof b.data === "object" && b.data !== null && !Array.isArray(b.children) ? "arrow-js" : "active";
+}
+function asOwner(batch, owner) {
+  if (ownerOf(batch) === owner)
+    return batch;
+  return owner === "active" ? deserializeBatch(serializeBatch(batch)) : deserializeBatch(serializeBatch(batch));
+}
+function withMetadata(batch, metadata) {
+  const b = batch;
+  return ownerOf(b) === "arrow-js" ? withBatchMetadata(b, metadata) : withBatchMetadata(b, metadata);
+}
+function serializeRequest(schema, batches) {
+  const all = batches;
+  if (all.length > 0 && all.every((b) => ownerOf(b) === "arrow-js")) {
+    return serializeBatches(all[0].schema, all);
+  }
+  return serializeIpcStream(schema, all.map((b) => asOwner(b, "active")));
+}
+function createRequestEncoder(schema) {
+  let owner = null;
+  let encoder = null;
+  const open = (as, s) => {
+    owner = as;
+    encoder = as === "arrow-js" ? createIncrementalEncoder(s) : createIncrementalEncoder(s);
+    return encoder.start();
+  };
+  return {
+    writeBatch(batch) {
+      const b = batch;
+      let head = new Uint8Array(0);
+      if (encoder === null) {
+        const as = ownerOf(b);
+        head = open(as, as === "arrow-js" ? b.schema : schema);
+      }
+      const body = encoder.writeBatch(asOwner(b, owner));
+      return concat(head, body);
+    },
+    finish() {
+      const head = encoder === null ? open("active", schema) : new Uint8Array(0);
+      return concat(head, encoder.finish());
+    }
+  };
+}
+function concat(a, b) {
+  if (a.length === 0)
+    return b;
+  if (b.length === 0)
+    return a;
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
 // src/client/raw-util.ts
-import { makeData, RecordBatch, Schema, Struct } from "@query-farm/apache-arrow";
 function rawBatchOf(batch) {
   return { batch, metadata: new Map(batch.metadata ?? []) };
 }
@@ -3657,11 +3702,10 @@ function rawInputBatch(input, extra) {
   if (extra)
     for (const [key, value] of extra)
       metadata.set(key, value);
-  return new RecordBatch(input.batch.schema, input.batch.data, metadata);
+  return withMetadata(input.batch, metadata);
 }
 
 // src/client/stream.ts
-import { Field, makeData as makeData2, RecordBatch as RecordBatch2, Schema as Schema2, Struct as Struct2, vectorFromArray } from "@query-farm/apache-arrow";
 function packResumeToken(cursor, callToken) {
   return callToken === null ? cursor : `${cursor.length}:${cursor}${callToken}`;
 }
@@ -3807,13 +3851,12 @@ class HttpStreamSession {
       for (const [key, value] of this._tokenMetadata(this._stateToken)) {
         metadata.set(key, value);
       }
-      const batch2 = new RecordBatch2(input.schema, input.data, metadata);
-      return this._rowsOfExchange(await this._doExchange(input.schema, [batch2]));
+      const batch = withMetadata(input, metadata);
+      return this._rowsOfExchange(await this._doExchange(batch.schema, [batch]));
     }
     if (input.length === 0) {
       const zeroSchema = this._inputSchema ?? this._outputSchema;
-      const emptyBatch = this._buildEmptyBatch(zeroSchema);
-      const batchWithMeta = new RecordBatch2(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
+      const batchWithMeta = emptyBatchWithMetadata(zeroSchema, this._tokenMetadata(this._stateToken));
       return this._rowsOfExchange(await this._doExchange(zeroSchema, [batchWithMeta]));
     }
     let inputSchema = this._inputSchema;
@@ -3829,22 +3872,14 @@ class HttpStreamSession {
         }
         const arrowType = inferArrowType(sample);
         const nullable = input.some((row) => row[key] == null);
-        return new Field(key, arrowType, nullable);
+        return field(key, arrowType, nullable);
       });
-      inputSchema = new Schema2(fields);
+      inputSchema = schema(fields);
     }
-    const children = inputSchema.fields.map((f) => {
-      const values = input.map((row) => row[f.name]);
-      return vectorFromArray(values, f.type).data[0];
-    });
-    const structType = new Struct2(inputSchema.fields);
-    const data = makeData2({
-      type: structType,
-      length: input.length,
-      children,
-      nullCount: 0
-    });
-    const batch = new RecordBatch2(inputSchema, data, this._tokenMetadata(this._stateToken));
+    const columns = {};
+    for (const f of inputSchema.fields)
+      columns[f.name] = input.map((row) => row[f.name]);
+    const batch = withBatchMetadata(batchFromColumns(inputSchema, columns), this._tokenMetadata(this._stateToken));
     return this._rowsOfExchange(await this._doExchange(inputSchema, [batch]));
   }
   async tick(metadata) {
@@ -3872,17 +3907,15 @@ class HttpStreamSession {
     const token = this._stateToken;
     this._finished = true;
     this._stateToken = null;
-    const structType = new Struct2([]);
-    const data = makeData2({ type: structType, length: 0, children: [], nullCount: 0 });
-    const emptySchema = new Schema2([]);
-    const batch = new RecordBatch2(emptySchema, data, this._tokenMetadata(token, { cancel: true }));
+    const emptySchema = schema([]);
+    const batch = emptyBatchWithMetadata(emptySchema, this._tokenMetadata(token, { cancel: true }));
     try {
       const resp = await this._post(this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }), serializeIpcStream(emptySchema, [batch]));
       await this._readResponse(resp);
     } catch {}
   }
-  async _doExchange(schema2, batches) {
-    const body = serializeIpcStream(schema2, batches);
+  async _doExchange(schema, batches) {
+    const body = serializeRequest(schema, batches);
     const resp = await this._post(this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }), body);
     if (resp.status === 401) {
       throw new RpcError("AuthenticationError", "Authentication required", "");
@@ -3913,19 +3946,6 @@ class HttpStreamSession {
   }
   _rowsOfExchange(reply) {
     return reply === null ? [] : extractBatchRows(reply);
-  }
-  _buildEmptyBatch(schema2) {
-    const children = schema2.fields.map((f) => {
-      return makeData2({ type: f.type, length: 0, nullCount: 0 });
-    });
-    const structType = new Struct2(schema2.fields);
-    const data = makeData2({
-      type: structType,
-      length: 0,
-      children,
-      nullCount: 0
-    });
-    return new RecordBatch2(schema2, data);
   }
   async* [Symbol.asyncIterator]() {
     for (let batch of this._pendingBatches) {
@@ -4044,18 +4064,11 @@ class HttpStreamSession {
     this._finished = false;
   }
   async _sendContinuation(token, applicationMetadata) {
-    const emptySchema = new Schema2([]);
+    const emptySchema = schema([]);
     const metadata = new Map(applicationMetadata ?? []);
     for (const [key, value] of this._tokenMetadata(token))
       metadata.set(key, value);
-    const structType = new Struct2(emptySchema.fields);
-    const data = makeData2({
-      type: structType,
-      length: 1,
-      children: [],
-      nullCount: 0
-    });
-    const batch = new RecordBatch2(emptySchema, data, metadata);
+    const batch = singleRowBatchWithMetadata(emptySchema, {}, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
     const resp = await this._post(this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }), body);
     if (resp.status === 401) {
@@ -4131,8 +4144,8 @@ async function requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn 
 async function buildPointerRequestBody(originalBody, downloadUrl) {
   const reader = await RecordBatchReader4.from(originalBody);
   await reader.open();
-  const schema2 = reader.schema;
-  if (!schema2) {
+  const schema = reader.schema;
+  if (!schema) {
     throw new RpcError("ProtocolError", "Original request body has no schema", "");
   }
   const batches = reader.readAll();
@@ -4141,7 +4154,7 @@ async function buildPointerRequestBody(originalBody, downloadUrl) {
   }
   const original = batches[0];
   const originalMeta = original.metadata ?? new Map;
-  const pointer = makeExternalLocationBatch(schema2, downloadUrl);
+  const pointer = makeExternalLocationBatch(schema, downloadUrl);
   const merged = new Map(pointer.metadata ?? new Map);
   const method = originalMeta.get(RPC_METHOD_KEY);
   const version = originalMeta.get(REQUEST_VERSION_KEY) ?? REQUEST_VERSION;
@@ -4152,9 +4165,8 @@ async function buildPointerRequestBody(originalBody, downloadUrl) {
     if (!merged.has(k))
       merged.set(k, v);
   }
-  const { RecordBatch: RecordBatch3 } = await import("@query-farm/apache-arrow");
-  const pointerWithMeta = new RecordBatch3(schema2, pointer.data, merged);
-  return serializeIpcStream(schema2, [pointerWithMeta]);
+  const pointerWithMeta = withBatchMetadata(pointer, merged);
+  return serializeIpcStream(schema, [pointerWithMeta]);
 }
 async function externalizeRequestBody(body, opts) {
   const fetchFn = opts.fetch ?? globalThis.fetch;
@@ -4321,9 +4333,9 @@ function httpConnect(rawBaseUrl, options) {
     if (compressionLoaded || compressionLevel == null)
       return;
     try {
-      const mod = await Promise.resolve().then(() => (init_zstd(), exports_zstd));
-      compressFn = mod.zstdCompress;
-      decompressFn = mod.zstdDecompress;
+      const mod = await Promise.resolve().then(() => (init_zstd(), {}));
+      compressFn = zstdCompress;
+      decompressFn = zstdDecompress;
     } catch {}
     compressionLoaded = true;
   }
@@ -4592,7 +4604,7 @@ function httpConnect(rawBaseUrl, options) {
     async callRaw(method, input) {
       await ensureCompression();
       const batch = rawInputBatch(input);
-      const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(await rawPrefix(input.metadata), method), serializeIpcStream(batch.schema, [batch]));
+      const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(await rawPrefix(input.metadata), method), serializeRequest(batch.schema, [batch]));
       checkAuth(resp);
       const responseBody = await readResponse(resp);
       const { batches } = await readResponseBatches(responseBody);
@@ -4613,18 +4625,18 @@ function httpConnect(rawBaseUrl, options) {
       }
       return resultBatch === null ? null : rawBatchOf(resultBatch);
     },
-    async streamRaw(method, input, options2) {
+    async streamRaw(method, input, options) {
       await ensureCompression();
       const batch = rawInputBatch(input);
       const prefixForCall = await rawPrefix(input.metadata);
-      const init = await openStreamOverHttp(method, serializeIpcStream(batch.schema, [batch]), options2.hasHeader, prefixForCall);
+      const init = await openStreamOverHttp(method, serializeRequest(batch.schema, [batch]), options.hasHeader, prefixForCall);
       return new HttpStreamSession({
         baseUrl,
         prefix: prefixForCall,
         method,
         stateToken: init.stateToken,
         callStateToken: init.callStateToken,
-        outputSchema: init.outputSchema ?? new Schema3([]),
+        outputSchema: init.outputSchema ?? schema([]),
         onLog,
         pendingBatches: init.pendingBatches,
         finished: init.finished,
@@ -4650,7 +4662,7 @@ function httpConnect(rawBaseUrl, options) {
         method,
         stateToken: cursor,
         callStateToken: callToken,
-        outputSchema: outputSchema ?? new Schema3([]),
+        outputSchema: outputSchema ?? schema([]),
         onLog,
         pendingBatches: [],
         finished: false,
@@ -4730,17 +4742,6 @@ function httpConnect(rawBaseUrl, options) {
 // src/client/iroh.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
 
-// src/client/pipe.ts
-import {
-  Field as Field2,
-  makeData as makeData3,
-  RecordBatch as RecordBatch3,
-  RecordBatchStreamWriter as RecordBatchStreamWriter2,
-  Schema as Schema4,
-  Struct as Struct3,
-  vectorFromArray as vectorFromArray2
-} from "@query-farm/apache-arrow";
-
 // src/wire/writer.ts
 var STDOUT_FD = 1;
 var RESOLVED = Promise.resolve();
@@ -4751,9 +4752,9 @@ function _loadWriteSync() {
     return _writeSync;
   const getBuiltin = globalThis.process?.getBuiltinModule;
   if (typeof getBuiltin === "function") {
-    const fs2 = getBuiltin.call(globalThis.process, _NODE_FS_MOD);
-    if (fs2?.writeSync) {
-      _writeSync = fs2.writeSync.bind(fs2);
+    const fs = getBuiltin.call(globalThis.process, _NODE_FS_MOD);
+    if (fs?.writeSync) {
+      _writeSync = fs.writeSync.bind(fs);
       return _writeSync;
     }
   }
@@ -4815,9 +4816,9 @@ async function socketWriteChunk(socket, data) {
       cleanup();
       resolve();
     };
-    const onError = (err2) => {
+    const onError = (err) => {
       cleanup();
-      reject(err2);
+      reject(err);
     };
     const onClose = () => {
       cleanup();
@@ -4840,18 +4841,18 @@ class IpcStreamWriter {
       this.target = { kind: "socket", socket: fdOrSocketOrSink };
     }
   }
-  async writeStream(schema2, batches) {
-    const bytes3 = serializeBatches(schema2, batches);
+  async writeStream(schema, batches) {
+    const bytes = serializeBatches(schema, batches);
     if (this.target.kind === "fd") {
-      writeAll(this.target.fd, bytes3);
+      writeAll(this.target.fd, bytes);
     } else if (this.target.kind === "sink") {
-      await this.target.sink.write(bytes3);
+      await this.target.sink.write(bytes);
     } else {
-      await socketWriteAll(this.target.socket, bytes3);
+      await socketWriteAll(this.target.socket, bytes);
     }
   }
-  openStream(schema2) {
-    return new IncrementalStream(this.target, schema2);
+  openStream(schema) {
+    return new IncrementalStream(this.target, schema);
   }
 }
 
@@ -4860,9 +4861,9 @@ class IncrementalStream {
   target;
   closed = false;
   writeChain = Promise.resolve();
-  constructor(target, schema2) {
+  constructor(target, schema) {
     this.target = target;
-    this.encoder = createIncrementalEncoder(schema2);
+    this.encoder = createIncrementalEncoder(schema);
     this.enqueue(this.encoder.start());
   }
   async write(batch) {
@@ -4876,17 +4877,17 @@ class IncrementalStream {
     this.closed = true;
     return this.enqueue(this.encoder.finish());
   }
-  enqueue(bytes3) {
+  enqueue(bytes) {
     const target = this.target;
     if (target.kind === "fd") {
-      writeAll(target.fd, bytes3);
+      writeAll(target.fd, bytes);
       return RESOLVED;
     }
     const next = this.writeChain.then(() => {
       if (target.kind === "sink") {
-        return target.sink.write(bytes3);
+        return target.sink.write(bytes);
       }
-      return socketWriteAll(target.socket, bytes3);
+      return socketWriteAll(target.socket, bytes);
     });
     this.writeChain = next.catch(() => {
       return;
@@ -4902,41 +4903,34 @@ function fieldsMatch(left, right) {
   }
   const leftChildren = left.type.children ?? [];
   const rightChildren = right.type.children ?? [];
-  return leftChildren.length === rightChildren.length && leftChildren.every((child2, index) => fieldsMatch(child2, rightChildren[index]));
+  return leftChildren.length === rightChildren.length && leftChildren.every((child, index) => fieldsMatch(child, rightChildren[index]));
 }
 function schemasMatch(left, right) {
-  return left.fields.length === right.fields.length && left.fields.every((field2, index) => fieldsMatch(field2, right.fields[index]));
+  return left.fields.length === right.fields.length && left.fields.every((field, index) => fieldsMatch(field, right.fields[index]));
 }
 
 class PipeIncrementalWriter {
-  writer;
+  encoder;
   writeFn;
   closed = false;
-  constructor(writeFn, schema2) {
+  constructor(writeFn, schema) {
     this.writeFn = writeFn;
-    this.writer = new RecordBatchStreamWriter2;
-    this.writer.reset(undefined, schema2);
-    this.drain();
+    this.encoder = createRequestEncoder(schema);
   }
   write(batch) {
     if (this.closed)
       throw new Error("PipeIncrementalWriter already closed");
-    this.writer._writeRecordBatch(batch);
-    this.drain();
+    this.emit(this.encoder.writeBatch(batch));
   }
   close() {
     if (this.closed)
       return;
     this.closed = true;
-    const eos = new Uint8Array(new Int32Array([-1, 0]).buffer);
-    this.writeFn(eos);
+    this.emit(this.encoder.finish());
   }
-  drain() {
-    const values = this.writer._sink._values;
-    for (const chunk of values) {
-      this.writeFn(chunk);
-    }
-    values.length = 0;
+  emit(bytes) {
+    if (bytes.length > 0)
+      this.writeFn(bytes);
   }
 }
 
@@ -4997,8 +4991,8 @@ class PipeStreamSession {
     if (this._outputStreamOpened)
       return;
     this._outputStreamOpened = true;
-    const schema2 = await (await this._reader()).openNextStream();
-    if (!schema2) {
+    const schema = await (await this._reader()).openNextStream();
+    if (!schema) {
       throw new RpcError("ProtocolError", "Expected output stream but got EOF", "");
     }
   }
@@ -5018,12 +5012,11 @@ class PipeStreamSession {
     if (this._closed) {
       throw new RpcError("ProtocolError", "Stream session is closed", "");
     }
-    const tickSchema = new Schema4([]);
+    const tickSchema = schema([]);
     if (!this._inputWriter) {
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
     }
-    const tickData = makeData3({ type: new Struct3([]), length: 0, children: [], nullCount: 0 });
-    const tickBatch = new RecordBatch3(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
+    const tickBatch = emptyBatchWithMetadata(tickSchema, metadata ? new Map(metadata) : undefined);
     this._inputWriter.write(tickBatch);
     await this._ensureOutputStream();
     let outputBatch;
@@ -5071,13 +5064,11 @@ class PipeStreamSession {
     this._closed = true;
     const cancelMetadata = new Map([[CANCEL_KEY, "1"]]);
     try {
-      const schema2 = this._inputSchema ?? new Schema4([]);
+      const schema2 = this._inputSchema ?? schema([]);
       if (!this._inputWriter) {
         this._inputWriter = new PipeIncrementalWriter(this._writeFn, schema2);
       }
-      const children = schema2.fields.map((f) => makeData3({ type: f.type, length: 0, nullCount: 0 }));
-      const data = makeData3({ type: new Struct3(schema2.fields), length: 0, children, nullCount: 0 });
-      this._inputWriter.write(new RecordBatch3(schema2, data, cancelMetadata));
+      this._inputWriter.write(emptyBatchWithMetadata(schema2, cancelMetadata));
       this._inputWriter.close();
       this._inputWriter = null;
     } catch {
@@ -5087,8 +5078,8 @@ class PipeStreamSession {
     try {
       if (!this._outputStreamOpened) {
         this._outputStreamOpened = true;
-        const schema2 = await (await this._reader()).openNextStream();
-        if (!schema2) {
+        const schema = await (await this._reader()).openNextStream();
+        if (!schema) {
           this._releaseBusy();
           return;
         }
@@ -5112,17 +5103,7 @@ class PipeStreamSession {
       this._inputSchema ??= inputSchema;
     } else if (input.length === 0) {
       inputSchema = this._inputSchema ?? this._outputSchema;
-      const children = inputSchema.fields.map((f) => {
-        return makeData3({ type: f.type, length: 0, nullCount: 0 });
-      });
-      const structType = new Struct3(inputSchema.fields);
-      const data = makeData3({
-        type: structType,
-        length: 0,
-        children,
-        nullCount: 0
-      });
-      batch = new RecordBatch3(inputSchema, data);
+      batch = emptyBatchWithMetadata(inputSchema);
     } else {
       const keys = Object.keys(input[0]);
       const fields = keys.map((key) => {
@@ -5134,9 +5115,9 @@ class PipeStreamSession {
           }
         }
         const arrowType = inferArrowType(sample);
-        return new Field2(key, arrowType, true);
+        return field(key, arrowType, true);
       });
-      inputSchema = new Schema4(fields);
+      inputSchema = schema(fields);
       if (this._inputSchema) {
         const cached = this._inputSchema;
         if (cached.fields.length !== inputSchema.fields.length || cached.fields.some((f, i) => f.name !== inputSchema.fields[i].name)) {
@@ -5145,18 +5126,10 @@ class PipeStreamSession {
       } else {
         this._inputSchema = inputSchema;
       }
-      const children = inputSchema.fields.map((f) => {
-        const values = input.map((row) => row[f.name]);
-        return vectorFromArray2(values, f.type).data[0];
-      });
-      const structType = new Struct3(inputSchema.fields);
-      const data = makeData3({
-        type: structType,
-        length: input.length,
-        children,
-        nullCount: 0
-      });
-      batch = new RecordBatch3(inputSchema, data);
+      const columns = {};
+      for (const f of inputSchema.fields)
+        columns[f.name] = input.map((row) => row[f.name]);
+      batch = batchFromColumns(inputSchema, columns);
     }
     if (!this._inputWriter) {
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, inputSchema);
@@ -5193,7 +5166,7 @@ class PipeStreamSession {
     if (this._closed)
       return;
     try {
-      const tickSchema = new Schema4([]);
+      const tickSchema = schema([]);
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
       while (true) {
         const rows = await this.tick();
@@ -5224,15 +5197,15 @@ class PipeStreamSession {
       this._inputWriter.close();
       this._inputWriter = null;
     } else {
-      const emptySchema = new Schema4([]);
+      const emptySchema = schema([]);
       const ipc = serializeIpcStream(emptySchema, []);
       this._writeFn(ipc);
     }
     const drainPromise = (async () => {
       try {
         if (!this._outputStreamOpened) {
-          const schema2 = await (await this._reader()).openNextStream();
-          if (schema2) {
+          const schema = await (await this._reader()).openNextStream();
+          if (schema) {
             while (await (await this._reader()).readNextBatch() !== null) {}
           }
         } else {
@@ -5261,13 +5234,13 @@ function pipeConnect(readable, writable, options) {
   let _busy = false;
   let _drainPromise = null;
   let closed = false;
-  const writeFn = (bytes3) => {
+  const writeFn = (bytes) => {
     let offset = 0;
     do {
-      const end = Math.min(offset + MAX_STREAM_CHUNK, bytes3.length);
-      writable.write(bytes3.subarray(offset, end));
+      const end = Math.min(offset + MAX_STREAM_CHUNK, bytes.length);
+      writable.write(bytes.subarray(offset, end));
       offset = end;
-    } while (offset < bytes3.length);
+    } while (offset < bytes.length);
     writable.flush?.();
   };
   async function ensureReader() {
@@ -5380,39 +5353,39 @@ function pipeConnect(readable, writable, options) {
       await acquireBusy();
       try {
         const batch = rawInputBatch(input);
-        writeFn(serializeIpcStream(batch.schema, [batch]));
+        writeFn(serializeRequest(batch.schema, [batch]));
         const r = await ensureReader();
         const response = await r.readStream();
         if (!response) {
           throw new RpcError("TransportError", "EOF reading response", "");
         }
         let resultBatch = null;
-        for (let batch2 of response.batches) {
-          if (batch2.numRows === 0) {
-            if (isExternalLocationBatch(batch2)) {
-              batch2 = await resolveExternalLocation(batch2, externalConfig, onLog);
+        for (let batch of response.batches) {
+          if (batch.numRows === 0) {
+            if (isExternalLocationBatch(batch)) {
+              batch = await resolveExternalLocation(batch, externalConfig, onLog);
             } else {
-              dispatchLogOrError(batch2, onLog);
+              dispatchLogOrError(batch, onLog);
               continue;
             }
           }
           if (resultBatch !== null) {
             throw new RpcError("ProtocolError", "A unary response returned more than one data batch", "");
           }
-          resultBatch = batch2;
+          resultBatch = batch;
         }
         return resultBatch === null ? null : rawBatchOf(resultBatch);
       } finally {
         releaseBusy();
       }
     },
-    async streamRaw(_method, input, options2) {
+    async streamRaw(_method, input, options) {
       await acquireBusy();
       try {
         const batch = rawInputBatch(input);
-        writeFn(serializeIpcStream(batch.schema, [batch]));
+        writeFn(serializeRequest(batch.schema, [batch]));
         let rawHeader = null;
-        if (options2.hasHeader) {
+        if (options.hasHeader) {
           const headerStream = await (await ensureReader()).readStream();
           if (headerStream) {
             for (const headerBatch of headerStream.batches) {
@@ -5434,7 +5407,7 @@ function pipeConnect(readable, writable, options) {
           onLog,
           header: null,
           rawHeader,
-          outputSchema: new Schema4([]),
+          outputSchema: schema([]),
           releaseBusy,
           setDrainPromise,
           externalConfig
@@ -5442,7 +5415,7 @@ function pipeConnect(readable, writable, options) {
       } catch (e) {
         try {
           const r = await ensureReader();
-          writeFn(serializeIpcStream(new Schema4([]), []));
+          writeFn(serializeIpcStream(schema([]), []));
           await r.readStream();
         } catch {}
         releaseBusy();
@@ -5498,7 +5471,7 @@ function pipeConnect(readable, writable, options) {
       } catch (e) {
         try {
           const r = await ensureReader();
-          const emptySchema = new Schema4([]);
+          const emptySchema = schema([]);
           const ipc = serializeIpcStream(emptySchema, []);
           writeFn(ipc);
           const outStream = await r.readStream();
@@ -5592,10 +5565,10 @@ function transportError(error, stage, category, dispatchCertainty) {
   return new IrohTransportError(error instanceof Error ? error.message : String(error), aborted ? "cancel" : stage, aborted ? "cancelled" : category, dispatchCertainty, { cause: error });
 }
 function decodeEndpointId(value) {
-  const bytes3 = new Uint8Array(32);
-  for (let i = 0;i < bytes3.length; i++)
-    bytes3[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
-  return bytes3;
+  const bytes = new Uint8Array(32);
+  for (let i = 0;i < bytes.length; i++)
+    bytes[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
+  return bytes;
 }
 function parseIrohEndpoint(raw) {
   if (typeof raw !== "string" || raw.length === 0 || raw.includes("\\") || raw.includes("?") || raw.includes("#") || [...raw].some((value) => value.charCodeAt(0) <= 32 || value.charCodeAt(0) === 127)) {
@@ -5779,8 +5752,8 @@ async function irohConnect(rawEndpoint, options = {}) {
     }
   });
   const writable = {
-    write(bytes3) {
-      const owned = Array.from(bytes3);
+    write(bytes) {
+      const owned = Array.from(bytes);
       writeQueue = writeQueue.then(() => activeIo(send.writeAll(owned), "write", "unknown", () => {
         send.reset(0n).catch(() => {});
       }));
@@ -5812,11 +5785,11 @@ async function irohConnect(rawEndpoint, options = {}) {
 // src/client/httpi.ts
 var BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 var IROH_HTTP_MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
-function encodeIrohNodeId(bytes3) {
+function encodeIrohNodeId(bytes) {
   let accumulator = 0;
   let bits = 0;
   let encoded = "";
-  for (const byte of bytes3) {
+  for (const byte of bytes) {
     accumulator = accumulator << 8 | byte;
     bits += 8;
     while (bits >= 5) {
@@ -5973,8 +5946,8 @@ function targetAddress(host) {
   if (kind === 4)
     return Uint8Array.of(1, ...host.split(".").map(Number));
   if (kind === 6) {
-    const bytes3 = ipv6Bytes(host);
-    return Uint8Array.of(4, ...bytes3);
+    const bytes = ipv6Bytes(host);
+    return Uint8Array.of(4, ...bytes);
   }
   const ascii = domainToASCII(host);
   if (!ascii || ascii.length > 255 || /[^\x21-\x7e]/u.test(ascii)) {
@@ -5991,23 +5964,23 @@ function ipv6Bytes(input) {
   const parseSide = (side) => {
     if (!side)
       return [];
-    const words2 = [];
+    const words = [];
     for (const part of side.split(":")) {
       if (part.includes(".")) {
         const octets = part.split(".").map(Number);
         if (octets.length !== 4 || octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
           throw new TypeError("invalid SOCKS5h IPv6 target");
         }
-        words2.push(octets[0] << 8 | octets[1], octets[2] << 8 | octets[3]);
+        words.push(octets[0] << 8 | octets[1], octets[2] << 8 | octets[3]);
       } else {
         const value = Number.parseInt(part, 16);
         if (!/^[0-9a-f]{1,4}$/u.test(part) || !Number.isInteger(value)) {
           throw new TypeError("invalid SOCKS5h IPv6 target");
         }
-        words2.push(value);
+        words.push(value);
       }
     }
-    return words2;
+    return words;
   };
   const left = parseSide(pieces[0]);
   const right = parseSide(pieces[1] ?? "");
@@ -6064,7 +6037,7 @@ function waitConnect(socket, signal) {
       signal.addEventListener("abort", aborted, { once: true });
   });
 }
-function write(socket, bytes3, signal) {
+function write(socket, bytes, signal) {
   return new Promise((resolve, reject) => {
     if (signal.aborted)
       return reject(signal.reason);
@@ -6073,7 +6046,7 @@ function write(socket, bytes3, signal) {
       reject(signal.reason);
     };
     signal.addEventListener("abort", aborted, { once: true });
-    socket.write(bytes3, (error) => {
+    socket.write(bytes, (error) => {
       signal.removeEventListener("abort", aborted);
       if (error)
         reject(error);
@@ -6323,12 +6296,12 @@ class HttpResponseFramer {
   materialize(length) {
     return Buffer.from(this.bytes.subarray(0, length));
   }
-  ensureCapacity(required2) {
-    if (required2 <= this.bytes.length)
+  ensureCapacity(required) {
+    if (required <= this.bytes.length)
       return;
     let capacity = this.bytes.length;
-    while (capacity < required2)
-      capacity = Math.min(this.maxResponseBytes, Math.max(capacity * 2, required2));
+    while (capacity < required)
+      capacity = Math.min(this.maxResponseBytes, Math.max(capacity * 2, required));
     const replacement = Buffer.allocUnsafe(capacity);
     this.bytes.copy(replacement, 0, 0, this.length);
     this.bytes = replacement;
@@ -6733,8 +6706,8 @@ function rfc3339Utc() {
   const ms = d.getUTCMilliseconds().toString().padStart(3, "0");
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}.${ms}Z`;
 }
-function base64(bytes3) {
-  return Buffer.from(bytes3).toString("base64");
+function base64(bytes) {
+  return Buffer.from(bytes).toString("base64");
 }
 function roundTo2(f) {
   return Math.round(f * 100) / 100;
@@ -6972,8 +6945,8 @@ class AccessLogHook {
   redact(claims) {
     try {
       return this.redactor(claims);
-    } catch (err2) {
-      console.warn("vgi-rpc access log: claim redactor threw; dropping claims from the record", err2);
+    } catch (err) {
+      console.warn("vgi-rpc access log: claim redactor threw; dropping claims from the record", err);
       return {};
     }
   }
@@ -7270,13 +7243,13 @@ class AuthUnavailableError extends Error {
     this.retryAfter = retryAfter;
   }
 }
-function classifyAuthFailure(err2) {
-  const declared = err2?.[AUTH_REASON_PROPERTY];
-  const message = err2 instanceof Error ? err2.message : "";
+function classifyAuthFailure(err) {
+  const declared = err?.[AUTH_REASON_PROPERTY];
+  const message = err instanceof Error ? err.message : "";
   if (typeof declared === "string" && AUTH_REASONS.has(declared)) {
-    return { reason: declared, detail: err2 instanceof AuthFailure ? err2.detail : message };
+    return { reason: declared, detail: err instanceof AuthFailure ? err.detail : message };
   }
-  if (err2 instanceof Error && err2.name === "PermissionError") {
+  if (err instanceof Error && err.name === "PermissionError") {
     return { reason: AuthReason.InsufficientScope, detail: message };
   }
   return { reason: AuthReason.Unauthorized, detail: message };
@@ -7324,12 +7297,12 @@ function bearerAuthenticateStatic(options) {
   }
   return bearerAuthenticate({ validate });
 }
-function isCredentialError(err2) {
-  if (err2 instanceof AuthUnavailableError)
+function isCredentialError(err) {
+  if (err instanceof AuthUnavailableError)
     return false;
-  if (err2 instanceof AuthFailure)
+  if (err instanceof AuthFailure)
     return true;
-  return err2 instanceof Error && err2.constructor === Error && err2.name !== "PermissionError";
+  return err instanceof Error && err.constructor === Error && err.name !== "PermissionError";
 }
 function combineReasons(codes) {
   if (codes.length === 0)
@@ -7347,13 +7320,13 @@ function chainAuthenticate(...authenticators) {
     for (const authFn of authenticators) {
       try {
         return await authFn(request);
-      } catch (err2) {
-        if (isCredentialError(err2)) {
-          lastError = err2;
-          codes.push(err2 instanceof AuthFailure ? err2.reason : AuthReason.Unauthorized);
+      } catch (err) {
+        if (isCredentialError(err)) {
+          lastError = err;
+          codes.push(err instanceof AuthFailure ? err.reason : AuthReason.Unauthorized);
           continue;
         }
-        throw err2;
+        throw err;
       }
     }
     const error = new AuthFailure(combineReasons(codes), "No authenticator accepted the request");
@@ -7400,7 +7373,7 @@ function validateRequestSchema(actual, expected, methodName) {
     }
   }
 }
-function parseRequest(schema2, batch) {
+function parseRequest(schema, batch) {
   const metadata = batch.metadata ?? new Map;
   const methodName = metadata.get(RPC_METHOD_KEY);
   if (methodName === undefined) {
@@ -7415,36 +7388,36 @@ function parseRequest(schema2, batch) {
   }
   const requestId = metadata.get(REQUEST_ID_KEY) ?? null;
   const params = {};
-  if (schema2.fields.length > 0 && batch.numRows !== 1) {
+  if (schema.fields.length > 0 && batch.numRows !== 1) {
     throw new RpcError("ProtocolError", `Expected 1 row in request batch, got ${batch.numRows}. ` + "Each parameter is a column (not a row). The batch should have exactly 1 row.", "");
   }
   const useOpaquePassthrough = backend.opaquePassthrough;
-  for (let i = 0;i < schema2.fields.length; i++) {
-    const field2 = schema2.fields[i];
-    if (useOpaquePassthrough && (isMap(field2.type) || isOpaquePassthroughType(field2.type))) {
+  for (let i = 0;i < schema.fields.length; i++) {
+    const field = schema.fields[i];
+    if (useOpaquePassthrough && (isMap(field.type) || isOpaquePassthroughType(field.type))) {
       const col = batch.getChildAt(i);
-      params[field2.name] = col.data?.[0] ?? col.get(0);
+      params[field.name] = col.data?.[0] ?? col.get(0);
       continue;
     }
     let value = batch.getChildAt(i)?.get(0);
-    if (value instanceof Uint32Array && isOpaquePassthroughType(field2.type)) {
+    if (value instanceof Uint32Array && isOpaquePassthroughType(field.type)) {
       try {
         value = BigInt(value.toString());
       } catch {}
     }
-    if (typeof value === "bigint" && !isOpaquePassthroughType(field2.type)) {
+    if (typeof value === "bigint" && !isOpaquePassthroughType(field.type)) {
       if (value >= MIN_SAFE_BIG && value <= MAX_SAFE_BIG) {
         value = Number(value);
       }
     }
-    params[field2.name] = value;
+    params[field.name] = value;
   }
   return {
     methodName,
     protocol: metadata.get(PROTOCOL_KEY) ?? "",
     requestVersion: version,
     requestId,
-    schema: schema2,
+    schema,
     params,
     rawMetadata: metadata
   };
@@ -7461,8 +7434,8 @@ function applyDefaults(params, defaults) {
 }
 
 // src/util/schema.ts
-function serializeSchema2(schema2) {
-  return serializeSchema(schema2);
+function serializeSchema2(schema) {
+  return serializeSchema(schema);
 }
 
 // node_modules/@noble/ciphers/utils.js
@@ -7481,15 +7454,15 @@ function anumber(n) {
     throw new RangeError("positive integer expected, got " + n);
 }
 function abytes(value, length, title = "") {
-  const bytes3 = isBytes(value);
+  const bytes = isBytes(value);
   const len = value?.length;
   const needsLen = length !== undefined;
-  if (!bytes3 || needsLen && len !== length) {
+  if (!bytes || needsLen && len !== length) {
     const prefix = title && `"${title}" `;
     const ofLen = needsLen ? ` of length ${length}` : "";
-    const got = bytes3 ? `length=${len}` : `type=${typeof value}`;
+    const got = bytes ? `length=${len}` : `type=${typeof value}`;
     const message = prefix + "expected Uint8Array" + ofLen + ", got " + got;
-    if (!bytes3)
+    if (!bytes)
       throw new TypeError(message);
     throw new RangeError(message);
   }
@@ -7605,25 +7578,25 @@ function getOutput(expectedLength, out, onlyAligned = true) {
     throw new Error("invalid output, must be aligned");
   return out;
 }
-function u64Lengths(dataLength, aadLength, isLE2) {
+function u64Lengths(dataLength, aadLength, isLE) {
   anumber(dataLength);
   anumber(aadLength);
-  abool(isLE2);
+  abool(isLE);
   const num = new Uint8Array(16);
   const view = createView(num);
-  view.setBigUint64(0, BigInt(aadLength), isLE2);
-  view.setBigUint64(8, BigInt(dataLength), isLE2);
+  view.setBigUint64(0, BigInt(aadLength), isLE);
+  view.setBigUint64(8, BigInt(dataLength), isLE);
   return num;
 }
-function isAligned32(bytes3) {
-  return bytes3.byteOffset % 4 === 0;
+function isAligned32(bytes) {
+  return bytes.byteOffset % 4 === 0;
 }
-function copyBytes(bytes3) {
-  return Uint8Array.from(abytes(bytes3));
+function copyBytes(bytes) {
+  return Uint8Array.from(abytes(bytes));
 }
 
 // node_modules/@noble/ciphers/_arx.js
-var encodeStr = (str2) => Uint8Array.from(str2.split(""), (c) => c.charCodeAt(0));
+var encodeStr = (str) => Uint8Array.from(str.split(""), (c) => c.charCodeAt(0));
 var sigma16_32 = /* @__PURE__ */ (() => swap32IfBE(u32(encodeStr("expand 16-byte k"))))();
 var sigma32_32 = /* @__PURE__ */ (() => swap32IfBE(u32(encodeStr("expand 32-byte k"))))();
 function rotl(a, b) {
@@ -8311,10 +8284,10 @@ function aadWith(prefix, scope) {
   identity.set(pBytes, 1);
   return concatBytes2(prefix, identity, tail);
 }
-function bytesToBase64(bytes3) {
+function bytesToBase64(bytes) {
   let s = "";
-  for (let i = 0;i < bytes3.length; i += 32768) {
-    s += String.fromCharCode(...bytes3.subarray(i, i + 32768));
+  for (let i = 0;i < bytes.length; i += 32768) {
+    s += String.fromCharCode(...bytes.subarray(i, i + 32768));
   }
   return btoa(s);
 }
@@ -8415,11 +8388,11 @@ function unpackStateToken(tokenBase64, tokenKey, tokenTtl, scope) {
       aad: computeAad(scope),
       version: TOKEN_VERSION
     });
-  } catch (err2) {
-    if (err2 instanceof SealError) {
+  } catch (err) {
+    if (err instanceof SealError) {
       throw new Error("State token signature verification failed");
     }
-    throw err2;
+    throw err;
   }
   if (plaintext.length < 8 + CALL_ID_LEN) {
     throw new Error("State token truncated");
@@ -8460,11 +8433,11 @@ function unpackCallToken(token, tokenKey, scope, tokenTtl = 0) {
       aad: computeCallAad(scope),
       version: CALL_TOKEN_VERSION
     });
-  } catch (err2) {
-    if (err2 instanceof SealError) {
+  } catch (err) {
+    if (err instanceof SealError) {
       throw new Error("State token signature verification failed");
     }
-    throw err2;
+    throw err;
   }
   if (plaintext.length < 8 + CALL_ID_LEN) {
     throw new Error("State token truncated");
@@ -8611,22 +8584,22 @@ function noteStream(ctx, callId) {
     hex += b.toString(16).padStart(2, "0");
   observer.streamId = hex;
 }
-async function deserializeSchema3(bytes3) {
-  return deserializeSchema(bytes3);
+async function deserializeSchema3(bytes) {
+  return deserializeSchema(bytes);
 }
 var EMPTY_SCHEMA2 = schema([]);
 function countExternalized(ctx) {
   const egress = ctx.egress;
   if (!egress)
     return;
-  return (bytes3) => {
-    egress.externalizedBytes += bytes3;
+  return (bytes) => {
+    egress.externalizedBytes += bytes;
   };
 }
 async function readInboundRequest(body, ctx) {
-  const { schema: schema2, batch } = await readRequestFromBody(body);
+  const { schema, batch } = await readRequestFromBody(body);
   if (!ctx.externalLocation || !isExternalLocationBatch(batch)) {
-    return { schema: schema2, batch, dataMetadata: batch.metadata ?? undefined };
+    return { schema, batch, dataMetadata: batch.metadata ?? undefined };
   }
   const resolved = await resolveExternalLocation(batch, ctx.externalLocation);
   const mergedMetadata = new Map(resolved.metadata ?? []);
@@ -8638,9 +8611,9 @@ async function readInboundRequest(body, ctx) {
     dataMetadata: resolved.metadata ?? undefined
   };
 }
-function parseHttpRequest(schema2, batch) {
+function parseHttpRequest(schema, batch) {
   try {
-    return parseRequest(schema2, batch);
+    return parseRequest(schema, batch);
   } catch (error) {
     const message = error?.errorMessage;
     const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
@@ -8683,14 +8656,14 @@ async function externalizeForResponseBudget(batch, ctx, methodName) {
   }
   return maybeExternalizeBatch(batch, ctx.externalLocation, countExternalized(ctx), force);
 }
-function makeCapErrorResponse(schema2, error, ctx) {
-  const errBatch = buildErrorBatch(schema2, error, ctx.serverId, null);
-  const response = arrowResponse(serializeIpcStream(schema2, [errBatch]), 500);
+function makeCapErrorResponse(schema, error, ctx) {
+  const errBatch = buildErrorBatch(schema, error, ctx.serverId, null);
+  const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
   response.__dispatchError = error;
   return response;
 }
 async function httpDispatchUnary(method, body, ctx) {
-  const schema2 = method.resultSchema;
+  const schema = method.resultSchema;
   const { schema: effectiveSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
   const parsed = parseHttpRequest(effectiveSchema, reqBatch);
   if (parsed.methodName !== method.name) {
@@ -8706,7 +8679,7 @@ async function httpDispatchUnary(method, body, ctx) {
   }
   applyDefaults(parsed.params, method.defaults);
   const externalizationEnabled = !!ctx.externalLocation?.storage;
-  const out = new OutputCollector(schema2, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
+  const out = new OutputCollector(schema, true, ctx.serverId, parsed.requestId, ctx.authContext, ctx.cookies, ctx.kind ?? "http" /* HTTP */, {
     remainingResponseBytes: ctx.maxResponseBytes,
     responseLimitBytes: ctx.maxResponseBytes,
     preferredResponseBytes: ctx.preferredResponseBytes,
@@ -8719,23 +8692,23 @@ async function httpDispatchUnary(method, body, ctx) {
     out.attachStickyContext(ctx.stickyContext);
   try {
     const result = await method.handler(parsed.params, out);
-    let resultBatch = buildResultBatch(schema2, result, ctx.serverId, parsed.requestId);
+    let resultBatch = buildResultBatch(schema, result, ctx.serverId, parsed.requestId);
     resultBatch = await externalizeForResponseBudget(resultBatch, ctx, method.name);
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
-    const body2 = serializeIpcStream(schema2, batches);
-    if (ctx.maxResponseBytes != null && body2.byteLength > ctx.maxResponseBytes) {
-      const overshoot = new Error(`HTTP body exceeds max_response_bytes (${body2.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`);
+    const body = serializeIpcStream(schema, batches);
+    if (ctx.maxResponseBytes != null && body.byteLength > ctx.maxResponseBytes) {
+      const overshoot = new Error(`HTTP body exceeds max_response_bytes (${body.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`);
       overshoot.name = "ResponseTooLargeError";
-      const response2 = makeCapErrorResponse(schema2, overshoot, ctx);
-      appendCookieHeaders(response2.headers, out.drainResponseCookies());
-      return response2;
+      const response = makeCapErrorResponse(schema, overshoot, ctx);
+      appendCookieHeaders(response.headers, out.drainResponseCookies());
+      return response;
     }
-    const response = arrowResponse(body2);
+    const response = arrowResponse(body);
     appendCookieHeaders(response.headers, out.drainResponseCookies());
     return response;
   } catch (error) {
-    const errBatch = buildErrorBatch(schema2, error, ctx.serverId, parsed.requestId);
-    const response = arrowResponse(serializeIpcStream(schema2, [errBatch]), 500);
+    const errBatch = buildErrorBatch(schema, error, ctx.serverId, parsed.requestId);
+    const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
     appendCookieHeaders(response.headers, out.drainResponseCookies());
     response.__dispatchError = error;
     return response;
@@ -8884,8 +8857,8 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     if (method.onCancel) {
       try {
         await method.onCancel(state);
-      } catch (err2) {
-        console.debug?.(`onCancel hook failed: ${err2 instanceof Error ? err2.message : err2}`);
+      } catch (err) {
+        console.debug?.(`onCancel hook failed: ${err instanceof Error ? err.message : err}`);
       }
     }
     return arrowResponse(serializeIpcStream(outputSchema, []));
@@ -8972,13 +8945,13 @@ async function httpDispatchStreamExchange(method, body, ctx) {
     } catch (error) {
       return makeCapErrorResponse(outputSchema, error, ctx);
     }
-    const body2 = serializeIpcStream(outputSchema, batches);
-    if (ctx.maxResponseBytes != null && body2.byteLength > ctx.maxResponseBytes) {
-      const overshoot = new Error(`HTTP body exceeds max_response_bytes (${body2.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`);
+    const body = serializeIpcStream(outputSchema, batches);
+    if (ctx.maxResponseBytes != null && body.byteLength > ctx.maxResponseBytes) {
+      const overshoot = new Error(`HTTP body exceeds max_response_bytes (${body.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`);
       overshoot.name = "ResponseTooLargeError";
       return makeCapErrorResponse(outputSchema, overshoot, ctx);
     }
-    return arrowResponse(body2);
+    return arrowResponse(body);
   }
 }
 async function produceStreamResponse(method, state, outputSchema, inputSchema, ctx, requestId, headerBytes, call, requestMetadata) {
@@ -9514,28 +9487,28 @@ async function exchangeCodeForToken(tokenEndpoint, code, redirectUri, codeVerifi
       throw new Error(`HTTP ${resp.status}: ${text}`);
     }
     body = await resp.json();
-  } catch (err2) {
-    throw new Error(`Token exchange failed: ${err2.message ?? err2}`);
+  } catch (err) {
+    throw new Error(`Token exchange failed: ${err.message ?? err}`);
   }
   const refreshToken = body.refresh_token ?? null;
   const idToken = body.id_token ?? null;
   if (useIdToken) {
-    const token2 = body.id_token;
-    if (!token2)
+    const token = body.id_token;
+    if (!token)
       throw new Error("Token response missing id_token");
     try {
-      const parts = token2.split(".");
+      const parts = token.split(".");
       if (parts.length >= 2) {
         const padding = 4 - parts[1].length % 4;
         const payloadJson = Buffer.from(parts[1] + "=".repeat(padding % 4), "base64").toString("utf-8");
         const claims = JSON.parse(payloadJson);
         if (claims.exp != null) {
           const maxAge = Math.max(Number(claims.exp) - Math.floor(Date.now() / 1000), 60);
-          return { token: token2, maxAge, refreshToken, idToken };
+          return { token, maxAge, refreshToken, idToken };
         }
       }
     } catch {}
-    return { token: token2, maxAge: AUTH_COOKIE_DEFAULT_MAX_AGE, refreshToken, idToken };
+    return { token, maxAge: AUTH_COOKIE_DEFAULT_MAX_AGE, refreshToken, idToken };
   }
   const token = body.access_token;
   if (!token)
@@ -9595,18 +9568,18 @@ function validateReturnTo(url, allowedOrigins) {
 }
 function parseCookies(request) {
   const header = request.headers.get("Cookie");
-  const map2 = new Map;
+  const map = new Map;
   if (!header)
-    return map2;
+    return map;
   for (const pair of header.split(";")) {
     const eq = pair.indexOf("=");
     if (eq < 0)
       continue;
     const name = pair.slice(0, eq).trim();
     const value = pair.slice(eq + 1).trim();
-    map2.set(name, value);
+    map.set(name, value);
   }
-  return map2;
+  return map;
 }
 function decodeJwtPayload(token) {
   if (!token)
@@ -9808,8 +9781,8 @@ async function handleOAuthTokenProxy(request, config) {
       body: upstream.toString(),
       signal: AbortSignal.timeout(15000)
     });
-  } catch (err2) {
-    return jsonErrorResponse(headers, 502, "server_error", `Upstream token endpoint failed: ${err2?.message ?? err2}`);
+  } catch (err) {
+    return jsonErrorResponse(headers, 502, "server_error", `Upstream token endpoint failed: ${err?.message ?? err}`);
   }
   const body = new Uint8Array(await upstreamResp.arrayBuffer());
   const ct = upstreamResp.headers.get("content-type") ?? "application/json";
@@ -9858,8 +9831,8 @@ async function handleOAuthCallback(request, config) {
   let result;
   try {
     result = await exchangeCodeForToken(endpoints.tokenEndpoint, code, config.redirectUri, unpacked.codeVerifier, config.clientId, config.clientSecret, config.useIdToken);
-  } catch (err2) {
-    return errorResponse(502, "Token exchange with the authorization server failed.", String(err2.message ?? err2));
+  } catch (err) {
+    return errorResponse(502, "Token exchange with the authorization server failed.", String(err.message ?? err));
   }
   const clearSessionCookie = buildSetCookieHeader(SESSION_COOKIE_NAME, "", {
     maxAge: 0,
@@ -10023,35 +9996,6 @@ function handleEarlyReturnTo(request, config) {
 var PROOF_HEADER = "VGI-Proxy-Proof";
 var PROOF_REQUIRED_HEADER = "VGI-Proxy-Proof-Required";
 var _enc = new TextEncoder;
-class NonceCache {
-  ttlSeconds;
-  capacity;
-  entries = new Map;
-  constructor(ttlSeconds, capacity) {
-    this.ttlSeconds = ttlSeconds;
-    this.capacity = capacity;
-  }
-  checkAndAdd(nonce, now) {
-    for (const [key, expires] of this.entries) {
-      if (expires > now)
-        break;
-      this.entries.delete(key);
-    }
-    if (this.entries.has(nonce))
-      return false;
-    while (this.entries.size >= this.capacity) {
-      const oldest = this.entries.keys().next();
-      if (oldest.done)
-        break;
-      this.entries.delete(oldest.value);
-    }
-    this.entries.set(nonce, now + this.ttlSeconds);
-    return true;
-  }
-  get size() {
-    return this.entries.size;
-  }
-}
 
 // src/http/sticky.ts
 var _UTF82 = new TextEncoder;
@@ -10060,10 +10004,10 @@ var TOKEN_VERSION2 = 1;
 var SESSION_ID_LEN = 12;
 var PREFIX_LEN = 8 + 1;
 var SUFFIX_LEN = 8;
-function base64UrlEncode(bytes3) {
+function base64UrlEncode(bytes) {
   let s = "";
-  for (let i = 0;i < bytes3.length; i += 32768) {
-    s += String.fromCharCode(...bytes3.subarray(i, i + 32768));
+  for (let i = 0;i < bytes.length; i += 32768) {
+    s += String.fromCharCode(...bytes.subarray(i, i + 32768));
   }
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -10115,11 +10059,11 @@ function openSessionToken(token, tokenKey, aad) {
   let plaintext;
   try {
     plaintext = openBytes(raw, tokenKey, { aad, version: TOKEN_VERSION2 });
-  } catch (err2) {
-    if (err2 instanceof SealError) {
+  } catch (err) {
+    if (err instanceof SealError) {
       throw new SessionLostError("session token verification failed");
     }
-    throw err2;
+    throw err;
   }
   if (plaintext.length < PREFIX_LEN) {
     throw new SessionLostError("malformed session token");
@@ -10287,8 +10231,8 @@ var jsonStateSerializer = {
   serialize(state) {
     return new TextEncoder().encode(JSON.stringify(state, (_key, value) => typeof value === "bigint" ? `__bigint__:${value}` : value));
   },
-  deserialize(bytes3) {
-    return JSON.parse(new TextDecoder().decode(bytes3), (_key, value) => typeof value === "string" && value.startsWith("__bigint__:") ? BigInt(value.slice(11)) : value);
+  deserialize(bytes) {
+    return JSON.parse(new TextDecoder().decode(bytes), (_key, value) => typeof value === "string" && value.startsWith("__bigint__:") ? BigInt(value.slice(11)) : value);
   }
 };
 
@@ -10677,17 +10621,17 @@ function createHttpHandler(target, options) {
     const { codec, usedCustom } = negotiated;
     const responseBody = new Uint8Array(await response.arrayBuffer());
     if (responseLimitBytes != null && responseBody.byteLength > responseLimitBytes) {
-      const headers2 = new Headers(response.headers);
-      headers2.delete(CONTENT_ENCODING_HEADER);
-      headers2.delete(VGI_CONTENT_ENCODING_HEADER);
+      const headers = new Headers(response.headers);
+      headers.delete(CONTENT_ENCODING_HEADER);
+      headers.delete(VGI_CONTENT_ENCODING_HEADER);
       const error = new Error(`HTTP body exceeds max_response_bytes (${responseBody.byteLength} > ${responseLimitBytes})`);
       error.name = "ResponseTooLargeError";
       const errorBatch = buildErrorBatch(EMPTY_SCHEMA3, error, serverId, null);
       const errorBody = serializeIpcStream(EMPTY_SCHEMA3, [errorBatch]);
-      headers2.set("Content-Type", ARROW_CONTENT_TYPE);
-      headers2.set(RPC_ERROR_HEADER, "true");
-      headers2.set("Content-Length", String(errorBody.byteLength));
-      return new Response(errorBody, { status: 200, headers: headers2 });
+      headers.set("Content-Type", ARROW_CONTENT_TYPE);
+      headers.set(RPC_ERROR_HEADER, "true");
+      headers.set("Content-Length", String(errorBody.byteLength));
+      return new Response(errorBody, { status: 200, headers });
     }
     if (compressionLevel == null || !codec) {
       return new Response(responseBody, { status: response.status, headers: response.headers });
@@ -10711,12 +10655,12 @@ function createHttpHandler(target, options) {
   }
   function authenticationErrorResponse(error, request) {
     if (error instanceof AuthUnavailableError || error instanceof PeerIdentityUnavailableError) {
-      const headers2 = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
-      addCorsHeaders(headers2);
+      const headers = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
+      addCorsHeaders(headers);
       const retryAfter = Number.isFinite(error.retryAfter) && error.retryAfter >= 0 ? Math.ceil(error.retryAfter) : 5;
-      headers2.set("Retry-After", String(retryAfter));
+      headers.set("Retry-After", String(retryAfter));
       const detail = error instanceof PeerIdentityUnavailableError ? "peer identity unavailable" : "authentication authority unavailable";
-      return new Response(JSON.stringify({ error: "authentication_unavailable", detail }), { status: 503, headers: headers2 });
+      return new Response(JSON.stringify({ error: "authentication_unavailable", detail }), { status: 503, headers });
     }
     const headers = new Headers;
     addCorsHeaders(headers);
@@ -10729,7 +10673,7 @@ function createHttpHandler(target, options) {
     const { reason } = classifyAuthFailure(error);
     return unauthorizedResponse(reason, "authentication rejected", headers);
   }
-  function peerEvidenceBinding2(auth) {
+  function peerEvidenceBinding(auth) {
     const value = auth?.claims?.peer_evidence_binding;
     return typeof value === "string" && value ? value : undefined;
   }
@@ -10824,9 +10768,9 @@ function createHttpHandler(target, options) {
       throw missingCredential;
     return { authContext, peerEvidence };
   }
-  function makeErrorResponse(error, statusCode, schema2 = EMPTY_SCHEMA3) {
-    const errBatch = buildErrorBatch(schema2, error, serverId, null);
-    const body = serializeIpcStream(schema2, [errBatch]);
+  function makeErrorResponse(error, statusCode, schema = EMPTY_SCHEMA3) {
+    const errBatch = buildErrorBatch(schema, error, serverId, null);
+    const body = serializeIpcStream(schema, [errBatch]);
     const resp = arrowResponse(body, statusCode);
     addCorsHeaders(resp.headers);
     return resp;
@@ -10870,19 +10814,19 @@ function createHttpHandler(target, options) {
         const resourceUrl = new URL(oauthMetadata.resource);
         metaJson.token_endpoint = `${resourceUrl.protocol}//${resourceUrl.host}${prefix}/_oauth/token`;
       }
-      const body2 = JSON.stringify(metaJson);
+      const body = JSON.stringify(metaJson);
       const headers = new Headers({
         "Content-Type": "application/json",
         "Cache-Control": "public, max-age=60"
       });
       addCorsHeaders(headers);
-      return new Response(body2, { status: 200, headers });
+      return new Response(body, { status: 200, headers });
     }
     if (request.method === "OPTIONS") {
-      const acceptedRaw2 = request.headers.get(ACCEPT_MAX_RESPONSE_BYTES_HEADER);
-      if (acceptedRaw2 !== null) {
+      const acceptedRaw = request.headers.get(ACCEPT_MAX_RESPONSE_BYTES_HEADER);
+      if (acceptedRaw !== null) {
         try {
-          parseResponseBudgetDecimal(acceptedRaw2);
+          parseResponseBudgetDecimal(acceptedRaw);
         } catch (error) {
           return invalidAcceptedResponseBudget(error, request, true);
         }
@@ -10957,14 +10901,14 @@ function createHttpHandler(target, options) {
       let aadDomain = null;
       let evidenceBinding;
       try {
-        const identity2 = await resolveRequestIdentity(request);
-        const auth2 = identity2.authContext;
-        evidenceBinding = peerEvidenceBinding2(auth2);
-        if (auth2.authenticated) {
-          aadPrincipal = auth2.principal ?? "";
-          aadDomain = auth2.domain;
+        const identity = await resolveRequestIdentity(request);
+        const auth = identity.authContext;
+        evidenceBinding = peerEvidenceBinding(auth);
+        if (auth.authenticated) {
+          aadPrincipal = auth.principal ?? "";
+          aadDomain = auth.domain;
         }
-        principalKey = sessionPrincipalKey(auth2.authenticated, auth2.domain, auth2.principal, evidenceBinding);
+        principalKey = sessionPrincipalKey(auth.authenticated, auth.domain, auth.principal, evidenceBinding);
       } catch {}
       const aad = computeAad({
         protocol: SERVER_SCOPE,
@@ -11029,15 +10973,15 @@ function createHttpHandler(target, options) {
     let stickyLockRelease = null;
     let stickySink = null;
     if (stickyEnabled && sessionRegistry) {
-      const auth2 = ctx.authContext;
-      const aadPrincipal = auth2?.authenticated ? auth2.principal ?? "" : null;
-      const evidenceBinding = peerEvidenceBinding2(auth2);
-      const principalKey = sessionPrincipalKey(!!auth2?.authenticated, auth2?.domain, auth2?.principal, evidenceBinding);
+      const auth = ctx.authContext;
+      const aadPrincipal = auth?.authenticated ? auth.principal ?? "" : null;
+      const evidenceBinding = peerEvidenceBinding(auth);
+      const principalKey = sessionPrincipalKey(!!auth?.authenticated, auth?.domain, auth?.principal, evidenceBinding);
       const aad = computeAad({
         protocol: SERVER_SCOPE,
         principal: aadPrincipal,
         evidenceBinding,
-        domain: auth2?.domain
+        domain: auth?.domain
       });
       const acceptOpens = (request.headers.get(SESSION_ACCEPT_HEADER) ?? "").trim().toLowerCase() === "true";
       const sessionHeader = (request.headers.get(SESSION_HEADER) ?? "").trim();
@@ -11050,8 +10994,8 @@ function createHttpHandler(target, options) {
           if (opened.serverId !== serverId) {
             throw new SessionLostError("session token was issued by a different worker (server_id mismatch)");
           }
-        } catch (err2) {
-          const e = err2 instanceof Error ? err2 : new Error(String(err2));
+        } catch (err) {
+          const e = err instanceof Error ? err : new Error(String(err));
           const r = makeErrorResponse(e, 500);
           addCapabilityHeaders(r.headers);
           return compressIfAccepted(r, responseEncoding, responseLimitBytes);
@@ -11085,14 +11029,14 @@ function createHttpHandler(target, options) {
           const sid = sink.sessionId;
           if (!sid)
             return;
-          const bytes3 = new Uint8Array(sid.length / 2);
-          for (let i = 0;i < bytes3.length; i++)
-            bytes3[i] = parseInt(sid.slice(i * 2, i * 2 + 2), 16);
+          const bytes = new Uint8Array(sid.length / 2);
+          for (let i = 0;i < bytes.length; i++)
+            bytes[i] = parseInt(sid.slice(i * 2, i * 2 + 2), 16);
           if (stickyLockRelease) {
             stickyLockRelease();
             stickyLockRelease = null;
           }
-          sessionRegistry.close(bytes3);
+          sessionRegistry.close(bytes);
           sink.state = null;
           sink.closed = true;
         }
@@ -11200,9 +11144,9 @@ function createHttpHandler(target, options) {
         return compressIfAccepted(response, responseEncoding, responseLimitBytes);
       } catch (error) {
         if (error instanceof HttpRpcError) {
-          const r2 = makeErrorResponse(error, error.statusCode, UPLOAD_URL_RESPONSE_SCHEMA);
-          addCapabilityHeaders(r2.headers);
-          return compressIfAccepted(r2, responseEncoding, responseLimitBytes);
+          const r = makeErrorResponse(error, error.statusCode, UPLOAD_URL_RESPONSE_SCHEMA);
+          addCapabilityHeaders(r.headers);
+          return compressIfAccepted(r, responseEncoding, responseLimitBytes);
         }
         const r = makeErrorResponse(error, 500, UPLOAD_URL_RESPONSE_SCHEMA);
         addCapabilityHeaders(r.headers);
@@ -11294,11 +11238,11 @@ function createHttpHandler(target, options) {
     } catch (error) {
       dispatchError = error instanceof Error ? error : new Error(String(error));
       if (error instanceof HttpRpcError) {
-        const r2 = makeErrorResponse(error, error.statusCode);
-        addCapabilityHeaders(r2.headers);
-        applyStickyResponseHeaders(r2.headers, stickySink);
-        info.httpStatus = r2.status;
-        return compressIfAccepted(r2, responseEncoding, responseLimitBytes);
+        const r = makeErrorResponse(error, error.statusCode);
+        addCapabilityHeaders(r.headers);
+        applyStickyResponseHeaders(r.headers, stickySink);
+        info.httpStatus = r.status;
+        return compressIfAccepted(r, responseEncoding, responseLimitBytes);
       }
       const r = makeErrorResponse(error, 500);
       addCapabilityHeaders(r.headers);
@@ -11421,9 +11365,9 @@ function looseInstanceOf(input, expected) {
 var ERR_INVALID_ARG_VALUE = "ERR_INVALID_ARG_VALUE";
 var ERR_INVALID_ARG_TYPE = "ERR_INVALID_ARG_TYPE";
 function CodedTypeError(message, code, cause) {
-  const err2 = new TypeError(message, { cause });
-  Object.assign(err2, { code });
-  return err2;
+  const err = new TypeError(message, { cause });
+  Object.assign(err, { code });
+  return err;
 }
 var allowInsecureRequests = Symbol();
 var clockSkew = Symbol();
@@ -11473,12 +11417,12 @@ if (Uint8Array.fromBase64) {
 } else {
   decodeBase64Url = (input) => {
     try {
-      const binary2 = atob(input.replace(/-/g, "+").replace(/_/g, "/").replace(/\s/g, ""));
-      const bytes3 = new Uint8Array(binary2.length);
-      for (let i = 0;i < binary2.length; i++) {
-        bytes3[i] = binary2.charCodeAt(i);
+      const binary = atob(input.replace(/-/g, "+").replace(/_/g, "/").replace(/\s/g, ""));
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0;i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
       }
-      return bytes3;
+      return bytes;
     } catch (cause) {
       throw CodedTypeError("The input to be decoded is not correctly encoded.", ERR_INVALID_ARG_VALUE, cause);
     }
@@ -11551,23 +11495,6 @@ async function calculateJwkThumbprint(jwk) {
       throw new UnsupportedOperationError("unsupported JWK key type", { cause: jwk });
   }
   return b64u(await crypto.subtle.digest("SHA-256", buf(JSON.stringify(components))));
-}
-function assertCryptoKey(key, it) {
-  if (!(key instanceof CryptoKey)) {
-    throw CodedTypeError(`${it} must be a CryptoKey`, ERR_INVALID_ARG_TYPE);
-  }
-}
-function assertPrivateKey(key, it) {
-  assertCryptoKey(key, it);
-  if (key.type !== "private") {
-    throw CodedTypeError(`${it} must be a private CryptoKey`, ERR_INVALID_ARG_VALUE);
-  }
-}
-function assertPublicKey(key, it) {
-  assertCryptoKey(key, it);
-  if (key.type !== "public") {
-    throw CodedTypeError(`${it} must be a public CryptoKey`, ERR_INVALID_ARG_VALUE);
-  }
 }
 function normalizeTyp(value) {
   return value.toLowerCase().replace(/^application\//, "");
@@ -11661,11 +11588,11 @@ function assertString(input, it, code, cause) {
     if (input.length === 0) {
       throw CodedTypeError(`${it} must not be empty`, ERR_INVALID_ARG_VALUE, cause);
     }
-  } catch (err2) {
+  } catch (err) {
     if (code) {
-      throw OPE(err2.message, code, cause);
+      throw OPE(err.message, code, cause);
     }
-    throw err2;
+    throw err;
   }
 }
 async function processDiscoveryResponse(expectedIssuerIdentifier, response) {
@@ -11712,68 +11639,6 @@ function assertContentType(response, contentType) {
     throw notJson(response, contentType);
   }
 }
-function randomBytes5() {
-  return b64u(crypto.getRandomValues(new Uint8Array(32)));
-}
-function psAlg(key) {
-  switch (key.algorithm.hash.name) {
-    case "SHA-256":
-      return "PS256";
-    case "SHA-384":
-      return "PS384";
-    case "SHA-512":
-      return "PS512";
-    default:
-      throw new UnsupportedOperationError("unsupported RsaHashedKeyAlgorithm hash name", {
-        cause: key
-      });
-  }
-}
-function rsAlg(key) {
-  switch (key.algorithm.hash.name) {
-    case "SHA-256":
-      return "RS256";
-    case "SHA-384":
-      return "RS384";
-    case "SHA-512":
-      return "RS512";
-    default:
-      throw new UnsupportedOperationError("unsupported RsaHashedKeyAlgorithm hash name", {
-        cause: key
-      });
-  }
-}
-function esAlg(key) {
-  switch (key.algorithm.namedCurve) {
-    case "P-256":
-      return "ES256";
-    case "P-384":
-      return "ES384";
-    case "P-521":
-      return "ES512";
-    default:
-      throw new UnsupportedOperationError("unsupported EcKeyAlgorithm namedCurve", { cause: key });
-  }
-}
-function keyToJws(key) {
-  switch (key.algorithm.name) {
-    case "RSA-PSS":
-      return psAlg(key);
-    case "RSASSA-PKCS1-v1_5":
-      return rsAlg(key);
-    case "ECDSA":
-      return esAlg(key);
-    case "Ed25519":
-    case "ML-DSA-44":
-    case "ML-DSA-65":
-    case "ML-DSA-87":
-      return key.algorithm.name;
-    case "EdDSA":
-      return "Ed25519";
-    default:
-      throw new UnsupportedOperationError("unsupported CryptoKey algorithm name", { cause: key });
-  }
-}
 function getClockSkew(client) {
   const skew = client?.[clockSkew];
   return typeof skew === "number" && Number.isFinite(skew) ? skew : 0;
@@ -11790,27 +11655,6 @@ function assertAs(as) {
     throw CodedTypeError('"as" must be an object', ERR_INVALID_ARG_TYPE);
   }
   assertString(as.issuer, '"as.issuer"');
-}
-async function signJwt(header, payload, key) {
-  if (!key.usages.includes("sign")) {
-    throw CodedTypeError('CryptoKey instances used for signing assertions must include "sign" in their "usages"', ERR_INVALID_ARG_VALUE);
-  }
-  const input = `${b64u(buf(JSON.stringify(header)))}.${b64u(buf(JSON.stringify(payload)))}`;
-  const signature = b64u(await crypto.subtle.sign(keyToSubtle(key), key, buf(input)));
-  return `${input}.${signature}`;
-}
-var jwkCache;
-async function getSetPublicJwkCache(key, alg) {
-  const { kty, e, n, x, y, crv, pub } = await crypto.subtle.exportKey("jwk", key);
-  const jwk = { kty, e, n, x, y, crv, pub };
-  if (kty === "AKP")
-    jwk.alg = alg;
-  jwkCache.set(key, jwk);
-  return jwk;
-}
-async function publicJwk(key, alg) {
-  jwkCache ||= new WeakMap;
-  return jwkCache.get(key) || getSetPublicJwkCache(key, alg);
 }
 var URLParse = URL.parse ? (url, base) => URL.parse(url, base) : (url, base) => {
   try {
@@ -11840,79 +11684,6 @@ function resolveEndpoint(as, endpoint, useMtlsAlias, enforceHttps) {
     return validateEndpoint(as.mtls_endpoint_aliases[endpoint], endpoint, useMtlsAlias, enforceHttps);
   }
   return validateEndpoint(as[endpoint], endpoint, useMtlsAlias, enforceHttps);
-}
-class DPoPHandler {
-  #header;
-  #privateKey;
-  #publicKey;
-  #clockSkew;
-  #modifyAssertion;
-  #map;
-  #jkt;
-  constructor(client, keyPair, options) {
-    assertPrivateKey(keyPair?.privateKey, '"DPoP.privateKey"');
-    assertPublicKey(keyPair?.publicKey, '"DPoP.publicKey"');
-    if (!keyPair.publicKey.extractable) {
-      throw CodedTypeError('"DPoP.publicKey.extractable" must be true', ERR_INVALID_ARG_VALUE);
-    }
-    this.#modifyAssertion = options?.[modifyAssertion];
-    this.#clockSkew = getClockSkew(client);
-    this.#privateKey = keyPair.privateKey;
-    this.#publicKey = keyPair.publicKey;
-    branded.add(this);
-  }
-  #get(key) {
-    this.#map ||= new Map;
-    let item = this.#map.get(key);
-    if (item) {
-      this.#map.delete(key);
-      this.#map.set(key, item);
-    }
-    return item;
-  }
-  #set(key, val) {
-    this.#map ||= new Map;
-    this.#map.delete(key);
-    if (this.#map.size === 100) {
-      this.#map.delete(this.#map.keys().next().value);
-    }
-    this.#map.set(key, val);
-  }
-  async calculateThumbprint() {
-    if (!this.#jkt) {
-      const jwk = await crypto.subtle.exportKey("jwk", this.#publicKey);
-      this.#jkt ||= await calculateJwkThumbprint(jwk);
-    }
-    return this.#jkt;
-  }
-  async addProof(url, headers, htm, accessToken) {
-    const alg = keyToJws(this.#privateKey);
-    this.#header ||= {
-      alg,
-      typ: "dpop+jwt",
-      jwk: await publicJwk(this.#publicKey, alg)
-    };
-    const nonce = this.#get(url.origin);
-    const now = epochTime() + this.#clockSkew;
-    const payload = {
-      iat: now,
-      jti: randomBytes5(),
-      htm,
-      nonce,
-      htu: `${url.origin}${url.pathname}`,
-      ath: accessToken ? b64u(await crypto.subtle.digest("SHA-256", buf(accessToken))) : undefined
-    };
-    this.#modifyAssertion?.(this.#header, payload);
-    headers.set("dpop", await signJwt(this.#header, payload, this.#privateKey));
-  }
-  cacheNonce(response, url) {
-    try {
-      const nonce = response.headers.get("dpop-nonce");
-      if (nonce) {
-        this.#set(url.origin, nonce);
-      }
-    } catch {}
-  }
 }
 var tokenMatch = "[a-zA-Z0-9!#$%&\\'\\*\\+\\-\\.\\^_`\\|~]+";
 var token68Match = "[a-zA-Z0-9\\-\\._\\~\\+\\/]+={0,2}";
@@ -11991,28 +11762,28 @@ async function getPublicSigKeyFromIssuerJwksUri(as, options, header) {
     default:
       throw new UnsupportedOperationError("unsupported JWS algorithm", { cause: { alg } });
   }
-  const candidates = jwks.keys.filter((jwk2) => {
-    if (jwk2.kty !== kty) {
+  const candidates = jwks.keys.filter((jwk) => {
+    if (jwk.kty !== kty) {
       return false;
     }
-    if (kid !== undefined && kid !== jwk2.kid) {
+    if (kid !== undefined && kid !== jwk.kid) {
       return false;
     }
-    if (jwk2.alg !== undefined && alg !== jwk2.alg) {
+    if (jwk.alg !== undefined && alg !== jwk.alg) {
       return false;
     }
-    if (jwk2.use !== undefined && jwk2.use !== "sig") {
+    if (jwk.use !== undefined && jwk.use !== "sig") {
       return false;
     }
-    if (jwk2.key_ops?.includes("verify") === false) {
+    if (jwk.key_ops?.includes("verify") === false) {
       return false;
     }
     switch (true) {
-      case (alg === "ES256" && jwk2.crv !== "P-256"):
-      case (alg === "ES384" && jwk2.crv !== "P-384"):
-      case (alg === "ES512" && jwk2.crv !== "P-521"):
-      case (alg === "Ed25519" && jwk2.crv !== "Ed25519"):
-      case (alg === "EdDSA" && jwk2.crv !== "Ed25519"):
+      case (alg === "ES256" && jwk.crv !== "P-256"):
+      case (alg === "ES384" && jwk.crv !== "P-384"):
+      case (alg === "ES512" && jwk.crv !== "P-521"):
+      case (alg === "Ed25519" && jwk.crv !== "Ed25519"):
+      case (alg === "EdDSA" && jwk.crv !== "Ed25519"):
         return false;
     }
     return true;
@@ -12084,8 +11855,8 @@ var jwtClaimNames = {
   cnf: "confirmation",
   auth_time: "authentication time"
 };
-function validatePresence(required2, result) {
-  for (const claim of required2) {
+function validatePresence(required, result) {
+  for (const claim of required) {
     if (result.claims[claim] === undefined) {
       throw OPE(`JWT "${claim}" (${jwtClaimNames[claim]}) claim missing`, INVALID_RESPONSE, {
         claims: result.claims
@@ -12145,7 +11916,7 @@ async function processJwksResponse(response) {
     throw OPE('"response" is not a conform JSON Web Key Set response (unexpected HTTP status code)', RESPONSE_IS_NOT_CONFORM, response);
   }
   assertReadableResponse(response);
-  const json = await getResponseJsonBody(response, (response2) => assertContentTypes(response2, "application/json", "application/jwk-set+json"));
+  const json = await getResponseJsonBody(response, (response) => assertContentTypes(response, "application/json", "application/jwk-set+json"));
   if (!Array.isArray(json.keys)) {
     throw OPE('"response" body "keys" property must be an array', INVALID_RESPONSE, { body: json });
   }
@@ -12248,7 +12019,7 @@ async function validateJwsSignature(protectedHeader, payload, key, signature) {
     });
   }
 }
-async function validateJwt(jws, checkAlg, clockSkew2, clockTolerance2, decryptJwt) {
+async function validateJwt(jws, checkAlg, clockSkew, clockTolerance, decryptJwt) {
   let { 0: protectedHeader, 1: payload, length } = jws.split(".");
   if (length === 5) {
     if (decryptJwt !== undefined) {
@@ -12285,13 +12056,13 @@ async function validateJwt(jws, checkAlg, clockSkew2, clockTolerance2, decryptJw
   if (!isJsonObject(claims)) {
     throw OPE("JWT Payload must be a top level object", INVALID_RESPONSE, jws);
   }
-  const now = epochTime() + clockSkew2;
+  const now = epochTime() + clockSkew;
   if (claims.exp !== undefined) {
     if (typeof claims.exp !== "number") {
       throw OPE('unexpected JWT "exp" (expiration time) claim type', INVALID_RESPONSE, { claims });
     }
-    if (claims.exp <= now - clockTolerance2) {
-      throw OPE('unexpected JWT "exp" (expiration time) claim value, expiration is past current timestamp', JWT_TIMESTAMP_CHECK, { claims, now, tolerance: clockTolerance2, claim: "exp" });
+    if (claims.exp <= now - clockTolerance) {
+      throw OPE('unexpected JWT "exp" (expiration time) claim value, expiration is past current timestamp', JWT_TIMESTAMP_CHECK, { claims, now, tolerance: clockTolerance, claim: "exp" });
     }
   }
   if (claims.iat !== undefined) {
@@ -12308,11 +12079,11 @@ async function validateJwt(jws, checkAlg, clockSkew2, clockTolerance2, decryptJw
     if (typeof claims.nbf !== "number") {
       throw OPE('unexpected JWT "nbf" (not before) claim type', INVALID_RESPONSE, { claims });
     }
-    if (claims.nbf > now + clockTolerance2) {
+    if (claims.nbf > now + clockTolerance) {
       throw OPE('unexpected JWT "nbf" (not before) claim value', JWT_TIMESTAMP_CHECK, {
         claims,
         now,
-        tolerance: clockTolerance2,
+        tolerance: clockTolerance,
         claim: "nbf"
       });
     }
@@ -12396,8 +12167,8 @@ function normalizeHtu(htu) {
   return url.href;
 }
 async function validateDPoP(request, accessToken, accessTokenClaims, options) {
-  const headerValue2 = request.headers.get("dpop");
-  if (headerValue2 === null) {
+  const headerValue = request.headers.get("dpop");
+  if (headerValue === null) {
     throw OPE("operation indicated DPoP use but the request has no DPoP HTTP Header", INVALID_REQUEST, { headers: request.headers });
   }
   if (request.headers.get("authorization")?.toLowerCase().startsWith("dpop ") === false) {
@@ -12406,9 +12177,9 @@ async function validateDPoP(request, accessToken, accessTokenClaims, options) {
   if (typeof accessTokenClaims.cnf?.jkt !== "string") {
     throw OPE("operation indicated DPoP use but the JWT Access Token has no jkt confirmation claim", INVALID_REQUEST, { claims: accessTokenClaims });
   }
-  const clockSkew2 = getClockSkew(options);
-  const proof = await validateJwt(headerValue2, checkSigningAlgorithm.bind(undefined, options?.signingAlgorithms, undefined, supported), clockSkew2, getClockTolerance(options), undefined).then(checkJwtType.bind(undefined, "dpop+jwt")).then(validatePresence.bind(undefined, ["iat", "jti", "ath", "htm", "htu"]));
-  const now = epochTime() + clockSkew2;
+  const clockSkew = getClockSkew(options);
+  const proof = await validateJwt(headerValue, checkSigningAlgorithm.bind(undefined, options?.signingAlgorithms, undefined, supported), clockSkew, getClockTolerance(options), undefined).then(checkJwtType.bind(undefined, "dpop+jwt")).then(validatePresence.bind(undefined, ["iat", "jti", "ath", "htm", "htu"]));
+  const now = epochTime() + clockSkew;
   const diff = Math.abs(now - proof.claims.iat);
   if (diff > 300) {
     throw OPE("DPoP Proof iat is not recent enough", JWT_TIMESTAMP_CHECK, {
@@ -12457,7 +12228,7 @@ async function validateDPoP(request, accessToken, accessTokenClaims, options) {
       });
     }
   }
-  const { 0: protectedHeader, 1: payload, 2: encodedSignature } = headerValue2.split(".");
+  const { 0: protectedHeader, 1: payload, 2: encodedSignature } = headerValue.split(".");
   const signature = b64u(encodedSignature);
   const key = await importJwk(alg, jwk);
   if (key.type !== "public") {
@@ -12517,9 +12288,9 @@ async function validateJwtAccessToken(as, request, expectedAudience, options) {
     if (!isJsonObject(claims.cnf)) {
       throw OPE('unexpected JWT "cnf" (confirmation) claim value', INVALID_REQUEST, { claims });
     }
-    const { 0: cnf, length: length2 } = Object.keys(claims.cnf);
-    if (length2) {
-      if (length2 !== 1) {
+    const { 0: cnf, length } = Object.keys(claims.cnf);
+    if (length) {
+      if (length !== 1) {
         throw new UnsupportedOperationError("multiple confirmation claims are not supported", {
           cause: { claims }
         });
@@ -12540,11 +12311,11 @@ async function validateJwtAccessToken(as, request, expectedAudience, options) {
   }
   return claims;
 }
-function reassignRSCode(err2) {
-  if (err2 instanceof OperationProcessingError && err2?.code === INVALID_REQUEST) {
-    err2.code = INVALID_RESPONSE;
+function reassignRSCode(err) {
+  if (err instanceof OperationProcessingError && err?.code === INVALID_REQUEST) {
+    err.code = INVALID_RESPONSE;
   }
-  throw err2;
+  throw err;
 }
 async function getResponseJsonBody(response, check = assertApplicationJson) {
   let json;
@@ -12655,9 +12426,9 @@ function extractCn(subject) {
   }
   return "";
 }
-function parseXfcc(headerValue2) {
+function parseXfcc(headerValue) {
   const elements = [];
-  for (const rawElement of splitRespectingQuotes(headerValue2, ",")) {
+  for (const rawElement of splitRespectingQuotes(headerValue, ",")) {
     const trimmed = rawElement.trim();
     if (!trimmed)
       continue;
@@ -12706,11 +12477,11 @@ function mtlsAuthenticateXfcc(options) {
   const domain = options?.domain ?? "mtls";
   const selectElement = options?.selectElement ?? "first";
   return async function authenticate(request) {
-    const headerValue2 = request.headers.get("x-forwarded-client-cert");
-    if (!headerValue2) {
+    const headerValue = request.headers.get("x-forwarded-client-cert");
+    if (!headerValue) {
       throw new Error("Missing x-forwarded-client-cert header");
     }
-    const elements = parseXfcc(headerValue2);
+    const elements = parseXfcc(headerValue);
     if (elements.length === 0) {
       throw new Error("Empty x-forwarded-client-cert header");
     }
@@ -12778,8 +12549,8 @@ function mtlsAuthenticateFingerprint(options) {
   }
   const entries = fingerprints instanceof Map ? fingerprints : new Map(Object.entries(fingerprints));
   function validate(cert) {
-    const { createHash: createHash2 } = _loadNodeCrypto();
-    const fp = createHash2(algorithm).update(cert.raw).digest("hex");
+    const { createHash } = _loadNodeCrypto();
+    const fp = createHash(algorithm).update(cert.raw).digest("hex");
     const ctx = entries.get(fp);
     if (!ctx) {
       throw new Error(`Unknown certificate fingerprint: ${fp}`);
@@ -12886,16 +12657,16 @@ function parseIpv4(value) {
   const parts = value.split(".");
   if (parts.length !== 4)
     return null;
-  const bytes3 = [];
+  const bytes = [];
   for (const part of parts) {
     if (!/^(?:0|[1-9][0-9]{0,2})$/u.test(part))
       return null;
     const byte = Number(part);
     if (byte > 255)
       return null;
-    bytes3.push(byte);
+    bytes.push(byte);
   }
-  return bytes3;
+  return bytes;
 }
 function parseIpv6Words(value, allowIpv4) {
   if (value === "")
@@ -12907,10 +12678,10 @@ function parseIpv6Words(value, allowIpv4) {
     if (part.includes(".")) {
       if (!allowIpv4 || index !== parts.length - 1)
         return null;
-      const bytes3 = parseIpv4(part);
-      if (!bytes3)
+      const bytes = parseIpv4(part);
+      if (!bytes)
         return null;
-      words.push(bytes3[0] << 8 | bytes3[1], bytes3[2] << 8 | bytes3[3]);
+      words.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
     } else {
       if (!/^[0-9a-f]{1,4}$/u.test(part))
         return null;
@@ -13010,40 +12781,40 @@ function validateSpiffeId(value, trustDomains) {
     throw new TypeError("SPIFFE trust domain is not allowed");
   return trustDomain;
 }
-function readDer(bytes3, offset) {
-  if (offset + 2 > bytes3.length)
+function readDer(bytes, offset) {
+  if (offset + 2 > bytes.length)
     throw new TypeError("truncated DER value");
-  const tag = bytes3[offset];
-  const first = bytes3[offset + 1];
+  const tag = bytes[offset];
+  const first = bytes[offset + 1];
   let length = 0;
   let header = 2;
   if ((first & 128) === 0) {
     length = first;
   } else {
     const count = first & 127;
-    if (count === 0 || count > 4 || offset + 2 + count > bytes3.length)
+    if (count === 0 || count > 4 || offset + 2 + count > bytes.length)
       throw new TypeError("invalid DER length");
     header += count;
     for (let index = 0;index < count; index++)
-      length = length * 256 + bytes3[offset + 2 + index];
+      length = length * 256 + bytes[offset + 2 + index];
     if (length < 128)
       throw new TypeError("non-canonical DER length");
   }
   const start = offset + header;
   const end = start + length;
-  if (!Number.isSafeInteger(end) || end > bytes3.length)
+  if (!Number.isSafeInteger(end) || end > bytes.length)
     throw new TypeError("truncated DER body");
-  return { tag, start, end, bytes: bytes3 };
+  return { tag, start, end, bytes };
 }
 function derChildren(node) {
   const children = [];
   let offset = node.start;
   while (offset < node.end) {
-    const child2 = readDer(node.bytes, offset);
-    if (child2.end > node.end)
+    const child = readDer(node.bytes, offset);
+    if (child.end > node.end)
       throw new TypeError("DER child exceeds parent");
-    children.push(child2);
-    offset = child2.end;
+    children.push(child);
+    offset = child.end;
   }
   if (offset !== node.end)
     throw new TypeError("malformed DER children");
@@ -13055,22 +12826,22 @@ function derContent(node) {
 function oid(node) {
   if (node.tag !== 6)
     throw new TypeError("expected DER OID");
-  const bytes3 = derContent(node);
-  if (bytes3.length === 0)
+  const bytes = derContent(node);
+  if (bytes.length === 0)
     throw new TypeError("empty DER OID");
-  const parts = [Math.min(2, Math.floor(bytes3[0] / 40)), 0];
-  parts[1] = bytes3[0] - parts[0] * 40;
+  const parts = [Math.min(2, Math.floor(bytes[0] / 40)), 0];
+  parts[1] = bytes[0] - parts[0] * 40;
   let value = 0;
-  for (let index = 1;index < bytes3.length; index++) {
-    value = value * 128 + (bytes3[index] & 127);
+  for (let index = 1;index < bytes.length; index++) {
+    value = value * 128 + (bytes[index] & 127);
     if (!Number.isSafeInteger(value))
       throw new TypeError("oversized DER OID");
-    if ((bytes3[index] & 128) === 0) {
+    if ((bytes[index] & 128) === 0) {
       parts.push(value);
       value = 0;
     }
   }
-  if ((bytes3[bytes3.length - 1] & 128) !== 0)
+  if ((bytes[bytes.length - 1] & 128) !== 0)
     throw new TypeError("truncated DER OID");
   return parts.join(".");
 }
@@ -13561,8 +13332,8 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
     const errSchema = method.headerSchema ?? EMPTY_SCHEMA4;
     const errBatch = buildErrorBatch(errSchema, error, serverId, requestId);
     await writer.writeStream(errSchema, [errBatch]);
-    const inputSchema2 = await reader.openNextStream();
-    if (inputSchema2) {
+    const inputSchema = await reader.openNextStream();
+    if (inputSchema) {
       while (await reader.readNextBatch() !== null) {}
     }
     return;
@@ -13581,8 +13352,8 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
     } catch (error) {
       const errBatch = buildErrorBatch(method.headerSchema, error, serverId, requestId);
       await writer.writeStream(method.headerSchema, [errBatch]);
-      const inputSchema2 = await reader.openNextStream();
-      if (inputSchema2) {
+      const inputSchema = await reader.openNextStream();
+      if (inputSchema) {
         while (await reader.readNextBatch() !== null) {}
       }
       return;
@@ -13605,8 +13376,8 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
         if (method.onCancel) {
           try {
             await method.onCancel(state);
-          } catch (err2) {
-            console.debug?.(`onCancel hook failed: ${err2 instanceof Error ? err2.message : err2}`);
+          } catch (err) {
+            console.debug?.(`onCancel hook failed: ${err instanceof Error ? err.message : err}`);
           }
         }
         break;
@@ -13657,19 +13428,19 @@ async function dispatchStream(method, params, writer, reader, serverId, requestI
 
 // src/dispatch/unary.ts
 async function dispatchUnary(method, params, writer, serverId, requestId, externalConfig, kind, authContext, peerEvidence) {
-  const schema2 = method.resultSchema;
-  const out = new OutputCollector(schema2, true, serverId, requestId, authContext, undefined, kind, { peerEvidence });
+  const schema = method.resultSchema;
+  const out = new OutputCollector(schema, true, serverId, requestId, authContext, undefined, kind, { peerEvidence });
   try {
     const result = await method.handler(params, out);
-    let resultBatch = buildResultBatch(schema2, result, serverId, requestId);
+    let resultBatch = buildResultBatch(schema, result, serverId, requestId);
     if (externalConfig) {
       resultBatch = await maybeExternalizeBatch(resultBatch, externalConfig);
     }
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
-    await writer.writeStream(schema2, batches);
+    await writer.writeStream(schema, batches);
   } catch (error) {
-    const batch = buildErrorBatch(schema2, error, serverId, requestId);
-    await writer.writeStream(schema2, [batch]);
+    const batch = buildErrorBatch(schema, error, serverId, requestId);
+    await writer.writeStream(schema, [batch]);
   }
 }
 
@@ -13850,11 +13621,11 @@ class IdentityImpl {
     let identity;
     try {
       identity = await this.resolveTokenHook(token);
-    } catch (err2) {
-      if (err2 instanceof AuthUnavailableError) {
-        throw new IdentityUnavailableError(err2.detail, err2.retryAfter);
+    } catch (err) {
+      if (err instanceof AuthUnavailableError) {
+        throw new IdentityUnavailableError(err.detail, err.retryAfter);
       }
-      throw err2;
+      throw err;
     }
     if (identity == null) {
       throw new TokenUnresolvedError("unresolved");
@@ -13909,11 +13680,11 @@ function buildIdentityProtocol(identity) {
 // src/server.ts
 var EMPTY_SCHEMA5 = schema([]);
 function randomStreamId() {
-  const bytes3 = new Uint8Array(16);
-  crypto.getRandomValues(bytes3);
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
   let out = "";
-  for (let i = 0;i < bytes3.length; i++) {
-    out += bytes3[i].toString(16).padStart(2, "0");
+  for (let i = 0;i < bytes.length; i++) {
+    out += bytes[i].toString(16).padStart(2, "0");
   }
   return out;
 }
@@ -14066,10 +13837,10 @@ class VgiRpcServer {
     if (!stream) {
       throw new Error("EOF");
     }
-    const { schema: schema2, batches } = stream;
+    const { schema, batches } = stream;
     if (batches.length === 0) {
-      const err2 = new RpcError("ProtocolError", "Request stream contains no batches", "");
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA5, err2, this.serverId, null);
+      const err = new RpcError("ProtocolError", "Request stream contains no batches", "");
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA5, err, this.serverId, null);
       await writer.writeStream(EMPTY_SCHEMA5, [errBatch]);
       return;
     }
@@ -14079,7 +13850,7 @@ class VgiRpcServer {
     let params;
     let requestId;
     try {
-      const parsed = parseRequest(schema2, batch);
+      const parsed = parseRequest(schema, batch);
       methodName = parsed.methodName;
       protocolName = parsed.protocol;
       params = parsed.params;
@@ -14102,7 +13873,7 @@ class VgiRpcServer {
       return;
     }
     try {
-      validateRequestSchema(schema2, method.paramsSchema, methodName);
+      validateRequestSchema(schema, method.paramsSchema, methodName);
     } catch (error) {
       const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA5;
       const errBatch = buildErrorBatch(errSchema, error, this.serverId, requestId);
@@ -14270,9 +14041,9 @@ function canonicalJson3(value) {
   throw new TypeError(`canonicalJson: unsupported type ${typeof value}`);
 }
 async function sha256Hex3(data) {
-  const buf2 = new ArrayBuffer(data.byteLength);
-  new Uint8Array(buf2).set(data);
-  const digest = await crypto.subtle.digest("SHA-256", buf2);
+  const buf = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buf).set(data);
+  const digest = await crypto.subtle.digest("SHA-256", buf);
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 async function computeHash(workerArgv, cwd, env) {
@@ -14309,17 +14080,17 @@ function pidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (err2) {
-    return err2?.code === "EPERM";
+  } catch (err) {
+    return err?.code === "EPERM";
   }
 }
 function readPid(path) {
   try {
     const fd = openSync(path, FS.O_RDONLY);
     try {
-      const buf2 = Buffer.alloc(64);
-      const n = readSync(fd, buf2, 0, buf2.length, 0);
-      const text = buf2.subarray(0, n).toString("utf8").trim();
+      const buf = Buffer.alloc(64);
+      const n = readSync(fd, buf, 0, buf.length, 0);
+      const text = buf.subarray(0, n).toString("utf8").trim();
       if (text === "")
         return 0;
       const parsed = Number(text);
@@ -14432,9 +14203,9 @@ function defaultStateDir() {
       if (st.uid !== process.geteuid()) {
         throw new Error(`state directory ${base} is not owned by current user`);
       }
-    } catch (err2) {
-      if (err2?.code === "ENOENT") {} else {
-        throw err2;
+    } catch (err) {
+      if (err?.code === "ENOENT") {} else {
+        throw err;
       }
     }
   }
@@ -14466,10 +14237,10 @@ function probeOnce(net, sockPath, timeoutMs) {
       sock.end();
       resolve("alive");
     });
-    sock.once("error", (err2) => {
+    sock.once("error", (err) => {
       clearTimeout(timer);
       sock.destroy();
-      const code = err2?.code ?? "";
+      const code = err?.code ?? "";
       resolve(ACCEPT_QUEUE_FULL.has(code) ? "alive" : code === "ECONNREFUSED" ? "refused" : "dead");
     });
   });
@@ -14738,9 +14509,6 @@ function onceExit(proc) {
 function delay(ms) {
   return new Promise((r) => setTimeout(r, Math.max(0, ms)));
 }
-// src/launcher/serve-tcp.ts
-import { createServer } from "node:net";
-
 // src/launcher/proxy-protocol-v2.ts
 var SIGNATURE = Buffer.from([13, 10, 13, 10, 0, 13, 10, 81, 85, 73, 84, 10]);
 var FIXED_BYTES = 16;
@@ -14757,16 +14525,16 @@ function ipv4Bytes(value) {
   const parts = value.split(".");
   if (parts.length !== 4)
     return;
-  const bytes3 = [];
+  const bytes = [];
   for (const part of parts) {
     if (!/^(0|[1-9][0-9]{0,2})$/u.test(part))
       return;
     const byte = Number(part);
     if (byte > 255)
       return;
-    bytes3.push(byte);
+    bytes.push(byte);
   }
-  return bytes3;
+  return bytes;
 }
 function ipv6Words(value) {
   if (!value || value.includes("%") || value.split("::").length > 2)
@@ -14782,10 +14550,10 @@ function ipv6Words(value) {
       if (piece.includes(".")) {
         if (!allowIpv4 || index !== pieces.length - 1)
           return;
-        const bytes3 = ipv4Bytes(piece);
-        if (!bytes3)
+        const bytes = ipv4Bytes(piece);
+        if (!bytes)
           return;
-        words.push(bytes3[0] << 8 | bytes3[1], bytes3[2] << 8 | bytes3[3]);
+        words.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
       } else {
         if (!/^[0-9a-f]{1,4}$/iu.test(piece))
           return;
@@ -14840,8 +14608,8 @@ function normalizedIp(value) {
     throw new TypeError(`trusted proxy must be an exact IPv4 or IPv6 address: ${JSON.stringify(value)}`);
   const mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 65535;
   if (mapped) {
-    const bytes3 = [words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255];
-    return { address: bytes3.join("."), key: `4:${bytes3.join(".")}` };
+    const bytes = [words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255];
+    return { address: bytes.join("."), key: `4:${bytes.join(".")}` };
   }
   const key = words.map((word) => word.toString(16).padStart(4, "0")).join("");
   return { address: formatIpv6(words), key: `6:${key}` };
@@ -15033,6 +14801,7 @@ function readProxyProtocolV2Preamble(socket, timeoutMs, maximumBytes) {
 }
 
 // src/launcher/serve-tcp.ts
+import { createServer } from "node:net";
 var EMPTY_SCHEMA6 = schema([]);
 async function serveTcp(protocol, options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -15083,12 +14852,12 @@ async function serveTcp(protocol, options = {}) {
   }
   const trustedProxyAddresses = new Map;
   for (const configured of options.trustedProxyAddresses ?? []) {
-    const address2 = normalizeProxyIpAddress(configured);
-    const key = proxyIpAddressKey(address2);
+    const address = normalizeProxyIpAddress(configured);
+    const key = proxyIpAddressKey(address);
     if (trustedProxyAddresses.has(key)) {
       throw new TypeError(`duplicate trusted proxy address: ${JSON.stringify(configured)}`);
     }
-    trustedProxyAddresses.set(key, address2);
+    trustedProxyAddresses.set(key, address);
   }
   if (proxyProtocolV2Required && trustedProxyAddresses.size === 0) {
     throw new TypeError("PROXY v2 requires at least one exact trusted proxy address");
@@ -15175,8 +14944,8 @@ async function serveTcp(protocol, options = {}) {
     activeConnections += 1;
     connections.add(socket);
     disarmIdleTimer();
-    handleConnection(socket).catch((err2) => {
-      const failureClass = err2 instanceof PeerIdentityUnavailableError ? "unavailable" : err2 instanceof PeerIdentityRejectedError || err2 instanceof ProxyProtocolV2Error ? "rejected" : "failed";
+    handleConnection(socket).catch((err) => {
+      const failureClass = err instanceof PeerIdentityUnavailableError ? "unavailable" : err instanceof PeerIdentityRejectedError || err instanceof ProxyProtocolV2Error ? "rejected" : "failed";
       process.stderr.write(`vgi-rpc/tcp: connection identity ${failureClass}
 `);
     }).finally(() => {
@@ -15301,10 +15070,10 @@ async function serveTcp(protocol, options = {}) {
         clearTimeout(timeout);
     }
   }
-  server.on("error", (err2) => {
+  server.on("error", (err) => {
     if (stopped)
       return;
-    rejectDone(err2);
+    rejectDone(err);
   });
   async function handleConnection(socket) {
     const peer = await prepareTcpPeer(socket);
@@ -15316,8 +15085,8 @@ async function serveTcp(protocol, options = {}) {
         try {
           await serveOnce(reader, writer, identity);
         } catch (e) {
-          const err2 = e;
-          if (err2?.message?.includes("closed") || err2?.message?.includes("Expected Schema Message") || err2?.message?.includes("null or length 0") || err2?.message?.includes("EOF") || err2?.code === "EPIPE" || err2?.code === "ERR_STREAM_PREMATURE_CLOSE" || err2?.code === "ERR_STREAM_DESTROYED") {
+          const err = e;
+          if (err?.message?.includes("closed") || err?.message?.includes("Expected Schema Message") || err?.message?.includes("null or length 0") || err?.message?.includes("EOF") || err?.code === "EPIPE" || err?.code === "ERR_STREAM_PREMATURE_CLOSE" || err?.code === "ERR_STREAM_DESTROYED") {
             return;
           }
           throw e;
@@ -15334,10 +15103,10 @@ async function serveTcp(protocol, options = {}) {
     if (!stream) {
       throw new Error("EOF");
     }
-    const { schema: schema2, batches } = stream;
+    const { schema, batches } = stream;
     if (batches.length === 0) {
-      const err2 = new RpcError("ProtocolError", "Request stream contains no batches", "");
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, err2, serverId, null);
+      const err = new RpcError("ProtocolError", "Request stream contains no batches", "");
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA6, err, serverId, null);
       await writer.writeStream(EMPTY_SCHEMA6, [errBatch]);
       return;
     }
@@ -15347,7 +15116,7 @@ async function serveTcp(protocol, options = {}) {
     let params;
     let requestId;
     try {
-      const parsed = parseRequest(schema2, batch);
+      const parsed = parseRequest(schema, batch);
       methodName = parsed.methodName;
       protocolName = parsed.protocol;
       params = parsed.params;
@@ -15369,7 +15138,7 @@ async function serveTcp(protocol, options = {}) {
       return;
     }
     try {
-      validateRequestSchema(schema2, method.paramsSchema, methodName);
+      validateRequestSchema(schema, method.paramsSchema, methodName);
     } catch (error) {
       const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA6;
       await writer.writeStream(errSchema, [buildErrorBatch(errSchema, error, serverId, requestId)]);
@@ -15421,7 +15190,7 @@ async function serveTcp(protocol, options = {}) {
   }
   await new Promise((resolve, reject) => {
     server.listen({ host, port: requestedPort, backlog }, () => resolve());
-    server.once("error", (err2) => reject(err2));
+    server.once("error", (err) => reject(err));
   });
   const address = server.address();
   const boundPort = typeof address === "object" && address ? address.port : requestedPort;
@@ -15515,8 +15284,8 @@ async function serveUnix(protocol, options) {
   let idleTimer = null;
   let resolveDone = () => {};
   let rejectDone = () => {};
-  const done = new Promise((resolve2, reject) => {
-    resolveDone = resolve2;
+  const done = new Promise((resolve, reject) => {
+    resolveDone = resolve;
     rejectDone = reject;
   });
   let stopped = false;
@@ -15542,8 +15311,8 @@ async function serveUnix(protocol, options) {
       return;
     stopped = true;
     disarmIdleTimer();
-    await new Promise((resolve2) => {
-      server.close(() => resolve2());
+    await new Promise((resolve) => {
+      server.close(() => resolve());
     });
     try {
       unlinkSync3(sockPath);
@@ -15553,8 +15322,8 @@ async function serveUnix(protocol, options) {
   server.on("connection", (socket) => {
     activeConnections += 1;
     disarmIdleTimer();
-    handleConnection(socket).catch((err2) => {
-      process.stderr.write(`vgi-rpc/unix: connection failed: ${err2?.message ?? err2}
+    handleConnection(socket).catch((err) => {
+      process.stderr.write(`vgi-rpc/unix: connection failed: ${err?.message ?? err}
 `);
     }).finally(() => {
       activeConnections -= 1;
@@ -15564,10 +15333,10 @@ async function serveUnix(protocol, options) {
       }
     });
   });
-  server.on("error", (err2) => {
+  server.on("error", (err) => {
     if (stopped)
       return;
-    rejectDone(err2);
+    rejectDone(err);
   });
   async function handleConnection(socket) {
     const reader = await IpcStreamReader.create(socket);
@@ -15578,8 +15347,8 @@ async function serveUnix(protocol, options) {
         try {
           await serveOnce(reader, writer);
         } catch (e) {
-          const err2 = e;
-          if (err2?.message?.includes("closed") || err2?.message?.includes("Expected Schema Message") || err2?.message?.includes("null or length 0") || err2?.message?.includes("EOF") || err2?.code === "EPIPE" || err2?.code === "ERR_STREAM_PREMATURE_CLOSE" || err2?.code === "ERR_STREAM_DESTROYED") {
+          const err = e;
+          if (err?.message?.includes("closed") || err?.message?.includes("Expected Schema Message") || err?.message?.includes("null or length 0") || err?.message?.includes("EOF") || err?.code === "EPIPE" || err?.code === "ERR_STREAM_PREMATURE_CLOSE" || err?.code === "ERR_STREAM_DESTROYED") {
             return;
           }
           throw e;
@@ -15596,10 +15365,10 @@ async function serveUnix(protocol, options) {
     if (!stream) {
       throw new Error("EOF");
     }
-    const { schema: schema2, batches } = stream;
+    const { schema, batches } = stream;
     if (batches.length === 0) {
-      const err2 = new RpcError("ProtocolError", "Request stream contains no batches", "");
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA7, err2, serverId, null);
+      const err = new RpcError("ProtocolError", "Request stream contains no batches", "");
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA7, err, serverId, null);
       await writer.writeStream(EMPTY_SCHEMA7, [errBatch]);
       return;
     }
@@ -15609,7 +15378,7 @@ async function serveUnix(protocol, options) {
     let params;
     let requestId;
     try {
-      const parsed = parseRequest(schema2, batch);
+      const parsed = parseRequest(schema, batch);
       methodName = parsed.methodName;
       protocolName = parsed.protocol;
       params = parsed.params;
@@ -15631,7 +15400,7 @@ async function serveUnix(protocol, options) {
       return;
     }
     try {
-      validateRequestSchema(schema2, method.paramsSchema, methodName);
+      validateRequestSchema(schema, method.paramsSchema, methodName);
     } catch (error) {
       const errSchema = method.type === "unary" /* UNARY */ ? method.resultSchema : EMPTY_SCHEMA7;
       await writer.writeStream(errSchema, [buildErrorBatch(errSchema, error, serverId, requestId)]);
@@ -15681,9 +15450,9 @@ async function serveUnix(protocol, options) {
       dispatchHook?.onDispatchEnd(token, info, stats, dispatchError);
     }
   }
-  await new Promise((resolve2, reject) => {
-    server.listen({ path: sockPath, backlog }, () => resolve2());
-    server.once("error", (err2) => reject(err2));
+  await new Promise((resolve, reject) => {
+    server.listen({ path: sockPath, backlog }, () => resolve());
+    server.once("error", (err) => reject(err));
   });
   try {
     const { chmodSync } = await import("node:fs");
@@ -15894,10 +15663,10 @@ class StrictJsonParser {
       this.index++;
   }
 }
-function parseStrictJson(bytes3, limit) {
-  if (bytes3.byteLength > limit)
+function parseStrictJson(bytes, limit) {
+  if (bytes.byteLength > limit)
     throw new Error("JSON exceeds byte limit");
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes3);
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   return new StrictJsonParser(text).parse();
 }
 function capabilities(value, requireSlash, requireObjectEntries) {
@@ -15992,21 +15761,21 @@ function remainingTimeout(context, configured) {
     candidates.push(budget);
   return Math.max(0, Math.min(...candidates));
 }
-async function localApiGet(transport, path3, timeoutMs, maxBody, maxHeaders, signal2) {
+async function localApiGet(transport, path, timeoutMs, maxBody, maxHeaders, signal) {
   const controller = new AbortController;
   const timer = setTimeout(() => controller.abort(new Error("LocalAPI deadline elapsed")), timeoutMs);
-  const cancel = () => controller.abort(signal2?.reason ?? new Error("LocalAPI request cancelled"));
-  if (signal2?.aborted)
+  const cancel = () => controller.abort(signal?.reason ?? new Error("LocalAPI request cancelled"));
+  if (signal?.aborted)
     cancel();
   else
-    signal2?.addEventListener("abort", cancel, { once: true });
+    signal?.addEventListener("abort", cancel, { once: true });
   const headers = { Accept: "application/json", Host: LOCALAPI_HOST };
   if (transport.password)
     headers.Authorization = `Basic ${Buffer.from(`:${transport.password}`).toString("base64")}`;
   const socket = transport.socket ? tcpConnect2({ path: transport.socket }) : tcpConnect2({ host: transport.endpoint.hostname, port: Number(transport.endpoint.port || 80) });
   try {
     await localApiWaitConnect(socket, controller.signal);
-    const request = `GET ${path3} HTTP/1.1\r
+    const request = `GET ${path} HTTP/1.1\r
 ${Object.entries(headers).map(([name, value]) => `${name}: ${value}\r
 `).join("")}Connection: close\r
 \r
@@ -16021,7 +15790,7 @@ ${Object.entries(headers).map(([name, value]) => `${name}: ${value}\r
   } finally {
     socket.destroy();
     clearTimeout(timer);
-    signal2?.removeEventListener("abort", cancel);
+    signal?.removeEventListener("abort", cancel);
   }
 }
 
@@ -16031,16 +15800,16 @@ class LocalApiInvalidResponseError extends Error {
     this.name = "LocalApiInvalidResponseError";
   }
 }
-function localApiWaitConnect(socket, signal2) {
-  return new Promise((resolve2, reject) => {
+function localApiWaitConnect(socket, signal) {
+  return new Promise((resolve, reject) => {
     const cleanup = () => {
       socket.off("connect", connected);
       socket.off("error", failed);
-      signal2.removeEventListener("abort", aborted);
+      signal.removeEventListener("abort", aborted);
     };
     const connected = () => {
       cleanup();
-      resolve2();
+      resolve();
     };
     const failed = (error) => {
       cleanup();
@@ -16049,38 +15818,38 @@ function localApiWaitConnect(socket, signal2) {
     const aborted = () => {
       cleanup();
       socket.destroy();
-      reject(signal2.reason);
+      reject(signal.reason);
     };
     socket.once("connect", connected);
     socket.once("error", failed);
-    signal2.addEventListener("abort", aborted, { once: true });
+    signal.addEventListener("abort", aborted, { once: true });
   });
 }
-function localApiWrite(socket, bytes3, signal2) {
-  return new Promise((resolve2, reject) => {
+function localApiWrite(socket, bytes, signal) {
+  return new Promise((resolve, reject) => {
     const aborted = () => {
       socket.destroy();
-      reject(signal2.reason);
+      reject(signal.reason);
     };
-    signal2.addEventListener("abort", aborted, { once: true });
-    socket.write(bytes3, (error) => {
-      signal2.removeEventListener("abort", aborted);
+    signal.addEventListener("abort", aborted, { once: true });
+    socket.write(bytes, (error) => {
+      signal.removeEventListener("abort", aborted);
       if (error)
         reject(error);
       else
-        resolve2();
+        resolve();
     });
   });
 }
-function localApiRead(socket, maxBytes, signal2) {
-  return new Promise((resolve2, reject) => {
+function localApiRead(socket, maxBytes, signal) {
+  return new Promise((resolve, reject) => {
     const chunks = [];
     let length = 0;
     const cleanup = () => {
       socket.off("data", data);
       socket.off("end", ended);
       socket.off("error", failed);
-      signal2.removeEventListener("abort", aborted);
+      signal.removeEventListener("abort", aborted);
     };
     const data = (chunk) => {
       length += chunk.length;
@@ -16093,7 +15862,7 @@ function localApiRead(socket, maxBytes, signal2) {
     };
     const ended = () => {
       cleanup();
-      resolve2(Buffer.concat(chunks, length));
+      resolve(Buffer.concat(chunks, length));
     };
     const failed = (error) => {
       cleanup();
@@ -16102,12 +15871,12 @@ function localApiRead(socket, maxBytes, signal2) {
     const aborted = () => {
       cleanup();
       socket.destroy();
-      reject(signal2.reason);
+      reject(signal.reason);
     };
     socket.on("data", data);
     socket.once("end", ended);
     socket.once("error", failed);
-    signal2.addEventListener("abort", aborted, { once: true });
+    signal.addEventListener("abort", aborted, { once: true });
   });
 }
 function decodeLocalApiChunked(body, maxBody) {
@@ -16202,11 +15971,11 @@ function tailscaleLocalApiIdentityProvider(options) {
   }
   let transport;
   if (options.endpoint) {
-    const endpoint2 = new URL(options.endpoint);
-    if (endpoint2.protocol !== "http:" || !endpoint2.host || endpoint2.username || endpoint2.password || endpoint2.pathname !== "" && endpoint2.pathname !== "/" || endpoint2.search || endpoint2.hash) {
+    const endpoint = new URL(options.endpoint);
+    if (endpoint.protocol !== "http:" || !endpoint.host || endpoint.username || endpoint.password || endpoint.pathname !== "" && endpoint.pathname !== "/" || endpoint.search || endpoint.hash) {
       throw new TypeError("LocalAPI endpoint must be a plain HTTP origin without userinfo or path");
     }
-    transport = { endpoint: endpoint2, password: options.password };
+    transport = { endpoint, password: options.password };
   } else {
     const socket = options.unixSocket ?? (process.platform === "linux" ? DEFAULT_SOCKET : undefined);
     if (!socket) {
@@ -16218,7 +15987,7 @@ function tailscaleLocalApiIdentityProvider(options) {
   }
   return {
     provider: PROVIDER3,
-    async resolve(context, signal2) {
+    async resolve(context, signal) {
       if (!context)
         return result(PeerIdentityStatus.INVALID);
       const source = context.assertedPeer ?? context.sourceEndpoint ?? context.immediatePeer;
@@ -16245,7 +16014,7 @@ function tailscaleLocalApiIdentityProvider(options) {
         return result(PeerIdentityStatus.UNAVAILABLE);
       let response;
       try {
-        response = await localApiGet(transport, `/localapi/v0/whois?${query.toString()}`, budget, maxBody, maxHeaders, signal2);
+        response = await localApiGet(transport, `/localapi/v0/whois?${query.toString()}`, budget, maxBody, maxHeaders, signal);
       } catch (error) {
         return result(error instanceof LocalApiInvalidResponseError ? PeerIdentityStatus.INVALID : PeerIdentityStatus.UNAVAILABLE);
       }
@@ -16349,198 +16118,198 @@ function sourceIp(source) {
   return source;
 }
 export {
-  writeUnaryResult,
-  writeRequest,
-  validateSpiffeId,
-  utf8Length2 as utf8Length,
-  unpackStateToken,
-  uint82 as uint8,
-  uint642 as uint64,
-  uint322 as uint32,
-  uint162 as uint16,
-  tryAcquireLock,
-  trimForShapeTest,
-  tokenDigest,
-  toSchema,
-  tcpConnectSocks5h,
-  tcpConnect,
-  tailscaleServeIdentityProvider,
-  tailscaleLocalApiIdentityProvider,
-  subprocessConnect,
-  str,
-  statusRows,
-  spiffeX509HeaderProvider,
-  socketPaths,
-  serveUnix,
-  serveTcp,
-  serveStream,
-  serveIrohTcpUpstream,
-  rpcPathFromPrefix,
-  rpcPath,
-  resolveExternalLocation,
-  reservedPath,
-  requirePeerIdentity,
-  rejectJwsShaped,
-  redactClaims,
-  readUnaryResult,
-  readRequest,
-  readProxyProtocolV2,
-  readIrohProxyProtocolV2,
-  probeSocket,
-  pipeConnect,
-  pickApplicationProtocol,
-  peerIdentityPrimary,
-  parseXfcc,
-  parseUseIdTokenAsBearer,
-  parseSocks5hProxy,
-  parseResourceMetadataUrl,
-  parseProxyProtocolV2,
-  parseIrohProxyProtocolV2,
-  parseIrohEndpoint,
-  parseDeviceCodeClientSecret,
-  parseDeviceCodeClientId,
-  parseClientSecret,
-  parseClientId,
-  parseCapabilitiesFromHeaders,
-  otelTraceContext,
-  observePeerIdentity,
-  oauthResourceMetadataToJson,
-  normalizeProxyIpAddress,
-  normalisePrincipals,
-  noRedaction,
-  nginxSpiffeProvider,
-  mtlsAuthenticateXfcc,
-  mtlsAuthenticateSubject,
-  mtlsAuthenticateFingerprint,
-  mtlsAuthenticate,
-  maybeExternalizeBatch,
-  makeExternalLocationBatch,
-  computeHash as launcherComputeHash,
-  launch,
-  jwtAuthenticate,
-  jsonStateSerializer,
-  isJwsShaped,
-  isExternalLocationBatch,
-  isCapabilitySnapshotFresh,
-  irohHttpBridgeOptions,
-  irohForwardedHeaderIdentityProvider,
-  irohConnect,
-  int82 as int8,
-  int322 as int32,
-  int162 as int16,
-  int,
-  inferParamTypes,
-  httpsOnlyValidator,
-  httpiConnect,
-  httpOAuthMetadata,
-  httpIntrospect,
-  httpConnectSocks5h,
-  httpConnect,
-  headersFromNodeRawHeaders,
-  gcpLoadBalancerSpiffeProvider,
-  gcStateDir,
-  formatProxyEndpoint,
-  float322 as float32,
-  float,
-  findStateToken,
-  findProtocolVersion,
-  fetchOAuthMetadata,
-  envoyXfccSpiffeProvider,
-  encodeTokenIdentity,
-  encodeIssuedGrant,
-  discoverHttpCapabilities,
-  dialSocks5h,
-  defaultStateDir,
-  decodeContentEncoding,
-  createSocks5hFetch,
-  createHttpHandler,
-  checkIntrospector,
-  checkFreshness,
-  chainAuthenticate,
-  bytes,
-  buildIdentityProtocol,
-  buildErrorStream,
-  bool2 as bool,
-  bearerAuthenticateStatic,
-  bearerAuthenticate,
-  azureApplicationGatewaySpiffeProvider,
-  awsAlbSpiffeProvider,
-  anyOfPeerIdentities,
-  allOfPeerIdentities,
-  adaptServiceDescription,
-  acquireLock,
-  VgiRpcServer,
-  VersionError,
-  VGI_IROH_ENDPOINT_TLV,
-  UPLOAD_URL_RESPONSE_SCHEMA,
-  UPLOAD_URL_PARAMS_SCHEMA,
-  UPLOAD_URL_METHOD,
-  TransportKind,
-  TokenUnresolvedError,
-  TOKEN_IDENTITY_SCHEMA,
-  SubjectStability,
-  StaleAuthError,
-  SessionLostError,
-  ServerDrainingError,
-  STATE_KEY,
-  SERVER_SCOPE,
-  SERVER_ID_KEY,
-  RpcError,
-  RPC_METHOD_KEY,
-  RPC_ERROR_HEADER,
-  REQUEST_VERSION_KEY,
-  REQUEST_VERSION,
-  REQUEST_ID_KEY,
-  REDACTED,
-  ProxyProtocolV2Error,
-  Protocol,
-  PipeStreamSession,
-  PeerSubjectKind,
-  PeerResolutionContext,
-  PeerIdentityUnavailableError,
-  PeerIdentityStatus,
-  PeerIdentityResult,
-  PeerIdentityRejectedError,
-  PeerIdentity,
-  PeerEvidenceSet,
-  OutputCollector,
-  MethodType,
-  MethodNotImplementedError,
-  MAX_UPLOAD_URL_COUNT,
-  MAX_TOKEN_BYTES,
-  LOG_MESSAGE_KEY,
-  LOG_LEVEL_KEY,
-  LOG_EXTRA_KEY,
-  IrohUriError,
-  IrohTransportError,
-  IntrospectionRefusedError,
-  IdentityUnavailableError,
-  IdentityImpl,
-  IdentityAssurance,
-  ISSUED_GRANT_SCHEMA,
-  IROH_HTTP_ALPN,
-  IROH_FORWARDED_ENDPOINT_HEADER,
-  IROH_ARROW_MUX_ALPN,
-  IDENTITY_PROTOCOL_NAME,
-  HttpStreamSession,
-  GrantRefusedError,
-  FdSink,
-  ERROR_KIND_SESSION_LOST,
-  ERROR_KIND_SERVER_DRAINING,
-  ERROR_KIND_METHOD_NOT_IMPLEMENTED,
-  ERROR_KIND_KEY,
-  DEFAULT_MAX_PROXY_V2_BYTES,
-  DEFAULT_MAX_AUTH_AGE_SECONDS,
-  DEFAULT_IDENTITY_TTL_SECONDS,
-  AuthUnavailableError,
-  AuthReason,
-  AuthFailure,
-  AuthContext,
-  AccessLogSampler,
-  AccessLogHook,
-  AUTH_REASON_HEADER,
+  ARROW_CONTENT_TYPE,
   AUTH_PROXY_REQUIRED_HEADER,
-  ARROW_CONTENT_TYPE
+  AUTH_REASON_HEADER,
+  AccessLogHook,
+  AccessLogSampler,
+  AuthContext,
+  AuthFailure,
+  AuthReason,
+  AuthUnavailableError,
+  DEFAULT_IDENTITY_TTL_SECONDS,
+  DEFAULT_MAX_AUTH_AGE_SECONDS,
+  DEFAULT_MAX_PROXY_V2_BYTES,
+  ERROR_KIND_KEY,
+  ERROR_KIND_METHOD_NOT_IMPLEMENTED,
+  ERROR_KIND_SERVER_DRAINING,
+  ERROR_KIND_SESSION_LOST,
+  FdSink,
+  GrantRefusedError,
+  HttpStreamSession,
+  IDENTITY_PROTOCOL_NAME,
+  IROH_ARROW_MUX_ALPN,
+  IROH_FORWARDED_ENDPOINT_HEADER,
+  IROH_HTTP_ALPN,
+  ISSUED_GRANT_SCHEMA,
+  IdentityAssurance,
+  IdentityImpl,
+  IdentityUnavailableError,
+  IntrospectionRefusedError,
+  IrohTransportError,
+  IrohUriError,
+  LOG_EXTRA_KEY,
+  LOG_LEVEL_KEY,
+  LOG_MESSAGE_KEY,
+  MAX_TOKEN_BYTES,
+  MAX_UPLOAD_URL_COUNT,
+  MethodNotImplementedError,
+  MethodType,
+  OutputCollector,
+  PeerEvidenceSet,
+  PeerIdentity,
+  PeerIdentityRejectedError,
+  PeerIdentityResult,
+  PeerIdentityStatus,
+  PeerIdentityUnavailableError,
+  PeerResolutionContext,
+  PeerSubjectKind,
+  PipeStreamSession,
+  Protocol,
+  ProxyProtocolV2Error,
+  REDACTED,
+  REQUEST_ID_KEY,
+  REQUEST_VERSION,
+  REQUEST_VERSION_KEY,
+  RPC_ERROR_HEADER,
+  RPC_METHOD_KEY,
+  RpcError,
+  SERVER_ID_KEY,
+  SERVER_SCOPE,
+  STATE_KEY,
+  ServerDrainingError,
+  SessionLostError,
+  StaleAuthError,
+  SubjectStability,
+  TOKEN_IDENTITY_SCHEMA,
+  TokenUnresolvedError,
+  TransportKind,
+  UPLOAD_URL_METHOD,
+  UPLOAD_URL_PARAMS_SCHEMA,
+  UPLOAD_URL_RESPONSE_SCHEMA,
+  VGI_IROH_ENDPOINT_TLV,
+  VersionError,
+  VgiRpcServer,
+  acquireLock,
+  adaptServiceDescription,
+  allOfPeerIdentities,
+  anyOfPeerIdentities,
+  awsAlbSpiffeProvider,
+  azureApplicationGatewaySpiffeProvider,
+  bearerAuthenticate,
+  bearerAuthenticateStatic,
+  bool2 as bool,
+  buildErrorStream,
+  buildIdentityProtocol,
+  bytes,
+  chainAuthenticate,
+  checkFreshness,
+  checkIntrospector,
+  createHttpHandler,
+  createSocks5hFetch,
+  decodeContentEncoding,
+  defaultStateDir,
+  dialSocks5h,
+  discoverHttpCapabilities,
+  encodeIssuedGrant,
+  encodeTokenIdentity,
+  envoyXfccSpiffeProvider,
+  fetchOAuthMetadata,
+  findProtocolVersion,
+  findStateToken,
+  float,
+  float322 as float32,
+  formatProxyEndpoint,
+  gcStateDir,
+  gcpLoadBalancerSpiffeProvider,
+  headersFromNodeRawHeaders,
+  httpConnect,
+  httpConnectSocks5h,
+  httpIntrospect,
+  httpOAuthMetadata,
+  httpiConnect,
+  httpsOnlyValidator,
+  inferParamTypes,
+  int,
+  int162 as int16,
+  int322 as int32,
+  int82 as int8,
+  irohConnect,
+  irohForwardedHeaderIdentityProvider,
+  irohHttpBridgeOptions,
+  isCapabilitySnapshotFresh,
+  isExternalLocationBatch,
+  isJwsShaped,
+  jsonStateSerializer,
+  jwtAuthenticate,
+  launch,
+  computeHash as launcherComputeHash,
+  makeExternalLocationBatch,
+  maybeExternalizeBatch,
+  mtlsAuthenticate,
+  mtlsAuthenticateFingerprint,
+  mtlsAuthenticateSubject,
+  mtlsAuthenticateXfcc,
+  nginxSpiffeProvider,
+  noRedaction,
+  normalisePrincipals,
+  normalizeProxyIpAddress,
+  oauthResourceMetadataToJson,
+  observePeerIdentity,
+  otelTraceContext,
+  parseCapabilitiesFromHeaders,
+  parseClientId,
+  parseClientSecret,
+  parseDeviceCodeClientId,
+  parseDeviceCodeClientSecret,
+  parseIrohEndpoint,
+  parseIrohProxyProtocolV2,
+  parseProxyProtocolV2,
+  parseResourceMetadataUrl,
+  parseSocks5hProxy,
+  parseUseIdTokenAsBearer,
+  parseXfcc,
+  peerIdentityPrimary,
+  pickApplicationProtocol,
+  pipeConnect,
+  probeSocket,
+  readIrohProxyProtocolV2,
+  readProxyProtocolV2,
+  readRequest,
+  readUnaryResult,
+  redactClaims,
+  rejectJwsShaped,
+  requirePeerIdentity,
+  reservedPath,
+  resolveExternalLocation,
+  rpcPath,
+  rpcPathFromPrefix,
+  serveIrohTcpUpstream,
+  serveStream,
+  serveTcp,
+  serveUnix,
+  socketPaths,
+  spiffeX509HeaderProvider,
+  statusRows,
+  str,
+  subprocessConnect,
+  tailscaleLocalApiIdentityProvider,
+  tailscaleServeIdentityProvider,
+  tcpConnect,
+  tcpConnectSocks5h,
+  toSchema,
+  tokenDigest,
+  trimForShapeTest,
+  tryAcquireLock,
+  uint162 as uint16,
+  uint322 as uint32,
+  uint642 as uint64,
+  uint82 as uint8,
+  unpackStateToken,
+  utf8Length2 as utf8Length,
+  validateSpiffeId,
+  writeRequest,
+  writeUnaryResult
 };
 
-//# debugId=E8A9CC351B9CF85764756E2164756E21
+//# debugId=13F568E50BF0302364756E2164756E21

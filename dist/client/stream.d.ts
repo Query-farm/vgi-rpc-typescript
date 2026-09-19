@@ -1,4 +1,4 @@
-import { RecordBatch, Schema } from "@query-farm/apache-arrow";
+import type { RecordBatch, Schema } from "@query-farm/apache-arrow";
 import { type ExternalLocationConfig } from "../external.js";
 import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
 import type { ExchangeInput, LogMessage, StreamSession } from "./types.js";
@@ -168,7 +168,6 @@ export declare class HttpStreamSession implements StreamSession, RawStreamSessio
     private _doExchange;
     /** Decode an exchange reply for the row-oriented surface. */
     private _rowsOfExchange;
-    private _buildEmptyBatch;
     /**
      * Iterate over producer stream batches.
      */

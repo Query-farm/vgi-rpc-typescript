@@ -94,7 +94,7 @@ export declare function withBatchMetadata(batch: VgiBatch, metadata: Map<string,
  * `tableToIPC` outputs produces multiple EOS markers, dropping batches
  * past the first.
  */
-export declare function serializeBatches(_schema: VgiSchema, batches: VgiBatch[]): Uint8Array;
+export declare function serializeBatches(schema: VgiSchema, batches: VgiBatch[]): Uint8Array;
 /**
  * Rebuild a batch's columns to match a target schema's field types.
  *

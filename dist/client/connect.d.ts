@@ -1,4 +1,4 @@
-import { Schema } from "@query-farm/apache-arrow";
+import type { Schema } from "@query-farm/apache-arrow";
 import { type HttpServerCapabilities } from "./capabilities.js";
 import { type ServiceDescription } from "./introspect.js";
 import type { RawBatch, RawStreamSession } from "./raw.js";

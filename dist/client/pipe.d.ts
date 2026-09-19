@@ -1,4 +1,4 @@
-import { Schema } from "@query-farm/apache-arrow";
+import type { Schema } from "@query-farm/apache-arrow";
 import { type ExternalLocationConfig } from "../external.js";
 import { IpcStreamReader } from "../wire/reader.js";
 import type { RpcClient } from "./connect.js";
