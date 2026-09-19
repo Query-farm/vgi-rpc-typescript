@@ -11,6 +11,13 @@
 // arrow-js batch (the documented `ExchangeInput` type), a zero-row exchange,
 // a raw exchange, producer continuations (iteration and an explicit tick with
 // metadata), a cancel, and a raw unary call. Prints one JSON line.
+//
+// It also sends zero-column exchange inputs that carry a row count -- the
+// shape DuckDB sends for a scalar whose arguments are all constants
+// (`SELECT example.hash_seed(42)`). flechette cannot derive that count from
+// columns, so its reader pins it as an own `numRows` over the prototype's
+// getter-only accessor, and the server's per-input metadata rewrite then has
+// to clone that batch without assigning to the accessor.
 
 import {
   RecordBatch as ArrowRecordBatch,
@@ -45,6 +52,15 @@ const protocol = new Protocol("demo.stream.v1")
       const values: number[] = [];
       for (let i = 0; i < input.numRows; i++) values.push(Number(col?.get(i)) * state.factor);
       out.emit({ value: values, app: values.map(() => input.metadata?.get("app") ?? "") });
+    },
+  })
+  .exchange<Record<string, never>>("rowcount", {
+    params: {},
+    inputSchema: {},
+    outputSchema: { n: int32, app: str },
+    init: async () => ({}),
+    exchange: async (_state, input, out) => {
+      out.emit({ n: [input.numRows], app: [input.metadata?.get("app") ?? ""] });
     },
   })
   .producer<{ limit: number; current: number }>("count", {
@@ -108,6 +124,19 @@ try {
     return values(await (await scaleStream()).exchange(batch));
   });
   await step("zeroRows", async () => values(await (await scaleStream()).exchange([])));
+  // Zero columns, three rows: the input reaches the method with its row count,
+  // both with no application metadata (the rewrite clears) and with some (it
+  // attaches).
+  const zeroColumnBatch = () =>
+    new ArrowRecordBatch(new Schema([]), makeData({ type: new Struct([]), length: 3, nullCount: 0, children: [] }));
+  await step("zeroColumnRows", async () =>
+    (await (await client.stream("rowcount", {})).exchange(zeroColumnBatch())).map((r) => [Number(r.n), r.app]),
+  );
+  await step("zeroColumnRowsWithMetadata", async () => {
+    const s = (await client.stream("rowcount", {})) as unknown as RawStreamSession;
+    const raw = await s.exchangeRaw({ batch: zeroColumnBatch(), metadata: new Map([["app", "zc"]]) });
+    return raw ? [Number(raw.batch.getChildAt(0)?.get(0)), String(raw.batch.getChildAt(1)?.get(0))] : null;
+  });
   await step("rawExchange", async () => {
     const raw = await ((await scaleStream()) as unknown as RawStreamSession).exchangeRaw({
       batch: batchFromColumns(schema([field("value", float64(), true)]), { value: [10] }) as any,

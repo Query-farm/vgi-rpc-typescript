@@ -50,6 +50,8 @@ const EXPECTED = {
   facadeBatch: [[10, ""]],
   arrowBatch: [[14, ""]],
   zeroRows: [],
+  zeroColumnRows: [[3, ""]],
+  zeroColumnRowsWithMetadata: [3, "zc"],
   rawExchange: [20, "raw"],
   produced: [0, 1, 2],
   tickWithMetadata: [[1, "tick"]],

@@ -397,10 +397,21 @@ export function isOpaqueData(_val: unknown): boolean {
  *  clears what the source carried. `attachBatchMetadata` treats empty as
  *  "nothing to attach", which is right for a freshly built table and wrong
  *  here: the clone kept the source's map, so an HTTP exchange input whose only
- *  keys were the stream tokens reached its method still carrying them. */
+ *  keys were the stream tokens reached its method still carrying them.
+ *
+ *  The clone copies the source's own properties as descriptors, not by
+ *  assignment. A zero-column batch read off the wire carries its row count as
+ *  an own `numRows` (see `deserializeBatch`) over `Table.prototype.numRows`, a
+ *  getter-only accessor. `Object.assign` *assigns* each own property, and
+ *  assigning to an inherited getter-only accessor throws in strict mode
+ *  ("Attempted to assign to readonly property") -- which HTTP dispatch hit on
+ *  every exchange whose input had no columns (a DuckDB scalar whose arguments
+ *  are all constants), since it rewrites each input's metadata. The descriptor
+ *  copy also keeps the override, which the clone needs: without it the getter
+ *  derives 0 rows from the absent columns. */
 export function withBatchMetadata(batch: VgiBatch, metadata: Map<string, string>): VgiBatch {
   const t = batch as any;
-  const clone = Object.assign(Object.create(Object.getPrototypeOf(t)), t);
+  const clone = Object.create(Object.getPrototypeOf(t), Object.getOwnPropertyDescriptors(t));
   if (metadata.size === 0) {
     clone._vgiRecordMetadata = undefined;
     clone.metadata = metadata;
