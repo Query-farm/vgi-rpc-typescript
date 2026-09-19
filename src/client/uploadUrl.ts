@@ -15,6 +15,7 @@
  */
 
 import { RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
+import { withBatchMetadata } from "#vgi-rpc-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
@@ -172,10 +173,10 @@ async function buildPointerRequestBody(originalBody: Uint8Array, downloadUrl: st
     if (!merged.has(k)) merged.set(k, v);
   }
 
-  // Re-emit the pointer batch with merged metadata.
-  const { RecordBatch } = await import("@query-farm/apache-arrow");
-  const pointerWithMeta = new RecordBatch(schema as any, (pointer as any).data, merged);
-  return serializeIpcStream(schema, [pointerWithMeta]);
+  // Re-emit the pointer batch with merged metadata. The pointer was built
+  // through the facade, so it is the active backend's own batch.
+  const pointerWithMeta = withBatchMetadata(pointer, merged);
+  return serializeIpcStream(schema as any, [pointerWithMeta]);
 }
 
 export interface ExternalizeOptions {

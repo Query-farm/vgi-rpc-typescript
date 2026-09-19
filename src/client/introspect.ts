@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Schema as ArrowSchema, type RecordBatch, type Schema } from "@query-farm/apache-arrow";
-import { deserializeSchema as deserializeSchemaImpl } from "#vgi-rpc-arrow";
+import { deserializeSchema as deserializeSchemaImpl, schema as makeSchema } from "#vgi-rpc-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { RESERVED_PROTOCOL_PREFIX } from "../binding.js";
 import { RpcError } from "../errors.js";
@@ -214,7 +214,7 @@ export function reflectionRequest(method: string, protocol?: string): Uint8Array
       { protocol: REFLECTION_PROTOCOL_NAME },
     );
   }
-  return buildRequestIpc(new ArrowSchema([]), {}, method, { protocol: REFLECTION_PROTOCOL_NAME });
+  return buildRequestIpc(makeSchema([]) as unknown as Schema, {}, method, { protocol: REFLECTION_PROTOCOL_NAME });
 }
 
 /**

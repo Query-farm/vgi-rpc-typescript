@@ -1,8 +1,17 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { Field, makeData, RecordBatch, Schema, Struct, vectorFromArray } from "@query-farm/apache-arrow";
+import type { RecordBatch, Schema } from "@query-farm/apache-arrow";
+import {
+  batchFromColumns,
+  emptyBatchWithMetadata,
+  field,
+  schema as makeSchema,
+  singleRowBatchWithMetadata,
+  withBatchMetadata,
+} from "#vgi-rpc-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
+import type { VgiSchema } from "../arrow/types.js";
 import { CALL_STATE_KEY, CANCEL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
@@ -12,6 +21,7 @@ import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget }
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
 import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
+import { serializeRequest, withMetadata } from "./outbound.js";
 import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
 import { rawBatchOf, rawInputBatch } from "./raw-util.js";
 import type { ExchangeInput, LogMessage, StreamSession } from "./types.js";
@@ -284,14 +294,15 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
     // runtime values cannot describe: all-null columns, zero rows, dictionary
     // index widths, timestamp units/timezones, decimal precision/scale, and
     // nested child nullability. Preserve its schema and buffers verbatim and
-    // add only the stream tokens required by the transport.
+    // add only the stream tokens required by the transport. The batch may be
+    // either implementation's; it is written by its own (see outbound.ts).
     if (!Array.isArray(input)) {
       const metadata = new Map(input.metadata ?? []);
       for (const [key, value] of this._tokenMetadata(this._stateToken)) {
         metadata.set(key, value);
       }
-      const batch = new RecordBatch(input.schema, input.data, metadata);
-      return this._rowsOfExchange(await this._doExchange(input.schema, [batch]));
+      const batch = withMetadata(input, metadata);
+      return this._rowsOfExchange(await this._doExchange(batch.schema, [batch]));
     }
 
     // We need to determine the input schema from the data.
@@ -303,8 +314,10 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
       // Use inputSchema from the description if available; fall back to
       // outputSchema so the server sees the correct column names.
       const zeroSchema = this._inputSchema ?? this._outputSchema;
-      const emptyBatch = this._buildEmptyBatch(zeroSchema);
-      const batchWithMeta = new RecordBatch(zeroSchema, emptyBatch.data, this._tokenMetadata(this._stateToken));
+      const batchWithMeta = emptyBatchWithMetadata(
+        zeroSchema as unknown as VgiSchema,
+        this._tokenMetadata(this._stateToken),
+      ) as unknown as RecordBatch;
       return this._rowsOfExchange(await this._doExchange(zeroSchema, [batchWithMeta]));
     }
 
@@ -325,24 +338,17 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
         }
         const arrowType = inferArrowType(sample);
         const nullable = input.some((row) => row[key] == null);
-        return new Field(key, arrowType, nullable);
+        return field(key, arrowType as any, nullable);
       });
-      inputSchema = new Schema(fields);
+      inputSchema = makeSchema(fields) as unknown as Schema;
     }
-    const children = inputSchema.fields.map((f) => {
-      const values = input.map((row) => row[f.name]);
-      return vectorFromArray(values, f.type).data[0];
-    });
-
-    const structType = new Struct(inputSchema.fields);
-    const data = makeData({
-      type: structType,
-      length: input.length,
-      children,
-      nullCount: 0,
-    });
-
-    const batch = new RecordBatch(inputSchema, data, this._tokenMetadata(this._stateToken));
+    // Built through the facade, so the batch is the active backend's own.
+    const columns: Record<string, any[]> = {};
+    for (const f of inputSchema.fields) columns[f.name] = input.map((row) => row[f.name]);
+    const batch = withBatchMetadata(
+      batchFromColumns(inputSchema as unknown as VgiSchema, columns),
+      this._tokenMetadata(this._stateToken),
+    ) as unknown as RecordBatch;
 
     return this._rowsOfExchange(await this._doExchange(inputSchema, [batch]));
   }
@@ -405,10 +411,8 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
     const token = this._stateToken;
     this._finished = true;
     this._stateToken = null;
-    const structType = new Struct([]);
-    const data = makeData({ type: structType, length: 0, children: [], nullCount: 0 });
-    const emptySchema = new Schema([]);
-    const batch = new RecordBatch(emptySchema, data, this._tokenMetadata(token, { cancel: true }));
+    const emptySchema = makeSchema([]);
+    const batch = emptyBatchWithMetadata(emptySchema, this._tokenMetadata(token, { cancel: true }));
     try {
       const resp = await this._post(
         this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }),
@@ -423,7 +427,7 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
   }
 
   private async _doExchange(schema: Schema, batches: RecordBatch[]): Promise<RecordBatch | null> {
-    const body = serializeIpcStream(schema, batches);
+    const body = serializeRequest(schema, batches);
     const resp = await this._post(
       this._baseUrl + rpcPathFromPrefix(this._prefix, this._method, { suffix: "/exchange" }),
       body,
@@ -486,20 +490,6 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
   /** Decode an exchange reply for the row-oriented surface. */
   private _rowsOfExchange(reply: RecordBatch | null): Record<string, any>[] {
     return reply === null ? [] : extractBatchRows(reply);
-  }
-
-  private _buildEmptyBatch(schema: Schema): RecordBatch {
-    const children = schema.fields.map((f) => {
-      return makeData({ type: f.type, length: 0, nullCount: 0 });
-    });
-    const structType = new Struct(schema.fields);
-    const data = makeData({
-      type: structType,
-      length: 0,
-      children,
-      nullCount: 0,
-    });
-    return new RecordBatch(schema, data);
   }
 
   /**
@@ -680,18 +670,14 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
     token: string,
     applicationMetadata?: ReadonlyMap<string, string>,
   ): Promise<Uint8Array> {
-    const emptySchema = new Schema([]);
+    const emptySchema = makeSchema([]);
     const metadata = new Map(applicationMetadata ?? []);
     for (const [key, value] of this._tokenMetadata(token)) metadata.set(key, value);
 
-    const structType = new Struct(emptySchema.fields);
-    const data = makeData({
-      type: structType,
-      length: 1,
-      children: [],
-      nullCount: 0,
-    });
-    const batch = new RecordBatch(emptySchema, data, metadata);
+    // A one-row, zero-column tick -- one row on arrow-js, where a zero-field
+    // batch can carry a length; flechette writes zero rows, which servers read
+    // the same way.
+    const batch = singleRowBatchWithMetadata(emptySchema, {}, metadata);
     const body = serializeIpcStream(emptySchema, [batch]);
 
     const resp = await this._post(

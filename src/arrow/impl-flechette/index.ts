@@ -465,6 +465,11 @@ function castNumericValues(col: any, dstType: VgiDataType): any[] {
  */
 export function conformBatchToSchema(batch: VgiBatch, schema: VgiSchema): VgiBatch {
   const t = batch as any;
+  // A zero-row batch has no values to cast and is passed through unchecked, as
+  // the arrow-js backend does: the same request must get the same answer from
+  // either backend's server. (The HTTP client's zero-row exchange sends the
+  // stream's output schema when it has not learned the input schema.)
+  if (t?.numRows === 0) return batch;
   const batchSchema = t?.schema;
   if (!batchSchema || !schema) return batch;
   const batchFields = batchSchema.fields ?? [];

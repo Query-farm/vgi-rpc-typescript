@@ -1,15 +1,9 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  Field,
-  makeData,
-  RecordBatch,
-  RecordBatchStreamWriter,
-  Schema,
-  Struct,
-  vectorFromArray,
-} from "@query-farm/apache-arrow";
+import type { Field, RecordBatch, Schema } from "@query-farm/apache-arrow";
+import { batchFromColumns, emptyBatchWithMetadata, field, schema as makeSchema } from "#vgi-rpc-arrow";
+import type { VgiSchema } from "../arrow/types.js";
 import { CANCEL_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
 import { type ExternalLocationConfig, isExternalLocationBatch, resolveExternalLocation } from "../external.js";
@@ -33,6 +27,7 @@ import {
   type ServiceDescription,
 } from "./introspect.js";
 import { buildRequestIpc, dispatchLogOrError, extractBatchRows, inferArrowType } from "./ipc.js";
+import { createRequestEncoder, serializeRequest } from "./outbound.js";
 import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
 import { rawBatchOf, rawInputBatch } from "./raw-util.js";
 import type {
@@ -83,37 +78,32 @@ function schemasMatch(left: Schema, right: Schema): boolean {
 // ---------------------------------------------------------------------------
 
 class PipeIncrementalWriter {
-  private writer: RecordBatchStreamWriter;
+  // One request stream, written by the implementation its first batch belongs
+  // to; later batches cross to it (see outbound.ts). Under arrow-js this is
+  // arrow-js's stream writer, byte for byte.
+  private encoder: ReturnType<typeof createRequestEncoder>;
   private writeFn: WriteFn;
   private closed = false;
 
   constructor(writeFn: WriteFn, schema: Schema) {
     this.writeFn = writeFn;
-    this.writer = new RecordBatchStreamWriter();
-    this.writer.reset(undefined, schema);
-    this.drain(); // flushes schema message
+    this.encoder = createRequestEncoder(schema);
   }
 
   write(batch: RecordBatch): void {
     if (this.closed) throw new Error("PipeIncrementalWriter already closed");
-    (this.writer as any)._writeRecordBatch(batch);
-    this.drain();
+    this.emit(this.encoder.writeBatch(batch));
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    // EOS marker: continuation (0xFFFFFFFF) + metadata length (0x00000000)
-    const eos = new Uint8Array(new Int32Array([-1, 0]).buffer);
-    this.writeFn(eos);
+    // The EOS marker (after the schema, if no batch was ever written).
+    this.emit(this.encoder.finish());
   }
 
-  private drain(): void {
-    const values = (this.writer as any)._sink._values as Uint8Array[];
-    for (const chunk of values) {
-      this.writeFn(chunk);
-    }
-    values.length = 0;
+  private emit(bytes: Uint8Array): void {
+    if (bytes.length > 0) this.writeFn(bytes);
   }
 }
 
@@ -256,12 +246,14 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
     if (this._closed) {
       throw new RpcError("ProtocolError", "Stream session is closed", "");
     }
-    const tickSchema = new Schema([]);
+    const tickSchema = makeSchema([]) as unknown as Schema;
     if (!this._inputWriter) {
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
     }
-    const tickData = makeData({ type: new Struct([]), length: 0, children: [], nullCount: 0 });
-    const tickBatch = new RecordBatch(tickSchema, tickData, metadata ? new Map(metadata) : undefined);
+    const tickBatch = emptyBatchWithMetadata(
+      tickSchema as unknown as VgiSchema,
+      metadata ? new Map(metadata) : undefined,
+    ) as unknown as RecordBatch;
     this._inputWriter.write(tickBatch);
     await this._ensureOutputStream();
     let outputBatch: RecordBatch | null;
@@ -335,13 +327,13 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
     this._closed = true;
     const cancelMetadata = new Map([[CANCEL_KEY, "1"]]);
     try {
-      const schema = this._inputSchema ?? new Schema([]);
+      const schema = this._inputSchema ?? (makeSchema([]) as unknown as Schema);
       if (!this._inputWriter) {
         this._inputWriter = new PipeIncrementalWriter(this._writeFn, schema);
       }
-      const children = schema.fields.map((f) => makeData({ type: f.type, length: 0, nullCount: 0 }));
-      const data = makeData({ type: new Struct(schema.fields), length: 0, children, nullCount: 0 });
-      this._inputWriter.write(new RecordBatch(schema, data, cancelMetadata));
+      this._inputWriter.write(
+        emptyBatchWithMetadata(schema as unknown as VgiSchema, cancelMetadata) as unknown as RecordBatch,
+      );
       this._inputWriter.close();
       this._inputWriter = null;
     } catch {
@@ -397,17 +389,7 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
       // schema is preferred because input and output schemas may differ
       // (e.g. exchange_accumulate: input {value} → output {running_sum, exchange_count}).
       inputSchema = this._inputSchema ?? this._outputSchema;
-      const children = inputSchema.fields.map((f) => {
-        return makeData({ type: f.type, length: 0, nullCount: 0 });
-      });
-      const structType = new Struct(inputSchema.fields);
-      const data = makeData({
-        type: structType,
-        length: 0,
-        children,
-        nullCount: 0,
-      });
-      batch = new RecordBatch(inputSchema, data);
+      batch = emptyBatchWithMetadata(inputSchema as unknown as VgiSchema) as unknown as RecordBatch;
     } else {
       // Infer schema from first row.
       // Always use nullable fields — the server validates input schemas
@@ -422,9 +404,9 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
           }
         }
         const arrowType = inferArrowType(sample);
-        return new Field(key, arrowType, /* nullable */ true);
+        return field(key, arrowType as any, /* nullable */ true);
       });
-      inputSchema = new Schema(fields);
+      inputSchema = makeSchema(fields) as unknown as Schema;
 
       // Validate schema consistency: all exchanges on the same pipe session
       // share a single IPC stream, so the schema is locked to the first call.
@@ -445,18 +427,10 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
         this._inputSchema = inputSchema;
       }
 
-      const children = inputSchema.fields.map((f) => {
-        const values = input.map((row) => row[f.name]);
-        return vectorFromArray(values, f.type).data[0];
-      });
-      const structType = new Struct(inputSchema.fields);
-      const data = makeData({
-        type: structType,
-        length: input.length,
-        children,
-        nullCount: 0,
-      });
-      batch = new RecordBatch(inputSchema, data);
+      // Built through the facade, so the batch is the active backend's own.
+      const columns: Record<string, any[]> = {};
+      for (const f of inputSchema.fields) columns[f.name] = input.map((row) => row[f.name]);
+      batch = batchFromColumns(inputSchema as unknown as VgiSchema, columns) as unknown as RecordBatch;
     }
 
     // Lazy-open input writer on first exchange
@@ -512,7 +486,7 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
 
     try {
       // Open input writer with empty schema for tick batches
-      const tickSchema = new Schema([]);
+      const tickSchema = makeSchema([]) as unknown as Schema;
       this._inputWriter = new PipeIncrementalWriter(this._writeFn, tickSchema);
 
       while (true) {
@@ -558,7 +532,7 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
     } else {
       // Never iterated/exchanged — send empty schema stream so server unblocks.
       // Server is blocked at reader.openNextStream() waiting for client's input.
-      const emptySchema = new Schema([]);
+      const emptySchema = makeSchema([]);
       const ipc = serializeIpcStream(emptySchema, []);
       this._writeFn(ipc);
     }
@@ -793,7 +767,7 @@ export function pipeConnect(
         // `ensureMethodCache` does: the reader blocks on a schema message the
         // server does not send until it has a request.
         const batch = rawInputBatch(input);
-        writeFn(serializeIpcStream(batch.schema, [batch]));
+        writeFn(serializeRequest(batch.schema, [batch]));
         const r = await ensureReader();
         const response = await r.readStream();
         if (!response) {
@@ -828,7 +802,7 @@ export function pipeConnect(
       await acquireBusy();
       try {
         const batch = rawInputBatch(input);
-        writeFn(serializeIpcStream(batch.schema, [batch]));
+        writeFn(serializeRequest(batch.schema, [batch]));
 
         // Only a header-bearing method writes anything before its first tick,
         // so only that case may open the reader here. Opening it for a
@@ -864,7 +838,7 @@ export function pipeConnect(
           onLog,
           header: null,
           rawHeader,
-          outputSchema: new Schema([]),
+          outputSchema: makeSchema([]) as unknown as Schema,
           releaseBusy,
           setDrainPromise,
           externalConfig,
@@ -874,7 +848,7 @@ export function pipeConnect(
         // stream, so send an empty one and drain its output before releasing.
         try {
           const r = await ensureReader();
-          writeFn(serializeIpcStream(new Schema([]), []));
+          writeFn(serializeIpcStream(makeSchema([]), []));
           void (await r.readStream());
         } catch {
           // Suppress errors during cleanup.
@@ -952,7 +926,7 @@ export function pipeConnect(
         // drain the server's output stream if needed.
         try {
           const r = await ensureReader();
-          const emptySchema = new Schema([]);
+          const emptySchema = makeSchema([]);
           const ipc = serializeIpcStream(emptySchema, []);
           writeFn(ipc);
           // Drain server's output stream (error response + EOS)

@@ -1,7 +1,8 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { type RecordBatch, Schema } from "@query-farm/apache-arrow";
+import type { RecordBatch, Schema } from "@query-farm/apache-arrow";
+import { schema as makeSchema } from "#vgi-rpc-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { CALL_STATE_KEY, LOG_LEVEL_KEY, PROTOCOL_KEY, STATE_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
@@ -16,7 +17,6 @@ import {
   SESSION_CLOSE_HEADER,
   SESSION_ENDPOINT,
   SESSION_HEADER,
-  serializeIpcStream,
 } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import {
@@ -34,6 +34,7 @@ import {
   readResponseBatches,
   readSequentialStreams,
 } from "./ipc.js";
+import { serializeRequest } from "./outbound.js";
 import type { RawBatch, RawStreamSession } from "./raw.js";
 import { rawBatchOf, rawInputBatch } from "./raw-util.js";
 import { HttpStreamSession, unpackResumeToken } from "./stream.js";
@@ -761,7 +762,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       const batch = rawInputBatch(input);
       const resp = await postWithExternalization(
         baseUrl + rpcPathFromPrefix(await rawPrefix(input.metadata), method),
-        serializeIpcStream(batch.schema, [batch]),
+        serializeRequest(batch.schema, [batch]),
       );
       checkAuth(resp);
       const responseBody = await readResponse(resp);
@@ -799,7 +800,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       const prefixForCall = await rawPrefix(input.metadata);
       const init = await openStreamOverHttp(
         method,
-        serializeIpcStream(batch.schema, [batch]),
+        serializeRequest(batch.schema, [batch]),
         options.hasHeader,
         prefixForCall,
       );
@@ -809,7 +810,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         method,
         stateToken: init.stateToken,
         callStateToken: init.callStateToken,
-        outputSchema: init.outputSchema ?? new Schema([]),
+        outputSchema: init.outputSchema ?? (makeSchema([]) as unknown as Schema),
         onLog,
         pendingBatches: init.pendingBatches,
         finished: init.finished,
@@ -844,7 +845,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         method,
         stateToken: cursor,
         callStateToken: callToken,
-        outputSchema: outputSchema ?? new Schema([]),
+        outputSchema: outputSchema ?? (makeSchema([]) as unknown as Schema),
         onLog,
         pendingBatches: [],
         finished: false,

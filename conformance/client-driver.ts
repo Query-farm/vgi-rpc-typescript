@@ -32,10 +32,11 @@
 
 import { Buffer } from "node:buffer";
 import { writeSync } from "node:fs";
-import { RecordBatch, type Schema } from "@query-farm/apache-arrow";
+import type { Schema } from "@query-farm/apache-arrow";
 import { type HttpRpcClient, httpConnect, type RpcClient } from "../src/client/connect.js";
 import type { LogMessage, ServiceDescription } from "../src/client/index.js";
 import { readResponseBatches } from "../src/client/ipc.js";
+import { serializeRequest, withMetadata } from "../src/client/outbound.js";
 import { subprocessConnect } from "../src/client/pipe.js";
 import type { RawBatch, RawStreamSession } from "../src/client/raw.js";
 import { tcpConnect } from "../src/client/tcp.js";
@@ -155,10 +156,14 @@ async function decodeOne(encoded: string): Promise<RawBatch> {
   return { batch, metadata: new Map(batch.metadata ?? []) };
 }
 
-/** Write one batch and its custom metadata back as a complete IPC stream. */
+/** Write one batch and its custom metadata back as a complete IPC stream.
+ *
+ *  Through the client's own outbound path, so a batch of either Arrow
+ *  implementation is written by its own -- the driver then runs unchanged
+ *  under `--conditions=flechette`. */
 function encodeOne(item: RawBatch): string {
-  const batch = new RecordBatch(item.batch.schema, item.batch.data, new Map(item.metadata));
-  return b64encode(serializeIpcStream(batch.schema, [batch]));
+  const batch = withMetadata(item.batch, new Map(item.metadata));
+  return b64encode(serializeRequest(batch.schema, [batch]));
 }
 
 /** Encode a bare schema as an IPC stream; only its schema message is read. */
