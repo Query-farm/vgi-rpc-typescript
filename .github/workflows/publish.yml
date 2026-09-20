@@ -47,6 +47,12 @@ jobs:
           # ship a package that is unresolvable for every browser bundler.
           test -f dist/browser/index.workerd.js
           test -f dist/browser/arrow/impl-arrowjs/index.js
+          # The `./connect` subpath's `import` condition. Its .d.ts is emitted
+          # by tsc, so types resolved while the JS did not exist at all and
+          # every Node consumer of the subpath got ERR_MODULE_NOT_FOUND. The
+          # unbundled tree cannot serve this: `#vgi-rpc-arrow` resolves to a
+          # .ts source outside bun, so only the bundled build works here.
+          test -f dist/client/connect.js
 
       - name: Verify dist actually loads
         # Guards against bundler re-export bugs that emit a syntactically valid
@@ -57,6 +63,9 @@ jobs:
           # Same guard for the entry the `browser` condition resolves to — it is
           # a pure re-export too, so it fails the same way if tree-shaken.
           bun -e "try { const m = await import('./dist/browser/index.workerd.js'); if (!Object.keys(m).length) throw new Error('no exports'); console.log('dist/browser/index.workerd.js loaded OK'); } catch (e) { console.error('dist/browser/index.workerd.js failed to load:', e); process.exit(1); }"
+          # Under node, not bun: bun would resolve the subpath to src/ and hide
+          # a missing or unloadable dist build.
+          node -e "import('./dist/client/connect.js').then((m) => { if (typeof m.httpConnect !== 'function' || typeof m.RpcError !== 'function') { console.error('dist/client/connect.js is missing exports'); process.exit(1); } console.log('dist/client/connect.js loaded OK under node'); }).catch((e) => { console.error('dist/client/connect.js failed to load:', e); process.exit(1); })"
 
       - name: Publish to npm
         run: npm publish --access public --provenance

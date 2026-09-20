@@ -1,6 +1,6 @@
 {
   "name": "@query-farm/vgi-rpc",
-  "version": "0.25.3",
+  "version": "0.25.4",
   "license": "Apache-2.0",
   "homepage": "https://vgi-rpc-typescript.query.farm",
   "repository": {
@@ -49,7 +49,7 @@
     "dist",
     "src"
   ],
-  "//imports": "`browser` must resolve to the JS emit under dist/browser, not ./src — the browser export condition serves transpiled JS and a `#vgi-rpc-arrow` specifier inside it is re-resolved with the consumer's conditions, so pointing it at a .ts file would drag TypeScript back into a loader-less bundler. Keep `browser` AFTER `workerd`/`worker`: conditions match in key order and a workerd build sets both, so it must reach flechette first.",
+  "//imports": "`browser` must resolve to the JS emit under dist/browser, not ./src \u2014 the browser export condition serves transpiled JS and a `#vgi-rpc-arrow` specifier inside it is re-resolved with the consumer's conditions, so pointing it at a .ts file would drag TypeScript back into a loader-less bundler. Keep `browser` AFTER `workerd`/`worker`: conditions match in key order and a workerd build sets both, so it must reach flechette first.",
   "imports": {
     "#vgi-rpc-client-response-budget": {
       "workerd": "./dist/browser/client/default-response-budget.browser.js",
@@ -118,7 +118,7 @@
     "build": "bun run build:types && bun run build:js",
     "build:types": "bunx tsc -p tsconfig.build.json",
     "build:js": "bun run build:js:node && bun run build:js:browser",
-    "build:js:node": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
+    "build:js:node": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/client/connect.ts --outdir dist/client --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
     "build:js:browser": "bunx tsc -p tsconfig.browser.json",
     "test": "bun test",
     "lint": "biome check .",
