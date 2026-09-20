@@ -738,7 +738,12 @@ export function createHttpHandler(
   function addCorsHeaders(headers: Headers, isOptions = false, requestedHeaders?: string | null): void {
     if (corsOrigins) {
       headers.set("Access-Control-Allow-Origin", corsOrigins);
-      headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+      // GET and HEAD are here for `/health`, the capability-discovery endpoint.
+      // A browser's probe carries VGI-Accept-Max-Response-Bytes, so it is
+      // preflighted, and a method absent from this list is refused before the
+      // request is sent — which left browser clients unable to discover
+      // capabilities from a TypeScript server at all. RPC itself is POST.
+      headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
       // Reflect the preflight's requested headers so clients may send custom
       // VGI request headers (e.g. x-vgi-accept-encoding, VGI-Session) without a
       // hard-coded allow-list. Mirrors the Python framework, whose preflight

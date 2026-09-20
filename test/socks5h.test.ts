@@ -348,4 +348,33 @@ describe("SOCKS5h", () => {
       await rpcServer.stop();
     }
   });
+
+  // A HEAD reply carries GET's Content-Length and no body (RFC 9110 §9.3.2).
+  // The decoder used to read that header as a promise of bytes and reject the
+  // response as "invalid HTTP Content-Length" — which made every SOCKS5h
+  // connection fail on its first request, since capability discovery probes
+  // /health with HEAD.
+  test("HTTP fetch accepts a bodyless HEAD reply that declares Content-Length", async () => {
+    const headOnly = createServer((socket) => {
+      socket.once("data", () => {
+        socket.write(
+          "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: application/json\r\n" +
+            "Content-Length: 42\r\n" +
+            "VGI-Accept-Max-Response-Bytes-Support: true\r\n\r\n",
+        );
+      });
+    });
+    servers.push(headOnly);
+    const headPort = await listen(headOnly);
+    const headProxy = await relayProxy(headPort);
+    const response = await createSocks5hFetch(`socks5h://127.0.0.1:${headProxy}`)(
+      "http://worker.invalid/health",
+      { method: "HEAD" },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("VGI-Accept-Max-Response-Bytes-Support")).toBe("true");
+    expect(await response.text()).toBe("");
+  });
+
 });

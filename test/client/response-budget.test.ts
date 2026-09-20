@@ -37,7 +37,7 @@ describe("HTTP client response budgets", () => {
       fetch: async (_input, init) => {
         const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         seen = request.headers.get("VGI-Accept-Max-Response-Bytes");
-        if (request.method === "OPTIONS") {
+        if (request.method === "HEAD") {
           return new Response(null, {
             status: 204,
             headers: { "VGI-Accept-Max-Response-Bytes-Support": "true" },
@@ -63,7 +63,7 @@ describe("HTTP client response budgets", () => {
       fetch: async (_input, init) => {
         const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
         seen = request.headers.get("VGI-Accept-Max-Response-Bytes");
-        if (request.method === "OPTIONS") {
+        if (request.method === "HEAD") {
           return new Response(null, {
             status: 204,
             headers: { "VGI-Accept-Max-Response-Bytes-Support": "true" },
@@ -84,7 +84,7 @@ describe("HTTP client response budgets", () => {
       acceptedMaxResponseBytes: 128 * 1024,
       fetch: async (_input, init) => {
         const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
-        if (request.method === "OPTIONS") {
+        if (request.method === "HEAD") {
           return new Response(null, {
             status: 204,
             headers: { "VGI-Accept-Max-Response-Bytes-Support": "true" },
@@ -173,7 +173,7 @@ describe("HTTP client response budgets", () => {
     const client = httpConnect("http://test", {
       fetch: async (_input, init) => {
         const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
-        if (request.method === "OPTIONS") {
+        if (request.method === "HEAD") {
           options += 1;
           return new Response(null, {
             status: 204,
@@ -198,7 +198,7 @@ describe("HTTP client response budgets", () => {
     const unsupported = httpConnect("http://test", {
       fetch: async (_input, init) => {
         const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
-        if (request.method === "OPTIONS") return new Response(null, { status: 204 });
+        if (request.method === "HEAD") return new Response(null, { status: 204 });
         posts += 1;
         return new Response();
       },
@@ -209,7 +209,7 @@ describe("HTTP client response budgets", () => {
     const missingOnRpc = httpConnect("http://test", {
       fetch: async (_input, init) => {
         const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
-        if (request.method === "OPTIONS") {
+        if (request.method === "HEAD") {
           return new Response(null, {
             status: 204,
             headers: { "VGI-Accept-Max-Response-Bytes-Support": "true" },
@@ -226,7 +226,7 @@ describe("HTTP client response budgets", () => {
     const client = httpConnect("http://test", {
       fetch: async (_input, init) => {
         const request = new Request("http://test/vgi_rpc.Reflection.v1/list_protocols", init);
-        if (request.method === "OPTIONS") {
+        if (request.method === "HEAD") {
           return new Response(null, {
             status: 503,
             headers: { "VGI-Accept-Max-Response-Bytes-Support": "true" },

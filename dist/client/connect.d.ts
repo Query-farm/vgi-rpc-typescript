@@ -115,4 +115,15 @@ export interface HttpRpcClient extends RpcClient {
  * zstd compression, authorization, and 413 request externalization.
  */
 export declare function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): HttpRpcClient;
+/**
+ * The error every method on an {@link RpcClient} throws, re-exported here.
+ *
+ * A client-only consumer would otherwise have to reach for the package root to
+ * catch what this module's own functions raise, and the root re-exports the
+ * whole framework — protocol, dispatch, access log, the server. A bundler
+ * cannot drop it, so browsers shipped `RpcServer` to `instanceof`-check an
+ * error class that has no imports of its own. `@query-farm/vgi` did exactly
+ * that, and it cost its consumers ~160 kB.
+ */
+export { RpcError } from "../errors.js";
 //# sourceMappingURL=connect.d.ts.map

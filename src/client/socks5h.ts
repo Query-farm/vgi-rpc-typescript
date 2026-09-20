@@ -633,7 +633,7 @@ function decodeChunked(body: Buffer): Buffer {
   }
 }
 
-function decodeHttpResponse(raw: Buffer, maxHeaderBytes: number): Response {
+function decodeHttpResponse(raw: Buffer, maxHeaderBytes: number, method: string): Response {
   const headerEnd = raw.indexOf("\r\n\r\n");
   if (headerEnd < 0 || headerEnd + 4 > maxHeaderBytes) throw new Error("invalid or oversized HTTP response headers");
   const lines = raw.toString("latin1", 0, headerEnd).split("\r\n");
@@ -653,8 +653,19 @@ function decodeHttpResponse(raw: Buffer, maxHeaderBytes: number): Response {
   }
   if (contentLengths.length > 1 || transferEncodings.length > 1) throw new Error("ambiguous HTTP response framing");
   if (contentLengths.length > 0 && transferEncodings.length > 0) throw new Error("conflicting HTTP response framing");
+  const statusCode = Number(status[1]);
+  // A HEAD response carries the header fields GET would have sent — including
+  // Content-Length — and no body (RFC 9110 §9.3.2). The framer already stops
+  // reading at the headers for HEAD, so treating Content-Length as a promise of
+  // bytes here rejects a perfectly good response as "invalid Content-Length".
+  // Capability discovery probes with HEAD, so this is the first request the
+  // SOCKS5h transport makes.
+  const bodyless =
+    method === "HEAD" || statusCode === 204 || statusCode === 205 || statusCode === 304;
   let body = raw.subarray(headerEnd + 4);
-  if (transferEncodings.length === 1) {
+  if (bodyless) {
+    body = raw.subarray(headerEnd + 4, headerEnd + 4);
+  } else if (transferEncodings.length === 1) {
     if (transferEncodings[0].toLowerCase() !== "chunked") throw new Error("unsupported HTTP Transfer-Encoding");
     body = decodeChunked(body);
     headers.delete("Transfer-Encoding");
@@ -664,9 +675,7 @@ function decodeHttpResponse(raw: Buffer, maxHeaderBytes: number): Response {
     if (!Number.isSafeInteger(length) || body.length < length) throw new Error("invalid HTTP Content-Length");
     body = body.subarray(0, length);
   }
-  const statusCode = Number(status[1]);
-  const noBody = statusCode === 204 || statusCode === 205 || statusCode === 304;
-  return new Response(noBody ? null : Uint8Array.from(body), {
+  return new Response(bodyless ? null : Uint8Array.from(body), {
     status: statusCode,
     statusText: status[2] ?? "",
     headers,
@@ -772,7 +781,7 @@ export function createSocks5hFetch(
         maxResponseHeaderBytes,
       );
       connection.destroy();
-      const response = decodeHttpResponse(rawResponse, maxResponseHeaderBytes);
+      const response = decodeHttpResponse(rawResponse, maxResponseHeaderBytes, method);
       requestBudget.finish();
       return response;
     } catch (error) {

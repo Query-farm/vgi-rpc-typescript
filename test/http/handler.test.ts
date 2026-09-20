@@ -386,7 +386,9 @@ describe("HTTP Handler", () => {
 
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
-    expect(res.headers.get("Access-Control-Allow-Methods")).toBe("POST, OPTIONS");
+    // GET/HEAD are advertised for /health, the capability-discovery endpoint:
+    // a browser's probe is preflighted and refused unless its method is here.
+    expect(res.headers.get("Access-Control-Allow-Methods")).toBe("GET, HEAD, POST, OPTIONS");
     expect(res.headers.get("Access-Control-Allow-Headers")).toBe(
       "Content-Type, Authorization, VGI-Accept-Max-Response-Bytes",
     );

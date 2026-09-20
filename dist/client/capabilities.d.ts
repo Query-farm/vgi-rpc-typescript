@@ -49,7 +49,24 @@ export interface HttpServerCapabilities {
 export declare function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabilities;
 /** Every VGI HTTP response, not only discovery, must repeat exact support. */
 export declare function requireResponseBudgetSupport(headers: Headers): HttpServerCapabilities;
-/** Probe the server's auth-exempt OPTIONS endpoint for HTTP transport capabilities. */
+/**
+ * Probe the server's auth-exempt `/health` endpoint for HTTP capabilities.
+ *
+ * The probe is `HEAD`, not `OPTIONS`, because `OPTIONS` cannot be used from a
+ * browser. It carries `VGI-Accept-Max-Response-Bytes`, which makes it a
+ * non-simple request, so the browser preflights it and asks
+ * `Access-Control-Request-Method: OPTIONS` — and a server answers a preflight
+ * with the methods its `/health` route actually implements, which is `GET` and
+ * `HEAD`. The probe is blocked before it is sent, and the error names a method
+ * nobody wrote. Every browser consumer hit this; each had to shim `fetch` to
+ * get a connection at all.
+ *
+ * `HEAD` is equivalent for this purpose and is what the spec asks for:
+ * `{prefix}/health` answers `GET, HEAD, OPTIONS` and carries the capability
+ * headers on all three (WIRE_PROTOCOL.md §10). The C++ client already probes
+ * with `HEAD`, so this also removes a divergence between the ports rather than
+ * adding one.
+ */
 export declare function discoverHttpCapabilities(baseUrl: string, prefix: string, authorization?: string, acceptedMaxResponseBytes?: number, fetchFn?: typeof globalThis.fetch): Promise<HttpServerCapabilities>;
 /** Return whether a cached capability snapshot remains usable without another probe. */
 export declare function isCapabilitySnapshotFresh(snapshot: HttpServerCapabilities | null): boolean;

@@ -151,7 +151,24 @@ export function requireResponseBudgetSupport(headers: Headers): HttpServerCapabi
   return capabilities;
 }
 
-/** Probe the server's auth-exempt OPTIONS endpoint for HTTP transport capabilities. */
+/**
+ * Probe the server's auth-exempt `/health` endpoint for HTTP capabilities.
+ *
+ * The probe is `HEAD`, not `OPTIONS`, because `OPTIONS` cannot be used from a
+ * browser. It carries `VGI-Accept-Max-Response-Bytes`, which makes it a
+ * non-simple request, so the browser preflights it and asks
+ * `Access-Control-Request-Method: OPTIONS` — and a server answers a preflight
+ * with the methods its `/health` route actually implements, which is `GET` and
+ * `HEAD`. The probe is blocked before it is sent, and the error names a method
+ * nobody wrote. Every browser consumer hit this; each had to shim `fetch` to
+ * get a connection at all.
+ *
+ * `HEAD` is equivalent for this purpose and is what the spec asks for:
+ * `{prefix}/health` answers `GET, HEAD, OPTIONS` and carries the capability
+ * headers on all three (WIRE_PROTOCOL.md §10). The C++ client already probes
+ * with `HEAD`, so this also removes a divergence between the ports rather than
+ * adding one.
+ */
 export async function discoverHttpCapabilities(
   baseUrl: string,
   prefix: string,
@@ -165,13 +182,13 @@ export async function discoverHttpCapabilities(
   optionalResponseBudget(accepted, "acceptedMaxResponseBytes");
   headers[ACCEPT_MAX_RESPONSE_BYTES_HEADER] = String(accepted);
   const resp = await fetchFn(`${baseUrl}${prefix}/health`, {
-    method: "OPTIONS",
+    method: "HEAD",
     headers,
   });
   if (!resp.ok) {
     throw new RpcError("TransportError", `Capability discovery failed: HTTP ${resp.status}`, "");
   }
-  // OPTIONS commonly answers 204; any successful 2xx status is valid.
+  // HEAD answers 200 with no body; any successful 2xx status is valid.
   return parseCapabilitiesFromHeaders(resp.headers);
 }
 
