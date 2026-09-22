@@ -660,8 +660,7 @@ function decodeHttpResponse(raw: Buffer, maxHeaderBytes: number, method: string)
   // bytes here rejects a perfectly good response as "invalid Content-Length".
   // Capability discovery probes with HEAD, so this is the first request the
   // SOCKS5h transport makes.
-  const bodyless =
-    method === "HEAD" || statusCode === 204 || statusCode === 205 || statusCode === 304;
+  const bodyless = method === "HEAD" || statusCode === 204 || statusCode === 205 || statusCode === 304;
   let body = raw.subarray(headerEnd + 4);
   if (bodyless) {
     body = raw.subarray(headerEnd + 4, headerEnd + 4);

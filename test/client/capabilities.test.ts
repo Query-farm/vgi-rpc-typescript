@@ -66,8 +66,8 @@ describe("discoverHttpCapabilities", () => {
 
   test("a non-2xx probe is a transport error", async () => {
     const failing = (async () => new Response(null, { status: 503 })) as typeof globalThis.fetch;
-    await expect(
-      discoverHttpCapabilities("http://server.test", "", undefined, undefined, failing),
-    ).rejects.toThrow(/Capability discovery failed: HTTP 503/);
+    await expect(discoverHttpCapabilities("http://server.test", "", undefined, undefined, failing)).rejects.toThrow(
+      /Capability discovery failed: HTTP 503/,
+    );
   });
 });

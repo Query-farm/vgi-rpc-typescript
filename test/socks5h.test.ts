@@ -368,13 +368,11 @@ describe("SOCKS5h", () => {
     servers.push(headOnly);
     const headPort = await listen(headOnly);
     const headProxy = await relayProxy(headPort);
-    const response = await createSocks5hFetch(`socks5h://127.0.0.1:${headProxy}`)(
-      "http://worker.invalid/health",
-      { method: "HEAD" },
-    );
+    const response = await createSocks5hFetch(`socks5h://127.0.0.1:${headProxy}`)("http://worker.invalid/health", {
+      method: "HEAD",
+    });
     expect(response.status).toBe(200);
     expect(response.headers.get("VGI-Accept-Max-Response-Bytes-Support")).toBe("true");
     expect(await response.text()).toBe("");
   });
-
 });

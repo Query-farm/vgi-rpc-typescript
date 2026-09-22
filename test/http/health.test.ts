@@ -80,9 +80,7 @@ describe("CORS preflight for the capability probe", () => {
         },
       }),
     );
-    const allowed = (resp.headers.get("Access-Control-Allow-Methods") ?? "")
-      .split(",")
-      .map((method) => method.trim());
+    const allowed = (resp.headers.get("Access-Control-Allow-Methods") ?? "").split(",").map((method) => method.trim());
     expect(allowed).toContain("HEAD");
     expect(allowed).toContain("GET");
     // RPC itself is POST, and the preflight verb stays allowed.
@@ -101,8 +99,6 @@ describe("CORS preflight for the capability probe", () => {
         },
       }),
     );
-    expect(resp.headers.get("Access-Control-Allow-Headers")).toContain(
-      "vgi-accept-max-response-bytes",
-    );
+    expect(resp.headers.get("Access-Control-Allow-Headers")).toContain("vgi-accept-max-response-bytes");
   });
 });
