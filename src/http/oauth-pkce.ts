@@ -19,9 +19,10 @@ import type { AuthContext } from "../auth.js";
 import type { AuthenticateFn } from "./auth.js";
 import { ERROR_PAGE_STYLE, FONTS, LOGO_URL } from "./pages.js";
 
-// Indirect-string require keeps node:crypto out of the static bundle for
-// workerd. OAuth PKCE is opt-in (configureOAuthPkce); callers on workerd
-// should not enable it.
+// An indirect string keeps node:crypto out of the static bundle for workerd.
+// It is reached through `process.getBuiltinModule` (Node.js ESM >= 20.16, and
+// Cloudflare Workers with the `nodejs_compat` flag), else `require` (Bun, Node
+// CJS). OAuth PKCE is opt-in (configureOAuthPkce).
 const _NODE_CRYPTO_MOD = "node:crypto";
 function _crypto(): {
   createHash: any;
@@ -29,9 +30,16 @@ function _crypto(): {
   randomBytes: (n: number) => any;
   timingSafeEqual: (a: any, b: any) => boolean;
 } {
+  const getBuiltin = (globalThis as any).process?.getBuiltinModule;
+  if (typeof getBuiltin === "function") {
+    const crypto = getBuiltin.call((globalThis as any).process, _NODE_CRYPTO_MOD);
+    if (crypto?.createHmac) return crypto;
+  }
   const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
-    throw new Error("OAuth PKCE requires Node.js or Bun (node:crypto).");
+    throw new Error(
+      "OAuth PKCE needs node:crypto: Node.js, Bun, or Cloudflare Workers with the nodejs_compat flag.",
+    );
   }
   return req(_NODE_CRYPTO_MOD);
 }

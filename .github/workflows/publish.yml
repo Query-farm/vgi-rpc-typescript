@@ -53,6 +53,10 @@ jobs:
           # unbundled tree cannot serve this: `#vgi-rpc-arrow` resolves to a
           # .ts source outside bun, so only the bundled build works here.
           test -f dist/client/connect.js
+          # The `./arrow` subpath (the Arrow facade) gets the same bundled build.
+          test -f dist/arrow/index.js
+          test -f dist/arrow/index.d.ts
+          test -f dist/browser/arrow/index.js
 
       - name: Verify dist actually loads
         # Guards against bundler re-export bugs that emit a syntactically valid
@@ -65,6 +69,7 @@ jobs:
           bun -e "try { const m = await import('./dist/browser/index.workerd.js'); if (!Object.keys(m).length) throw new Error('no exports'); console.log('dist/browser/index.workerd.js loaded OK'); } catch (e) { console.error('dist/browser/index.workerd.js failed to load:', e); process.exit(1); }"
           # Under node, not bun: bun would resolve the subpath to src/ and hide
           # a missing or unloadable dist build.
+          node -e "import('./dist/arrow/index.js').then((m) => { if (typeof m.batchFromColumns !== 'function' || m.backend?.name !== 'arrow-js') { console.error('dist/arrow/index.js is missing exports'); process.exit(1); } console.log('dist/arrow/index.js loaded OK under node'); }).catch((e) => { console.error('dist/arrow/index.js failed to load:', e); process.exit(1); })"
           node -e "import('./dist/client/connect.js').then((m) => { if (typeof m.httpConnect !== 'function' || typeof m.RpcError !== 'function') { console.error('dist/client/connect.js is missing exports'); process.exit(1); } console.log('dist/client/connect.js loaded OK under node'); }).catch((e) => { console.error('dist/client/connect.js failed to load:', e); process.exit(1); })"
 
       - name: Publish to npm

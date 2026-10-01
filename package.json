@@ -1,6 +1,6 @@
 {
   "name": "@query-farm/vgi-rpc",
-  "version": "0.25.4",
+  "version": "0.25.5",
   "license": "Apache-2.0",
   "homepage": "https://vgi-rpc-typescript.query.farm",
   "repository": {
@@ -10,7 +10,8 @@
   "type": "module",
   "sideEffects": [
     "./src/index.ts",
-    "./src/index.workerd.ts"
+    "./src/index.workerd.ts",
+    "./src/arrow/index.ts"
   ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -28,6 +29,14 @@
       "browser": "./dist/browser/client/connect.js",
       "bun": "./src/client/connect.ts",
       "import": "./dist/client/connect.js"
+    },
+    "./arrow": {
+      "workerd": "./src/arrow/index.ts",
+      "worker": "./src/arrow/index.ts",
+      "bun": "./src/arrow/index.ts",
+      "types": "./dist/arrow/index.d.ts",
+      "browser": "./dist/browser/arrow/index.js",
+      "import": "./dist/arrow/index.js"
     },
     "./otel": {
       "bun": "./src/otel.ts",
@@ -58,6 +67,7 @@
       "default": "./src/client/default-response-budget.ts"
     },
     "#vgi-rpc-arrow": {
+      "types": "./dist/arrow/impl-arrowjs/index.d.ts",
       "flechette": "./src/arrow/impl-flechette/index.ts",
       "workerd": "./src/arrow/impl-flechette/index.ts",
       "worker": "./src/arrow/impl-flechette/index.ts",
@@ -118,7 +128,7 @@
     "build": "bun run build:types && bun run build:js",
     "build:types": "bunx tsc -p tsconfig.build.json",
     "build:js": "bun run build:js:node && bun run build:js:browser",
-    "build:js:node": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/client/connect.ts --outdir dist/client --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
+    "build:js:node": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/client/connect.ts --outdir dist/client --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/arrow/index.ts --outdir dist/arrow --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
     "build:js:browser": "bunx tsc -p tsconfig.browser.json",
     "test": "bun test",
     "lint": "biome check .",
