@@ -130,6 +130,29 @@ const EMPTY_COOKIES: ReadonlyMap<string, string> = new Map();
  * can never become an unbounded buffering exception. */
 const MAX_UPLOAD_URL_REQUEST_BYTES = 8 * 1024;
 
+/** How much of an oversized body is read and discarded before the 413. */
+const MAX_DRAIN_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Read and discard the rest of a rejected body (up to {@link MAX_DRAIN_BYTES}).
+ * A 413 sent while the client is still uploading is often never seen: HTTP/1.1
+ * clients such as libcurl keep writing the body, the server stops reading, and
+ * the client waits out its timeout instead of reporting the 413.
+ */
+async function drainBody(reader: ReadableStreamDefaultReader<Uint8Array>, alreadyRead: number): Promise<void> {
+  let drained = alreadyRead;
+  try {
+    while (drained <= MAX_DRAIN_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      drained += value.byteLength;
+    }
+    await reader.cancel("request body limit exceeded");
+  } catch {
+    // The client went away; nothing left to drain.
+  }
+}
+
 async function readBodyBounded(request: Request, maxBytes?: number): Promise<Uint8Array> {
   if (maxBytes == null) return new Uint8Array(await request.arrayBuffer());
 
@@ -137,6 +160,14 @@ async function readBodyBounded(request: Request, maxBytes?: number): Promise<Uin
   if (declared != null) {
     const parsed = Number(declared);
     if (Number.isFinite(parsed) && parsed > maxBytes) {
+      if (request.body) {
+        const reader = request.body.getReader();
+        try {
+          await drainBody(reader, 0);
+        } finally {
+          reader.releaseLock();
+        }
+      }
       throw new HttpRpcError("Request body too large", 413);
     }
   }
@@ -151,7 +182,7 @@ async function readBodyBounded(request: Request, maxBytes?: number): Promise<Uin
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
-        await reader.cancel("request body limit exceeded");
+        await drainBody(reader, total);
         throw new HttpRpcError("Request body too large", 413);
       }
       chunks.push(value);

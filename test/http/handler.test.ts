@@ -659,6 +659,32 @@ describe("HTTP Handler", () => {
     expect(res.status).toBe(413);
   });
 
+  test("an oversized body is read to the end before the 413 is sent", async () => {
+    // A 413 sent mid-upload is often never seen: the client keeps writing and
+    // times out. Draining lets it finish and read the response.
+    const limited = createHttpHandler(makeTestProtocol(), { prefix: "/vgi", maxRequestBytes: 64 });
+    for (const declare of [true, false]) {
+      let pulled = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (pulled === 5) return controller.close();
+          pulled++;
+          controller.enqueue(new Uint8Array(100));
+        },
+      });
+      const res = await limited(
+        new Request(`${BASE}/vgi/TestHTTP/add`, {
+          method: "POST",
+          headers: { "Content-Type": ARROW_CONTENT_TYPE, ...(declare ? { "Content-Length": "500" } : {}) },
+          body: stream,
+          duplex: "half",
+        } as RequestInit),
+      );
+      expect(res.status).toBe(413);
+      expect(pulled).toBe(5);
+    }
+  });
+
   test("every advertised capability header is exposed", async () => {
     // Mirrors the cross-language TestCors assertion: a capability header the
     // server advertises but does not expose is invisible to a browser and to
