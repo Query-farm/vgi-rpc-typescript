@@ -7,8 +7,10 @@ import { type HttpRpcClient, httpConnect } from "./connect.js";
 import { IrohTransportError, parseIrohEndpoint } from "./iroh.js";
 import type { HttpConnectOptions } from "./types.js";
 
-/** Native endpoint options accepted by the official iroh-http Node adapter. */
-export type IrohHttpNodeOptions = import("@momics/iroh-http-node").NodeOptions;
+// Declared structurally: importing `@momics/iroh-http-node`'s type would make
+// every consumer's type check depend on that optional peer being installed.
+/** Native endpoint options for the official iroh-http Node adapter (its `NodeOptions`), passed through unchanged. */
+export type IrohHttpNodeOptions = object;
 
 /** Per-request controls understood by an iroh-http/2 Fetch implementation. */
 export interface IrohHttpFetchInit extends RequestInit {
