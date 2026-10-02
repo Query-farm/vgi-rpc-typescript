@@ -52,7 +52,7 @@ jobs:
       # stream-client test does the same for the client's exchange, continuation,
       # cancel and raw paths.
       - name: Run batch-metadata guard (flechette backend)
-        run: bun --conditions=flechette test test/batch-metadata.test.ts test/http/exchange-input-metadata.test.ts test/flechette-declared-schema.test.ts test/flechette-stream-client.test.ts
+        run: bun --conditions=flechette test test/batch-metadata.test.ts test/http/exchange-input-metadata.test.ts test/flechette-declared-schema.test.ts test/flechette-stream-client.test.ts test/http/response-cap.test.ts test/client-externalize.test.ts
 
       - name: Run client tests (bun transports only)
         run: timeout 180 bun test test/client.test.ts test/client-native-conformance.test.ts test/iroh-client.test.ts

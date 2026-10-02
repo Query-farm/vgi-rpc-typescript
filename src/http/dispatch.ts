@@ -328,21 +328,6 @@ function parseHttpRequest(schema: VgiSchema, batch: VgiBatch): ReturnType<typeof
   }
 }
 
-/** Predict the external upload size if maybeExternalizeBatch ran on this batch
- *  right now. Returns 0 when externalisation would not fire. Mirrors the
- *  threshold logic so a pre-flight check matches the real upload size. */
-function predictExternalizeBytes(batch: VgiBatch, config: ExternalLocationConfig | undefined): number {
-  if (!config?.storage) return 0;
-  if (batch.numRows === 0) return 0;
-  // arrow-js exposes `.data.byteLength` for an O(1) batch-bytes estimate;
-  // flechette doesn't surface this, but maybeExternalizeBatch will measure
-  // exact size on the actual upload path. Best-effort prediction here.
-  const size = (batch as any).data?.byteLength ?? 0;
-  const threshold = config.externalizeThresholdBytes ?? 1_048_576;
-  if (size < threshold) return 0;
-  return size;
-}
-
 function runtimeCapError(message: string): Error {
   const error = new Error(message);
   error.name = "RuntimeError";
@@ -362,7 +347,10 @@ async function externalizeForResponseBudget(
 ): Promise<VgiBatch> {
   if (!ctx.externalLocation?.storage || batch.numRows === 0) return batch;
   const exactBytes = serializeIpcStream(batch.schema, [batch]).byteLength;
-  const normalExternalization = predictExternalizeBytes(batch, ctx.externalLocation) > 0;
+  // The serialized size, the same measure maybeExternalizeBatch applies. (An
+  // estimate from arrow-js's `.data.byteLength` was 0 under flechette, so
+  // Workers externalized only responses over the response limit itself.)
+  const normalExternalization = exactBytes >= (ctx.externalLocation.externalizeThresholdBytes ?? 1_048_576);
   const target = ctx.preferredResponseBytes ?? ctx.maxResponseBytes;
   const force = target != null && exactBytes > target;
   if (!normalExternalization && !force) return batch;
