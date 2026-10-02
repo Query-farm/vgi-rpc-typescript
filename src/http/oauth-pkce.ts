@@ -37,9 +37,7 @@ function _crypto(): {
   }
   const req: any = (import.meta as any).require ?? (globalThis as any).require ?? null;
   if (!req) {
-    throw new Error(
-      "OAuth PKCE needs node:crypto: Node.js, Bun, or Cloudflare Workers with the nodejs_compat flag.",
-    );
+    throw new Error("OAuth PKCE needs node:crypto: Node.js, Bun, or Cloudflare Workers with the nodejs_compat flag.");
   }
   return req(_NODE_CRYPTO_MOD);
 }

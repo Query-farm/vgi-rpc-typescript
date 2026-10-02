@@ -156,7 +156,10 @@ function probeOnce(net: typeof import("node:net"), sockPath: string, timeoutMs: 
       clearTimeout(timer);
       sock.destroy();
       const code = err?.code ?? "";
-      resolve(ACCEPT_QUEUE_FULL.has(code) ? "alive" : code === "ECONNREFUSED" ? "refused" : "dead");
+      // Bun (1.3 on macOS) reports a refused AF_UNIX connect as ENOENT. The
+      // path existing proves it is a refusal, not a missing socket file.
+      const refused = code === "ECONNREFUSED" || (code === "ENOENT" && existsSync(sockPath));
+      resolve(ACCEPT_QUEUE_FULL.has(code) ? "alive" : refused ? "refused" : "dead");
     });
   });
 }
@@ -181,7 +184,9 @@ function probeOnce(net: typeof import("node:net"), sockPath: string, timeoutMs: 
  *
  * Which runtimes can tell a full queue from a refusal is measured, not
  * assumed: on Linux, Node reports it as `EAGAIN`, but Bun (1.4.2) reports it as
- * `ECONNREFUSED`, exactly like macOS does for every runtime. Under Bun, then, a
+ * `ECONNREFUSED`, exactly like macOS does for every runtime -- except Bun 1.3
+ * on macOS, which says `ENOENT` for a socket file that exists; that counts as
+ * a refusal too. Under Bun, then, a
  * busy worker is recognised only if it frees a slot within the re-probe window
  * -- the same guarantee the reference gives on macOS.
  *
