@@ -8,9 +8,21 @@
  * optionally compressed with zstd, and uploaded to pluggable storage.
  * The batch is replaced with a zero-row "pointer batch" containing the
  * download URL and SHA-256 checksum in metadata.
+ *
+ * A result that changes rarely can instead be published once with
+ * `publishExternal` and answered with the returned `ExternalRef` on every
+ * later call: the dispatcher writes the pointer directly, with no
+ * serialization or upload.
  */
 
-import { deserializeBatches, serializeBatch, type VgiBatch, type VgiSchema, withBatchMetadata } from "./arrow/index.js";
+import {
+  deserializeBatches,
+  serializeBatch,
+  singleRowBatch,
+  type VgiBatch,
+  type VgiSchema,
+  withBatchMetadata,
+} from "./arrow/index.js";
 import type { LogMessage } from "./client/types.js";
 import {
   LOCATION_FETCH_MS_KEY,
@@ -21,7 +33,7 @@ import {
 } from "./constants.js";
 import { dispatchLogOrError } from "./log-batch.js";
 import { zstdCompress, zstdDecompress } from "./util/zstd.js";
-import { buildEmptyBatch } from "./wire/response.js";
+import { buildEmptyBatch, coerceInt64 } from "./wire/response.js";
 
 // ---------------------------------------------------------------------------
 // Interfaces and configuration
@@ -260,25 +272,196 @@ export async function maybeExternalizeBatch(
   const threshold = config.externalizeThresholdBytes ?? DEFAULT_THRESHOLD;
   if (!force && batchByteSize(batch) < threshold) return batch;
 
-  // Serialize to IPC
-  let ipcData = serializeBatchToIpc(batch);
+  const { url, sha256 } = await uploadIpcBytes(
+    serializeBatchToIpc(batch),
+    config.storage,
+    config.compression,
+    onUpload,
+  );
+  return makeExternalLocationBatch(batch.schema, url, sha256);
+}
 
-  // Compute SHA-256 of raw IPC bytes (pre-compression)
-  const checksum = await sha256Hex(ipcData);
+// ---------------------------------------------------------------------------
+// Shared hash / compress / upload
+// ---------------------------------------------------------------------------
 
-  // Optionally compress
+/**
+ * Hash, optionally compress, and upload one serialized IPC stream.
+ *
+ * The single choke point shared by every server-side externalization path
+ * (per-call {@link maybeExternalizeBatch} and {@link publishExternal}), so the
+ * bytes a pointer names are always produced the same way: SHA-256 over the
+ * raw (pre-compression) IPC bytes, zstd at the configured level (default 3)
+ * with `contentEncoding` `"zstd"`, otherwise `""`.
+ */
+async function uploadIpcBytes(
+  ipcData: Uint8Array,
+  storage: ExternalStorage,
+  compression: ExternalLocationConfig["compression"] | undefined,
+  onUpload?: (bytes: number) => void,
+): Promise<{ url: string; sha256: string }> {
+  // SHA-256 of the raw IPC bytes (pre-compression) for end-to-end verification.
+  const sha256 = await sha256Hex(ipcData);
+
+  let body = ipcData;
   let contentEncoding = "";
-  if (config.compression?.algorithm === "zstd") {
-    ipcData = (await zstdCompress(ipcData, config.compression.level ?? 3)) as Uint8Array;
+  if (compression?.algorithm === "zstd") {
+    body = (await zstdCompress(ipcData, compression.level ?? 3)) as Uint8Array;
     contentEncoding = "zstd";
   }
 
-  // Upload
-  onUpload?.(ipcData.byteLength);
-  const url = await config.storage.upload(ipcData, contentEncoding);
+  onUpload?.(body.byteLength);
+  const url = await storage.upload(body, contentEncoding);
+  return { url, sha256 };
+}
 
-  // Return pointer batch
-  return makeExternalLocationBatch(batch.schema, url, checksum);
+// ---------------------------------------------------------------------------
+// Pre-published references
+// ---------------------------------------------------------------------------
+
+/** Brand that identifies an {@link ExternalRef} even across duplicated module
+ *  copies (a bundled `dist/` beside `src/`), where `instanceof` would not. */
+const EXTERNAL_REF_BRAND: unique symbol = Symbol.for("vgi_rpc.ExternalRef");
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * A reference to an already-published unary result.
+ *
+ * A unary handler may return an `ExternalRef` in place of its result values.
+ * The server then answers with the external-location pointer batch for `url`
+ * directly: the result is not built or validated, nothing is serialized,
+ * compressed or uploaded during the call, and the ref is used whether or not
+ * the server has external storage configured and regardless of
+ * `externalizeThresholdBytes` (a ref is never inlined). It does not count
+ * toward `maxExternalizedResponseBytes`. Clients resolve it like any other
+ * pointer, so they need no change. Unary methods only.
+ *
+ * Build one with {@link publishExternal} (or by hand for an object published
+ * out of band). The object at `url` must be an Arrow IPC stream (optionally
+ * `Content-Encoding: zstd`) whose schema is the method's result schema and
+ * which holds exactly one 1-row data batch.
+ *
+ * The caller owns caching the ref and the object's lifecycle: a long-lived ref
+ * must not point at an object under the short-TTL lifecycle rule used for
+ * per-call uploads, and a pre-signed URL expires -- re-sign or rebuild the ref
+ * before then. Only return a ref to callers who are all entitled to the same
+ * content.
+ *
+ * @example
+ * ```ts
+ * let cached: ExternalRef | undefined;
+ * protocol.unary("catalog", {
+ *   params: {},
+ *   result: { result: str },
+ *   handler: async () => {
+ *     cached ??= await publishExternalResult(catalogSchema, { result: buildCatalog() }, storage);
+ *     return cached;
+ *   },
+ * });
+ * ```
+ */
+export class ExternalRef {
+  /** Where the published IPC stream lives. */
+  readonly url: string;
+  /**
+   * Lowercase hex SHA-256 of the raw (pre-compression) IPC stream bytes, sent
+   * as `vgi_rpc.location.sha256`. `undefined` omits the key, so clients skip
+   * the content check -- use this for an object rewritten in place or one too
+   * large to hash.
+   */
+  readonly sha256: string | undefined;
+  /** @internal */
+  readonly [EXTERNAL_REF_BRAND] = true;
+
+  /**
+   * @param url - Where the published IPC stream lives; must be non-empty.
+   * @param sha256 - Optional lowercase hex SHA-256 (64 characters) of the raw
+   *   IPC stream bytes. `null`/`undefined` means no digest.
+   * @throws Error if `url` is empty or `sha256` is not 64 lowercase hex characters.
+   */
+  constructor(url: string, sha256?: string | null) {
+    if (typeof url !== "string" || url.length === 0) {
+      throw new Error("ExternalRef.url must be non-empty");
+    }
+    if (sha256 != null && (typeof sha256 !== "string" || !SHA256_HEX.test(sha256))) {
+      throw new Error("ExternalRef.sha256 must be 64 lowercase hex characters (or omitted)");
+    }
+    this.url = url;
+    this.sha256 = sha256 ?? undefined;
+    Object.freeze(this);
+  }
+
+  /** Build the zero-row pointer batch announcing this ref against `schema`
+   *  (the method's result schema). */
+  pointerBatch(schema: VgiSchema): VgiBatch {
+    return makeExternalLocationBatch(schema, this.url, this.sha256);
+  }
+}
+
+/** True when `value` is an {@link ExternalRef} (brand check, robust to
+ *  duplicated module copies). */
+export function isExternalRef(value: unknown): value is ExternalRef {
+  return typeof value === "object" && value !== null && (value as any)[EXTERNAL_REF_BRAND] === true;
+}
+
+/** Options for {@link publishExternal}. */
+export interface PublishExternalOptions {
+  /** Optional compression applied before upload -- pass the server's
+   *  `ExternalLocationConfig.compression` to match it. */
+  compression?: ExternalLocationConfig["compression"];
+  /** When `false` the ref carries no digest, so clients skip the content
+   *  check. Default: `true`. */
+  includeSha256?: boolean;
+}
+
+/**
+ * Publish a unary result batch once and return a reusable {@link ExternalRef}.
+ *
+ * Serializes `batch` exactly as the per-call externalizer does (an IPC stream
+ * of its schema plus this one batch), hashes the raw bytes, compresses when
+ * `options.compression` is given, and calls `storage.upload` once. Cache the
+ * returned ref and return it from the unary handler on later calls; the
+ * server writes the pointer directly.
+ *
+ * @param batch - The 1-row result batch, built against the method's result
+ *   schema (see {@link publishExternalResult} to build it from values).
+ * @param storage - Storage backend to upload to.
+ * @param options - Compression and digest options.
+ * @throws Error if `batch` does not have exactly one row.
+ */
+export async function publishExternal(
+  batch: VgiBatch,
+  storage: ExternalStorage,
+  options: PublishExternalOptions = {},
+): Promise<ExternalRef> {
+  if (batch.numRows !== 1) {
+    throw new Error(`publishExternal expects a 1-row result batch, got ${batch.numRows} rows`);
+  }
+  const { url, sha256 } = await uploadIpcBytes(serializeBatchToIpc(batch), storage, options.compression);
+  return new ExternalRef(url, options.includeSha256 === false ? undefined : sha256);
+}
+
+/**
+ * Convenience over {@link publishExternal}: build the 1-row result batch for
+ * `schema` (a method's `resultSchema`, e.g.
+ * `protocol.getMethod("catalog")!.resultSchema`) from `values` -- the
+ * same `{ result: value }` record a handler would return -- and publish it.
+ *
+ * @throws TypeError if a non-nullable result field is missing from `values`.
+ */
+export async function publishExternalResult(
+  schema: VgiSchema,
+  values: Record<string, any>,
+  storage: ExternalStorage,
+  options: PublishExternalOptions = {},
+): Promise<ExternalRef> {
+  for (const f of schema.fields) {
+    if (values[f.name] === undefined && !f.nullable) {
+      throw new TypeError(`Result missing required field '${f.name}'. Got keys: [${Object.keys(values).join(", ")}]`);
+    }
+  }
+  return publishExternal(singleRowBatch(schema, coerceInt64(schema, values)), storage, options);
 }
 
 // ---------------------------------------------------------------------------

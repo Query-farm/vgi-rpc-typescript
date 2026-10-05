@@ -1,8 +1,9 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import type { VgiBatch } from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
-import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
+import { type ExternalLocationConfig, isExternalRef, maybeExternalizeBatch } from "../external.js";
 import type { PeerEvidenceSet } from "../identity.js";
 import type { MethodDefinition, TransportKind } from "../types.js";
 import { OutputCollector } from "../types.js";
@@ -52,9 +53,17 @@ export async function dispatchUnary(
     // sufficient evidence for this property in any port. Do not delete those
     // cases on the grounds that conformance covers them.
     const result = await method.handler!(params, out);
-    let resultBatch = buildResultBatch(schema, result, serverId, requestId);
-    if (externalConfig) {
-      resultBatch = await maybeExternalizeBatch(resultBatch, externalConfig);
+    let resultBatch: VgiBatch;
+    if (isExternalRef(result)) {
+      // A pre-published reference (route `external_ref`): write its pointer
+      // as-is. Nothing to build, validate, serialize or upload, and never
+      // inlined, whatever the storage config or threshold says.
+      resultBatch = result.pointerBatch(schema);
+    } else {
+      resultBatch = buildResultBatch(schema, result, serverId, requestId);
+      if (externalConfig) {
+        resultBatch = await maybeExternalizeBatch(resultBatch, externalConfig);
+      }
     }
     // Collect log batches (from clientLog) + result batch
     const batches = [...out.batches.map((b) => b.batch), resultBatch];

@@ -36,17 +36,23 @@ def main() -> None:
     storage_url = sys.argv[1]
     threshold = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 
+    external_location = ExternalLocationConfig(
+        storage=FakeStorageBackend(storage_url),
+        externalize_threshold_bytes=threshold,
+        # The fake store vends http://127.0.0.1 URLs, which the default
+        # HTTPS-only validator would (correctly) refuse.
+        url_validator=None,
+    )
     server = RpcServer(
         ConformanceService,
-        ConformanceServiceImpl(),
-        enable_describe=True,
-        external_location=ExternalLocationConfig(
-            storage=FakeStorageBackend(storage_url),
-            externalize_threshold_bytes=threshold,
-            # The fake store vends http://127.0.0.1 URLs, which the default
-            # HTTPS-only validator would (correctly) refuse.
-            url_validator=None,
+        # published_string publishes through the worker's own storage, so the
+        # pre-published-ref test (test_published_ref_round_trips) has one.
+        ConformanceServiceImpl(
+            external_storage=external_location.storage,
+            external_compression=external_location.compression,
         ),
+        enable_describe=True,
+        external_location=external_location,
     )
     serve_stdio(server)
 

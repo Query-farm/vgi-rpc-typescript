@@ -14,6 +14,7 @@ import { CALL_STATE_KEY, CANCEL_KEY, STATE_KEY } from "../constants.js";
 import {
   type ExternalLocationConfig,
   isExternalLocationBatch,
+  isExternalRef,
   maybeExternalizeBatch,
   resolveExternalLocation,
 } from "../external.js";
@@ -422,8 +423,18 @@ export async function httpDispatchUnary(
 
   try {
     const result = await method.handler!(parsed.params, out);
-    let resultBatch = buildResultBatch(schema, result, ctx.serverId, parsed.requestId);
-    resultBatch = await externalizeForResponseBudget(resultBatch, ctx, method.name);
+    // A pre-published ExternalRef (route `external_ref`) is written as its
+    // pointer directly: no result batch to build or validate and nothing to
+    // upload, so the external-channel pre-flight and the externalized-bytes
+    // tally do not apply. The wire-body cap below still sees the (tiny)
+    // pointer like any other response.
+    const resultBatch = isExternalRef(result)
+      ? result.pointerBatch(schema)
+      : await externalizeForResponseBudget(
+          buildResultBatch(schema, result, ctx.serverId, parsed.requestId),
+          ctx,
+          method.name,
+        );
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
     const body = serializeIpcStream(schema, batches);
     // Hard wire-cap enforcement — overshoot replaces the response with a

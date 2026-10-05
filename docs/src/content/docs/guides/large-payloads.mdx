@@ -129,6 +129,45 @@ import {
 - **`makeExternalLocationBatch(schema, url, sha256?)`** — builds a zero-row pointer batch with the given schema, setting `vgi_rpc.location` (and `vgi_rpc.location.sha256` when provided).
 - **`isExternalLocationBatch(batch)`** — returns `true` for a zero-row batch carrying `vgi_rpc.location` (and *not* a log/error batch).
 
+### Pre-published results (`ExternalRef`)
+
+Per-call offloading serializes, compresses, and uploads a **new** object on every call. A result that is large and changes rarely — a whole catalog, identical for every caller until redeploy — can instead be **published once** and answered with the same pointer on every later call.
+
+A unary handler may return an `ExternalRef` in place of its result values. The dispatcher then writes the pointer batch for that ref directly:
+
+- the result is not built or validated, nothing is serialized, compressed or uploaded during the call;
+- it is used whether or not the server has `externalLocation` configured, and regardless of `externalizeThresholdBytes` — a ref is never inlined, however small;
+- it does not count toward `maxExternalizedResponseBytes` (nothing is uploaded), but the tiny pointer still goes through the `maxResponseBytes` wire budget;
+- the same on every transport (stdio, unix, tcp, HTTP). Unary methods only.
+
+`publishExternal(batch, storage, { compression?, includeSha256? })` serializes a 1-row result batch exactly as the per-call externalizer does, hashes the raw IPC bytes, compresses when asked (pass your `ExternalLocationConfig.compression` to match it), uploads once, and returns the `ExternalRef`. `publishExternalResult(schema, values, storage, options?)` builds that batch from the same `{ result: value }` record a handler would return.
+
+```typescript
+import { ExternalRef, Protocol, publishExternalResult, str } from "@query-farm/vgi-rpc";
+
+const protocol = new Protocol("Catalog");
+let catalogRef: Promise<ExternalRef> | undefined;
+
+protocol.unary("catalog", {
+  params: {},
+  result: { result: str },
+  handler: () => {
+    // Cache the promise, so concurrent first calls still upload once.
+    catalogRef ??= publishExternalResult(
+      protocol.getMethod("catalog")!.resultSchema,
+      { result: buildCatalog() },
+      storage,
+      { compression: { algorithm: "zstd", level: 3 } },
+    );
+    return catalogRef;
+  },
+});
+```
+
+You can also construct `new ExternalRef(url, sha256?)` by hand for an object published out of band. The object must be an Arrow IPC stream (optionally `Content-Encoding: zstd`) whose schema is the method's result schema and which holds exactly one 1-row batch. `sha256`, when given, must be 64 lowercase hex characters over the raw (pre-compression) bytes; omit it (or pass `includeSha256: false` to `publishExternal`) and the pointer carries no `vgi_rpc.location.sha256`, so clients skip the content check — useful for an object rewritten in place or too large to hash. An empty `url` or malformed digest throws.
+
+Clients need no change: a pointer is a pointer. The caller owns caching the ref and the object's lifecycle — a long-lived ref must not point at an object under the short-TTL lifecycle rule used for per-call uploads, and a pre-signed URL expires, so re-sign or rebuild the ref before then. Only return a ref to callers who are all entitled to the same content.
+
 ## Request externalization (upload URLs)
 
 The size caps and external storage above protect the response side. For large **requests**, the client can upload its payload to a pre-signed URL and send the server a pointer instead of the inline body.

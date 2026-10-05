@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance worker — 89-method reference RPC service exercising all framework
+ * Conformance worker — 90-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * Flags:
@@ -46,7 +46,7 @@
 import { openSync } from "node:fs";
 import type { ExternalLocationConfig } from "../src/external.js";
 import { AccessLogHook, FdSink, serveTcp, serveUnix, VgiRpcServer } from "../src/index.js";
-import { protocol } from "./conformance-protocol.js";
+import { protocol, setConformanceExternalStorage } from "./conformance-protocol.js";
 import { FakeStorage } from "./fake-storage.js";
 
 const args = process.argv.slice(2);
@@ -91,6 +91,8 @@ if (fakeStorageUrl) {
     // HTTPS-only and would (correctly) refuse them.
     urlValidator: null,
   };
+  // published_string publishes through the worker's own storage.
+  setConformanceExternalStorage(externalLocation.storage, externalLocation.compression);
 }
 
 let dispatchHook: AccessLogHook | undefined;

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance protocol — 89-method reference RPC service exercising all framework
+ * Conformance protocol — 90-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * This module exports the Protocol instance so it can be reused by both the
@@ -39,6 +39,12 @@ import {
   utf8,
   type VgiBatch,
 } from "../src/arrow/index.js";
+import {
+  type ExternalLocationConfig,
+  type ExternalRef,
+  type ExternalStorage,
+  publishExternalResult,
+} from "../src/external.js";
 import { Protocol } from "../src/index.js";
 import {
   bool,
@@ -203,6 +209,31 @@ function _serializeBatch(schema: Schema, batch: RecordBatch): Uint8Array {
 // ConformanceService.protocol_version.
 export const protocol = new Protocol("ConformanceService", { protocolVersion: "2.0.0" });
 
+// ---------------------------------------------------------------------------
+// Worker external storage, for `published_string`
+// ---------------------------------------------------------------------------
+
+// The protocol is a module singleton shared by every worker entry point, so
+// the worker's storage reaches `published_string` through this setter rather
+// than a constructor argument (the Python reference passes it to
+// `ConformanceServiceImpl`). Every launcher that configures `--fake-storage`
+// must call it, with its compression, or the method refuses.
+let publishedStorage: ExternalStorage | undefined;
+let publishedCompression: ExternalLocationConfig["compression"] | undefined;
+// Per-process publish-once cache keyed by (value, include_sha256). It holds
+// the in-flight promise, so two concurrent first calls still upload once.
+const publishedRefs = new Map<string, Promise<ExternalRef>>();
+
+/** Hand the worker's external storage (and compression) to `published_string`. */
+export function setConformanceExternalStorage(
+  storage: ExternalStorage | undefined,
+  compression?: ExternalLocationConfig["compression"],
+): void {
+  publishedStorage = storage;
+  publishedCompression = compression;
+  publishedRefs.clear();
+}
+
 // ===== Scalar Echo (5) =====
 
 protocol.unary("echo_string", {
@@ -233,6 +264,33 @@ protocol.unary("oversized_unary", {
     return { result: new Uint8Array(n) };
   },
   paramTypes: { target_bytes: "int" },
+});
+
+// Pre-published ExternalRef: publish `{result: [value]}` once per
+// (value, include_sha256) through the worker's storage + compression and
+// answer every call with the cached ref, so the response is always a pointer.
+protocol.unary("published_string", {
+  params: { value: str, include_sha256: bool },
+  result: { result: str },
+  handler: (p) => {
+    const storage = publishedStorage;
+    if (!storage) throw new RuntimeError("published_string requires external storage");
+    const includeSha256 = Boolean(p.include_sha256);
+    const key = JSON.stringify([p.value, includeSha256]);
+    let ref = publishedRefs.get(key);
+    if (ref === undefined) {
+      const resultSchema = protocol.getMethod("published_string")!.resultSchema;
+      ref = publishExternalResult(resultSchema, { result: p.value }, storage, {
+        compression: publishedCompression,
+        includeSha256,
+      });
+      publishedRefs.set(key, ref);
+      // A failed publish must not poison the cache.
+      ref.catch(() => publishedRefs.delete(key));
+    }
+    return ref;
+  },
+  doc: "Return value through a pre-published ExternalRef (publish once, reuse).",
 });
 
 protocol.unary("echo_int", {

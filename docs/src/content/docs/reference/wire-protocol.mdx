@@ -95,6 +95,13 @@ carries:
 - `vgi_rpc.location.sha256` — the SHA-256 digest of the referenced payload for
   integrity verification
 
+A unary handler that returns a pre-published `ExternalRef` produces exactly
+this pointer (its URL, plus `vgi_rpc.location.sha256` only when the ref has a
+digest) without serializing or uploading anything during the call; the wire
+format is unchanged, so clients resolve it like any other pointer. The digest
+is optional on the wire: when the key is absent the client skips the content
+check.
+
 ## Protocol version enforcement
 
 Requests may carry `vgi_rpc.protocol_version`, the application protocol surface

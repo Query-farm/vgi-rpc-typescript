@@ -201,6 +201,8 @@ protocol.unary("add", {
 
 The handler receives parsed parameters and returns a record matching the result schema. The optional `defaults` field provides default values for omitted parameters.
 
+A unary handler may instead return an `ExternalRef` to a **pre-published** result: publish a large, rarely-changing value once with `publishExternal` / `publishExternalResult`, cache the ref, and return it on every call. The server writes the external-location pointer directly — no serialization or upload per call, never inlined, with or without `externalLocation` configured — and clients resolve it like any other pointer. See [Large Payloads](https://vgi-rpc-typescript.query.farm/guides/large-payloads/#pre-published-results-externalref).
+
 ### Producer (Server Streaming)
 
 The server produces multiple output batches. The generic `<S>` parameter infers state types from the `init` return value:

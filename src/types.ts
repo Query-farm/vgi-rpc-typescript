@@ -4,6 +4,7 @@
 import { batchFromColumns, isBatch, type VgiBatch, type VgiSchema } from "./arrow/index.js";
 import { AuthContext } from "./auth.js";
 import { RpcError } from "./errors.js";
+import type { ExternalRef } from "./external.js";
 import { PeerEvidenceSet } from "./identity.js";
 import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
@@ -210,11 +211,18 @@ function runtimeError(message: string): Error {
   return new RuntimeError(message);
 }
 
-/** Handler for unary (request-response) RPC methods. */
+/**
+ * Handler for unary (request-response) RPC methods.
+ *
+ * Returns the result values (`{ result: value }`), or an {@link ExternalRef}
+ * to a pre-published result: the dispatcher then writes that ref's pointer
+ * batch directly, with no result build, validation, serialization or upload
+ * (see `publishExternal`).
+ */
 export type UnaryHandler = (
   params: Record<string, any>,
   ctx: LogContext,
-) => Promise<Record<string, any>> | Record<string, any>;
+) => Promise<Record<string, any> | ExternalRef> | Record<string, any> | ExternalRef;
 
 /** Initialization function for producer streams. Returns the initial state object. */
 export type ProducerInit<S = any> = (params: Record<string, any>) => Promise<S> | S;

@@ -28,7 +28,7 @@ import type { ExternalLocationConfig } from "../src/external.js";
 import type { AuthenticateFn } from "../src/http/auth.js";
 import { createHttpHandler } from "../src/http/index.js";
 import type { DispatchHook, HookToken, ServeStartHook } from "../src/types.js";
-import { protocol } from "./conformance-protocol.js";
+import { protocol, setConformanceExternalStorage } from "./conformance-protocol.js";
 import { FakeStorage } from "./fake-storage.js";
 
 /** Decode a hex string into bytes — used only for the `--token-key` fixture flag. */
@@ -185,6 +185,8 @@ if (fakeStorageUrl) {
     ...(maxDecompressedFetchBytesArg !== undefined ? { maxDecompressedBytes: maxDecompressedFetchBytesArg } : {}),
     ...(compression ? { compression } : {}),
   };
+  // published_string publishes through the worker's own storage + compression.
+  setConformanceExternalStorage(fakeStorage, compression);
 }
 
 let dispatchHook: DispatchHook | undefined;

@@ -52,7 +52,7 @@ examples/
   calculator.ts     — Unary methods example
   greeter.ts        — String params example
   streaming.ts      — Producer and exchange streams
-  conformance.ts    — 89-method conformance suite for wire-protocol testing
+  conformance.ts    — 90-method conformance suite for wire-protocol testing
 test/
   wire.test.ts      — Unit tests for wire serialization
   dispatch-identity.test.ts — Access records name the owning binding, and its digest
@@ -134,6 +134,8 @@ This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
 - **`X-Request-ID`** — `createHttpHandler` echoes an inbound header unchanged and mints a 16-hex-character id otherwise, stamps it on every response, and puts the same value in the access record's `request_id`. Agreement between the two is the point of the field: an id on the response that names nothing in the log looks like a working trail right until someone follows it. The header sat in the CORS expose list long before it was ever sent — the same shape of bug as advertising a capability header that never ships.
 
 The conformance worker (`examples/conformance.ts`) accepts `--access-log <path>` anywhere on the CLI, plus `--access-log-sample R`, `--access-log-async`, and `--access-log-debug`. `examples/conformance-http.ts` takes the same four. `--access-log-debug` raises the hook to DEBUG so records carry `request_data`; at the default INFO the payload is a `payload_omitted` marker and `vgi-rpc-test --require-request-data` fails.
+
+**Pre-published `ExternalRef` results.** A unary handler may return an `ExternalRef` (`src/external.ts`) instead of its values; both unary dispatchers (`src/dispatch/unary.ts` for stdio/unix/tcp, `src/http/dispatch.ts` for HTTP) then write `ref.pointerBatch(schema)` as-is -- no result build, no upload, never inlined, not tallied as externalized bytes. Detection is the `isExternalRef` brand check, not `instanceof`, so a ref built by a second copy of the module still counts. `publishExternal` shares `uploadIpcBytes` with `maybeExternalizeBatch`. The conformance method `published_string` needs the worker's storage: the protocol is a module singleton, so every launcher that takes `--fake-storage` must call `setConformanceExternalStorage(storage, compression)` (`examples/conformance.ts`, `examples/conformance-http.ts`) or the method refuses.
 
 `conformance/check_access_log_streams.py` covers what neither the schema nor `--require-request-data` can reach: that a log contains stream records at all, that `stream_id` distinguishes streams and chains a stream's turns, and that `request_data` rides on `/init` and nothing else. `--require-request-data` inspects only unary records, and any 32 hex characters satisfy the schema's `stream_id` — so both reported PASS over 113 stream records that named no stream.
 

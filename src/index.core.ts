@@ -48,11 +48,16 @@ export {
 } from "./errors.js";
 export {
   type ExternalLocationConfig,
+  ExternalRef,
   type ExternalStorage,
   httpsOnlyValidator,
   isExternalLocationBatch,
+  isExternalRef,
   makeExternalLocationBatch,
   maybeExternalizeBatch,
+  type PublishExternalOptions,
+  publishExternal,
+  publishExternalResult,
   resolveExternalLocation,
 } from "./external.js";
 export {
