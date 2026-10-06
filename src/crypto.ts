@@ -53,6 +53,11 @@ export interface SealOptions {
   aad: Uint8Array;
   /** Envelope version byte. Defaults to 1; carry through to {@link openBytes}. */
   version?: number;
+  /** A fixed 24-byte nonce, **for test vectors only**. Omitted (always, in
+   *  production) a fresh random nonce is drawn; reusing a nonce under one key
+   *  destroys XChaCha20-Poly1305's confidentiality and authenticity. Ignored
+   *  by {@link openBytes}. */
+  nonce?: Uint8Array;
 }
 
 /** Seal `plaintext` under `key` with AEAD, returning the wire envelope. */
@@ -64,7 +69,10 @@ export function sealBytes(plaintext: Uint8Array, key: Uint8Array, opts: SealOpti
   if (version < 1 || version > 255) {
     throw new Error(`AEAD envelope version must fit in one byte; got ${version}`);
   }
-  const nonce = randomBytes(NONCE_LEN);
+  if (opts.nonce !== undefined && opts.nonce.length !== NONCE_LEN) {
+    throw new Error(`nonce must be ${NONCE_LEN} bytes, got ${opts.nonce.length}`);
+  }
+  const nonce = opts.nonce ?? randomBytes(NONCE_LEN);
   const ciphertext = xchacha20poly1305(key, nonce, opts.aad as Uint8Array).encrypt(plaintext);
   const wire = new Uint8Array(VERSION_LEN + NONCE_LEN + ciphertext.length);
   wire[0] = version;

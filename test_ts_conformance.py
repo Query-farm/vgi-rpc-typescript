@@ -598,6 +598,27 @@ def conformance_http_identity_introspect_only_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_grant_port() -> Iterator[int]:
+    """The sealed-grant identity worker (IDENTITY_CONFORMANCE_FIXTURE.md §10).
+
+    The fixture resolver plus the fixture's grant keys and no mint hook, so
+    the framework mints and accepts its own grants; hosts
+    ``conformance.Whoami.v1`` so a test can read back how a bearer was
+    authenticated. Backs ``TestSealedGrants``, ``TestSealedGrantRejections``,
+    ``TestGrantPrefixRouting`` and ``TestResolveTokenBearer``, which skip --
+    loudly, an open deliverable -- without it. The name is load-bearing.
+    """
+    proc, port = _start_variant(
+        "identity_grants",
+        [*BUN_HTTP_IDENTITY_WORKER, "--identity", "grants"],
+        [_PY_SERVE_HTTP, "--http", "--identity", "grants"],
+    )
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
     """Bun conformance HTTP server configured to allow the CORS test origin.
 

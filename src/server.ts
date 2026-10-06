@@ -17,6 +17,7 @@ import { dispatchUnary, type RawDispatchContext } from "./dispatch/unary.js";
 import { MethodNotImplementedError, RpcError, VersionError } from "./errors.js";
 
 import type { ExternalLocationConfig } from "./external.js";
+import { GrantKeys } from "./grants.js";
 import type { PeerEvidenceSet } from "./identity.js";
 import type { Protocol } from "./protocol.js";
 import {
@@ -26,7 +27,7 @@ import {
   REFLECTION_PROTOCOL_NAME,
   RETIRED_DESCRIBE_METHOD,
 } from "./reflection.js";
-import { buildIdentityProtocol, IDENTITY_PROTOCOL_NAME, type IdentityImpl } from "./token-identity.js";
+import { buildIdentityProtocol, IDENTITY_PROTOCOL_NAME, IdentityImpl } from "./token-identity.js";
 import {
   type CallStatistics,
   type DispatchHook,
@@ -90,6 +91,17 @@ export interface VgiRpcServerOptions {
    *  only on servers whose transport authenticates callers (HTTP). */
   identity?: IdentityImpl;
   /**
+   * Sealed-grant configuration (WIRE_PROTOCOL.md §16). `"env"` (the default)
+   * reads `VGI_RPC_GRANT_KEYS` and friends -- unset means grants are off and
+   * nothing changes. With keys, the framework mints sealed grants through
+   * `issue_grant` (unless {@link identity} supplies `mintGrant`), and an HTTP
+   * handler serving this server accepts them back as bearer credentials.
+   * `null` turns grants off regardless of the environment. A malformed key
+   * throws here: a worker refuses to start rather than run with a key it
+   * misread.
+   */
+  grantKeys?: GrantKeys | "env" | null;
+  /**
    * Whether EXCEPTION batches carry the remote traceback (`log_extra.traceback`).
    * Default `true`, on **every** transport: the DuckDB extension puts the
    * remote traceback into the error a user sees, and omitting it on HTTP hid
@@ -127,6 +139,7 @@ export class VgiRpcServer {
   private externalConfig: ExternalLocationConfig | undefined;
   private onServeStart: ServeStartHook | null = null;
   private readonly tracebacks: boolean;
+  private hostedIdentity: IdentityImpl | undefined;
   /** True once the on_serve_start hook has fired successfully. The bind
    *  state is committed only after the hook returns, so a transient
    *  failure on first request leaves it `false` and the next request
@@ -166,7 +179,32 @@ export class VgiRpcServer {
     // introspect is not a useful default now that `__describe__` is gone, and
     // reflection is what the client bootstraps from.
     if (options?.enableDescribe ?? true) this.registerReflection();
-    if (options?.identity) this.registerIdentity(options.identity);
+    // Read at construction, so a malformed key refuses to start the worker
+    // rather than failing the first mint.
+    const grantKeys =
+      options?.grantKeys === undefined || options.grantKeys === "env" ? GrantKeys.fromEnv() : options.grantKeys;
+    let identity = options?.identity;
+    if (grantKeys) {
+      if (!identity) {
+        // Grants on, no other identity hooks: the framework mints and accepts
+        // its own, and hosts issue_grant alone.
+        identity = new IdentityImpl({ grantKeys });
+      } else if (!identity.grantKeys) {
+        throw new Error(
+          "grant keys were configured (grantKeys or VGI_RPC_GRANT_KEYS) and an IdentityImpl was passed " +
+            "without them. Pass new IdentityImpl({ grantKeys, ... }) so the minter and the verifier use the " +
+            "same keys.",
+        );
+      }
+    }
+    if (identity) this.registerIdentity(identity);
+  }
+
+  /** The hosted `vgi_rpc.Identity.v1` implementation, when there is one. Its
+   *  sealed grants and `resolveToken` are what an HTTP handler accepts as
+   *  bearer credentials. */
+  get identity(): IdentityImpl | undefined {
+    return this.hostedIdentity;
   }
 
   /** This server's identifier, as written on every response batch. */
@@ -263,6 +301,7 @@ export class VgiRpcServer {
     this.assertOpen("register identity");
     const protocol = buildIdentityProtocol(identity);
     if (!protocol) return;
+    this.hostedIdentity = identity;
     this.hostBinding({ name: IDENTITY_PROTOCOL_NAME, protocol, versionExempt: false });
   }
 

@@ -67,6 +67,34 @@ the hook: it is translated to `identity_unavailable` with its retry hint
 (`vgi_rpc.RetryInfo`). Host identity only where the transport authenticates
 callers (HTTP).
 
+## Grants and bearer credentials
+
+`issue_grant` mints a credential meant to be presented later as an ordinary
+bearer, and `resolveToken` resolves opaque bearers — so both feed back into HTTP
+authentication (WIRE_PROTOCOL.md §16):
+
+- **Sealed grants, opt-in.** Set `VGI_RPC_GRANT_KEYS` (comma-separated
+  standard base64, exactly 32 bytes each; the first mints, all verify), or pass
+  `new VgiRpcServer(app, { grantKeys: GrantKeys.parse([...]) })`. The framework
+  then hosts `issue_grant` (unless your `IdentityImpl` supplies `mintGrant`)
+  and accepts its own `vgig1.` tokens as bearers. Optional
+  `VGI_RPC_GRANT_AUDIENCE` and `VGI_RPC_GRANT_MAX_TTL_SECONDS` (default 7 days).
+  No key, no change; a malformed key fails construction.
+- **`resolveToken` as a bearer authenticator.** A hosted identity with
+  `resolveToken` has bearers your own `authenticate` did not accept resolved
+  through it: an identity authenticates (domain `token`), `null` is 401, and
+  `AuthUnavailableError` / `IdentityUnavailableError` is 503 with `Retry-After`.
+- **Order.** Your `authenticate` → sealed grants → `resolveToken`. A bad
+  `vgig1.` token is 401 and never reaches `resolveToken`.
+- A grant-authenticated caller has no `auth_time`, so it cannot mint another
+  grant (`stale_auth`).
+- Sealed grants are not individually revocable: keep the maximum lifetime short;
+  removing a key revokes all its grants.
+- If your authentication depends on proxy-injected evidence (`proxyProofRequired`,
+  `proxyAuthHeaders`), the handler refuses to OR these in: compose
+  `grantAuthenticate` / `resolveTokenAuthenticate` yourself and pass
+  `identityBearer: false`.
+
 ## Conformance fixtures
 
 `@query-farm/vgi-rpc/conformance` exports `buildSecondaryProtocol()` (the

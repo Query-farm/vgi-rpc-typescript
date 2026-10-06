@@ -14,6 +14,7 @@ import {
 } from "../binding.js";
 import { PROTOCOL_KEY, PROTOCOL_VERSION_KEY, REQUEST_ID_HEADER, RPC_ERROR_HEADER } from "../constants.js";
 import { MethodNotImplementedError, ResponseTooLargeError, SessionLostError } from "../errors.js";
+import type { GrantKeys } from "../grants.js";
 import {
   PeerEvidenceSet,
   PeerIdentityRejectedError,
@@ -31,6 +32,7 @@ import {
   REFLECTION_PROTOCOL_NAME,
   RETIRED_DESCRIBE_METHOD,
 } from "../reflection.js";
+import type { TokenResolver } from "../token-identity.js";
 import {
   type AccessLogDeferral,
   type CallStatistics,
@@ -79,6 +81,7 @@ import {
   UPLOAD_URL_RESPONSE_SCHEMA,
 } from "./common.js";
 import { httpDispatchStreamExchange, httpDispatchStreamInit, httpDispatchUnary } from "./dispatch.js";
+import { composeIdentityAuthenticate } from "./grant-auth.js";
 import {
   configureOAuthPkce,
   handleBrowserGetRedirect,
@@ -346,6 +349,25 @@ export function createHttpHandler(
   const serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
   let authenticate = options?.authenticate;
+  // Close the identity loop (WIRE_PROTOCOL.md §16): a host serving
+  // vgi_rpc.Identity.v1 with sealed grants or a resolveToken hook accepts
+  // those credentials as bearers, after the deployment's own authenticator.
+  // Before the PKCE wrapper below, so the cookie path is an alternative to the
+  // composed chain rather than something inserted inside it.
+  const hostedIdentity = isProtocolHost(target) ? target.identity : undefined;
+  if ((options?.identityBearer ?? true) && hostedIdentity) {
+    const grantKeys = hostedIdentity.grantKeys as GrantKeys | undefined;
+    const resolveToken = hostedIdentity.resolveToken as TokenResolver | undefined;
+    if ((grantKeys || resolveToken) && (options?.proxyProofRequired || (options?.proxyAuthHeaders ?? []).length > 0)) {
+      throw new Error(
+        "this handler's authenticate depends on proxy-injected evidence, and accepting sealed grants or " +
+          "resolveToken bearers would be an OR beside it that bypasses that requirement. Compose it yourself " +
+          "(a gate that requires the proxy evidence, then chainAuthenticate(inner, grantAuthenticate(keys), " +
+          "resolveTokenAuthenticate(hook))) and pass identityBearer: false.",
+      );
+    }
+    authenticate = composeIdentityAuthenticate(authenticate, { grantKeys, resolveToken });
+  }
   const oauthMetadata = options?.oauthResourceMetadata;
   const peerIdentityProviders = [...(options?.peerIdentityProviders ?? [])];
   const peerAuthenticationPolicy = options?.peerAuthenticationPolicy;

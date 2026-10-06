@@ -119,6 +119,14 @@ export interface HttpHandlerOptions {
    *  through {@link proxyProofRequired} contributes its own header, so this is
    *  only needed on top of that. */
   proxyAuthHeaders?: readonly string[];
+  /** Accept the hosted `vgi_rpc.Identity.v1`'s credentials as bearers -- its
+   *  sealed grants (when grant keys are configured) and tokens its
+   *  `resolveToken` resolves -- after {@link authenticate} (WIRE_PROTOCOL.md
+   *  §16). Default `true`. `false` is for a deployment that composes
+   *  `grantAuthenticate` / `resolveTokenAuthenticate` itself, which is
+   *  required when authentication depends on proxy-injected evidence
+   *  ({@link proxyProofRequired}, {@link proxyAuthHeaders}). */
+  identityBearer?: boolean;
   /** Size of the per-process cache of resolved stream calls. The cache is a
    *  pure accelerator — a miss reopens the call token the client echoed — so
    *  `0` disables it and forces every continuation onto the miss path, which

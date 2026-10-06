@@ -61,6 +61,7 @@ import {
 } from "./arrow/index.js";
 import type { AuthContext } from "./auth.js";
 import { type ErrorCode, type RetryInfo, retryInfo } from "./error-model.js";
+import { type GrantKeys, sealedMintGrant } from "./grants.js";
 import { AuthUnavailableError } from "./http/unauthorized.js";
 import { Protocol } from "./protocol.js";
 import type { CallContext } from "./types.js";
@@ -578,6 +579,11 @@ export interface IdentityOptions {
   /** How recently a caller must have authenticated to mint a grant, in
    *  seconds. */
   maxAuthAge?: number;
+  /** Sealed-grant configuration (WIRE_PROTOCOL.md §16). When given and
+   *  `mintGrant` is not, the framework mints sealed grants itself; an HTTP
+   *  handler serving this identity also accepts them back as bearer
+   *  credentials. Absent changes nothing. */
+  grantKeys?: GrantKeys;
 }
 
 /**
@@ -600,18 +606,31 @@ export interface IdentityOptions {
  */
 export class IdentityImpl {
   private readonly resolveTokenHook?: TokenResolver;
+  private readonly grantKeysConfig?: GrantKeys;
   private readonly mintGrantHook?: GrantMinter;
   private readonly principals: ReadonlySet<string>;
   private readonly maxAuthAge: number;
 
   constructor(options: IdentityOptions = {}) {
     this.resolveTokenHook = options.resolveToken;
-    this.mintGrantHook = options.mintGrant;
+    this.grantKeysConfig = options.grantKeys;
+    this.mintGrantHook = options.mintGrant ?? (options.grantKeys ? sealedMintGrant(options.grantKeys) : undefined);
     this.maxAuthAge = options.maxAuthAge ?? DEFAULT_MAX_AUTH_AGE_SECONDS;
     // Validated at construction, not at first call: a worker that would refuse
     // every introspection should fail to start rather than serve traffic until
     // someone tries.
     this.principals = this.resolveTokenHook ? normalisePrincipals(options.introspectPrincipals) : new Set<string>();
+  }
+
+  /** The sealed-grant configuration, when this deployment has one. */
+  get grantKeys(): GrantKeys | undefined {
+    return this.grantKeysConfig;
+  }
+
+  /** The worker's `resolveToken`, which an HTTP handler also consults for
+   *  bearer credentials (WIRE_PROTOCOL.md §16). */
+  get resolveToken(): TokenResolver | undefined {
+    return this.resolveTokenHook;
   }
 
   /**

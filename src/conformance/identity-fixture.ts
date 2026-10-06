@@ -25,8 +25,11 @@
 // tests.
 
 import { AuthContext } from "../auth.js";
+import { GrantKeys } from "../grants.js";
 import type { AuthenticateFn } from "../http/auth.js";
 import { AuthUnavailableError } from "../http/unauthorized.js";
+import { Protocol } from "../protocol.js";
+import { str } from "../schema.js";
 import {
   GrantRefusedError,
   IdentityImpl,
@@ -34,6 +37,7 @@ import {
   type IssuedGrant,
   type TokenIdentity,
 } from "../token-identity.js";
+import type { CallContext } from "../types.js";
 
 // ---------------------------------------------------------------------------
 // The two headers that stand in for an identity provider
@@ -65,7 +69,13 @@ export const AUTH_TIME_HEADER = "X-Conformance-Auth-Time";
  */
 export const conformanceAuthenticate: AuthenticateFn = (request: Request) => {
   const principal = request.headers.get(PRINCIPAL_HEADER);
-  if (!principal) return AuthContext.anonymous();
+  if (!principal) {
+    // A bearer and no principal header: not ours. A plain Error so the chain
+    // moves on to the identity bearer authenticators the handler appends
+    // (sealed grants, resolveToken) -- IDENTITY_CONFORMANCE_FIXTURE.md §10.
+    if (request.headers.get("Authorization")) throw new Error("no conformance principal header");
+    return AuthContext.anonymous();
+  }
   const authTime = request.headers.get(AUTH_TIME_HEADER);
   return new AuthContext("conformance", true, principal, authTime === null ? {} : { auth_time: authTime });
 };
@@ -249,5 +259,82 @@ export function conformanceIdentity(mode: ConformanceIdentityMode = "both"): Ide
     ...(mode === "both" ? { mintGrant: conformanceMintGrant } : {}),
     introspectPrincipals: [INTROSPECTOR_PRINCIPAL],
     maxAuthAge: MAX_AUTH_AGE,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Sealed grants and bearer acceptance (IDENTITY_CONFORMANCE_FIXTURE.md §10)
+// ---------------------------------------------------------------------------
+
+/** The grant worker's minting key: bytes 0x10..0x2f. Published on purpose --
+ *  the shared suite mints with it to test this port's verifier and decodes
+ *  this port's grants to test its minter. A fixture key, never a deployment one. */
+export const GRANT_KEY_CURRENT = Uint8Array.from({ length: 32 }, (_, i) => 0x10 + i);
+/** The previous key, still configured to verify (rotation): bytes 0x30..0x4f. */
+export const GRANT_KEY_PREVIOUS = Uint8Array.from({ length: 32 }, (_, i) => 0x30 + i);
+/** Audience bound into the grant worker's tokens. */
+export const GRANT_AUDIENCE = "conformance";
+/** The grant worker's lifetime ceiling, in seconds. */
+export const GRANT_MAX_TTL = 3600;
+
+/** The grant worker's configuration: current key mints, both verify. */
+export function conformanceGrantKeys(): GrantKeys {
+  return new GrantKeys([GRANT_KEY_CURRENT, GRANT_KEY_PREVIOUS], {
+    audience: GRANT_AUDIENCE,
+    maxTtlSeconds: GRANT_MAX_TTL,
+  });
+}
+
+/** The grant worker's identity: the fixture resolver, the allowlist and auth
+ *  age of §3, the grant keys, and **no** mint hook -- the framework mints. */
+export function conformanceGrantIdentity(): IdentityImpl {
+  return new IdentityImpl({
+    resolveToken: conformanceResolveToken,
+    introspectPrincipals: [INTROSPECTOR_PRINCIPAL],
+    maxAuthAge: MAX_AUTH_AGE,
+    grantKeys: conformanceGrantKeys(),
+  });
+}
+
+/** Routing key of the probe that reports how a request was authenticated. */
+export const WHOAMI_PROTOCOL_NAME = "conformance.Whoami.v1";
+/** Pinned digest of `conformance.Whoami.v1`. */
+export const WHOAMI_PROTOCOL_HASH = "a280333ba72432020e162cab388a78355969a30aa74f0665ad9d2932d7a10b8f";
+
+/** JSON with object keys sorted at every level, compact -- Python's
+ *  `json.dumps(sort_keys=True, separators=(",", ":"))`. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .filter((k) => obj[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Build `conformance.Whoami.v1`: `whoami() -> utf8`, the caller's
+ *  `AuthContext` as `{"authenticated","claims","domain","principal"}` with
+ *  sorted keys (`""` for an absent domain or principal). Hosted only by the
+ *  grant worker. */
+export function buildWhoamiProtocol(): Protocol {
+  return new Protocol(WHOAMI_PROTOCOL_NAME).unary("whoami", {
+    params: {},
+    result: { result: str },
+    doc: "Report how this request was authenticated.",
+    handler: (_params, ctx) => {
+      const auth = (ctx as CallContext).auth;
+      return {
+        result: canonicalJson({
+          authenticated: auth.authenticated,
+          claims: { ...(auth.claims ?? {}) },
+          domain: auth.domain ?? "",
+          principal: auth.principal ?? "",
+        }),
+      };
+    },
   });
 }

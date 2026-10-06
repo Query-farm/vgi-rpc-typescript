@@ -37,7 +37,13 @@
  * @packageDocumentation
  */
 
-import { buildSecondaryProtocol, conformanceAuthenticate, conformanceIdentity } from "../src/conformance/index.js";
+import {
+  buildSecondaryProtocol,
+  buildWhoamiProtocol,
+  conformanceAuthenticate,
+  conformanceGrantIdentity,
+  conformanceIdentity,
+} from "../src/conformance/index.js";
 import { createHttpHandler } from "../src/http/index.js";
 import { VgiRpcServer } from "../src/server.js";
 import { protocol } from "./conformance-protocol.js";
@@ -49,8 +55,8 @@ import { protocol } from "./conformance-protocol.js";
 const args = process.argv.slice(2);
 const modeArg = args.indexOf("--identity");
 const mode = modeArg >= 0 ? (args[modeArg + 1] ?? "") : "both";
-if (mode !== "both" && mode !== "introspect-only" && mode !== "off") {
-  throw new Error(`--identity must be one of both, introspect-only, off (got ${JSON.stringify(mode)})`);
+if (mode !== "both" && mode !== "introspect-only" && mode !== "off" && mode !== "grants") {
+  throw new Error(`--identity must be one of both, introspect-only, grants, off (got ${JSON.stringify(mode)})`);
 }
 
 // A `VgiRpcServer` rather than a bare `Protocol`: identity is a *secondary*
@@ -61,8 +67,14 @@ const server = new VgiRpcServer(protocol, {
   serverId: `conformance-http-identity-${mode}`,
   // Every conformance worker hosts the fixture secondary, registered through
   // the public hosting API rather than special-cased.
-  protocols: [buildSecondaryProtocol()],
-  ...(mode === "off" ? {} : { identity: conformanceIdentity(mode) }),
+  // `grants` (IDENTITY_CONFORMANCE_FIXTURE.md §10): the resolver plus the
+  // fixture's grant keys and no mint hook, so the framework mints and accepts
+  // its own grants; hosts conformance.Whoami.v1 to report how a bearer was
+  // authenticated. The handler appends the grant and resolveToken bearer
+  // authenticators after the principal-header one automatically.
+  protocols: mode === "grants" ? [buildSecondaryProtocol(), buildWhoamiProtocol()] : [buildSecondaryProtocol()],
+  grantKeys: null,
+  ...(mode === "off" ? {} : { identity: mode === "grants" ? conformanceGrantIdentity() : conformanceIdentity(mode) }),
 });
 
 const handler = createHttpHandler(server, {

@@ -99,6 +99,36 @@ export {
   publishExternalResult,
   resolveExternalLocation,
 } from "./external.js";
+// Sealed grants (WIRE_PROTOCOL.md §16): mint/verify, and the bearer
+// authenticators that accept grants and resolveToken credentials.
+export {
+  DEFAULT_GRANT_CLOCK_SKEW_SECONDS,
+  DEFAULT_GRANT_MAX_TTL_SECONDS,
+  GRANT_AUDIENCE_ENV,
+  GRANT_KEYS_ENV,
+  GRANT_MAX_TTL_ENV,
+  GRANT_TOKEN_PREFIX,
+  type GrantClaims,
+  GrantInvalidError,
+  GrantKeys,
+  type GrantKeysOptions,
+  grantKeyId,
+  MAX_GRANT_TOKEN_CHARS,
+  type MintedGrant,
+  type MintGrantRequest,
+  mintGrantToken,
+  sealedMintGrant,
+  verifyGrantToken,
+} from "./grants.js";
+export {
+  composeIdentityAuthenticate,
+  GRANT_AUTH_DOMAIN,
+  GrantRejectedError,
+  grantAuthenticate,
+  type IdentityBearerSources,
+  resolveTokenAuthenticate,
+  TOKEN_AUTH_DOMAIN,
+} from "./http/grant-auth.js";
 export {
   ARROW_CONTENT_TYPE,
   AUTH_PROXY_REQUIRED_HEADER,
