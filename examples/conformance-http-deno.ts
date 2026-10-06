@@ -13,7 +13,7 @@ import { createHttpHandler } from "../src/http/index.js";
  *
  * Run: deno run --allow-all examples/conformance-http-deno.ts
  */
-import { protocol } from "./conformance-protocol.js";
+import { conformanceHost } from "./conformance-protocol.js";
 
 const rawLevel = Deno.env.get("VGI_COMPRESSION_LEVEL");
 // undefined => leave the option unset so the library default applies.
@@ -23,11 +23,14 @@ const compressionLevel: number | null | undefined = !rawLevel
     ? null
     : parseInt(rawLevel, 10);
 
-const handler = createHttpHandler(protocol, {
-  serverId: compressionLevel ? "conformance-deno-zstd" : "conformance-deno",
-  protocolName: "ConformanceService",
-  ...(compressionLevel !== undefined ? { compressionLevel } : {}),
-});
+const handler = createHttpHandler(
+  conformanceHost({ serverId: compressionLevel ? "conformance-deno-zstd" : "conformance-deno" }),
+  {
+    serverId: compressionLevel ? "conformance-deno-zstd" : "conformance-deno",
+    protocolName: "ConformanceService",
+    ...(compressionLevel !== undefined ? { compressionLevel } : {}),
+  },
+);
 
 Deno.serve(
   {

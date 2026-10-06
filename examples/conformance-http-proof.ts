@@ -21,7 +21,7 @@
  * Run: bun run examples/conformance-http-proof.ts --proof-secrets k:$(...)
  */
 import { createHttpHandler, type ProofMode, parseProofSecrets, requireProxyProof } from "../src/http/index.js";
-import { protocol } from "./conformance-protocol.js";
+import { conformanceHost } from "./conformance-protocol.js";
 
 const args = process.argv.slice(2);
 let port = 0;
@@ -62,7 +62,7 @@ const authenticate =
         replayCache,
       });
 
-const handler = createHttpHandler(protocol, {
+const handler = createHttpHandler(conformanceHost({ serverId: "conformance-http-proof" }), {
   serverId: "conformance-http-proof",
   protocolName: "ConformanceService",
   prefix: "/vgi",

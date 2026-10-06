@@ -60,6 +60,7 @@ import {
   utf8,
 } from "./arrow/index.js";
 import type { AuthContext } from "./auth.js";
+import { type ErrorCode, type RetryInfo, retryInfo } from "./error-model.js";
 import { AuthUnavailableError } from "./http/unauthorized.js";
 import { Protocol } from "./protocol.js";
 import type { CallContext } from "./types.js";
@@ -140,6 +141,10 @@ export class IntrospectionRefusedError extends Error {
   static readonly errorKind = "introspection_refused";
   /** Typed marker hoisted onto the error batch metadata. */
   readonly errorKind = "introspection_refused";
+  /** Canonical code this kind names (WIRE_PROTOCOL.md §16). */
+  static readonly errorCode: ErrorCode = "PERMISSION_DENIED";
+  /** Canonical code hoisted as `vgi_rpc.error_code`. */
+  readonly errorCode: ErrorCode = "PERMISSION_DENIED";
   constructor(message: string) {
     super(message);
     this.name = "IntrospectionRefusedError";
@@ -158,6 +163,10 @@ export class TokenUnresolvedError extends Error {
   static readonly errorKind = "token_unresolved";
   /** Typed marker hoisted onto the error batch metadata. */
   readonly errorKind = "token_unresolved";
+  /** Canonical code this kind names (WIRE_PROTOCOL.md §16). */
+  static readonly errorCode: ErrorCode = "NOT_FOUND";
+  /** Canonical code hoisted as `vgi_rpc.error_code`. */
+  readonly errorCode: ErrorCode = "NOT_FOUND";
   constructor(message: string) {
     super(message);
     this.name = "TokenUnresolvedError";
@@ -176,6 +185,10 @@ export class StaleAuthError extends Error {
   static readonly errorKind = "stale_auth";
   /** Typed marker hoisted onto the error batch metadata. */
   readonly errorKind = "stale_auth";
+  /** Canonical code this kind names (WIRE_PROTOCOL.md §16). */
+  static readonly errorCode: ErrorCode = "UNAUTHENTICATED";
+  /** Canonical code hoisted as `vgi_rpc.error_code`. */
+  readonly errorCode: ErrorCode = "UNAUTHENTICATED";
   constructor(message: string) {
     super(message);
     this.name = "StaleAuthError";
@@ -192,6 +205,10 @@ export class GrantRefusedError extends Error {
   static readonly errorKind = "grant_refused";
   /** Typed marker hoisted onto the error batch metadata. */
   readonly errorKind = "grant_refused";
+  /** Canonical code this kind names (WIRE_PROTOCOL.md §16). */
+  static readonly errorCode: ErrorCode = "PERMISSION_DENIED";
+  /** Canonical code hoisted as `vgi_rpc.error_code`. */
+  readonly errorCode: ErrorCode = "PERMISSION_DENIED";
   constructor(message: string) {
     super(message);
     this.name = "GrantRefusedError";
@@ -204,18 +221,27 @@ export class GrantRefusedError extends Error {
  * Transient, and distinct from a definitive rejection: a caller that
  * negative-caches "unknown" must not cache this.
  *
- * Deliberately **not** a plain `Error` and not a `TokenUnresolvedError`.
- * `chainAuthenticate` advances to the next authenticator on a plain `Error`
- * (see `isCredentialError` in `src/http/bearer.ts`), so a sidecar outage raised
- * as one is read as "not my credential, try the next" and emerges as a 401 from
+ * Deliberately **not** a plain `Error` -- one whose constructor is `Error`
+ * itself -- and not a `TokenUnresolvedError`. `chainAuthenticate` advances to
+ * the next authenticator only on an error whose `constructor === Error` (see
+ * `isCredentialError` in `src/http/bearer.ts`), so a sidecar outage raised as
+ * one is read as "not my credential, try the next" and emerges as a 401 from
  * the end of the chain -- turning a thirty-second blip into a fleet-wide
- * re-login. Being a subclass is what makes it propagate instead.
+ * re-login. Being its own subclass of `Error` is what makes it propagate.
+ *
+ * Carries `vgi_rpc.RetryInfo` with {@link retryAfter} on the wire, as
+ * WIRE_PROTOCOL.md §16 requires of `identity_unavailable`: a caller learns the
+ * failure is transient *and* when to ask again.
  */
 export class IdentityUnavailableError extends Error {
   /** Typed `vgi_rpc.error_kind` marker for this error class. */
   static readonly errorKind = "identity_unavailable";
   /** Typed marker hoisted onto the error batch metadata. */
   readonly errorKind = "identity_unavailable";
+  /** Canonical code this kind names (WIRE_PROTOCOL.md §16). */
+  static readonly errorCode: ErrorCode = "UNAVAILABLE";
+  /** Canonical code hoisted as `vgi_rpc.error_code`. */
+  readonly errorCode: ErrorCode = "UNAVAILABLE";
   /** Seconds the caller should wait. A hint to retry, not a backoff schedule. */
   readonly retryAfter: number;
   /** Operator-facing text. Must not contain the credential. */
@@ -227,6 +253,29 @@ export class IdentityUnavailableError extends Error {
     this.detail = detail;
     this.retryAfter = retryAfter;
   }
+
+  /** The retry hint. Required on this kind (WIRE_PROTOCOL.md §16). */
+  get errorDetails(): RetryInfo[] {
+    return [retryInfo(this.retryAfter)];
+  }
+}
+
+/**
+ * Translate the transport-auth "could not find out" into `identity_unavailable`.
+ *
+ * A hook calling the same backing store an authenticator calls raises what an
+ * authenticator raises when that store is down -- {@link AuthUnavailableError}.
+ * Left untranslated it reaches the wire with no kind, and a caller can no
+ * longer tell an outage from a refusal, which is the one distinction this
+ * protocol's error kinds exist to carry. The retry hint is kept, never
+ * substituted: the store that is down is the one that knows how long
+ * (WIRE_PROTOCOL.md §16).
+ */
+function translateUnavailable(err: unknown): unknown {
+  if (err instanceof AuthUnavailableError) {
+    return new IdentityUnavailableError(err.detail || "identity lookup unavailable", err.retryAfter);
+  }
+  return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -603,13 +652,8 @@ export class IdentityImpl {
       // `AuthUnavailableError` (as the retired `__introspect_token__` route
       // did). Translated rather than propagated as-is: transient-versus-
       // definitive reaches a caller only through `error_kind`, and an
-      // untranslated error carries none -- so such a resolver would report an
-      // outage as an unclassified failure, which is precisely the distinction
-      // this taxonomy exists to preserve.
-      if (err instanceof AuthUnavailableError) {
-        throw new IdentityUnavailableError(err.detail, err.retryAfter);
-      }
-      throw err;
+      // untranslated error carries none.
+      throw translateUnavailable(err);
     }
     if (identity == null) {
       // Uniform with malformed and expired: reporting which would confirm that
@@ -633,7 +677,15 @@ export class IdentityImpl {
     // The subject is the caller, never a parameter: cross-subject minting is
     // closed by construction rather than by a check that could be forgotten in
     // one of seven ports.
-    return this.mintGrantHook(auth.principal ?? "", purpose, scopes, ttlSeconds);
+    //
+    // The translation covers this hook too: a minter backed by the same store
+    // fails the same way, and a port that wraps only the resolver passes the
+    // token test and fails this one.
+    try {
+      return await this.mintGrantHook(auth.principal ?? "", purpose, scopes, ttlSeconds);
+    } catch (err) {
+      throw translateUnavailable(err);
+    }
   }
 }
 

@@ -11,7 +11,8 @@
   "sideEffects": [
     "./src/index.ts",
     "./src/index.workerd.ts",
-    "./src/arrow/index.ts"
+    "./src/arrow/index.ts",
+    "./src/conformance/index.ts"
   ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -37,6 +38,13 @@
       "types": "./dist/arrow/index.d.ts",
       "browser": "./dist/browser/arrow/index.js",
       "import": "./dist/arrow/index.js"
+    },
+    "./conformance": {
+      "workerd": "./src/conformance/index.ts",
+      "worker": "./src/conformance/index.ts",
+      "bun": "./src/conformance/index.ts",
+      "types": "./dist/conformance/index.d.ts",
+      "import": "./dist/conformance/index.js"
     },
     "./otel": {
       "bun": "./src/otel.ts",
@@ -128,7 +136,7 @@
     "build": "bun run build:types && bun run build:js",
     "build:types": "bunx tsc -p tsconfig.build.json",
     "build:js": "bun run build:js:node && bun run build:js:browser",
-    "build:js:node": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/client/connect.ts --outdir dist/client --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/arrow/index.ts --outdir dist/arrow --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
+    "build:js:node": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/client/connect.ts --outdir dist/client --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/arrow/index.ts --outdir dist/arrow --target node --format esm --sourcemap=external --external @query-farm/apache-arrow && bun build ./src/conformance/index.ts --outdir dist/conformance --target node --format esm --sourcemap=external --external @query-farm/apache-arrow",
     "build:js:browser": "bunx tsc -p tsconfig.browser.json",
     "test": "bun test",
     "lint": "biome check .",

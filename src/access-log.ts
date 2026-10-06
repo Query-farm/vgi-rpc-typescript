@@ -14,6 +14,7 @@
  * same tool that gates the conformance suite.
  */
 
+import { errorCodeOf } from "./error-model.js";
 import type { CallStatistics, DispatchHook, DispatchInfo, HookToken } from "./types.js";
 
 /** Where the hook writes formatted JSON lines. */
@@ -442,6 +443,8 @@ export class AccessLogHook implements DispatchHook {
     };
 
     if (errMsg) rec.error_message = errMsg;
+    // What an operator alerts on ("page on UNAVAILABLE"); error records only.
+    if (error) rec.error_code = errorCodeOf(error);
     if (this.serverVersion) rec.server_version = this.serverVersion;
     if (info.protocolVersion) rec.protocol_version = info.protocolVersion;
     if (info.requestId) rec.request_id = info.requestId;
@@ -614,6 +617,7 @@ export class AccessLogHook implements DispatchHook {
     };
     if (rec.method_type === "stream" && typeof rec.stream_id === "string") sentinel.stream_id = rec.stream_id;
     if (sentinel.status === "error") {
+      if (typeof rec.error_code === "string") sentinel.error_code = rec.error_code;
       sentinel.error_message =
         typeof rec.error_message === "string" && rec.error_message ? rec.error_message : "record_too_large";
     }

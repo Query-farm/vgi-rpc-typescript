@@ -190,7 +190,17 @@ jobs:
         run: pip install ".vgi-rpc-python[http,cli,external,conformance]" pytest
 
       - name: Run conformance tests
-        run: timeout 120 python -m pytest test_ts_conformance.py -x -v
+        # The multi-protocol groups (secondary, error model, traceback policy,
+        # identity auth-unavailable) skip *loudly* rather than fail when the
+        # runner provides no `conformance_protocol_connector`, and a skip is an
+        # unmet deliverable, not a pass -- so the log is checked for that skip.
+        # 300 s, not 120: the suite is ~2000 cases with those groups, ~100 s
+        # serial on a 48-core host.
+        run: |
+          timeout 300 python -m pytest test_ts_conformance.py -x -v -rs | tee "$RUNNER_TEMP/conformance.txt"
+          if grep -q "runner provides no 'conformance_protocol_connector'" "$RUNNER_TEMP/conformance.txt"; then
+            echo "the multi-protocol groups were skipped: conformance_protocol_connector is missing"; exit 1
+          fi
 
       # The runner-driven suite with no access log attached. This is the only
       # place the `large_payload` group runs: test_ts_conformance.py drives
@@ -342,7 +352,11 @@ jobs:
           VGI_CONFORMANCE_ROLE: client
           VGI_CONFORMANCE_SERVER: python
           VGI_RPC_PYTHON_REPO: ${{ github.workspace }}/.vgi-rpc-python
-        run: timeout 900 python -m pytest test_ts_conformance.py -q
+        run: |
+          timeout 900 python -m pytest test_ts_conformance.py -q -rs | tee "$RUNNER_TEMP/client-conformance.txt"
+          if grep -q "runner provides no 'conformance_protocol_connector'" "$RUNNER_TEMP/client-conformance.txt"; then
+            echo "the multi-protocol groups were skipped in client role"; exit 1
+          fi
 
       - name: Drive this port's client against this port's own server
         # Not a conformance claim — a regression check. When the two legs

@@ -11,6 +11,7 @@ import {
 } from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
 import { CALL_STATE_KEY, CANCEL_KEY, STATE_KEY } from "../constants.js";
+import { ResponseTooLargeError } from "../errors.js";
 import {
   type ExternalLocationConfig,
   isExternalLocationBatch,
@@ -225,6 +226,9 @@ export interface DispatchContext {
   tokenKey: Uint8Array;
   tokenTtl: number;
   serverId: string;
+  /** Whether error batches carry the remote traceback. Omitted by default
+   *  over HTTP (WIRE_PROTOCOL.md §8, "Tracebacks"). */
+  includeTraceback: boolean;
   /** Wire name of the protocol that owns the dispatched method.
    *
    *  Bound into the AEAD associated data of this stream's cursor and call
@@ -336,9 +340,7 @@ function runtimeCapError(message: string): Error {
 }
 
 function responseTooLargeError(message: string): Error {
-  const error = new Error(message);
-  error.name = "ResponseTooLargeError";
-  return error;
+  return new ResponseTooLargeError(message);
 }
 
 async function externalizeForResponseBudget(
@@ -367,7 +369,7 @@ async function externalizeForResponseBudget(
  *  500 response so common.ts/arrowResponse rewrites it to 200 + X-VGI-RPC-Error.
  *  Used for cap-overshoot strict-fail. */
 function makeCapErrorResponse(schema: VgiSchema, error: Error, ctx: DispatchContext): Response {
-  const errBatch = buildErrorBatch(schema, error, ctx.serverId, null);
+  const errBatch = buildErrorBatch(schema, error, ctx.serverId, null, ctx.includeTraceback);
   const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
   (response as any).__dispatchError = error;
   return response;
@@ -440,10 +442,9 @@ export async function httpDispatchUnary(
     // Hard wire-cap enforcement — overshoot replaces the response with a
     // fresh EXCEPTION-only stream.
     if (ctx.maxResponseBytes != null && body.byteLength > ctx.maxResponseBytes) {
-      const overshoot = new Error(
+      const overshoot = new ResponseTooLargeError(
         `HTTP body exceeds max_response_bytes (${body.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`,
       );
-      overshoot.name = "ResponseTooLargeError";
       const response = makeCapErrorResponse(schema, overshoot, ctx);
       appendCookieHeaders(response.headers, out.drainResponseCookies());
       return response;
@@ -452,7 +453,7 @@ export async function httpDispatchUnary(
     appendCookieHeaders(response.headers, out.drainResponseCookies());
     return response;
   } catch (error: any) {
-    const errBatch = buildErrorBatch(schema, error, ctx.serverId, parsed.requestId);
+    const errBatch = buildErrorBatch(schema, error, ctx.serverId, parsed.requestId, ctx.includeTraceback);
     const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
     // Apply any cookies queued before the exception — matches Python's
     // "cookies-on-error" behavior.
@@ -501,7 +502,7 @@ export async function httpDispatchStreamInit(
     }
   } catch (error: any) {
     const errSchema = method.headerSchema ?? EMPTY_SCHEMA;
-    const errBatch = buildErrorBatch(errSchema, error, ctx.serverId, parsed.requestId);
+    const errBatch = buildErrorBatch(errSchema, error, ctx.serverId, parsed.requestId, ctx.includeTraceback);
     const response = arrowResponse(serializeIpcStream(errSchema, [errBatch]), 500);
     (response as any).__dispatchError = error;
     return response;
@@ -536,7 +537,13 @@ export async function httpDispatchStreamInit(
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
       headerBytes = serializeIpcStream(method.headerSchema, headerBatches);
     } catch (error: any) {
-      const errBatch = buildErrorBatch(method.headerSchema, error, ctx.serverId, parsed.requestId);
+      const errBatch = buildErrorBatch(
+        method.headerSchema,
+        error,
+        ctx.serverId,
+        parsed.requestId,
+        ctx.includeTraceback,
+      );
       const response = arrowResponse(serializeIpcStream(method.headerSchema, [errBatch]), 500);
       (response as any).__dispatchError = error;
       return response;
@@ -809,7 +816,7 @@ export async function httpDispatchStreamExchange(
           error.message,
           error.stack?.split("\n").slice(0, 5).join("\n"),
         );
-      const errBatch = buildErrorBatch(outputSchema, error, ctx.serverId, null);
+      const errBatch = buildErrorBatch(outputSchema, error, ctx.serverId, null, ctx.includeTraceback);
       const response = arrowResponse(serializeIpcStream(outputSchema, [errBatch]), 500);
       (response as any).__dispatchError = error;
       return response;
@@ -878,10 +885,9 @@ export async function httpDispatchStreamExchange(
     // Hard wire-cap enforcement for stream-exchange — overshoot replaces
     // the response with an EXCEPTION-only stream so the client surfaces RpcError.
     if (ctx.maxResponseBytes != null && body.byteLength > ctx.maxResponseBytes) {
-      const overshoot = new Error(
+      const overshoot = new ResponseTooLargeError(
         `HTTP body exceeds max_response_bytes (${body.byteLength} > ${ctx.maxResponseBytes}) for method '${method.name}'`,
       );
-      overshoot.name = "ResponseTooLargeError";
       return makeCapErrorResponse(outputSchema, overshoot, ctx);
     }
     return arrowResponse(body);
@@ -960,7 +966,7 @@ async function produceStreamResponse(
   } catch (error: any) {
     if (dispatchDebug())
       console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));
-    allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId));
+    allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId, ctx.includeTraceback));
     producerError = error instanceof Error ? error : new Error(String(error));
   }
 
@@ -998,7 +1004,7 @@ async function produceStreamResponse(
 
   if (externalOvershoot) {
     allBatches.length = 0;
-    allBatches.push(buildErrorBatch(outputSchema, externalOvershoot, ctx.serverId, requestId));
+    allBatches.push(buildErrorBatch(outputSchema, externalOvershoot, ctx.serverId, requestId, ctx.includeTraceback));
     producerError = externalOvershoot;
   } else if (!producerError && !out.finished) {
     // Every unfinished invocation returns one cursor. A response-size budget
@@ -1021,7 +1027,7 @@ async function produceStreamResponse(
     // serialized above. The caller gets an error-only stream and cannot resume
     // an oversized turn.
     allBatches.length = 0;
-    allBatches.push(buildErrorBatch(outputSchema, responseOvershoot, ctx.serverId, requestId));
+    allBatches.push(buildErrorBatch(outputSchema, responseOvershoot, ctx.serverId, requestId, ctx.includeTraceback));
     dataBytes = serializeIpcStream(outputSchema, allBatches);
     headerBytes = null;
     producerError = responseOvershoot;

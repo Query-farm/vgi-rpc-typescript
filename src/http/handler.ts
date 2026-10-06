@@ -4,6 +4,7 @@
 import { batchFromColumns, deserializeBatch, schema as makeSchema, type VgiSchema } from "../arrow/index.js";
 import { AuthContext } from "../auth.js";
 import {
+  gateProtocolVersion,
   isProtocolHost,
   type ProtocolBinding,
   type ProtocolHost,
@@ -12,7 +13,7 @@ import {
   validateProtocolName,
 } from "../binding.js";
 import { PROTOCOL_KEY, PROTOCOL_VERSION_KEY, REQUEST_ID_HEADER, RPC_ERROR_HEADER } from "../constants.js";
-import { MethodNotImplementedError, ProtocolVersionError, parseProtocolVersion, SessionLostError } from "../errors.js";
+import { MethodNotImplementedError, ResponseTooLargeError, SessionLostError } from "../errors.js";
 import {
   PeerEvidenceSet,
   PeerIdentityRejectedError,
@@ -300,6 +301,13 @@ export function createHttpHandler(
   if (!primary) {
     throw new Error("createHttpHandler was given a server that hosts no protocols.");
   }
+  // Tracebacks are included by default on every transport (WIRE_PROTOCOL.md
+  // §8); the DuckDB extension shows them to the user. An explicit handler
+  // option wins; otherwise the host's one server-wide switch decides.
+  const includeTraceback =
+    options?.includeTracebacks ?? (isProtocolHost(target) ? (target.includeTracebacks ?? true) : true);
+  // The hosted set is fixed from here on: this handler snapshots it.
+  if (isProtocolHost(target)) target.seal?.();
   // The primary protocol, which every server-level surface reports: the
   // landing and describe pages and the `protocol` field of
   // the health body.
@@ -455,43 +463,7 @@ export function createHttpHandler(
     binding: ProtocolBinding,
     reqBatchMeta: ReadonlyMap<string, string> | undefined,
   ): void {
-    const parts = binding.protocol.protocolVersionParts;
-    if (parts === null) return;
-    const serverVersion = binding.protocol.protocolVersion;
-    const clientVersion = reqBatchMeta?.get(PROTOCOL_VERSION_KEY);
-    if (clientVersion === undefined) {
-      throw new ProtocolVersionError(
-        "VGI client/worker protocol_version mismatch.\n" +
-          "  Client: <not declared>\n" +
-          `  Server: ${serverVersion}\n` +
-          "  Direction: the client did not send a vgi_rpc.protocol_version " +
-          "metadata key. This is either a vgi-rpc framework bug or a " +
-          "non-VGI client connecting to a VGI worker.",
-      );
-    }
-    let clientParts: readonly [number, number, number];
-    try {
-      clientParts = parseProtocolVersion(clientVersion);
-    } catch {
-      throw new ProtocolVersionError(
-        "VGI client/worker protocol_version mismatch.\n" +
-          `  Client: ${clientVersion}\n` +
-          `  Server: ${serverVersion}\n` +
-          "  Direction: client sent a malformed protocol_version. " +
-          "Expected canonical semver MAJOR.MINOR.PATCH.",
-      );
-    }
-    if (clientParts[0] === parts[0] && clientParts[1] === parts[1]) return;
-    const clientOlder = clientParts[0] < parts[0] || (clientParts[0] === parts[0] && clientParts[1] < parts[1]);
-    const direction = clientOlder
-      ? `client is too old; upgrade the VGI extension/client to a version supporting protocol_version ${serverVersion}.`
-      : `server is too old; upgrade the VGI worker to a version supporting protocol_version ${clientVersion}.`;
-    throw new ProtocolVersionError(
-      "VGI client/worker protocol_version mismatch.\n" +
-        `  Client: ${clientVersion}\n` +
-        `  Server: ${serverVersion}\n` +
-        `  Direction: ${direction}`,
-    );
+    gateProtocolVersion(binding, reqBatchMeta?.get(PROTOCOL_VERSION_KEY));
   }
 
   // Response compression is ON by default at zstd level 1 (see
@@ -725,6 +697,7 @@ export function createHttpHandler(
     externalLocation,
     kind: transportKind,
     callStateCacheEntries: options?.callStateCacheEntries,
+    includeTraceback,
   };
 
   // Built once: a browser hides every response header from JavaScript unless
@@ -926,11 +899,10 @@ export function createHttpHandler(
       const headers = new Headers(response.headers);
       headers.delete(CONTENT_ENCODING_HEADER);
       headers.delete(VGI_CONTENT_ENCODING_HEADER);
-      const error = new Error(
+      const error = new ResponseTooLargeError(
         `HTTP body exceeds max_response_bytes (${responseBody.byteLength} > ${responseLimitBytes})`,
       );
-      error.name = "ResponseTooLargeError";
-      const errorBatch = buildErrorBatch(EMPTY_SCHEMA, error, serverId, null);
+      const errorBatch = buildErrorBatch(EMPTY_SCHEMA, error, serverId, null, includeTraceback);
       const errorBody = serializeIpcStream(EMPTY_SCHEMA, [errorBatch]);
       headers.set("Content-Type", ARROW_CONTENT_TYPE);
       headers.set(RPC_ERROR_HEADER, "true");
@@ -1134,7 +1106,7 @@ export function createHttpHandler(
   }
 
   function makeErrorResponse(error: Error, statusCode: number, schema: VgiSchema = EMPTY_SCHEMA): Response {
-    const errBatch = buildErrorBatch(schema, error, serverId, null);
+    const errBatch = buildErrorBatch(schema, error, serverId, null, includeTraceback);
     const body = serializeIpcStream(schema, [errBatch]);
     const resp = arrowResponse(body, statusCode);
     addCorsHeaders(resp.headers);
@@ -1735,7 +1707,7 @@ export function createHttpHandler(
         if (versionGated) enforceProtocolVersion(binding, reqMeta);
       } catch (exc) {
         const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
-        const errBatch = buildErrorBatch(errSchema, exc as Error, serverId, null);
+        const errBatch = buildErrorBatch(errSchema, exc as Error, serverId, null, includeTraceback);
         const errBody = serializeIpcStream(errSchema, [errBatch]);
         const response = arrowResponse(errBody, 400);
         addCorsHeaders(response.headers);

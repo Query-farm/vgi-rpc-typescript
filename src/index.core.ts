@@ -24,6 +24,8 @@ export {
 export { AuthContext } from "./auth.js";
 export * from "./client/index.js";
 export {
+  ERROR_CODE_KEY,
+  ERROR_DETAILS_KEY,
   ERROR_KIND_KEY,
   LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
@@ -37,11 +39,48 @@ export {
   STATE_KEY,
 } from "./constants.js";
 export {
+  type BadRequest,
+  badRequest,
+  decodeErrorDetails,
+  ERROR_CODES,
+  type ErrorCode,
+  type ErrorDetail,
+  type ErrorDetailJson,
+  type ErrorInfo,
+  encodeErrorDetails,
+  errorCodeOf,
+  errorDetailsOf,
+  errorInfo,
+  errorKindOf,
+  type FieldViolation,
+  type Help,
+  type HelpLink,
+  isErrorCode,
+  isRetryable,
+  type LocalizedMessage,
+  MAX_ERROR_DETAILS_BYTES,
+  type PreconditionFailure,
+  type PreconditionViolation,
+  parseErrorCode,
+  parseErrorDetail,
+  preconditionFailure,
+  type QuotaFailure,
+  type QuotaViolation,
+  type ResourceInfo,
+  type RetryInfo,
+  retryInfo,
+  StatusError,
+  type StatusErrorOptions,
+} from "./error-model.js";
+export {
   ERROR_KIND_METHOD_NOT_IMPLEMENTED,
   ERROR_KIND_SERVER_DRAINING,
   ERROR_KIND_SESSION_LOST,
   MethodNotImplementedError,
+  ProtocolVersionError,
+  ResponseTooLargeError,
   RpcError,
+  type RpcErrorModel,
   ServerDrainingError,
   SessionLostError,
   VersionError,
@@ -167,7 +206,7 @@ export {
   uint64,
 } from "./schema.js";
 export { type ServeStreamOptions, serveStream } from "./serve-stream.js";
-export { VgiRpcServer } from "./server.js";
+export { type RawPeer, VgiRpcServer, type VgiRpcServerOptions } from "./server.js";
 // `vgi_rpc.Identity.v1` -- the framework-owned identity protocol, and the only
 // introspection surface: the HTTP `__introspect_token__` route it replaced is
 // retired (IDENTITY_V1_SPEC §8).

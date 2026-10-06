@@ -19,30 +19,13 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import * as path from "node:path";
-import { schema as makeSchema, serializeBatch } from "../arrow/index.js";
-import type { ProtocolBinding } from "../binding.js";
-import { dispatchStream } from "../dispatch/stream.js";
-import { dispatchUnary } from "../dispatch/unary.js";
-import { RpcError, VersionError } from "../errors.js";
 import type { ExternalLocationConfig } from "../external.js";
 import type { Protocol } from "../protocol.js";
-import { protocolHashFor } from "../reflection.js";
-import { VgiRpcServer } from "../server.js";
-import {
-  type CallStatistics,
-  type DispatchHook,
-  type DispatchInfo,
-  type MethodDefinition,
-  MethodType,
-  type ServeStartHook,
-  TransportKind,
-} from "../types.js";
+import { isConnectionClosed, type VgiRpcServer } from "../server.js";
+import { type DispatchHook, type ServeStartHook, TransportKind } from "../types.js";
 import { IpcStreamReader } from "../wire/reader.js";
-import { applyDefaults, parseRequest, validateRequestSchema } from "../wire/request.js";
-import { buildErrorBatch } from "../wire/response.js";
 import { IpcStreamWriter } from "../wire/writer.js";
-
-const EMPTY_SCHEMA = makeSchema([]);
+import { launcherHost } from "./host.js";
 
 /** Configuration for {@link serveUnix}. */
 export interface ServeUnixOptions {
@@ -95,20 +78,21 @@ export interface ServeUnixHandle {
 }
 
 /**
- * Bind an AF_UNIX socket and serve `protocol` over per-connection IPC streams.
+ * Bind an AF_UNIX socket and serve `target` over per-connection IPC streams.
+ *
+ * `target` is a bare {@link Protocol}, or a {@link VgiRpcServer} carrying
+ * additional protocols (and identity) -- the same host object every other
+ * transport accepts, so all of them serve one hosted set. With a server, the
+ * server-level options here (`serverId`, `protocolVersion`, `enableDescribe`,
+ * `dispatchHook`, `externalLocation`, `onServeStart`) must be left unset.
  *
  * Sequential listen — one client at a time, just like Python's `serve_unix`.
  * Each connection gets its own dispatch loop and shares the protocol.
  */
-export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): Promise<ServeUnixHandle> {
+export async function serveUnix(target: Protocol | VgiRpcServer, options: ServeUnixOptions): Promise<ServeUnixHandle> {
   const sockPath = path.resolve(options.unixPath);
   const idleTimeoutS = options.idleTimeout ?? 300;
   const startupGraceS = options.startupGraceSeconds ?? 5;
-  const protocolVersion = options.protocolVersion ?? "";
-  const serverId = options.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-  const dispatchHook = options.dispatchHook ?? null;
-  const externalConfig = options.externalLocation;
-  const onServeStart = options.onServeStart ?? null;
   const backlog = options.backlog ?? 16;
   const announcementSink = options.announcementSink ?? process.stdout;
 
@@ -126,39 +110,12 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
     }
   }
 
-  // One routing host, so this transport resolves `(protocol, method)` the
-  // same way the stdio server does -- and hosts `vgi_rpc.Reflection.v1`,
-  // which is what a client bootstraps from now that `__describe__` is gone.
-  // Only the binding table and the resolver are used; the dispatch loop
-  // below stays this transport's own, because its framing is.
-  const host = new VgiRpcServer(protocol, {
-    serverId,
-    protocolVersion,
-    enableDescribe: options.enableDescribe ?? true,
-  });
-
-  // Lifecycle: only commit `serveStartFired` after the hook returns successfully.
-  let serveStartFired = false;
-  let serveStartInFlight: Promise<void> | null = null;
-  async function notifyTransport(): Promise<void> {
-    if (serveStartFired) return;
-    if (serveStartInFlight) {
-      await serveStartInFlight;
-      return;
-    }
-    if (!onServeStart) {
-      serveStartFired = true;
-      return;
-    }
-    const attempt = Promise.resolve().then(() => onServeStart(TransportKind.UNIX));
-    serveStartInFlight = attempt;
-    try {
-      await attempt;
-      serveStartFired = true;
-    } finally {
-      if (serveStartInFlight === attempt) serveStartInFlight = null;
-    }
-  }
+  // One protocol host, shared with every other transport this server is
+  // handed to: routing, the version gate, error encoding and the dispatch hook
+  // all run in `VgiRpcServer.serveRequest`, so this launcher owns only its
+  // socket lifecycle.
+  const host = launcherHost(target, options, "serveUnix");
+  host.seal();
 
   const server: Server = createServer({ allowHalfOpen: false });
 
@@ -243,25 +200,14 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
 
     try {
       // Fire on_serve_start lazily — first request retries on hook failure.
-      await notifyTransport();
+      await host.notifyTransport(TransportKind.UNIX);
 
       while (true) {
         try {
-          await serveOnce(reader, writer);
+          await host.serveRequest(reader, writer, TransportKind.UNIX);
         } catch (e: unknown) {
-          const err = e as { code?: string; message?: string };
           // EOF/closed client → end this connection cleanly.
-          if (
-            err?.message?.includes("closed") ||
-            err?.message?.includes("Expected Schema Message") ||
-            err?.message?.includes("null or length 0") ||
-            err?.message?.includes("EOF") ||
-            err?.code === "EPIPE" ||
-            err?.code === "ERR_STREAM_PREMATURE_CLOSE" ||
-            err?.code === "ERR_STREAM_DESTROYED"
-          ) {
-            return;
-          }
+          if (isConnectionClosed(e)) return;
           throw e;
         }
       }
@@ -271,113 +217,6 @@ export async function serveUnix(protocol: Protocol, options: ServeUnixOptions): 
       } catch {
         // already closed
       }
-    }
-  }
-
-  async function serveOnce(reader: IpcStreamReader, writer: IpcStreamWriter): Promise<void> {
-    const stream = await reader.readStream();
-    if (!stream) {
-      throw new Error("EOF");
-    }
-    const { schema, batches } = stream;
-    if (batches.length === 0) {
-      const err = new RpcError("ProtocolError", "Request stream contains no batches", "");
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, serverId, null);
-      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
-      return;
-    }
-    const batch = batches[0];
-    let methodName: string;
-    let protocolName: string;
-    let params: Record<string, unknown>;
-    let requestId: string | null;
-    try {
-      const parsed = parseRequest(schema, batch);
-      methodName = parsed.methodName;
-      protocolName = parsed.protocol;
-      params = parsed.params;
-      requestId = parsed.requestId;
-    } catch (e: unknown) {
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, e as Error, serverId, null);
-      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
-      if (e instanceof VersionError || e instanceof RpcError) return;
-      throw e;
-    }
-
-    // Resolve (protocol, method). The routing key is part of the lookup rather
-    // than a label on it: method names may collide across protocols, and a
-    // retired `__describe__` is refused here with a message naming where
-    // introspection went.
-    let method: MethodDefinition;
-    let binding: ProtocolBinding;
-    try {
-      ({ method, binding } = host.resolve(protocolName, methodName));
-    } catch (error) {
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, error as Error, serverId, requestId);
-      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
-      return;
-    }
-
-    try {
-      validateRequestSchema(schema, method.paramsSchema, methodName);
-    } catch (error) {
-      const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
-      await writer.writeStream(errSchema, [buildErrorBatch(errSchema, error as Error, serverId, requestId)]);
-      return;
-    }
-
-    const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
-    let requestData: Uint8Array | undefined;
-    try {
-      requestData = serializeBatch(batch);
-    } catch {
-      // best-effort
-    }
-    const info: DispatchInfo = {
-      method: methodName,
-      methodType,
-      serverId,
-      requestId,
-      // The protocol that owns the dispatched method, and *its* canonical
-      // digest. Both from the resolved binding, never the server's primary:
-      // `protocol_hash` is the registry key for decoding an archived record,
-      // so a record naming one protocol while carrying another's is decoded
-      // against the wrong description -- and passes the schema while doing it.
-      // Read inline rather than through a local so the pairing is visible at
-      // the emit site, which is what `test/dispatch-identity.test.ts` checks.
-      protocol: binding.name,
-      protocolHash: await protocolHashFor(binding),
-      protocolVersion,
-      kind: TransportKind.UNIX,
-      principal: "",
-      authDomain: "",
-      authenticated: false,
-      remoteAddr: "",
-      requestData,
-    };
-    const stats: CallStatistics = {
-      inputBatches: 0,
-      outputBatches: 0,
-      inputRows: 0,
-      outputRows: 0,
-      inputBytes: 0,
-      outputBytes: 0,
-    };
-
-    const token = dispatchHook?.onDispatchStart(info);
-    let dispatchError: Error | undefined;
-    applyDefaults(params, method.defaults);
-    try {
-      if (method.type === MethodType.UNARY) {
-        await dispatchUnary(method, params, writer, serverId, requestId, externalConfig, TransportKind.UNIX);
-      } else {
-        await dispatchStream(method, params, writer, reader, serverId, requestId, externalConfig, TransportKind.UNIX);
-      }
-    } catch (e) {
-      dispatchError = e instanceof Error ? e : new Error(String(e));
-      throw e;
-    } finally {
-      dispatchHook?.onDispatchEnd(token, info, stats, dispatchError);
     }
   }
 

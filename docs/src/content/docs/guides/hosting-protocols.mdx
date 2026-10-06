@@ -1,0 +1,74 @@
+---
+title: Hosting Several Protocols
+description: Serve additional application protocols from one server, on every transport.
+---
+
+A server hosts one **primary** protocol and any number of additional
+application protocols, fixed when it is constructed (WIRE_PROTOCOL.md §3.1).
+Every request names its protocol in `vgi_rpc.protocol`, so method names may
+repeat across protocols without colliding.
+
+```typescript
+import { Protocol, serveTcp, str, VgiRpcServer } from "@query-farm/vgi-rpc";
+
+const app = new Protocol("acme.App.v1", { protocolVersion: "1.0.0" });
+const reports = new Protocol("acme.Reports.v1").unary("render", {
+  params: { id: str },
+  result: { result: str },
+  handler: ({ id }) => ({ result: `report ${id}` }),
+});
+
+const server = new VgiRpcServer(app, { protocols: [reports] });
+
+// The same host object serves every transport:
+await server.run();                         // stdio
+// await serveTcp(server, { port: 0 });      // raw TCP
+// await serveUnix(server, { unixPath });    // AF_UNIX
+// await serveStream(server, { readable });  // any byte-stream pair
+// createHttpHandler(server, { ... });       // HTTP / Cloudflare Workers
+```
+
+Rules:
+
+- **Fixed for the server's life.** Register everything in the constructor
+  (`protocols`, `identity`). Once a transport starts serving, `addProtocol`
+  throws, so reflection output and every `protocol_hash` stay stable.
+- **The same set on every transport.** Hand the one `VgiRpcServer` to each
+  launcher; a launcher given a built server refuses server-level options
+  (`serverId`, `dispatchHook`, …) — they belong on the server.
+- **Order is registration order, primary first.** `list_protocols` reports
+  application protocols in that order; framework protocols
+  (`vgi_rpc.Reflection.v1`, `vgi_rpc.Identity.v1`) follow.
+- **No reserved names.** A name starting `vgi_rpc.` is refused, whether it is
+  the binding name or the protocol's own name. Names must be unique.
+- **The protocol is the unit of optionality.** There is no way to host a subset
+  of a protocol's methods; make an optional capability its own protocol.
+- **Versions are per binding.** Each protocol's `protocolVersion` gates only its
+  own methods.
+
+## Identity
+
+`vgi_rpc.Identity.v1` is framework-owned and opted into with the `identity`
+option:
+
+```typescript
+import { IdentityImpl, VgiRpcServer } from "@query-farm/vgi-rpc";
+
+const server = new VgiRpcServer(app, {
+  identity: new IdentityImpl({
+    resolveToken: async (token) => lookup(token), // null = unknown credential
+    introspectPrincipals: ["edge-proxy"],          // required with resolveToken
+  }),
+});
+```
+
+For "I could not find out" (a store outage), throw `AuthUnavailableError` from
+the hook: it is translated to `identity_unavailable` with its retry hint
+(`vgi_rpc.RetryInfo`). Host identity only where the transport authenticates
+callers (HTTP).
+
+## Conformance fixtures
+
+`@query-farm/vgi-rpc/conformance` exports `buildSecondaryProtocol()` (the
+cross-port `conformance.Secondary.v1`) and the identity fixture policy, for
+conformance workers and SDK fixture workers. Not for production servers.

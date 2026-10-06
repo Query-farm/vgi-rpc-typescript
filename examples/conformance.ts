@@ -45,8 +45,8 @@
  */
 import { openSync } from "node:fs";
 import type { ExternalLocationConfig } from "../src/external.js";
-import { AccessLogHook, FdSink, serveTcp, serveUnix, VgiRpcServer } from "../src/index.js";
-import { protocol, setConformanceExternalStorage } from "./conformance-protocol.js";
+import { AccessLogHook, FdSink, serveTcp, serveUnix } from "../src/index.js";
+import { conformanceHost, protocol, setConformanceExternalStorage } from "./conformance-protocol.js";
 import { FakeStorage } from "./fake-storage.js";
 
 const args = process.argv.slice(2);
@@ -112,13 +112,18 @@ if (accessLogPath) {
   }
 }
 
+// One protocol host for whichever transport was selected: ConformanceService
+// plus conformance.Secondary.v1, registered through the public hosting API.
+const conformance = conformanceHost({
+  enableDescribe: true,
+  dispatchHook,
+  externalLocation,
+  protocolVersion: protocol.protocolVersion,
+});
+
 if (unixArg !== undefined) {
-  const handle = await serveUnix(protocol, {
+  const handle = await serveUnix(conformance, {
     unixPath: unixArg,
-    enableDescribe: true,
-    dispatchHook,
-    externalLocation,
-    protocolVersion: protocol.protocolVersion,
     idleTimeout: 0,
   });
   await handle.done;
@@ -138,13 +143,9 @@ if (unixArg !== undefined) {
     process.stderr.write(`--tcp expects [HOST:]PORT, got '${tcpArg}'\n`);
     process.exit(2);
   }
-  const handle = await serveTcp(protocol, {
+  const handle = await serveTcp(conformance, {
     host,
     port,
-    enableDescribe: true,
-    dispatchHook,
-    externalLocation,
-    protocolVersion: protocol.protocolVersion,
     idleTimeout: 0,
   });
   await handle.done;
@@ -153,6 +154,5 @@ if (unixArg !== undefined) {
   // rather than a reserved method name; `enableDescribe` (the default) is what
   // hosts it, registered after the application protocol so it appears in its
   // own output without being special-cased.
-  const server = new VgiRpcServer(protocol, { enableDescribe: true, dispatchHook, externalLocation });
-  server.run();
+  conformance.run();
 }

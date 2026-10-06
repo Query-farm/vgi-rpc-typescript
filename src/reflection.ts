@@ -469,7 +469,14 @@ export function buildReflectionProtocol(deps: {
     doc: "Return every protocol this server hosts, with versions and hashes.",
     handler: async () => {
       const all = deps.listBindings();
-      const names = [...all.keys()].sort();
+      // Registration order, primary first (WIRE_PROTOCOL.md §3.1) -- never
+      // sorted. A client's "describe this server" takes the first protocol
+      // whose name is not reserved, so order is contract: sorting by name put
+      // a hosted `conformance.Secondary.v1` ahead of a primary `vgi.v2`, and
+      // every client then described the wrong protocol. (The shared suite's
+      // `ConformanceService` happens to sort first in ASCII, which is why it
+      // could not see this.)
+      const names = [...all.keys()];
       const protocols: ProtocolSummaryDesc[] = [];
       for (const name of names) {
         const b = all.get(name)!;

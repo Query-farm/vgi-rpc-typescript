@@ -28,26 +28,61 @@ The error message is transmitted to the client and the transport remains clean f
 
 ## Wire format
 
-Errors are transmitted as zero-row Arrow batches with `EXCEPTION`-level metadata:
+Errors are transmitted as zero-row Arrow batches with `EXCEPTION`-level metadata,
+carrying the three layers of the error model (WIRE_PROTOCOL.md §8, adopted from
+gRPC's `google.rpc.Status`):
 
 - `vgi_rpc.log_level` set to `EXCEPTION`
 - `vgi_rpc.log_message` containing the error message (`"{ExceptionType}: {message}"`)
-- `vgi_rpc.error_kind` — optional. Present when the thrown error carries an
-  `errorKind` marker (see [Typed error classes](#typed-error-classes) below). Lets
-  clients branch on the error category without string-matching the message.
-- `vgi_rpc.log_extra` — a JSON blob with structured fields:
+- `vgi_rpc.error_code` — **always present**: one of gRPC's sixteen canonical
+  code names (`UNAVAILABLE`, `NOT_FOUND`, …). An error that declares none is
+  `UNKNOWN`.
+- `vgi_rpc.error_kind` — optional. The reason a client branches on, present when
+  the thrown error carries an `errorKind` marker (see
+  [Typed error classes](#typed-error-classes) below).
+- `vgi_rpc.error_details` — optional. A JSON array of typed details from a fixed
+  catalog (`vgi_rpc.RetryInfo`, `vgi_rpc.BadRequest`, …). At most 4 KiB of
+  UTF-8; a larger array, or one that repeats a type or invents a `vgi_rpc.*`
+  type, is **dropped whole**, never trimmed.
+- `vgi_rpc.log_extra` — a JSON blob mirroring the three layers:
 
 ```json
 {
   "exception_type": "ServerDrainingError",
   "exception_message": "server is draining",
-  "traceback": "...",
-  "error_kind": "server_draining"
+  "error_code": "UNAVAILABLE",
+  "error_kind": "server_draining",
+  "error_details": [{"@type": "vgi_rpc.RetryInfo", "retry_delay_seconds": 1}],
+  "traceback": "..."
 }
 ```
 
-`error_kind` is only included in the `log_extra` payload when the error carries
-an `errorKind` marker.
+### Tracebacks
+
+`traceback` is **included by default on every transport** — the DuckDB
+extension shows the remote traceback in the error a user sees. One server-wide
+switch turns it off everywhere: `new VgiRpcServer(protocol, { includeTracebacks:
+false })` (or the HTTP handler's `includeTracebacks` option). When on, it is
+never empty. Type, message, code, kind and details are sent either way.
+
+## Choosing the code: `StatusError`
+
+Throw a `StatusError` to choose what a client sees:
+
+```typescript
+import { retryInfo, StatusError } from "@query-farm/vgi-rpc";
+
+throw new StatusError("report is being rebuilt", {
+  code: "UNAVAILABLE",
+  kind: "report_rebuilding",
+  details: [retryInfo(30)],
+});
+```
+
+Any error class may instead declare `errorCode` / `errorKind` / `errorDetails`
+properties (instance or static). Details must come from the catalog; a
+protocol-specific type lives under the protocol's own name
+(`acme.Reports.v1.SomeDetail`).
 
 ### HTTP transport
 
@@ -67,9 +102,25 @@ import { RpcError } from "@query-farm/vgi-rpc";
 class RpcError extends Error {
   readonly errorType: string;
   readonly errorMessage: string;
-  readonly remoteTraceback: string;
+  readonly remoteTraceback: string; // "" only when the server turned tracebacks off
+  readonly errorCode: string;       // "" only from a server older than the model
+  readonly errorKind: string;       // "" when absent
+  readonly errorDetails: readonly ErrorDetailJson[]; // as received, unknown types included
+  readonly requestId: string;
+
+  get code(): ErrorCode;            // UNKNOWN when absent or unrecognised
+  isRetryable(): boolean;
+  details(): ErrorDetail[];         // catalog entries only
+  retryInfo(): RetryInfo | null;    // also errorInfo(), badRequest(), preconditionFailure(),
+                                    // quotaFailure(), resourceInfo(), help(), localizedMessage()
 }
 ```
+
+Every client decode path — pipe, HTTP unary, stream init and exchange, and an
+externalized error batch — fills these fields. `isRetryable()` is a
+classification, not a policy: `UNAVAILABLE` is retryable, `RESOURCE_EXHAUSTED`
+only with `RetryInfo`, everything else is final. The client **never retries an
+RPC error automatically**, because a method may not be idempotent.
 
 ### VersionError
 

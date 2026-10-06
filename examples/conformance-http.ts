@@ -28,7 +28,7 @@ import type { ExternalLocationConfig } from "../src/external.js";
 import type { AuthenticateFn } from "../src/http/auth.js";
 import { createHttpHandler } from "../src/http/index.js";
 import type { DispatchHook, HookToken, ServeStartHook } from "../src/types.js";
-import { protocol, setConformanceExternalStorage } from "./conformance-protocol.js";
+import { conformanceHost, setConformanceExternalStorage } from "./conformance-protocol.js";
 import { FakeStorage } from "./fake-storage.js";
 
 /** Decode a hex string into bytes — used only for the `--token-key` fixture flag. */
@@ -277,7 +277,7 @@ const principalHeaderAuth: AuthenticateFn = (request: Request) => {
   return principal ? new AuthContext("conformance", true, principal) : AuthContext.anonymous();
 };
 
-const handler = createHttpHandler(protocol, {
+const handler = createHttpHandler(conformanceHost({ serverId: serverIdArg ?? "conformance-http" }), {
   serverId: serverIdArg ?? "conformance-http",
   protocolName: "ConformanceService",
   enableSticky: true,

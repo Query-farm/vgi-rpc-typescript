@@ -57,6 +57,10 @@ jobs:
           test -f dist/arrow/index.js
           test -f dist/arrow/index.d.ts
           test -f dist/browser/arrow/index.js
+          # The `./conformance` subpath (conformance.Secondary.v1 and the
+          # identity fixture policy), imported by every VGI SDK fixture worker.
+          test -f dist/conformance/index.js
+          test -f dist/conformance/index.d.ts
 
       - name: Verify dist actually loads
         # Guards against bundler re-export bugs that emit a syntactically valid

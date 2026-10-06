@@ -8,6 +8,7 @@
 // what makes protocols independently authorable, and a port that merges them
 // into one namespace is not conformant.
 
+import { ProtocolVersionError, parseProtocolVersion } from "./errors.js";
 import type { Protocol } from "./protocol.js";
 
 /** The name grammar: an identifier, optionally dot-qualified, carrying its
@@ -70,6 +71,10 @@ export interface ProtocolBinding {
 export interface ProtocolHost {
   /** Every protocol this host serves, keyed by wire name, primary first. */
   bindings(): Map<string, ProtocolBinding>;
+  /** Fix the hosted set: called when a transport starts serving the host. */
+  seal?(): void;
+  /** Whether the host's error batches carry the remote traceback. */
+  readonly includeTracebacks?: boolean;
 }
 
 /** True when `target` enumerates protocols rather than being a bare one. */
@@ -90,6 +95,7 @@ export function isProtocolHost(target: unknown): target is ProtocolHost {
  *  {@link ProtocolNotSpecifiedError.percentEncoded}. */
 export class ProtocolNotSpecifiedError extends Error {
   readonly errorKind = "protocol_not_specified";
+  readonly errorCode = "INVALID_ARGUMENT";
   constructor(hosted: readonly string[], message?: string) {
     super(
       message ??
@@ -122,6 +128,7 @@ export class ProtocolNotSpecifiedError extends Error {
  *  without an Arrow parser. */
 export class ProtocolNotSupportedError extends Error {
   readonly errorKind = "protocol_not_supported";
+  readonly errorCode = "UNIMPLEMENTED";
   constructor(message: string) {
     super(message);
     this.name = "ProtocolNotSupportedError";
@@ -132,4 +139,60 @@ export class ProtocolNotSupportedError extends Error {
       `This server does not host protocol '${requested}'. Hosted: [${hosted.join(", ")}].`,
     );
   }
+}
+
+/**
+ * Gate a client's declared `vgi_rpc.protocol_version` against the binding that
+ * owns the resolved method. No-op for a binding that declares no version.
+ *
+ * Exact major+minor match, patch ignored; the message names which side is
+ * older. Per binding, never against the primary: a server hosting several
+ * protocols has a version per binding and no single "server version", so
+ * gating a secondary against the primary rejects correct callers and names the
+ * wrong protocol when it does. The thrown error carries a
+ * `PreconditionFailure` naming the gated protocol. One implementation for
+ * every transport, so the raw launchers cannot drift from stdio and HTTP.
+ */
+export function gateProtocolVersion(binding: ProtocolBinding, clientVersion: string | undefined): void {
+  const serverParts = binding.protocol.protocolVersionParts;
+  if (serverParts === null) return;
+  const serverVersion = binding.protocol.protocolVersion;
+  const gate = { protocol: binding.name, serverVersion };
+  if (clientVersion === undefined) {
+    throw new ProtocolVersionError(
+      `VGI client/worker protocol_version mismatch for protocol '${binding.name}'.\n` +
+        "  Client: <not declared>\n" +
+        `  Server: ${serverVersion}\n` +
+        "  Direction: the client did not send a vgi_rpc.protocol_version " +
+        "metadata key. This is either a vgi-rpc framework bug or a " +
+        "non-VGI client connecting to a VGI worker.",
+      gate,
+    );
+  }
+  let clientParts: readonly [number, number, number];
+  try {
+    clientParts = parseProtocolVersion(clientVersion);
+  } catch {
+    throw new ProtocolVersionError(
+      `VGI client/worker protocol_version mismatch for protocol '${binding.name}'.\n` +
+        `  Client: ${clientVersion}\n` +
+        `  Server: ${serverVersion}\n` +
+        "  Direction: client sent a malformed protocol_version. " +
+        "Expected canonical semver MAJOR.MINOR.PATCH.",
+      { ...gate, clientVersion },
+    );
+  }
+  if (clientParts[0] === serverParts[0] && clientParts[1] === serverParts[1]) return;
+  const clientOlder =
+    clientParts[0] < serverParts[0] || (clientParts[0] === serverParts[0] && clientParts[1] < serverParts[1]);
+  const direction = clientOlder
+    ? `client is too old; upgrade the VGI extension/client to a version supporting protocol_version ${serverVersion}.`
+    : `server is too old; upgrade the VGI worker to a version supporting protocol_version ${clientVersion}.`;
+  throw new ProtocolVersionError(
+    `VGI client/worker protocol_version mismatch for protocol '${binding.name}'.\n` +
+      `  Client: ${clientVersion}\n` +
+      `  Server: ${serverVersion}\n` +
+      `  Direction: ${direction}`,
+    { ...gate, clientVersion },
+  );
 }

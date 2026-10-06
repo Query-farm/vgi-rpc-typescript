@@ -4,6 +4,7 @@
 import { observePeerIdentity, peerIdentityPrimary } from "../identity.js";
 import { validateIrohIssuer } from "../iroh.js";
 import type { Protocol } from "../protocol.js";
+import type { VgiRpcServer } from "../server.js";
 import { type ServeTcpHandle, type ServeTcpOptions, serveTcp } from "./serve-tcp.js";
 
 /** Options for the raw loopback upstream consumed by {@code vgi-iroh-bridge}. */
@@ -32,7 +33,7 @@ export interface ServeIrohTcpUpstreamOptions
  * EndpointId evidence and a loopback-only listener.
  */
 export function serveIrohTcpUpstream(
-  protocol: Protocol,
+  protocol: Protocol | VgiRpcServer,
   options: ServeIrohTcpUpstreamOptions,
 ): Promise<ServeTcpHandle> {
   validateIrohIssuer(options.issuer);

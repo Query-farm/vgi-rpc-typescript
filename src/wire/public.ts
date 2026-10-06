@@ -84,15 +84,22 @@ export function writeRequest(
  * This is the wire shape an intermediary returns to deny or abort a call
  * in-band — the client decodes it back into a thrown error. `schema` defaults
  * to an empty schema, matching Python's `build_error_stream`.
+ *
+ * The batch carries the error model (`vgi_rpc.error_code` always, kind and
+ * details when `error` declares them). `includeTraceback` defaults to `true`,
+ * as on every server transport (WIRE_PROTOCOL.md §8).
  */
 export function buildErrorStream(
   error: Error,
   schema?: VgiSchema,
   serverId = "",
   requestId: string | null = null,
+  includeTraceback = true,
 ): Uint8Array {
   const streamSchema = schema ?? makeSchema([]);
-  return serializeIpcStream(streamSchema, [buildErrorBatch(streamSchema, error, serverId, requestId)]);
+  return serializeIpcStream(streamSchema, [
+    buildErrorBatch(streamSchema, error, serverId, requestId, includeTraceback),
+  ]);
 }
 
 /**

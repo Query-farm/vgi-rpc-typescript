@@ -1,6 +1,8 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
+import { type ErrorCode, type RetryInfo, retryInfo } from "../error-model.js";
+
 /**
  * The standardized shape of an HTTP 401, per `docs/unauthorized-spec.md` in
  * the vgi-rpc reference repository.
@@ -116,6 +118,12 @@ export class AuthFailure extends Error {
  * Do not throw it for a credential the authority answered about.
  */
 export class AuthUnavailableError extends Error {
+  /** Canonical code (WIRE_PROTOCOL.md §8); the hint rides as `RetryInfo`. */
+  static readonly errorCode: ErrorCode = "UNAVAILABLE";
+  /** Canonical code hoisted as `vgi_rpc.error_code` if this reaches an RPC
+   *  error batch. Raised from an identity hook it is translated to
+   *  `identity_unavailable`, keeping {@link retryAfter}. */
+  readonly errorCode: ErrorCode = "UNAVAILABLE";
   /** Seconds to advertise in `Retry-After`. A hint to retry, not a backoff
    *  schedule — keep it short. */
   readonly retryAfter: number;
@@ -129,6 +137,11 @@ export class AuthUnavailableError extends Error {
     this.name = "AuthUnavailableError";
     this.detail = detail;
     this.retryAfter = retryAfter;
+  }
+
+  /** The retry hint, as the one detail this error carries. */
+  get errorDetails(): RetryInfo[] {
+    return [retryInfo(this.retryAfter)];
   }
 }
 

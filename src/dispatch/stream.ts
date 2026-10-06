@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { conformBatchToSchema, schema as makeSchema, withBatchMetadata } from "../arrow/index.js";
-import type { AuthContext } from "../auth.js";
 import { CANCEL_KEY } from "../constants.js";
-import { type ExternalLocationConfig, maybeExternalizeBatch } from "../external.js";
-import type { PeerEvidenceSet } from "../identity.js";
-import type { MethodDefinition, TransportKind } from "../types.js";
+import { maybeExternalizeBatch } from "../external.js";
+import type { MethodDefinition } from "../types.js";
 import { OutputCollector } from "../types.js";
 import type { IpcStreamReader } from "../wire/reader.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
+import type { RawDispatchContext } from "./unary.js";
 
 const EMPTY_SCHEMA = makeSchema([]);
 
@@ -34,13 +33,9 @@ export async function dispatchStream(
   params: Record<string, any>,
   writer: IpcStreamWriter,
   reader: IpcStreamReader,
-  serverId: string,
-  requestId: string | null,
-  externalConfig?: ExternalLocationConfig,
-  kind?: TransportKind,
-  authContext?: AuthContext,
-  peerEvidence?: PeerEvidenceSet,
+  ctx: RawDispatchContext,
 ): Promise<void> {
+  const { serverId, requestId, externalConfig, kind, authContext, peerEvidence, includeTraceback } = ctx;
   const isProducer = !!method.producerFn;
 
   let state: any;
@@ -52,7 +47,7 @@ export async function dispatchStream(
     }
   } catch (error: any) {
     const errSchema = method.headerSchema ?? EMPTY_SCHEMA;
-    const errBatch = buildErrorBatch(errSchema, error, serverId, requestId);
+    const errBatch = buildErrorBatch(errSchema, error, serverId, requestId, includeTraceback);
     await writer.writeStream(errSchema, [errBatch]);
     // Still need to consume the input stream from the client
     const inputSchema = await reader.openNextStream();
@@ -93,7 +88,7 @@ export async function dispatchStream(
       const headerBatches = [...headerOut.batches.map((b) => b.batch), headerBatch];
       await writer.writeStream(method.headerSchema, headerBatches);
     } catch (error: any) {
-      const errBatch = buildErrorBatch(method.headerSchema, error, serverId, requestId);
+      const errBatch = buildErrorBatch(method.headerSchema, error, serverId, requestId, includeTraceback);
       await writer.writeStream(method.headerSchema, [errBatch]);
       // Drain input stream so client doesn't hang
       const inputSchema = await reader.openNextStream();
@@ -107,7 +102,13 @@ export async function dispatchStream(
   // Open the input IPC stream (ticks or data from client)
   const inputSchema = await reader.openNextStream();
   if (!inputSchema) {
-    const errBatch = buildErrorBatch(outputSchema, new Error("Expected input stream but got EOF"), serverId, requestId);
+    const errBatch = buildErrorBatch(
+      outputSchema,
+      new Error("Expected input stream but got EOF"),
+      serverId,
+      requestId,
+      includeTraceback,
+    );
     await writer.writeStream(outputSchema, [errBatch]);
     return;
   }
@@ -214,7 +215,7 @@ export async function dispatchStream(
       }
     }
   } catch (error: any) {
-    await stream.write(buildErrorBatch(outputSchema, error, serverId, requestId));
+    await stream.write(buildErrorBatch(outputSchema, error, serverId, requestId, includeTraceback));
   }
 
   await stream.close();

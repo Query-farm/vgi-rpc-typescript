@@ -9,6 +9,8 @@ import {
   type VgiSchema,
 } from "../arrow/index.js";
 import {
+  ERROR_CODE_KEY,
+  ERROR_DETAILS_KEY,
   ERROR_KIND_KEY,
   LOG_EXTRA_KEY,
   LOG_LEVEL_KEY,
@@ -16,6 +18,7 @@ import {
   REQUEST_ID_KEY,
   SERVER_ID_KEY,
 } from "../constants.js";
+import { encodeErrorDetails, errorCodeOf, errorDetailsOf, errorKindOf } from "../error-model.js";
 
 /**
  * Names of the Int64 fields in a schema, computed once per schema object.
@@ -103,9 +106,28 @@ export function buildResultBatch(
 }
 
 /**
- * Build a 0-row error batch with EXCEPTION metadata matching Python's Message.from_exception().
+ * Build a 0-row error batch with EXCEPTION metadata matching Python's
+ * `Message.from_exception()`, carrying the error model (WIRE_PROTOCOL.md §8):
+ *
+ * - `vgi_rpc.error_code` **always** -- `UNKNOWN` when the error declares none;
+ * - `vgi_rpc.error_kind` when the error declares one;
+ * - `vgi_rpc.error_details` when it declares any and they obey the catalog
+ *   rules and fit 4 KiB -- otherwise omitted whole, never trimmed.
+ *
+ * All three are mirrored into `log_extra` (details as a JSON *array*).
+ *
+ * `includeTraceback` is required rather than defaulted, so every call site
+ * carries its server's one switch (on by default, WIRE_PROTOCOL.md §8) rather
+ * than silently ignoring an operator who turned it off. When on, the traceback
+ * is never empty: an error with no stack sends `<type>: <message>`.
  */
-export function buildErrorBatch(schema: VgiSchema, error: Error, serverId: string, requestId: string | null): VgiBatch {
+export function buildErrorBatch(
+  schema: VgiSchema,
+  error: Error,
+  serverId: string,
+  requestId: string | null,
+  includeTraceback: boolean,
+): VgiBatch {
   const metadata = new Map<string, string>();
   metadata.set(LOG_LEVEL_KEY, "EXCEPTION");
   // Prefer the standard `error.name` property (which user classes can set
@@ -122,24 +144,38 @@ export function buildErrorBatch(schema: VgiSchema, error: Error, serverId: strin
   const exceptionMessage = typeof rpcErrorMessage === "string" ? rpcErrorMessage : error.message;
   metadata.set(LOG_MESSAGE_KEY, `${exceptionType}: ${exceptionMessage}`);
 
-  // Hoist `errorKind` (typed-exception marker) into the EXCEPTION batch
-  // metadata as a top-level `vgi_rpc.error_kind` field so clients can
-  // branch on the kind without parsing the log_extra JSON blob. Mirrors
-  // Python's `Message.from_exception()` + `add_to_metadata()` hoisting.
-  const errorKind =
-    (error as { errorKind?: unknown }).errorKind ??
-    ((error.constructor as { errorKind?: unknown }).errorKind as unknown);
-  if (typeof errorKind === "string" && errorKind.length > 0) {
-    metadata.set(ERROR_KIND_KEY, errorKind);
-  }
-
   const extra: Record<string, any> = {
     exception_type: exceptionType,
     exception_message: exceptionMessage,
-    traceback: error.stack ?? "",
   };
-  if (typeof errorKind === "string" && errorKind.length > 0) {
+
+  // Code first: it is required on every EXCEPTION batch, so it is set before
+  // anything that could be skipped.
+  const code = errorCodeOf(error);
+  metadata.set(ERROR_CODE_KEY, code);
+  extra.error_code = code;
+
+  // Hoisted as a top-level key so clients branch on the kind without parsing
+  // the log_extra blob.
+  const errorKind = errorKindOf(error);
+  if (errorKind !== null) {
+    metadata.set(ERROR_KIND_KEY, errorKind);
     extra.error_kind = errorKind;
+  }
+
+  // Measured with the same encoder that writes it, so the bytes on the wire
+  // are the bytes that were checked. `null` drops the whole array -- top-level
+  // key *and* mirror.
+  const details = errorDetailsOf(error);
+  const encodedDetails = encodeErrorDetails(details);
+  if (encodedDetails !== null) {
+    metadata.set(ERROR_DETAILS_KEY, encodedDetails);
+    extra.error_details = JSON.parse(encodedDetails);
+  }
+
+  if (includeTraceback) {
+    const stack = typeof error.stack === "string" ? error.stack : "";
+    extra.traceback = stack.length > 0 ? stack : `${exceptionType}: ${exceptionMessage}`;
   }
   metadata.set(LOG_EXTRA_KEY, JSON.stringify(extra));
   metadata.set(SERVER_ID_KEY, serverId);

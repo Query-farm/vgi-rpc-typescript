@@ -11,7 +11,7 @@
 import type { Socket } from "node:net";
 
 import type { Protocol } from "./protocol.js";
-import { VgiRpcServer } from "./server.js";
+import { VgiRpcServer, type VgiRpcServerOptions } from "./server.js";
 import type { TransportKind } from "./types.js";
 import type { ByteSink } from "./wire/writer.js";
 
@@ -23,18 +23,34 @@ export interface ServeStreamOptions {
   /** Outgoing response sink — a stdout-like fd number, or a `net.Socket` /
    *  structurally-compatible `Duplex`. Omit for the stdout fd. */
   writable?: number | Socket | ByteSink;
-  /** Passed through to the `VgiRpcServer` constructor (describe, hooks, …). */
-  serverOptions?: ConstructorParameters<typeof VgiRpcServer>[1];
+  /** Passed through to the `VgiRpcServer` constructor (describe, hooks, …)
+   *  when `target` is a bare `Protocol`. Refused alongside a built server:
+   *  the options belong on that server. */
+  serverOptions?: VgiRpcServerOptions;
   /** Reported to the `on_serve_start` hook. Defaults to `PIPE`. */
   transportKind?: TransportKind;
 }
 
 /**
- * Serve `protocol` over the provided `readable`/`writable` until the readable
+ * Serve `target` over the provided `readable`/`writable` until the readable
  * ends. Thin wrapper over {@link VgiRpcServer.serveConnection}. Resolves on
  * clean EOF; rejects on a real protocol/transport error.
+ *
+ * `target` is a bare {@link Protocol}, or a {@link VgiRpcServer} carrying
+ * additional protocols -- the same host object every other transport accepts.
  */
-export async function serveStream(protocol: Protocol, options: ServeStreamOptions): Promise<void> {
-  const server = new VgiRpcServer(protocol, options.serverOptions);
+export async function serveStream(target: Protocol | VgiRpcServer, options: ServeStreamOptions): Promise<void> {
+  let server: VgiRpcServer;
+  if (target instanceof VgiRpcServer) {
+    if (options.serverOptions !== undefined) {
+      throw new TypeError(
+        "serveStream was given a VgiRpcServer together with serverOptions. Pass them to the VgiRpcServer " +
+          "constructor instead, so every transport serving it agrees.",
+      );
+    }
+    server = target;
+  } else {
+    server = new VgiRpcServer(target, options.serverOptions);
+  }
   await server.serveConnection(options.readable, options.writable, options.transportKind);
 }

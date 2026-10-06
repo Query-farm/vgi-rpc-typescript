@@ -1265,6 +1265,108 @@ def conformance_conn(
     return factory
 
 
+@pytest.fixture(scope="session")
+def conformance_protocol_connector(
+    request: pytest.FixtureRequest,
+    ts_http_port: int,
+    ts_http_zstd_port: int,
+) -> Callable[..., contextlib.AbstractContextManager[Any]]:
+    """Bind a proxy to *any* protocol on the worker a ``conformance_conn`` transport reaches.
+
+    The runner contract of the reference's MULTI_PROTOCOL_HOSTING.md §4:
+    ``connect(transport, protocol, on_log=None)``, where *transport* is the
+    ``conformance_conn`` parameter id and the proxy talks to the **same** worker
+    that transport reaches, routing on *protocol*'s wire name -- which is how
+    one test holds a primary and a secondary proxy and shows one method name
+    resolving to two bindings.
+
+    Server role binds the reference client to this port's worker. Client role
+    binds this port's client, through the driver, with ``service=protocol``.
+    """
+    from vgi_rpc.external import ExternalLocationConfig
+
+    def _http_port(transport: str) -> int:
+        if transport == "http":
+            return ts_http_port
+        if transport == "http-zstd":
+            return ts_http_zstd_port
+        fixture = {
+            "http_externalize_always": "conformance_http_externalize_always_port",
+            "http-node": "ts_node_http_port",
+            "http-node-zstd": "ts_node_http_zstd_port",
+            "http-deno": "ts_deno_http_port",
+            "http-deno-zstd": "ts_deno_http_zstd_port",
+            "flechette-http": "ts_flechette_http_port",
+        }.get(transport)
+        if fixture is None:
+            raise ValueError(f"no conformance transport named {transport!r}")
+        return int(request.getfixturevalue(fixture))
+
+    def connect(
+        transport: str,
+        protocol: type,
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[Any]:
+        if ROLE == "client":
+            from vgi_rpc.conformance.client_driver import ClientDriver
+
+            from ts_client_proxy import _DEFAULT_DRIVER
+
+            driver = ClientDriver.from_env(default=_DEFAULT_DRIVER, service=protocol)
+            external_config = None
+            compression_level: int | None = None
+            if transport == "pipe":
+                kind, target = "stdio", _stdio_worker_cmd()
+            else:
+                kind, target = "http", f"http://127.0.0.1:{_http_port(transport)}"
+                if transport == "http-zstd":
+                    compression_level = 3
+                if transport == "http_externalize_always":
+                    external_config = ExternalLocationConfig(url_validator=None)
+
+            @contextlib.contextmanager
+            def _driven() -> Iterator[Any]:
+                proxy = driver.connect(
+                    kind, target, on_log, external_config=external_config, compression_level=compression_level
+                )
+                try:
+                    yield proxy
+                finally:
+                    proxy.close()
+
+            return _driven()
+
+        if transport in ("pipe", "flechette-pipe"):
+            cmd = BUN_FLECHETTE_WORKER if transport == "flechette-pipe" else BUN_WORKER
+
+            @contextlib.contextmanager
+            def _pipe() -> Iterator[_RpcProxy]:
+                pipe_transport = SubprocessTransport(cmd)
+                try:
+                    yield _RpcProxy(protocol, pipe_transport, on_log)
+                finally:
+                    pipe_transport.close()
+
+            return _pipe()
+        if transport == "subprocess":
+
+            @contextlib.contextmanager
+            def _shared() -> Iterator[_RpcProxy]:
+                yield _RpcProxy(protocol, request.getfixturevalue("ts_transport"), on_log)
+
+            return _shared()
+        url = f"http://127.0.0.1:{_http_port(transport)}"
+        if transport == "http_externalize_always":
+            return http_connect(
+                protocol, url, on_log=on_log, external_location=ExternalLocationConfig(url_validator=None)
+            )
+        if transport.endswith("-zstd"):
+            return http_connect(protocol, url, on_log=on_log, compression_level=3)
+        return http_connect(protocol, url, on_log=on_log)
+
+    return connect
+
+
 @pytest.fixture(params=["pipe", "subprocess"])
 def conformance_raw_conn(request: pytest.FixtureRequest) -> ConnFactory:
     """Connect only through the default persistent byte-stream transports."""

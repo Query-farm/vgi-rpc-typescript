@@ -10,6 +10,19 @@ import { OutputCollector } from "../types.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
 
+/** Per-request context the raw-transport dispatchers need. */
+export interface RawDispatchContext {
+  serverId: string;
+  requestId: string | null;
+  /** Whether error batches carry the remote traceback; decided per transport
+   *  by the server (WIRE_PROTOCOL.md §8, "Tracebacks"). */
+  includeTraceback: boolean;
+  externalConfig?: ExternalLocationConfig;
+  kind?: TransportKind;
+  authContext?: AuthContext;
+  peerEvidence?: PeerEvidenceSet;
+}
+
 /**
  * Dispatch a unary RPC call.
  * Calls the handler with parsed params, writes result or error batch.
@@ -19,13 +32,9 @@ export async function dispatchUnary(
   method: MethodDefinition,
   params: Record<string, any>,
   writer: IpcStreamWriter,
-  serverId: string,
-  requestId: string | null,
-  externalConfig?: ExternalLocationConfig,
-  kind?: TransportKind,
-  authContext?: AuthContext,
-  peerEvidence?: PeerEvidenceSet,
+  ctx: RawDispatchContext,
 ): Promise<void> {
+  const { serverId, requestId, externalConfig, kind, authContext, peerEvidence, includeTraceback } = ctx;
   const schema = method.resultSchema;
   const out = new OutputCollector(schema, true, serverId, requestId, authContext, undefined, kind, { peerEvidence });
 
@@ -69,7 +78,7 @@ export async function dispatchUnary(
     const batches = [...out.batches.map((b) => b.batch), resultBatch];
     await writer.writeStream(schema, batches);
   } catch (error: any) {
-    const batch = buildErrorBatch(schema, error, serverId, requestId);
+    const batch = buildErrorBatch(schema, error, serverId, requestId, includeTraceback);
     await writer.writeStream(schema, [batch]);
   }
 }

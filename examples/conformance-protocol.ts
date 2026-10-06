@@ -39,6 +39,7 @@ import {
   utf8,
   type VgiBatch,
 } from "../src/arrow/index.js";
+import { buildSecondaryProtocol } from "../src/conformance/secondary.js";
 import {
   type ExternalLocationConfig,
   type ExternalRef,
@@ -61,6 +62,7 @@ import {
   uint32,
   uint64,
 } from "../src/schema.js";
+import { VgiRpcServer, type VgiRpcServerOptions } from "../src/server.js";
 
 // ---------------------------------------------------------------------------
 // Error classes
@@ -1410,3 +1412,12 @@ protocol.exchange<Record<string, never>>("exchange_session_counter", {
     out.emitRow({ value: BigInt(counter.value) });
   },
 });
+
+/**
+ * The conformance worker's protocol host: `ConformanceService` plus
+ * `conformance.Secondary.v1`, registered through the public hosting API
+ * (`protocols`) rather than special-cased, and handed to every transport.
+ */
+export function conformanceHost(options: VgiRpcServerOptions = {}): VgiRpcServer {
+  return new VgiRpcServer(protocol, { ...options, protocols: [buildSecondaryProtocol()] });
+}

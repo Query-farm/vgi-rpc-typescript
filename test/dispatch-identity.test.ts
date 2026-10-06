@@ -42,10 +42,11 @@ import { VgiRpcServer } from "../src/server.js";
 
 /** Every construction of a `DispatchInfo` in the source tree, one per site.
  *
- *  Four transports build one: the stdio server, the HTTP handler, and the unix
- *  and tcp launchers. Each keeps its own dispatch loop because each has its own
- *  framing, which is exactly why a fix applied to one can miss the others. */
-const EXPECTED_EMIT_SITES = 4;
+ *  Two: the raw-transport request path (`VgiRpcServer.serveRequest`, which
+ *  stdio, unix, tcp and byte-stream serving all share -- the launchers used to
+ *  keep their own copies, and the unix and tcp ones had silently lost the
+ *  per-binding version gate) and the HTTP handler, whose framing differs. */
+const EXPECTED_EMIT_SITES = 2;
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];

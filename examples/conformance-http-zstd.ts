@@ -12,9 +12,9 @@ import { createHttpHandler } from "../src/http/index.js";
  *
  * Run: bun run examples/conformance-http-zstd.ts
  */
-import { protocol } from "./conformance-protocol.js";
+import { conformanceHost } from "./conformance-protocol.js";
 
-const handler = createHttpHandler(protocol, {
+const handler = createHttpHandler(conformanceHost({ serverId: "conformance-http-zstd" }), {
   serverId: "conformance-http-zstd",
   protocolName: "ConformanceService",
   compressionLevel: 3,

@@ -14,7 +14,7 @@
  *   --resource <r>  Resource URL advertised in metadata (default: http://127.0.0.1:8000/vgi).
  */
 import { createHttpHandler } from "../src/http/index.js";
-import { protocol } from "./conformance-protocol.js";
+import { conformanceHost } from "./conformance-protocol.js";
 
 function flag(name: string, fallback: string): string {
   const idx = process.argv.indexOf(name);
@@ -25,7 +25,7 @@ const port = parseInt(flag("--port", "0"), 10);
 const idpUrl = flag("--idp-url", "http://127.0.0.1:9999");
 const resource = flag("--resource", "http://127.0.0.1:8000/vgi");
 
-const handler = createHttpHandler(protocol, {
+const handler = createHttpHandler(conformanceHost({ serverId: "conformance-http-pkce-ts" }), {
   prefix: "/vgi",
   serverId: "conformance-http-pkce-ts",
   protocolName: "ConformanceService",

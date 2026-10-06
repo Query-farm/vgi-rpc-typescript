@@ -15,7 +15,7 @@
  */
 import { createServer, type IncomingMessage } from "node:http";
 import { createHttpHandler } from "../src/http/index.js";
-import { protocol } from "./conformance-protocol.js";
+import { conformanceHost } from "./conformance-protocol.js";
 
 const rawLevel = process.env.VGI_COMPRESSION_LEVEL;
 // undefined => leave the option unset so the library default applies.
@@ -25,11 +25,14 @@ const compressionLevel: number | null | undefined = !rawLevel
     ? null
     : parseInt(rawLevel, 10);
 
-const handler = createHttpHandler(protocol, {
-  serverId: compressionLevel ? "conformance-node-zstd" : "conformance-node",
-  protocolName: "ConformanceService",
-  ...(compressionLevel !== undefined ? { compressionLevel } : {}),
-});
+const handler = createHttpHandler(
+  conformanceHost({ serverId: compressionLevel ? "conformance-node-zstd" : "conformance-node" }),
+  {
+    serverId: compressionLevel ? "conformance-node-zstd" : "conformance-node",
+    protocolName: "ConformanceService",
+    ...(compressionLevel !== undefined ? { compressionLevel } : {}),
+  },
+);
 
 /** Collect request body into a single Uint8Array. */
 async function collectBody(req: IncomingMessage): Promise<Uint8Array | undefined> {

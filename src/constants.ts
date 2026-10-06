@@ -85,3 +85,12 @@ export const REQUEST_ID_HEADER = "X-Request-ID";
  *  Hoisted by `buildErrorBatch` when the thrown error has a static or instance
  *  `errorKind` property. Mirrors Python's `vgi_rpc.metadata.ERROR_KIND_KEY`. */
 export const ERROR_KIND_KEY = "vgi_rpc.error_kind";
+
+/** Top-level metadata key on an EXCEPTION batch carrying the canonical code's
+ *  name (`UNAVAILABLE`). Required on every EXCEPTION batch this port writes:
+ *  `UNKNOWN` when unclassified. WIRE_PROTOCOL.md §8. */
+export const ERROR_CODE_KEY = "vgi_rpc.error_code";
+
+/** Top-level metadata key on an EXCEPTION batch carrying the typed details, a
+ *  JSON array of at most 4 KiB -- omitted whole when larger. WIRE_PROTOCOL.md §8. */
+export const ERROR_DETAILS_KEY = "vgi_rpc.error_details";

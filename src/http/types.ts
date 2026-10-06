@@ -56,6 +56,10 @@ export interface HttpHandlerOptions {
   maxExternalizedResponseBytes?: number;
   /** Server ID included in response metadata. Random if omitted. */
   serverId?: string;
+  /** Whether EXCEPTION batches carry the remote traceback. Default: the
+   *  served `VgiRpcServer`'s `includeTracebacks`, else `true` -- included on
+   *  every transport (WIRE_PROTOCOL.md §8, "Tracebacks"). `false` omits it. */
+  includeTracebacks?: boolean;
   /** Custom state serializer for stream state objects. Default: JSON with BigInt support. */
   stateSerializer?: StateSerializer;
   /** zstd compression level for responses (1-22).

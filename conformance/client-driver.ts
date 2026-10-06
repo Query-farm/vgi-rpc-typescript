@@ -129,16 +129,39 @@ function errorJson(error: unknown): Json {
     // are the peer's own, and `message` is this class's `"<type>: <message>"`
     // rendering, which the harness would render again as
     // `ProtocolError: ProtocolError: ...`.
+    //
+    // The error model comes from the client's own error object, never from
+    // re-reading the batch: a driver that cannot get it from its client has
+    // found the client defect this field exists to catch. Relayed verbatim --
+    // no defaulting a missing code to UNKNOWN, since "" (none sent) and
+    // "UNKNOWN" (sent) are different answers.
     return {
       error_type: error.errorType,
       error_message: error.errorMessage,
       traceback: error.remoteTraceback ?? "",
+      error_code: error.errorCode,
+      error_kind: error.errorKind,
+      error_details: [...error.errorDetails],
     };
   }
   if (error instanceof Error) {
-    return { error_type: error.name || "Error", error_message: error.message, traceback: "" };
+    return {
+      error_type: error.name || "Error",
+      error_message: error.message,
+      traceback: "",
+      error_code: "",
+      error_kind: "",
+      error_details: [],
+    };
   }
-  return { error_type: "Error", error_message: String(error), traceback: "" };
+  return {
+    error_type: "Error",
+    error_message: String(error),
+    traceback: "",
+    error_code: "",
+    error_kind: "",
+    error_details: [],
+  };
 }
 
 /** Text for an `ok: false` refusal — the driver could not carry out the op. */

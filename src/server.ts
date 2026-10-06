@@ -2,24 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { schema as makeSchema, serializeBatch } from "./arrow/index.js";
+import type { AuthContext } from "./auth.js";
 import {
+  gateProtocolVersion,
   type ProtocolBinding,
   ProtocolNotSpecifiedError,
   ProtocolNotSupportedError,
+  RESERVED_PROTOCOL_PREFIX,
   validateProtocolName,
 } from "./binding.js";
 import { PROTOCOL_VERSION_KEY } from "./constants.js";
 import { dispatchStream } from "./dispatch/stream.js";
-import { dispatchUnary } from "./dispatch/unary.js";
-import {
-  MethodNotImplementedError,
-  ProtocolVersionError,
-  parseProtocolVersion,
-  RpcError,
-  VersionError,
-} from "./errors.js";
+import { dispatchUnary, type RawDispatchContext } from "./dispatch/unary.js";
+import { MethodNotImplementedError, RpcError, VersionError } from "./errors.js";
 
 import type { ExternalLocationConfig } from "./external.js";
+import type { PeerEvidenceSet } from "./identity.js";
 import type { Protocol } from "./protocol.js";
 import {
   buildReflectionProtocol,
@@ -55,9 +53,71 @@ function randomStreamId(): string {
   return out;
 }
 
+/** Options for {@link VgiRpcServer}. */
+export interface VgiRpcServerOptions {
+  /** Host `vgi_rpc.Reflection.v1`. Default `true`.
+   *
+   *  Named for the `__describe__` method it used to switch on, and kept
+   *  under that name across the fleet: what it gates is introspection,
+   *  and introspection is now a co-hosted protocol rather than a reserved
+   *  method answered before dispatch. */
+  enableDescribe?: boolean;
+  /** Opaque per-process server identifier surfaced to clients and the landing page. */
+  serverId?: string;
+  /** Hook invoked around each dispatched request (tracing/metrics/auth enrichment). */
+  dispatchHook?: DispatchHook;
+  /** Configuration for externalizing oversized record batches to blob storage. */
+  externalLocation?: ExternalLocationConfig;
+  /** Protocol version string reported in the service description. */
+  protocolVersion?: string;
+  /** Lifecycle hook fired once before the first dispatched request. */
+  onServeStart?: ServeStartHook;
+  /**
+   * Additional application protocols, hosted after the primary in this order
+   * (WIRE_PROTOCOL.md §3.1, "Hosting several application protocols").
+   *
+   * A {@link Protocol} carries its handlers, so each entry is the whole
+   * `(protocol, implementation)` pair. The set is fixed for the server's life
+   * and is the same on every transport the server is handed to --
+   * {@link VgiRpcServer.serveConnection}, `serveTcp`, `serveUnix`,
+   * `serveStream` and `createHttpHandler` all accept this server. Names must
+   * be unique, and none may use the reserved `vgi_rpc.` prefix: reflection is
+   * hosted automatically and identity through {@link identity}.
+   */
+  protocols?: readonly Protocol[];
+  /** Host `vgi_rpc.Identity.v1` with this implementation. Only the methods
+   *  whose hooks it was given are hosted; with neither hook nothing is. Host it
+   *  only on servers whose transport authenticates callers (HTTP). */
+  identity?: IdentityImpl;
+  /**
+   * Whether EXCEPTION batches carry the remote traceback (`log_extra.traceback`).
+   * Default `true`, on **every** transport: the DuckDB extension puts the
+   * remote traceback into the error a user sees, and omitting it on HTTP hid
+   * chained causes. `false` turns it off on all transports at once. The
+   * exception type, message, code, kind and details are sent either way.
+   * WIRE_PROTOCOL.md §8, "Tracebacks".
+   */
+  includeTracebacks?: boolean;
+}
+
+/** Who is calling, as a raw transport resolved it. */
+export interface RawPeer {
+  /** The authenticated caller, when the transport resolves one (TCP peer identity). */
+  auth?: AuthContext;
+  /** Connection evidence snapshotted for the connection lifetime. */
+  evidence?: PeerEvidenceSet;
+  /** Remote address, for the access log. */
+  remoteAddr?: string;
+}
+
 /**
  * RPC server that reads Arrow IPC requests from stdin and writes responses to stdout.
  * Supports unary and streaming (producer/exchange) methods.
+ *
+ * It is also the **protocol host** every other transport serves: hand the same
+ * instance to `serveTcp`, `serveUnix`, `serveStream` or `createHttpHandler`
+ * and each serves exactly the protocols registered here, routed, gated and
+ * error-encoded by the same code.
  */
 export class VgiRpcServer {
   private protocol: Protocol;
@@ -66,49 +126,52 @@ export class VgiRpcServer {
   private dispatchHook: DispatchHook | null = null;
   private externalConfig: ExternalLocationConfig | undefined;
   private onServeStart: ServeStartHook | null = null;
+  private readonly tracebacks: boolean;
   /** True once the on_serve_start hook has fired successfully. The bind
    *  state is committed only after the hook returns, so a transient
    *  failure on first request leaves it `false` and the next request
    *  re-fires rather than silently skipping. Mirrors Python 7b3999c. */
   private serveStartFired = false;
+  /** The in-flight first notification, shared by concurrent connections so a
+   *  launcher accepting two at once fires the hook once rather than twice. */
+  private serveStartInFlight: Promise<void> | null = null;
+  /** Set once a transport starts serving. The hosted set is fixed for the
+   *  server's life from then on (WIRE_PROTOCOL.md §3.1): reflection output and
+   *  every protocol_hash stay stable, and a protocol added late cannot be
+   *  reachable on one transport and not another. */
+  private sealed = false;
   /** Protocols hosted beyond the primary, keyed by wire name.
    *
    *  The primary stays in `protocol` so every existing path is untouched; it is
    *  projected into a binding on demand by {@link bindings}. */
   private extraBindings: Map<string, ProtocolBinding> = new Map();
 
-  constructor(
-    protocol: Protocol,
-    options?: {
-      /** Host `vgi_rpc.Reflection.v1`. Default `true`.
-       *
-       *  Named for the `__describe__` method it used to switch on, and kept
-       *  under that name across the fleet: what it gates is introspection,
-       *  and introspection is now a co-hosted protocol rather than a reserved
-       *  method answered before dispatch. */
-      enableDescribe?: boolean;
-      /** Opaque per-process server identifier surfaced to clients and the landing page. */
-      serverId?: string;
-      /** Hook invoked around each dispatched request (tracing/metrics/auth enrichment). */
-      dispatchHook?: DispatchHook;
-      /** Configuration for externalizing oversized record batches to blob storage. */
-      externalLocation?: ExternalLocationConfig;
-      /** Protocol version string reported in the service description. */
-      protocolVersion?: string;
-      /** Lifecycle hook fired once before the first dispatched request. */
-      onServeStart?: ServeStartHook;
-    },
-  ) {
+  constructor(protocol: Protocol, options?: VgiRpcServerOptions) {
     this.protocol = protocol;
     this.serverId = options?.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
     this.dispatchHook = options?.dispatchHook ?? null;
     this.externalConfig = options?.externalLocation;
     this.protocolVersion = options?.protocolVersion ?? "";
     this.onServeStart = options?.onServeStart ?? null;
+    this.tracebacks = options?.includeTracebacks ?? true;
+    // The primary is an application protocol like any other: the reserved
+    // prefix rule applies to it too, however its name was derived.
+    validateApplicationProtocol(protocol.name, protocol.name, "the primary protocol");
+    // Application protocols first, in registration order, so reflection lists
+    // them right after the primary. Framework protocols follow.
+    for (const [index, extra] of (options?.protocols ?? []).entries()) {
+      this.addProtocol(extra, `protocols[${index}]`);
+    }
     // Registered here rather than left to the caller: a server no client can
     // introspect is not a useful default now that `__describe__` is gone, and
     // reflection is what the client bootstraps from.
     if (options?.enableDescribe ?? true) this.registerReflection();
+    if (options?.identity) this.registerIdentity(options.identity);
+  }
+
+  /** This server's identifier, as written on every response batch. */
+  get id(): string {
+    return this.serverId;
   }
 
   /** Every protocol this server hosts, primary first.
@@ -126,11 +189,34 @@ export class VgiRpcServer {
     return out;
   }
 
+  /** Whether this server's error batches carry the remote traceback. One
+   *  switch for every transport, on by default (WIRE_PROTOCOL.md §8). */
+  get includeTracebacks(): boolean {
+    return this.tracebacks;
+  }
+
+  /** Fix the hosted set. Called by every transport when it starts serving;
+   *  idempotent. After this {@link addProtocol}, {@link registerReflection}
+   *  and {@link registerIdentity} throw. */
+  seal(): void {
+    this.sealed = true;
+  }
+
+  private assertOpen(what: string): void {
+    if (this.sealed) {
+      throw new Error(
+        `Cannot ${what}: this server has started serving. The hosted protocols are fixed for the ` +
+          "server's lifetime, so register every protocol before handing the server to a transport.",
+      );
+    }
+  }
+
   /** Host `vgi_rpc.Reflection.v1` on this server.
    *
-   *  Registered after the application protocol so it appears in its own output
-   *  without being special-cased, and so the primary stays the application
-   *  protocol -- which is what the single-protocol accessors report.
+   *  Registered after the application protocols so it appears in its own
+   *  output without being special-cased, and so the primary stays the
+   *  application protocol -- which is what the single-protocol accessors
+   *  report.
    *
    *  The binding is version-exempt: this is the protocol a version-mismatched
    *  client calls to learn *what* mismatched, and gating it would deny the
@@ -141,6 +227,7 @@ export class VgiRpcServer {
    *  server into a duplicate-name error. */
   registerReflection(): void {
     if (this.extraBindings.has(REFLECTION_PROTOCOL_NAME)) return;
+    this.assertOpen("register reflection");
     const reflection = buildReflectionProtocol({
       listBindings: () => this.bindings() as never,
       hashFor: (name) => {
@@ -150,17 +237,12 @@ export class VgiRpcServer {
       serverId: () => this.serverId,
       serverVersion: () => "",
     });
-    this.addProtocol({ name: REFLECTION_PROTOCOL_NAME, protocol: reflection, versionExempt: true }, true);
+    this.hostBinding({ name: REFLECTION_PROTOCOL_NAME, protocol: reflection, versionExempt: true });
   }
 
   /** Host `vgi_rpc.Identity.v1` on this server, when the deployment configured
-   *  it.
-   *
-   *  Call this *after* {@link registerReflection} so identity appears in
-   *  reflection's output. (`listBindings` is read at request time here, so the
-   *  order is a convention rather than a mechanism -- but it is the convention
-   *  every port follows, and a port that later caches the listing would break
-   *  silently without it.)
+   *  it. Prefer the `identity` constructor option, which registers it in the
+   *  canonical place (after reflection).
    *
    *  Only the methods whose hooks the deployment supplied are hosted, so the
    *  binding's `protocol_hash` narrows with them: a method this worker cannot
@@ -174,40 +256,40 @@ export class VgiRpcServer {
    *  Not version-exempt: the binding declares no `protocolVersion`, so the gate
    *  never fires, and exempting it would be a claim rather than a fact.
    *
-   *  **KNOWN GAP: this protocol is reachable over HTTP and stdio only.**
-   *  `createHttpHandler` accepts a `ProtocolHost`, and {@link serveConnection}
-   *  is a method on this class, so both can carry a secondary binding. The
-   *  three launcher transports cannot: `serveTcp`, `serveUnix` and
-   *  `serveStream` each take a bare {@link Protocol} and construct their *own*
-   *  `VgiRpcServer` internally, so there is no seam through which a caller can
-   *  register identity (or any other secondary protocol) on them.
-   *
-   *  That bites hardest on TCP, which is the one raw transport that does
-   *  resolve a peer identity into an `AuthContext` -- so it is the only place
-   *  `introspect_token` could succeed for an allowlisted caller off HTTP, and
-   *  it cannot host the method to try. `serveConnection` supplies no
-   *  `AuthContext` at all, so identity there is reachable but fails closed,
-   *  which is correct but is only half the property
-   *  IDENTITY_CONFORMANCE_FIXTURE.md §7 asks a port to cover; the allowlisted
-   *  half of `test/token-identity.test.ts`'s raw-transport block rides HTTP
-   *  for this reason and says so.
-   *
-   *  The fix is to widen those three signatures to `Protocol | ProtocolHost`
-   *  the way `createHttpHandler` already is. Left undone deliberately: it is a
-   *  public API change rather than a wiring fix, and naming it beats bundling
-   *  it into an unrelated commit. */
+   *  Reachable on every transport this server is handed to. Its guards read
+   *  the caller's `AuthContext`: HTTP and TCP-with-peer-identity supply one;
+   *  stdio and unix do not, so there it fails closed. */
   registerIdentity(identity: IdentityImpl): void {
+    this.assertOpen("register identity");
     const protocol = buildIdentityProtocol(identity);
     if (!protocol) return;
-    this.addProtocol({ name: IDENTITY_PROTOCOL_NAME, protocol, versionExempt: false }, true);
+    this.hostBinding({ name: IDENTITY_PROTOCOL_NAME, protocol, versionExempt: false });
   }
 
-  /** Host an additional protocol alongside the primary.
+  /** Host an additional application protocol alongside the primary.
    *
-   *  `allowReserved` is for the framework's own protocols only; an application
-   *  passing `true` would be able to shadow reflection. */
-  addProtocol(binding: ProtocolBinding, allowReserved = false): void {
-    validateProtocolName(binding.name, allowReserved);
+   *  Prefer the `protocols` constructor option, which fixes the set at
+   *  construction. Refused once the server has started serving, for a
+   *  reserved `vgi_rpc.` name (checked on the binding name *and* the
+   *  protocol's own name, however either was derived), and for a duplicate
+   *  name. */
+  addProtocol(target: Protocol | ProtocolBinding, label = "addProtocol"): void {
+    this.assertOpen("add a protocol");
+    const binding: ProtocolBinding =
+      "protocol" in target && "versionExempt" in target
+        ? target
+        : { name: (target as Protocol).name, protocol: target as Protocol, versionExempt: false };
+    validateApplicationProtocol(binding.name, binding.protocol.name, label);
+    // An application binding is never version-exempt: exemption is for
+    // reflection, which the framework registers itself.
+    this.hostBinding({ ...binding, versionExempt: false });
+  }
+
+  /** Register a binding. The framework's own protocols come through here with
+   *  their reserved names; application ones only after
+   *  {@link validateApplicationProtocol}. */
+  private hostBinding(binding: ProtocolBinding): void {
+    validateProtocolName(binding.name, true);
     if (binding.name === this.protocol.name || this.extraBindings.has(binding.name)) {
       throw new Error(
         `Two protocols are hosted under the same name '${binding.name}'. ` +
@@ -268,61 +350,30 @@ export class VgiRpcServer {
     return { method: found, binding };
   }
 
-  /** Fire the on_serve_start hook once for this transport. Idempotent
-   *  on success — re-throws on failure without committing the bind. */
-  private async notifyTransport(kind: TransportKind): Promise<void> {
+  /** Fire the on_serve_start hook once for this server. Idempotent on
+   *  success; re-throws on failure without committing, so the next request
+   *  retries. Concurrent first requests share one attempt. Also seals the
+   *  hosted set. */
+  async notifyTransport(kind: TransportKind): Promise<void> {
+    this.seal();
     if (this.serveStartFired) return;
-    if (this.onServeStart) {
-      await this.onServeStart(kind);
-    }
-    this.serveStartFired = true;
-  }
-
-  /** Validate a client's declared protocol_version against the Protocol's
-   *  declared version. Caller invokes only when
-   *  `protocol.protocolVersionParts` is non-null. Mirrors Python's
-   *  `RpcServer._check_protocol_version`: exact major+minor match, patch
-   *  ignored; directional error message names which side is older. */
-  private checkProtocolVersion(clientVersion: string | undefined, binding?: ProtocolBinding): void {
-    const target = binding?.protocol ?? this.protocol;
-    const serverParts = target.protocolVersionParts!;
-    const serverVersion = target.protocolVersion;
-    if (clientVersion === undefined) {
-      throw new ProtocolVersionError(
-        "VGI client/worker protocol_version mismatch.\n" +
-          "  Client: <not declared>\n" +
-          `  Server: ${serverVersion}\n` +
-          "  Direction: the client did not send a vgi_rpc.protocol_version " +
-          "metadata key. This is either a vgi-rpc framework bug or a " +
-          "non-VGI client connecting to a VGI worker.",
-      );
-    }
-    let clientParts: readonly [number, number, number];
-    try {
-      clientParts = parseProtocolVersion(clientVersion);
-    } catch {
-      throw new ProtocolVersionError(
-        "VGI client/worker protocol_version mismatch.\n" +
-          `  Client: ${clientVersion}\n` +
-          `  Server: ${serverVersion}\n` +
-          "  Direction: client sent a malformed protocol_version. " +
-          "Expected canonical semver MAJOR.MINOR.PATCH.",
-      );
-    }
-    if (clientParts[0] === serverParts[0] && clientParts[1] === serverParts[1]) {
+    if (this.serveStartInFlight) {
+      await this.serveStartInFlight;
       return;
     }
-    const clientOlder =
-      clientParts[0] < serverParts[0] || (clientParts[0] === serverParts[0] && clientParts[1] < serverParts[1]);
-    const direction = clientOlder
-      ? `client is too old; upgrade the VGI extension/client to a version supporting protocol_version ${serverVersion}.`
-      : `server is too old; upgrade the VGI worker to a version supporting protocol_version ${clientVersion}.`;
-    throw new ProtocolVersionError(
-      "VGI client/worker protocol_version mismatch.\n" +
-        `  Client: ${clientVersion}\n` +
-        `  Server: ${serverVersion}\n` +
-        `  Direction: ${direction}`,
-    );
+    if (!this.onServeStart) {
+      this.serveStartFired = true;
+      return;
+    }
+    const hook = this.onServeStart;
+    const attempt = Promise.resolve().then(() => hook(kind));
+    this.serveStartInFlight = attempt;
+    try {
+      await attempt;
+      this.serveStartFired = true;
+    } finally {
+      if (this.serveStartInFlight === attempt) this.serveStartInFlight = null;
+    }
   }
 
   /** Start the server loop over stdin/stdout. Reads requests until stdin closes. */
@@ -354,13 +405,17 @@ export class VgiRpcServer {
    *   or a Node `Readable` (e.g. a `Duplex` bridging a MessagePort).
    * @param writable outgoing response sink — a stdout-like fd number, or a
    *   `net.Socket` / structurally-compatible `Duplex`. Omit for the stdout fd.
-   * @param transportKind reported to the `on_serve_start` hook (default `PIPE`).
+   * @param transportKind reported to the `on_serve_start` hook, and deciding
+   *   the traceback default (default `PIPE`).
+   * @param peer the caller, when the transport resolved one.
    */
   async serveConnection(
     readable: ReadableStream<Uint8Array> | NodeJS.ReadableStream,
     writable?: number | import("node:net").Socket | ByteSink,
     transportKind: TransportKind = TransportKind.PIPE,
+    peer: RawPeer = {},
   ): Promise<void> {
+    this.seal();
     const reader = await IpcStreamReader.create(readable);
     const writer = new IpcStreamWriter(writable);
 
@@ -370,21 +425,10 @@ export class VgiRpcServer {
         // the transport binding. Inside the loop so a failure on the very
         // first request can be retried.
         await this.notifyTransport(transportKind);
-        await this.serveOne(reader, writer, transportKind);
+        await this.serveRequest(reader, writer, transportKind, peer);
       }
     } catch (e: any) {
-      // EOF or broken pipe / closed channel → clean exit
-      if (
-        e.message?.includes("closed") ||
-        e.message?.includes("Expected Schema Message") ||
-        e.message?.includes("null or length 0") ||
-        e.code === "EPIPE" ||
-        e.code === "ERR_STREAM_PREMATURE_CLOSE" ||
-        e.code === "ERR_STREAM_DESTROYED" ||
-        (e instanceof Error && e.message.includes("EOF"))
-      ) {
-        return;
-      }
+      if (isConnectionClosed(e)) return;
       // ArrowInvalid or unexpected error
       throw e;
     } finally {
@@ -392,11 +436,23 @@ export class VgiRpcServer {
     }
   }
 
-  private async serveOne(
+  /**
+   * Read and answer exactly one request on a raw (framed Arrow IPC) transport.
+   *
+   * The one request path shared by stdio, unix, TCP and byte-stream serving,
+   * so routing, the per-binding version gate, error encoding and the dispatch
+   * hook cannot drift between them. Throws an EOF-shaped error when the peer
+   * has closed; {@link isConnectionClosed} recognises it.
+   *
+   * @internal Used by the launchers; not a stable API.
+   */
+  async serveRequest(
     reader: IpcStreamReader,
     writer: IpcStreamWriter,
     transportKind: TransportKind,
+    peer: RawPeer = {},
   ): Promise<void> {
+    const includeTraceback = this.tracebacks;
     const stream = await reader.readStream();
     if (!stream) {
       throw new Error("EOF");
@@ -405,7 +461,7 @@ export class VgiRpcServer {
     const { schema, batches } = stream;
     if (batches.length === 0) {
       const err = new RpcError("ProtocolError", "Request stream contains no batches", "");
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, this.serverId, null);
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, this.serverId, null, includeTraceback);
       await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
@@ -424,7 +480,7 @@ export class VgiRpcServer {
       requestId = parsed.requestId;
     } catch (e: any) {
       // Write error response for protocol/version errors
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, e, this.serverId, null);
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA, e, this.serverId, null, includeTraceback);
       await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       if (e instanceof VersionError || e instanceof RpcError) {
         return; // Continue serving
@@ -439,7 +495,7 @@ export class VgiRpcServer {
     try {
       ({ method, binding } = this.resolve(protocolName, methodName));
     } catch (error) {
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, error as Error, this.serverId, requestId);
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA, error as Error, this.serverId, requestId, includeTraceback);
       await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
       return;
     }
@@ -448,24 +504,20 @@ export class VgiRpcServer {
       validateRequestSchema(schema, method.paramsSchema, methodName);
     } catch (error) {
       const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
-      const errBatch = buildErrorBatch(errSchema, error as Error, this.serverId, requestId);
+      const errBatch = buildErrorBatch(errSchema, error as Error, this.serverId, requestId, includeTraceback);
       await writer.writeStream(errSchema, [errBatch]);
       return;
     }
 
     // Application-protocol-version gate, against the binding that owns the
-    // resolved method. A server hosting several protocols has a version per
-    // binding and no single "server version"; gating a secondary against the
-    // primary rejects correct callers and names the wrong protocol when it
-    // does. A version-exempt binding (reflection) is skipped: it is what a
-    // mismatched client calls to learn what mismatched.
-    if (!binding.versionExempt && binding.protocol.protocolVersionParts !== null) {
+    // resolved method. A version-exempt binding (reflection) is skipped: it is
+    // what a mismatched client calls to learn what mismatched.
+    if (!binding.versionExempt) {
       try {
-        const md = batch.metadata;
-        this.checkProtocolVersion(md?.get(PROTOCOL_VERSION_KEY), binding);
+        gateProtocolVersion(binding, batch.metadata?.get(PROTOCOL_VERSION_KEY));
       } catch (exc) {
         const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
-        const errBatch = buildErrorBatch(errSchema, exc as Error, this.serverId, requestId);
+        const errBatch = buildErrorBatch(errSchema, exc as Error, this.serverId, requestId, includeTraceback);
         await writer.writeStream(errSchema, [errBatch]);
         return;
       }
@@ -507,10 +559,10 @@ export class VgiRpcServer {
       protocolHash: await protocolHashFor(binding),
       protocolVersion: this.protocolVersion,
       kind: transportKind,
-      principal: "",
-      authDomain: "",
-      authenticated: false,
-      remoteAddr: "",
+      principal: peer.auth?.principal ?? "",
+      authDomain: peer.auth?.domain ?? "",
+      authenticated: peer.auth?.authenticated ?? false,
+      remoteAddr: peer.remoteAddr ?? "",
       requestData,
       streamId,
     };
@@ -528,20 +580,20 @@ export class VgiRpcServer {
 
     applyDefaults(params, method.defaults);
 
+    const ctx: RawDispatchContext = {
+      serverId: this.serverId,
+      requestId,
+      includeTraceback,
+      externalConfig: this.externalConfig,
+      kind: transportKind,
+      authContext: peer.auth,
+      peerEvidence: peer.evidence,
+    };
     try {
       if (method.type === MethodType.UNARY) {
-        await dispatchUnary(method, params, writer, this.serverId, requestId, this.externalConfig, transportKind);
+        await dispatchUnary(method, params, writer, ctx);
       } else {
-        await dispatchStream(
-          method,
-          params,
-          writer,
-          reader,
-          this.serverId,
-          requestId,
-          this.externalConfig,
-          transportKind,
-        );
+        await dispatchStream(method, params, writer, reader, ctx);
       }
     } catch (e) {
       dispatchError = e instanceof Error ? e : new Error(String(e));
@@ -550,4 +602,43 @@ export class VgiRpcServer {
       this.dispatchHook?.onDispatchEnd(token, info, stats, dispatchError);
     }
   }
+}
+
+/** Refuse an application protocol whose name is reserved or malformed.
+ *
+ *  Checked on *both* names a registration carries -- the binding's routing
+ *  key and the protocol's own name -- because the reserved-prefix rule
+ *  applies however a name was derived (WIRE_PROTOCOL.md §3.1). */
+function validateApplicationProtocol(bindingName: string, protocolName: string, label: string): void {
+  for (const name of new Set([bindingName, protocolName])) {
+    if (name.startsWith(RESERVED_PROTOCOL_PREFIX)) {
+      throw new Error(
+        `${label}: protocol name '${name}' claims the reserved '${RESERVED_PROTOCOL_PREFIX}' prefix, which is ` +
+          "for protocols the framework defines. Reflection is hosted automatically; identity is hosted " +
+          "through the `identity` option.",
+      );
+    }
+    // Grammar only (`allowReserved`): the reserved-prefix rule is the check
+    // above, kept single so it names the label and cannot be shadowed.
+    try {
+      validateProtocolName(name, true);
+    } catch (e) {
+      throw new Error(`${label}: ${(e as Error).message}`);
+    }
+  }
+}
+
+/** Whether a raw-transport read failed because the peer closed the connection
+ *  -- the clean way a serve loop ends. */
+export function isConnectionClosed(e: unknown): boolean {
+  const err = e as { code?: string; message?: string } | null;
+  return Boolean(
+    err?.message?.includes("closed") ||
+      err?.message?.includes("Expected Schema Message") ||
+      err?.message?.includes("null or length 0") ||
+      err?.message?.includes("EOF") ||
+      err?.code === "EPIPE" ||
+      err?.code === "ERR_STREAM_PREMATURE_CLOSE" ||
+      err?.code === "ERR_STREAM_DESTROYED",
+  );
 }

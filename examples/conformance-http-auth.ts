@@ -16,7 +16,7 @@
  * `unauthorized`.
  */
 import { AuthFailure, AuthReason, createHttpHandler } from "../src/http/index.js";
-import { protocol } from "./conformance-protocol.js";
+import { conformanceHost } from "./conformance-protocol.js";
 
 const portArg = process.argv.indexOf("--port");
 const port = portArg >= 0 ? parseInt(process.argv[portArg + 1] ?? "0", 10) : 0;
@@ -37,7 +37,7 @@ const REQUESTABLE: Record<string, AuthReason> = {
   insufficient_scope: AuthReason.InsufficientScope,
 };
 
-const handler = createHttpHandler(protocol, {
+const handler = createHttpHandler(conformanceHost({ serverId: "conformance-http-auth" }), {
   serverId: "conformance-http-auth",
   protocolName: "ConformanceService",
   authenticate: (request: Request) => {

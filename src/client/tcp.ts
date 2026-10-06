@@ -49,9 +49,14 @@ export function tcpConnect(host: string, port: number, options?: TcpConnectOptio
     },
   };
 
+  // `protocol` must ride through: without it the client binds to whatever
+  // reflection lists first, so a caller naming a secondary protocol was
+  // silently routed to the primary -- a same-named method then answered with
+  // the wrong binding's result rather than an error.
   const client = pipeConnect(readable, writable, {
     onLog: options?.onLog,
     externalLocation: options?.externalLocation,
+    protocol: options?.protocol,
   });
 
   const originalClose = client.close;

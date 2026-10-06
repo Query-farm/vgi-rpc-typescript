@@ -25,12 +25,7 @@
  */
 
 import { createServer, type Server, type Socket } from "node:net";
-import { schema as makeSchema, serializeBatch } from "../arrow/index.js";
 import { AuthContext } from "../auth.js";
-import type { ProtocolBinding } from "../binding.js";
-import { dispatchStream } from "../dispatch/stream.js";
-import { dispatchUnary } from "../dispatch/unary.js";
-import { RpcError, VersionError } from "../errors.js";
 import type { ExternalLocationConfig } from "../external.js";
 import {
   IdentityAssurance,
@@ -48,21 +43,11 @@ import {
 } from "../identity.js";
 import { validateIrohIssuer } from "../iroh.js";
 import type { Protocol } from "../protocol.js";
-import { protocolHashFor } from "../reflection.js";
-import { VgiRpcServer } from "../server.js";
-import {
-  type CallStatistics,
-  type DispatchHook,
-  type DispatchInfo,
-  type MethodDefinition,
-  MethodType,
-  type ServeStartHook,
-  TransportKind,
-} from "../types.js";
+import { isConnectionClosed, type VgiRpcServer } from "../server.js";
+import { type DispatchHook, type ServeStartHook, TransportKind } from "../types.js";
 import { IpcStreamReader } from "../wire/reader.js";
-import { applyDefaults, parseRequest, validateRequestSchema } from "../wire/request.js";
-import { buildErrorBatch } from "../wire/response.js";
 import { IpcStreamWriter } from "../wire/writer.js";
+import { launcherHost } from "./host.js";
 import {
   DEFAULT_MAX_PROXY_V2_BYTES,
   formatProxyEndpoint,
@@ -72,8 +57,6 @@ import {
   readProxyProtocolV2,
   readProxyProtocolV2AllowingIrohIdentity,
 } from "./proxy-protocol-v2.js";
-
-const EMPTY_SCHEMA = makeSchema([]);
 
 /** Configuration for {@link serveTcp}. */
 export interface ServeTcpOptions {
@@ -160,27 +143,24 @@ export interface ServeTcpHandle {
  * (`setNoDelay(true)`) on each connection so the lockstep request/response
  * framing is not delayed waiting to coalesce writes.
  *
- * SECURITY: no authentication or TLS — trusted networks only; the default
+ * `target` is a bare {@link Protocol}, or a {@link VgiRpcServer} carrying
+ * additional protocols (and identity) -- the same host object every other
+ * transport accepts, so all of them serve one hosted set. With a server, the
+ * server-level options here (`serverId`, `protocolVersion`, `enableDescribe`,
+ * `dispatchHook`, `externalLocation`, `onServeStart`) must be left unset.
+ *
+SECURITY: no authentication or TLS — trusted networks only; the default
  * host is loopback (`127.0.0.1`).  Use the HTTP transport for untrusted
  * networks.
  */
-// KNOWN GAP: `protocol` is a bare `Protocol`, not a `Protocol | ProtocolHost`
-// the way `createHttpHandler`'s target is, so a caller cannot register a
-// secondary protocol on this transport -- `vgi_rpc.Identity.v1` included, even
-// though TCP is the one raw transport that resolves a peer identity into an
-// `AuthContext` and could therefore actually answer `introspect_token`. Same
-// for `serveUnix` and `serveStream`. See `VgiRpcServer.registerIdentity` for
-// the full note and the fix.
-export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}): Promise<ServeTcpHandle> {
+export async function serveTcp(
+  target: Protocol | VgiRpcServer,
+  options: ServeTcpOptions = {},
+): Promise<ServeTcpHandle> {
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 0;
   const idleTimeoutS = options.idleTimeout ?? 300;
   const startupGraceS = options.startupGraceSeconds ?? 5;
-  const protocolVersion = options.protocolVersion ?? "";
-  const serverId = options.serverId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-  const dispatchHook = options.dispatchHook ?? null;
-  const externalConfig = options.externalLocation;
-  const onServeStart = options.onServeStart ?? null;
   const backlog = options.backlog ?? 128;
   const announcementSink = options.announcementSink ?? process.stdout;
   const peerIdentityProviders = [...(options.peerIdentityProviders ?? [])];
@@ -237,39 +217,12 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
   }
   let activePeerProviderCalls = 0;
 
-  // One routing host, so this transport resolves `(protocol, method)` the
-  // same way the stdio server does -- and hosts `vgi_rpc.Reflection.v1`,
-  // which is what a client bootstraps from now that `__describe__` is gone.
-  // Only the binding table and the resolver are used; the dispatch loop
-  // below stays this transport's own, because its framing is.
-  const rpcHost = new VgiRpcServer(protocol, {
-    serverId,
-    protocolVersion,
-    enableDescribe: options.enableDescribe ?? true,
-  });
-
-  // Lifecycle: only commit `serveStartFired` after the hook returns successfully.
-  let serveStartFired = false;
-  let serveStartInFlight: Promise<void> | null = null;
-  async function notifyTransport(): Promise<void> {
-    if (serveStartFired) return;
-    if (serveStartInFlight) {
-      await serveStartInFlight;
-      return;
-    }
-    if (!onServeStart) {
-      serveStartFired = true;
-      return;
-    }
-    const attempt = Promise.resolve().then(() => onServeStart(TransportKind.TCP));
-    serveStartInFlight = attempt;
-    try {
-      await attempt;
-      serveStartFired = true;
-    } finally {
-      if (serveStartInFlight === attempt) serveStartInFlight = null;
-    }
-  }
+  // One protocol host, shared with every other transport this server is
+  // handed to: routing, the version gate, error encoding and the dispatch hook
+  // all run in `VgiRpcServer.serveRequest`, so this launcher owns only its
+  // socket lifecycle, admission and peer identity.
+  const rpcHost = launcherHost(target, options, "serveTcp");
+  rpcHost.seal();
 
   const server: Server = createServer({ allowHalfOpen: false });
 
@@ -537,25 +490,19 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
 
     try {
       // Fire on_serve_start lazily — first request retries on hook failure.
-      await notifyTransport();
+      await rpcHost.notifyTransport(TransportKind.TCP);
 
+      const peer = {
+        auth: identity.auth,
+        evidence: identity.evidence,
+        remoteAddr: identity.evidence.identities[0]?.sourceAddress ?? "",
+      };
       while (true) {
         try {
-          await serveOnce(reader, writer, identity);
+          await rpcHost.serveRequest(reader, writer, TransportKind.TCP, peer);
         } catch (e: unknown) {
-          const err = e as { code?: string; message?: string };
           // EOF/closed client → end this connection cleanly.
-          if (
-            err?.message?.includes("closed") ||
-            err?.message?.includes("Expected Schema Message") ||
-            err?.message?.includes("null or length 0") ||
-            err?.message?.includes("EOF") ||
-            err?.code === "EPIPE" ||
-            err?.code === "ERR_STREAM_PREMATURE_CLOSE" ||
-            err?.code === "ERR_STREAM_DESTROYED"
-          ) {
-            return;
-          }
+          if (isConnectionClosed(e)) return;
           throw e;
         }
       }
@@ -565,138 +512,6 @@ export async function serveTcp(protocol: Protocol, options: ServeTcpOptions = {}
       } catch {
         // already closed
       }
-    }
-  }
-
-  async function serveOnce(
-    reader: IpcStreamReader,
-    writer: IpcStreamWriter,
-    identity: { auth: AuthContext; evidence: PeerEvidenceSet },
-  ): Promise<void> {
-    const stream = await reader.readStream();
-    if (!stream) {
-      throw new Error("EOF");
-    }
-    const { schema, batches } = stream;
-    if (batches.length === 0) {
-      const err = new RpcError("ProtocolError", "Request stream contains no batches", "");
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, serverId, null);
-      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
-      return;
-    }
-    const batch = batches[0];
-    let methodName: string;
-    let protocolName: string;
-    let params: Record<string, unknown>;
-    let requestId: string | null;
-    try {
-      const parsed = parseRequest(schema, batch);
-      methodName = parsed.methodName;
-      protocolName = parsed.protocol;
-      params = parsed.params;
-      requestId = parsed.requestId;
-    } catch (e: unknown) {
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, e as Error, serverId, null);
-      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
-      if (e instanceof VersionError || e instanceof RpcError) return;
-      throw e;
-    }
-
-    // Resolve (protocol, method). The routing key is part of the lookup rather
-    // than a label on it: method names may collide across protocols, and a
-    // retired `__describe__` is refused here with a message naming where
-    // introspection went.
-    let method: MethodDefinition;
-    let binding: ProtocolBinding;
-    try {
-      ({ method, binding } = rpcHost.resolve(protocolName, methodName));
-    } catch (error) {
-      const errBatch = buildErrorBatch(EMPTY_SCHEMA, error as Error, serverId, requestId);
-      await writer.writeStream(EMPTY_SCHEMA, [errBatch]);
-      return;
-    }
-
-    try {
-      validateRequestSchema(schema, method.paramsSchema, methodName);
-    } catch (error) {
-      const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
-      await writer.writeStream(errSchema, [buildErrorBatch(errSchema, error as Error, serverId, requestId)]);
-      return;
-    }
-
-    const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
-    let requestData: Uint8Array | undefined;
-    try {
-      requestData = serializeBatch(batch);
-    } catch {
-      // best-effort
-    }
-    const info: DispatchInfo = {
-      method: methodName,
-      methodType,
-      serverId,
-      requestId,
-      // The protocol that owns the dispatched method, and *its* canonical
-      // digest. Both from the resolved binding, never the server's primary:
-      // `protocol_hash` is the registry key for decoding an archived record,
-      // so a record naming one protocol while carrying another's is decoded
-      // against the wrong description -- and passes the schema while doing it.
-      // Read inline rather than through a local so the pairing is visible at
-      // the emit site, which is what `test/dispatch-identity.test.ts` checks.
-      protocol: binding.name,
-      protocolHash: await protocolHashFor(binding),
-      protocolVersion,
-      kind: TransportKind.TCP,
-      principal: identity.auth.principal ?? "",
-      authDomain: identity.auth.domain,
-      authenticated: identity.auth.authenticated,
-      remoteAddr: identity.evidence.identities[0]?.sourceAddress ?? "",
-      requestData,
-    };
-    const stats: CallStatistics = {
-      inputBatches: 0,
-      outputBatches: 0,
-      inputRows: 0,
-      outputRows: 0,
-      inputBytes: 0,
-      outputBytes: 0,
-    };
-
-    const token = dispatchHook?.onDispatchStart(info);
-    let dispatchError: Error | undefined;
-    applyDefaults(params, method.defaults);
-    try {
-      if (method.type === MethodType.UNARY) {
-        await dispatchUnary(
-          method,
-          params,
-          writer,
-          serverId,
-          requestId,
-          externalConfig,
-          TransportKind.TCP,
-          identity.auth,
-          identity.evidence,
-        );
-      } else {
-        await dispatchStream(
-          method,
-          params,
-          writer,
-          reader,
-          serverId,
-          requestId,
-          externalConfig,
-          TransportKind.TCP,
-          identity.auth,
-          identity.evidence,
-        );
-      }
-    } catch (e) {
-      dispatchError = e instanceof Error ? e : new Error(String(e));
-      throw e;
-    } finally {
-      dispatchHook?.onDispatchEnd(token, info, stats, dispatchError);
     }
   }
 

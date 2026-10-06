@@ -153,6 +153,7 @@ export default defineConfig({
             { label: "Output Collector", slug: "guides/output-collector" },
             { label: "Client Logging", slug: "guides/client-logging" },
             { label: "Error Handling", slug: "guides/error-handling" },
+            { label: "Hosting Several Protocols", slug: "guides/hosting-protocols" },
             { label: "HTTP Transport", slug: "guides/http-transport" },
             { label: "Compression", slug: "guides/compression" },
             { label: "Large Payloads", slug: "guides/large-payloads" },

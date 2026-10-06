@@ -59,7 +59,7 @@ describe("buildErrorBatch", () => {
   it("builds a 0-row error batch with EXCEPTION metadata", () => {
     const schema = new Schema([new Field("result", new Float64(), false)]);
     const error = new Error("Something went wrong");
-    const batch = buildErrorBatch(schema, error, "srv1", "req1");
+    const batch = buildErrorBatch(schema, error, "srv1", "req1", true);
 
     expect(batch.numRows).toBe(0);
     expect(batch.metadata.get(LOG_LEVEL_KEY)).toBe("EXCEPTION");
@@ -74,7 +74,7 @@ describe("buildErrorBatch", () => {
 
   it("preserves RpcError's protocol exception type", () => {
     const schema = new Schema([]);
-    const batch = buildErrorBatch(schema, new RpcError("ProtocolError", "bad schema", ""), "srv1", null);
+    const batch = buildErrorBatch(schema, new RpcError("ProtocolError", "bad schema", ""), "srv1", null, true);
     expect(batch.metadata.get(LOG_MESSAGE_KEY)).toBe("ProtocolError: bad schema");
     const extra = JSON.parse(batch.metadata.get("vgi_rpc.log_extra")!);
     expect(extra.exception_type).toBe("ProtocolError");
