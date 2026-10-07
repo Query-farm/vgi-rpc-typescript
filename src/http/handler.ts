@@ -80,7 +80,12 @@ import {
   UPLOAD_URL_PARAMS_SCHEMA,
   UPLOAD_URL_RESPONSE_SCHEMA,
 } from "./common.js";
-import { httpDispatchStreamExchange, httpDispatchStreamInit, httpDispatchUnary } from "./dispatch.js";
+import {
+  type DispatchObserver,
+  httpDispatchStreamExchange,
+  httpDispatchStreamInit,
+  httpDispatchUnary,
+} from "./dispatch.js";
 import { composeIdentityAuthenticate } from "./grant-auth.js";
 import {
   configureOAuthPkce,
@@ -1405,7 +1410,7 @@ export function createHttpHandler(
     // dispatcher reports the two stream facts the handler cannot see for
     // itself — the chain id sealed inside the tokens, and a cancel flag that
     // rides in request-batch metadata.
-    const streamObserver: { streamId?: string; cancelled?: boolean } = {};
+    const streamObserver: DispatchObserver = {};
     // Authentication — run before content-type validation so unauthenticated
     // requests get 401 regardless of body shape or response-budget syntax.
     let identity: { authContext: AuthContext; peerEvidence?: PeerEvidenceSet };
@@ -1444,7 +1449,7 @@ export function createHttpHandler(
       peerEvidence?: PeerEvidenceSet;
       cookies: ReadonlyMap<string, string>;
       stickyContext?: StickySink;
-      streamObserver: { streamId?: string; cancelled?: boolean };
+      streamObserver: DispatchObserver;
     };
 
     // Hoisted ahead of sticky resolution so the SessionLost path's
@@ -1768,12 +1773,6 @@ export function createHttpHandler(
       principal: auth?.principal ?? "",
       authDomain: auth?.domain ?? "",
       authenticated: auth?.authenticated ?? false,
-      // Self-contained Arrow IPC stream of the request batch — the body we
-      // already buffered.  Carried on unary calls *and* stream `/init`, both
-      // of which spec §4.3 requires it on; `/exchange` continuations are the
-      // one shape that must not have it. Best-effort: the access log can
-      // still emit even if we couldn't capture it.
-      requestData: action === "call" || action === "init" ? body : undefined,
       claims: auth?.claims,
       requestBytes: requestWireBytes,
       deferral,
@@ -1853,6 +1852,15 @@ export function createHttpHandler(
       // emit: the same 32 zeros for every stream on the server.
       if (streamObserver.streamId) info.streamId = streamObserver.streamId;
       if (streamObserver.cancelled) info.cancelled = true;
+      // The request's shape (names, types, rows -- never values) on unary calls
+      // and stream `/init` only; an `/exchange` continuation carries input
+      // batches, not a request (spec §4.3). State tokens by size only.
+      if ((action === "call" || action === "init") && streamObserver.requestFields) {
+        info.requestFields = streamObserver.requestFields;
+        info.requestRows = streamObserver.requestRows ?? 0;
+      }
+      if (streamObserver.requestStateBytes !== undefined) info.requestStateBytes = streamObserver.requestStateBytes;
+      if (streamObserver.responseStateBytes !== undefined) info.responseStateBytes = streamObserver.responseStateBytes;
       if (egress?.externalizedBytes) info.externalizedBytes = egress.externalizedBytes;
       dispatchHook?.onDispatchEnd(hookToken, info, stats, dispatchError);
       // Release the per-session lock if dispatch held it and the handler

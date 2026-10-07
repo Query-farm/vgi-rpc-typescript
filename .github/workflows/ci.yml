@@ -219,31 +219,29 @@ jobs:
       # wrong. Validating the emitted records here is the only thing that keeps
       # the schema honest.
       #
-      # --access-log-debug is load-bearing: at INFO the worker replaces
-      # `request_data` with a `payload_omitted` marker, and the validator only
-      # checks the field is well-formed *when present*, so an INFO log passes
-      # every request_data rule without ever exercising one.
-      # --require-request-data turns that silent pass into a failure.
+      # --access-log-debug: DEBUG is where a payload leak would show up, so the
+      # log validated is the most verbose one the worker can write. No record
+      # may carry a payload value (request_data, request_state,
+      # response_state) at any level -- the framework cannot know which
+      # parameters are secret -- and check_access_log_streams.py rejects one
+      # that does. Up to 0.28 the opposite was enforced here with
+      # --require-request-data, which made the DEBUG log a store of whatever
+      # credentials callers passed; the reference now rejects that flag.
       #
-      # `large_payload` is excluded here, and only here. At
-      # --access-log-debug every record embeds its whole request payload, so
-      # the >2 GiB test would ask this step to write a multi-gigabyte JSONL
-      # line and then schema-validate it in Python — which killed the worker
-      # outright and failed every test after it with a broken pipe. The group
-      # still runs, unfiltered, in the step above. What this step checks is
-      # the log's *shape*, and an ordinary payload exercises that identically.
+      # `large_payload` is excluded here only because it already runs,
+      # unfiltered, in the step above and takes minutes; its records have the
+      # same shape as any other call's.
       #
       # Nothing else is filtered. Zero-parameter methods (`void_noop`) send an
-      # empty schema and no row, and a validator that demands one row
-      # unconditionally rejects them — that bug shipped in 0.36.1. Any
-      # --filter added here must keep `void*` in scope.
+      # empty schema and no row (request_fields [], request_rows 0), and a
+      # validator that demands one row unconditionally rejects them — that bug
+      # shipped in 0.36.1. Any --filter added here must keep `void*` in scope.
       - name: Validate access log against the cross-language schema
         run: |
           rm -f /tmp/conformance-access.jsonl
           timeout 300 vgi-rpc-test \
             --cmd "bun run examples/conformance.ts --access-log /tmp/conformance-access.jsonl --access-log-debug" \
             --access-log /tmp/conformance-access.jsonl \
-            --require-request-data \
             --filter '!large_payload'
           python conformance/check_access_log_streams.py /tmp/conformance-access.jsonl
 
@@ -251,15 +249,15 @@ jobs:
       # stream. HTTP is where a stream is many requests, so it is the only
       # transport whose records have to chain — and it was never validated at
       # all until now. It went unvalidated while emitting 32 zeros as the
-      # stream id of every stream on the server, and no `request_data` on
+      # stream id of every stream on the server, and no request description on
       # `/init`: on this very suite `--access-log` reported "PASS: 191 entries
       # validated" over 113 stream records, none of which named a stream.
       #
-      # Hence the second checker. `--require-request-data` only inspects unary
-      # records, and `stream_id` passes the schema's hex pattern whatever it
-      # holds, so neither of the tools above can see either bug. A validator
-      # that passes over records that never carried the value it validates is
-      # not evidence, and this is the third time that shape has shipped.
+      # Hence the second checker. `stream_id` passes the schema's hex pattern
+      # whatever it holds, so the schema validator cannot see either bug. A
+      # validator that passes over records that never carried the value it
+      # validates is not evidence, and this is the third time that shape has
+      # shipped.
       - name: Validate the HTTP access log, including stream records
         run: |
           rm -f /tmp/conformance-http-access.jsonl
@@ -276,17 +274,11 @@ jobs:
           # `|| STATUS=1` on both so a schema failure and a stream-coverage
           # failure are each reported, rather than the first aborting under
           # `bash -e` and hiding the second.
-          # `large_payload` excluded for the same reason as the pipe step
-          # above: at DEBUG the record embeds the payload, and the 4 MiB test
-          # alone overshoots the emitter's per-record cap, so `request_data`
-          # is shed (access-log-spec §5b) and --require-request-data reports
-          # the record as missing it. The >2 GiB test never reaches HTTP —
-          # it is scoped to pipe/unix/tcp — so this is purely about the 4 MiB
-          # one. Both run in the dedicated suite step earlier.
+          # `large_payload` excluded: it runs in the dedicated suite step
+          # earlier, and the >2 GiB test is scoped to pipe/unix/tcp anyway.
           timeout 300 vgi-rpc-test \
             --url "http://127.0.0.1:$PORT" \
             --access-log /tmp/conformance-http-access.jsonl \
-            --require-request-data \
             --filter '!large_payload' || STATUS=1
           python conformance/check_access_log_streams.py \
             /tmp/conformance-http-access.jsonl --http --require-continuations || STATUS=1

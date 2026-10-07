@@ -99,7 +99,12 @@ describe("access log sampling", () => {
     // agree, whichever way the hash falls.
     const hook = new AccessLogHook(sink, { sampleRate: 0.5 });
     const streamId = "ab".repeat(16);
-    const init = info({ methodType: "stream", streamId, requestData: new Uint8Array([1, 2, 3]) });
+    const init = info({
+      methodType: "stream",
+      streamId,
+      requestFields: [{ name: "count", type: "int32" }],
+      requestRows: 1,
+    });
     const continuation = info({ methodType: "stream", streamId });
     dispatch(hook, init);
     dispatch(hook, continuation);
@@ -248,36 +253,40 @@ describe("access log claim redaction", () => {
 // truncated: payload_omitted vs true
 // ---------------------------------------------------------------------------
 
-describe("access log truncation markers", () => {
-  test("payload omission at INFO is 'payload_omitted', not 'true'", () => {
+describe("access log request description", () => {
+  test("the request is described by shape, never by value", () => {
     const sink = new CaptureSink();
     const hook = new AccessLogHook(sink);
-    dispatch(hook, info({ requestData: new Uint8Array(64) }));
+    dispatch(hook, info({ requestFields: [{ name: "options", type: "binary" }], requestRows: 1 }));
     const rec = sink.last();
-    expect(rec.truncated).toBe("payload_omitted");
+    expect(rec.request_fields).toEqual([{ name: "options", type: "binary" }]);
+    expect(rec.request_rows).toBe(1);
     expect(rec.request_data).toBeUndefined();
-    expect(rec.original_request_bytes).toBeGreaterThan(0);
+    expect(rec.original_request_bytes).toBeUndefined();
   });
 
-  test("DEBUG keeps the payload and sets no marker", () => {
+  test("level DEBUG is a no-op: it brings back no payload", () => {
     const sink = new CaptureSink();
     const hook = new AccessLogHook(sink, { level: "DEBUG" });
-    dispatch(hook, info({ requestData: new Uint8Array([1, 2, 3, 4]) }));
+    dispatch(hook, info({ requestFields: [], requestRows: 0 }));
     const rec = sink.last();
-    expect(rec.truncated).toBeUndefined();
-    expect(typeof rec.request_data).toBe("string");
+    expect(rec.request_fields).toEqual([]);
+    expect(rec.request_rows).toBe(0);
+    expect(rec.request_data).toBeUndefined();
   });
 
-  test("size-driven shedding is 'true' — the value consumers filter on", () => {
+  test("state tokens are reported by size only", () => {
     const sink = new CaptureSink();
-    // DEBUG so the payload is in the record to begin with, and a cap it
-    // cannot fit under.
-    const hook = new AccessLogHook(sink, { level: "DEBUG", maxRecordBytes: 512 });
-    dispatch(hook, info({ requestData: new Uint8Array(4096) }));
+    const hook = new AccessLogHook(sink);
+    dispatch(
+      hook,
+      info({ methodType: "stream", streamId: "ab".repeat(16), requestStateBytes: 40, responseStateBytes: 44 }),
+    );
     const rec = sink.last();
-    expect(rec.truncated).toBe(true);
-    expect(rec.request_data).toBeUndefined();
-    expect(rec.original_request_bytes).toBeGreaterThan(512);
+    expect(rec.request_state_bytes).toBe(40);
+    expect(rec.response_state_bytes).toBe(44);
+    expect(rec.request_state).toBeUndefined();
+    expect(rec.response_state).toBeUndefined();
   });
 
   test("claims are emptied before the sentinel form is reached", () => {

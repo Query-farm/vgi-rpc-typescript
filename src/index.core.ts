@@ -272,6 +272,7 @@ export {
 } from "./token-identity.js";
 export {
   type AccessLogDeferral,
+  type AccessLogRequestField,
   type CallContext,
   type CallStatistics,
   type DispatchHook,

@@ -309,6 +309,14 @@ export interface AccessLogDeferral {
   defer(emit: (responseBytes: number | undefined) => void): void;
 }
 
+/** One request parameter as the access log describes it: name and type, never value. */
+export interface AccessLogRequestField {
+  /** Parameter name. */
+  name: string;
+  /** Canonical Arrow type token, e.g. `utf8`, `list<item?:int32>`. */
+  type: string;
+}
+
 /** Metadata passed to dispatch hooks before and after RPC method execution. */
 export interface DispatchInfo {
   /** RPC method name. */
@@ -341,8 +349,20 @@ export interface DispatchInfo {
   /** HTTP transport: the status code the response went out with. Absent on
    *  transports that have no such thing (pipe, Unix socket, TCP). */
   httpStatus?: number;
-  /** Self-contained Arrow IPC stream of the request batch (unary + stream init only). */
-  requestData?: Uint8Array;
+  /** Shape of the request batch -- parameter names and Arrow type tokens, in
+   *  schema order -- on unary calls and stream init only. Never the values:
+   *  the framework cannot know which parameters are secret (a VGI
+   *  `catalog_attach` carries API keys and passwords), so no payload reaches
+   *  a dispatch hook. */
+  requestFields?: AccessLogRequestField[];
+  /** Row count of the request batch; present exactly when `requestFields` is. */
+  requestRows?: number;
+  /** HTTP streams: size of the state token the client sent on this turn. The
+   *  token itself is never exposed -- it is the serialized stream state, which
+   *  may hold anything the call was given, and a replayable continuation. */
+  requestStateBytes?: number;
+  /** HTTP streams: size of the state token returned on this turn. */
+  responseStateBytes?: number;
   /** Stream lifecycle identifier (32-char lowercase hex); empty on unary. */
   streamId?: string;
   /** True when a stream was cancelled by the client. */

@@ -20,7 +20,8 @@ import {
   resolveExternalLocation,
 } from "../external.js";
 import type { PeerEvidenceSet } from "../identity.js";
-import type { MethodDefinition } from "../types.js";
+import { requestShape } from "../request-shape.js";
+import type { AccessLogRequestField, MethodDefinition } from "../types.js";
 import { OutputCollector, TransportKind } from "../types.js";
 import { serializeSchema } from "../util/schema.js";
 import { applyDefaults, parseRequest, validateRequestSchema } from "../wire/request.js";
@@ -272,8 +273,43 @@ export interface DispatchContext {
    *  of request-batch metadata — neither is visible to the handler that
    *  assembles the access-log record, which sees only a URL and a body. Both
    *  are reported here so `stream_id` and `cancelled` describe the stream that
-   *  actually ran instead of a placeholder. Absent on non-HTTP dispatch. */
-  streamObserver?: { streamId?: string; cancelled?: boolean };
+   *  actually ran instead of a placeholder. The request's shape (never its
+   *  values) and the state-token sizes ride here for the same reason. Absent
+   *  on non-HTTP dispatch. */
+  streamObserver?: DispatchObserver;
+}
+
+/** What the HTTP dispatcher reports back for the access-log record. Sizes and
+ *  shapes only: no payload value or state token is ever placed here. */
+export interface DispatchObserver {
+  /** Hex of the stream's callId, the same on `/init` and every continuation. */
+  streamId?: string;
+  /** The client cancelled the stream on this turn. */
+  cancelled?: boolean;
+  /** Request parameter names and types (unary and `/init`). */
+  requestFields?: AccessLogRequestField[];
+  /** Request row count; set with `requestFields`. */
+  requestRows?: number;
+  /** Size of the state token the client sent on this turn. */
+  requestStateBytes?: number;
+  /** Size of the state token returned on this turn. */
+  responseStateBytes?: number;
+}
+
+/** Record the request's shape (names, types, rows -- never values). */
+function noteRequestShape(ctx: DispatchContext, schema: VgiSchema, batch: VgiBatch): void {
+  const observer = ctx.streamObserver;
+  if (!observer) return;
+  try {
+    Object.assign(observer, requestShape(schema, batch.numRows));
+  } catch {
+    // best-effort; observability must not fail dispatch
+  }
+}
+
+/** Record the size of the state token returned on this turn. */
+function noteResponseState(ctx: DispatchContext, token: string): void {
+  if (ctx.streamObserver) ctx.streamObserver.responseStateBytes = token.length;
 }
 
 /** Tally callback for `maybeExternalizeBatch`, or `undefined` when this
@@ -383,6 +419,7 @@ export async function httpDispatchUnary(
 ): Promise<Response> {
   const schema = method.resultSchema;
   const { schema: effectiveSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
+  noteRequestShape(ctx, effectiveSchema, reqBatch);
   const parsed = parseHttpRequest(effectiveSchema, reqBatch);
 
   if (parsed.methodName !== method.name) {
@@ -475,6 +512,7 @@ export async function httpDispatchStreamInit(
   const inputSchema = method.inputSchema ?? EMPTY_SCHEMA;
 
   const { schema: reqSchema, batch: reqBatch } = await readInboundRequest(body, ctx);
+  noteRequestShape(ctx, reqSchema, reqBatch);
   const parsed = parseHttpRequest(reqSchema, reqBatch);
 
   if (parsed.methodName !== method.name) {
@@ -594,6 +632,7 @@ export async function httpDispatchStreamInit(
     const tokenMeta = new Map<string, string>();
     tokenMeta.set(STATE_KEY, token);
     tokenMeta.set(CALL_STATE_KEY, callToken);
+    noteResponseState(ctx, token);
     const tokenBatch = buildEmptyBatch(resolvedOutputSchema, tokenMeta);
     const tokenStreamBytes = serializeIpcStream(resolvedOutputSchema, [tokenBatch]);
 
@@ -643,6 +682,7 @@ export async function httpDispatchStreamExchange(
   if (!tokenBase64) {
     throw new HttpRpcError("Missing state token in exchange request", 400);
   }
+  if (ctx.streamObserver) ctx.streamObserver.requestStateBytes = tokenBase64.length;
 
   // Cancel signal — observed alongside the state token. Must be checked
   // before conformBatchToSchema so that zero-row empty-schema cancel batches
@@ -683,8 +723,12 @@ export async function httpDispatchStreamExchange(
   try {
     state = ctx.stateSerializer.deserialize(unpacked.stateBytes);
   } catch (error: any) {
-    console.error(`[httpDispatchStreamExchange] state deserialize error:`, error.message);
-    throw new HttpRpcError(`State deserialization failed: ${error.message}`, 500);
+    // The error's *type* only. This runs on the plaintext of an opened token --
+    // the serialized stream state, which may hold anything the call was given
+    // -- and a parser's message quotes the input it choked on.
+    const kind = error instanceof Error ? error.name : typeof error;
+    console.error(`[httpDispatchStreamExchange] state deserialize error: ${kind}`);
+    throw new HttpRpcError(`State deserialization failed (${kind})`, 500);
   }
 
   // Recover schemas from the token (the state itself may not contain
@@ -855,6 +899,7 @@ export async function httpDispatchStreamExchange(
           const mergedMeta = new Map<string, string>(batch.metadata ?? []);
           if (emitted.metadata) for (const [k, v] of emitted.metadata) mergedMeta.set(k, v);
           mergedMeta.set(STATE_KEY, token);
+          noteResponseState(ctx, token);
           batches.push(withBatchMetadata(batch, mergedMeta));
         } else {
           batches.push(batch);
@@ -868,6 +913,7 @@ export async function httpDispatchStreamExchange(
         const tokenMeta = new Map<string, string>();
         tokenMeta.set(STATE_KEY, token);
         batches.push(buildEmptyBatch(outputSchema, tokenMeta));
+        noteResponseState(ctx, token);
       }
     }
 
@@ -1014,6 +1060,7 @@ async function produceStreamResponse(
     const tokenMeta = new Map<string, string>();
     tokenMeta.set(STATE_KEY, token);
     if (call.callToken) tokenMeta.set(CALL_STATE_KEY, call.callToken);
+    noteResponseState(ctx, token);
     allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));
   }
 

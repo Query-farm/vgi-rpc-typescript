@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { schema as makeSchema, serializeBatch } from "./arrow/index.js";
+import { schema as makeSchema } from "./arrow/index.js";
 import type { AuthContext } from "./auth.js";
 import {
   gateProtocolVersion,
@@ -15,7 +15,6 @@ import { PROTOCOL_VERSION_KEY } from "./constants.js";
 import { dispatchStream } from "./dispatch/stream.js";
 import { dispatchUnary, type RawDispatchContext } from "./dispatch/unary.js";
 import { MethodNotImplementedError, RpcError, VersionError } from "./errors.js";
-
 import type { ExternalLocationConfig } from "./external.js";
 import { GrantKeys } from "./grants.js";
 import type { PeerEvidenceSet } from "./identity.js";
@@ -27,6 +26,7 @@ import {
   REFLECTION_PROTOCOL_NAME,
   RETIRED_DESCRIBE_METHOD,
 } from "./reflection.js";
+import { requestShape } from "./request-shape.js";
 import { buildIdentityProtocol, IDENTITY_PROTOCOL_NAME, IdentityImpl } from "./token-identity.js";
 import {
   type CallStatistics,
@@ -565,13 +565,12 @@ export class VgiRpcServer {
     // Dispatch based on method type, with optional hook
     const methodType = method.type === MethodType.UNARY ? "unary" : "stream";
 
-    // Capture self-contained IPC bytes of the request batch for the access log.
-    // Only pay the full IPC re-encode when a hook will actually read them — the
-    // default (no dispatchHook) path skips it entirely.
-    let requestData: Uint8Array | undefined;
+    // The request's shape for the access log -- names, types, row count, never
+    // the values (see src/request-shape.ts). Only computed when a hook reads it.
+    let shape: ReturnType<typeof requestShape> | undefined;
     if (this.dispatchHook) {
       try {
-        requestData = serializeBatch(batch as any);
+        shape = requestShape((batch as any).schema, (batch as any).numRows ?? 0);
       } catch {
         // best-effort; observability must not fail dispatch
       }
@@ -602,7 +601,7 @@ export class VgiRpcServer {
       authDomain: peer.auth?.domain ?? "",
       authenticated: peer.auth?.authenticated ?? false,
       remoteAddr: peer.remoteAddr ?? "",
-      requestData,
+      ...shape,
       streamId,
     };
     const stats: CallStatistics = {

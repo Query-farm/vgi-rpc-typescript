@@ -72,10 +72,6 @@ function rfc3339Utc(): string {
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}.${ms}Z`;
 }
 
-function base64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64");
-}
-
 /** Round to 2 decimal places. */
 function roundTo2(f: number): number {
   return Math.round(f * 100) / 100;
@@ -327,24 +323,27 @@ class AsyncRecordQueue {
 /**
  * Options for {@link AccessLogHook}.
  *
- * `level` matches Python's logger-level gating in `_emit_access_log`: at
- * "INFO" the heavy `request_data` field (a base64 of the full request batch —
- * typically 8+ KiB per init RPC) is replaced with a
- * `truncated: "payload_omitted"` marker plus `original_request_bytes`, so the
- * access-log schema's "unary requires request_data unless truncated"
- * invariant still holds. Bump to "DEBUG" to capture full payloads for
- * replay/audit.
+ * No option makes the log carry a payload value. Records describe the request
+ * by `request_fields` (names and types) and `request_rows`, and stream state
+ * tokens by `request_state_bytes` / `response_state_bytes` -- at every level.
+ * The framework cannot know which parameters are secret (a VGI
+ * `catalog_attach` carries API keys and passwords), so a flag that logged
+ * them would be a credential leak waiting for someone to turn DEBUG on.
  */
 export interface AccessLogOptions {
   /** Server version string (optional). */
   serverVersion?: string;
-  /** Verbosity for heavy fields. Default: "INFO". */
+  /**
+   * @deprecated Has no effect. Up to 0.28 `"DEBUG"` made records carry the
+   * base64 request payload (`request_data`); payloads are no longer logged at
+   * any level. Accepted so existing callers keep compiling.
+   */
   level?: "INFO" | "DEBUG";
   /**
    * Per-record byte cap. Records above it shed fields in the order the spec
-   * mandates (`request_data`, then `claims`, then a sentinel form) so log
-   * shippers with a per-line ceiling do not drop the line outright. Default:
-   * 1 MiB. Pass `0` to disable.
+   * mandates (`claims`, then a sentinel form) so log shippers with a
+   * per-line ceiling do not drop the line outright. Default: 1 MiB. Pass `0`
+   * to disable.
    */
   maxRecordBytes?: number;
   /**
@@ -371,7 +370,6 @@ export interface AccessLogOptions {
 
 export class AccessLogHook implements DispatchHook {
   private readonly serverVersion: string;
-  private readonly level: "INFO" | "DEBUG";
   private readonly maxRecordBytes: number;
   private readonly sampler: AccessLogSampler;
   private readonly traceContext: TraceContextResolver;
@@ -386,7 +384,6 @@ export class AccessLogHook implements DispatchHook {
     // serverVersion string as the second arg.
     const opts: AccessLogOptions = typeof options === "string" ? { serverVersion: options } : options;
     this.serverVersion = opts.serverVersion ?? "";
-    this.level = opts.level ?? "INFO";
     this.maxRecordBytes = opts.maxRecordBytes ?? 1_048_576;
     this.sampler = new AccessLogSampler(opts.sampleRate ?? 1);
     this.traceContext = opts.traceContext ?? otelTraceContext;
@@ -456,21 +453,21 @@ export class AccessLogHook implements DispatchHook {
       rec.trace_id = trace.traceId;
       rec.span_id = trace.spanId;
     }
-    if (info.requestData && info.requestData.length > 0) {
-      // At INFO, the per-request base64 payload dominates record size (an
-      // init RPC commonly logs 8+ KiB of base64 per call) and audit consumers
-      // rarely need the bytes — they care about who/what/when. The marker is
-      // "payload_omitted", NOT `true`: nothing was lost to a size cap here,
-      // and a consumer scanning for real data loss needs the two to be
-      // distinguishable. Bump level to DEBUG to re-enable the full payload.
-      const encoded = base64(info.requestData);
-      if (this.level === "DEBUG") {
-        rec.request_data = encoded;
-      } else {
-        rec.original_request_bytes = encoded.length;
-        rec.truncated = "payload_omitted";
-      }
+    // The request's shape -- never its values. Neither the request nor the
+    // stream state is logged at any level: see src/request-shape.ts.
+    if (info.requestFields) {
+      rec.request_fields = info.requestFields;
+      rec.request_rows = info.requestRows ?? 0;
+      // Transitional, for the 0.50.0 access-log schema, which requires a
+      // unary record to carry `request_data` unless it is marked truncated.
+      // "payload_omitted" is that schema's marker for "this emitter does not
+      // log payloads", which is now true at every level. The reference
+      // schema after 0.50.0 drops that rule and accepts the marker as legacy;
+      // remove this once the port's CI validates against that release.
+      if (info.methodType === "unary") rec.truncated = "payload_omitted";
     }
+    if (info.requestStateBytes !== undefined) rec.request_state_bytes = info.requestStateBytes;
+    if (info.responseStateBytes !== undefined) rec.response_state_bytes = info.responseStateBytes;
     if (info.methodType === "stream") {
       // The schema requires the field on every stream record, including ones
       // for requests that failed before a stream existed — a mistyped method,
@@ -577,17 +574,6 @@ export class AccessLogHook implements DispatchHook {
   private format(rec: AccessRecord): string {
     let line = JSON.stringify(rec);
     if (this.maxRecordBytes <= 0 || utf8Length(line) <= this.maxRecordBytes) return line;
-
-    const requestData = rec.request_data;
-    if (typeof requestData === "string") {
-      rec.original_request_bytes = requestData.length;
-      delete rec.request_data;
-      // Genuine size-driven shedding — `true`, as distinct from the
-      // "payload_omitted" this record may have carried a moment ago.
-      rec.truncated = true;
-      line = JSON.stringify(rec);
-      if (utf8Length(line) <= this.maxRecordBytes) return line;
-    }
 
     if (rec.claims !== undefined) {
       rec.claims = {};

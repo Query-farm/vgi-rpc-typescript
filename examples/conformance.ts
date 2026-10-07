@@ -13,12 +13,10 @@
  *                         at startup, not at the first request.
  *   --access-log-async    Drain records through a bounded queue instead of
  *                         writing them inline. Trades durability for latency.
- *   --access-log-debug    Emit at DEBUG so records carry `request_data`. At the
- *                         default INFO the payload is replaced by a
- *                         `truncated: "payload_omitted"` marker, which leaves
- *                         every rule governing `request_data` unexercised —
- *                         `vgi-rpc-test --require-request-data` fails a log
- *                         that never carries the field.
+ *   --access-log-debug    Accepted for CLI parity with the other ports. Records
+ *                         are identical at every level: no payload value or
+ *                         state token is ever logged (request_fields /
+ *                         request_rows and *_state_bytes describe them).
  *   --tcp [HOST:]PORT     Serve over a raw TCP socket instead of stdin/stdout.
  *                         HOST defaults to 127.0.0.1 (loopback only); PORT may
  *                         be 0 to let the OS auto-select. Prints

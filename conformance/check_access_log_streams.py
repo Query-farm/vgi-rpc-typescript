@@ -2,13 +2,12 @@
 """Assert an access log actually *covers* stream calls.
 
 ``vgi-rpc-test --access-log`` validates every record it finds against
-``vgi_rpc/access_log.schema.json``, and ``--require-request-data`` closes the
-one hole the schema leaves open — but only for ``method_type == "unary"``.
-Neither notices when a log is silent about streams, and neither notices when
-``stream_id`` is present, schema-valid and meaningless. Both of those shipped
-here: the HTTP transport wrote 32 zeros as the stream id of *every* stream on
-the server, and stamped no ``request_data`` on ``/init``, and a validator
-reporting PASS over records that never carried a real value is not evidence.
+``vgi_rpc/access_log.schema.json``. It does not notice when a log is silent
+about streams, nor when ``stream_id`` is present, schema-valid and
+meaningless. Both of those shipped here: the HTTP transport wrote 32 zeros as
+the stream id of *every* stream on the server, and described no request on
+``/init``, and a validator reporting PASS over records that never carried a
+real value is not evidence.
 
 So this checks the rules of ``docs/access-log-spec.md`` §4.2/§4.3/§5 that only
 have teeth once you look at streams:
@@ -22,8 +21,11 @@ have teeth once you look at streams:
 * the id chains a stream's turns: with ``--require-continuations`` at least one
   id must span more than one record, and all records sharing an id must name
   one method and contain exactly one init;
-* ``request_data`` rides on ``/init`` and on nothing else — required there by
-  §4.3, forbidden on continuations by §5.
+* ``request_fields`` / ``request_rows`` ride on ``/init`` and on nothing else
+  — the request description of §4.3, absent on continuations by §5;
+* no record carries a payload value (``request_data``, ``request_state``,
+  ``response_state``) at any level: the framework cannot know which
+  parameters are secret.
 
 ``--http`` additionally requires the fields §4.4 defines for HTTP transports:
 ``http_status`` on every record, and a ``request_id`` that is unique per
@@ -49,6 +51,8 @@ STREAM_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 #: Reserved by the emitter for a stream record whose request failed before any
 #: stream existed. Legal, but it can never be a real chain id.
 NO_STREAM_SENTINEL = "0" * 32
+#: Fields that would carry a request value or serialized stream state.
+PAYLOAD_FIELDS = ("request_data", "request_state", "response_state")
 
 
 def _load(path: pathlib.Path) -> list[dict]:
@@ -70,10 +74,9 @@ def _load(path: pathlib.Path) -> list[dict]:
 def _is_init(record: dict) -> bool:
     """True when the record describes a call's entry rather than a continuation.
 
-    ``request_data`` is the marker at DEBUG; at INFO the emitter substitutes
-    ``truncated: "payload_omitted"`` for the same field, so both count.
+    ``request_fields`` describes the request batch, which only an entry has.
     """
-    return "request_data" in record or record.get("truncated") == "payload_omitted"
+    return "request_fields" in record
 
 
 def check(records: list[dict], *, http: bool, require_continuations: bool) -> list[str]:
@@ -130,16 +133,16 @@ def check(records: list[dict], *, http: bool, require_continuations: bool) -> li
         if len(inits) != 1:
             failures.append(
                 f"stream_id {sid} (method={group[0].get('method')}) has {len(inits)} init records "
-                f"among {len(group)}; exactly one turn carries request_data"
+                f"among {len(group)}; exactly one turn carries request_fields"
             )
 
-    # §4.3: required on unary and stream init, absent on continuations.
+    # No payload value, at any level, on any record.
     for i, rec in enumerate(records):
-        is_stream = rec.get("method_type") == "stream"
-        if is_stream and not _is_init(rec) and "request_data" in rec:
+        leaked = [k for k in PAYLOAD_FIELDS if k in rec]
+        if leaked:
             failures.append(
-                f"record {i} (method={rec.get('method')}): a stream continuation carries request_data, "
-                f"which §5 says only init records do"
+                f"record {i} (method={rec.get('method')}): carries {leaked}; access logs must not "
+                f"contain payload values, which can include secrets"
             )
 
     if http:

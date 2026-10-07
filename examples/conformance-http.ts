@@ -86,8 +86,7 @@ let corsOrigin: string | undefined;
 let accessLogPath: string | undefined;
 let accessLogSample = 1;
 let accessLogAsync = false;
-// Without this the record's `request_data` is a `payload_omitted` marker, so
-// `vgi-rpc-test --require-request-data` has nothing to validate against.
+// Accepted for CLI parity; no level makes a record carry a payload value.
 let accessLogDebug = false;
 // Lifecycle fault-injection fixture.  The hook is deliberately wired into
 // the real HTTP handler so the shared suite observes the same first-request

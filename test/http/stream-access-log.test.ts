@@ -94,6 +94,10 @@ interface Record_ {
   method_type: string;
   stream_id?: string;
   request_data?: string;
+  request_fields?: { name: string; type: string }[];
+  request_rows?: number;
+  request_state_bytes?: number;
+  response_state_bytes?: number;
   truncated?: string;
   http_status?: number;
   status: string;
@@ -108,13 +112,9 @@ function sink(): AccessLogSink {
 
 beforeEach(() => {
   records = [];
-  // DEBUG so `request_data` survives onto the record: at INFO the hook
-  // deliberately replaces the base64 payload with a `payload_omitted`
-  // marker, and the assertion below is about *which turns carry the
-  // request*, which the marker would obscure.
   handler = createHttpHandler(makeProtocol(), {
     prefix: "/vgi",
-    dispatchHook: new AccessLogHook(sink(), { level: "DEBUG" }),
+    dispatchHook: new AccessLogHook(sink()),
   });
 });
 
@@ -176,15 +176,20 @@ describe("an HTTP stream emits one access record per turn", () => {
     expect(new Set(streamRecords.map((r) => r.stream_id)).size).toBe(1);
   });
 
-  test("request_data rides on the init record and on no continuation", async () => {
+  test("request_fields ride on the init record and on no continuation", async () => {
     await driveStream(3);
     const streamRecords = records.filter((r) => r.method === "produce_n");
-    const withRequest = streamRecords.filter((r) => r.request_data !== undefined);
-    // Spec §4.3: the init carries the request batch; a continuation batch is
+    const withRequest = streamRecords.filter((r) => r.request_fields !== undefined);
+    // Spec §4.3: the init describes the request batch; a continuation batch is
     // not a request batch and must not claim to be one.
     expect(withRequest.length).toBe(1);
-    expect(streamRecords[0].request_data).toBeDefined();
-    expect(streamRecords.slice(1).every((r) => r.request_data === undefined)).toBe(true);
+    expect(streamRecords[0].request_fields).toEqual([{ name: "count", type: "int32" }]);
+    expect(streamRecords[0].request_rows).toBe(1);
+    expect(streamRecords.slice(1).every((r) => r.request_fields === undefined)).toBe(true);
+    // No payload, and state tokens by size only.
+    expect(streamRecords.every((r) => r.request_data === undefined)).toBe(true);
+    expect(streamRecords[0].response_state_bytes).toBeGreaterThan(0);
+    expect(streamRecords[1].request_state_bytes).toBeGreaterThan(0);
   });
 
   test("two streams of the same method do not share an id", async () => {
@@ -209,6 +214,7 @@ describe("an HTTP stream emits one access record per turn", () => {
     const rec = records.find((r) => r.method === "noop");
     expect(rec?.method_type).toBe("unary");
     expect(rec?.stream_id).toBeUndefined();
-    expect(rec?.request_data).toBeDefined();
+    expect(rec?.request_fields).toEqual([{ name: "count", type: "int32" }]);
+    expect(rec?.request_data).toBeUndefined();
   });
 });
