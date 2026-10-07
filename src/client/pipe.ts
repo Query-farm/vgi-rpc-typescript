@@ -20,6 +20,7 @@ import { MAX_STREAM_CHUNK } from "../wire/writer.js";
 import type { RpcClient } from "./connect.js";
 import {
   adaptServiceDescription,
+  attachReflectionCall,
   type MethodInfo,
   pickApplicationProtocol,
   reflectionRequest,
@@ -650,27 +651,31 @@ export function pipeConnect(
     _drainPromise = p;
   }
 
+  // One unary reflection call; the caller holds the busy lock. The *first*
+  // one has to be written before the reader is opened: IpcStreamReader.create()
+  // blocks on reader.open() reading the first schema message, and the server
+  // writes nothing until it has a request. Sending first is what avoids the
+  // deadlock. The whole response stream (error batch included) is consumed
+  // before an error is raised, so the connection stays usable afterwards.
+  async function reflectionCallUnlocked(method: string, protocol?: string): Promise<Uint8Array> {
+    writeFn(reflectionRequest(method, protocol));
+    const r = await ensureReader();
+    // ensureReader() consumed the schema via open(). readStream() — on the
+    // first call (initialized=false) — returns the current stream without
+    // calling reset().
+    const response = await r.readStream();
+    if (!response) {
+      throw new RpcError("TransportError", `EOF reading the '${method}' reflection response`, "");
+    }
+    return reflectionResult(response.batches as any, onLog, externalConfig);
+  }
+
   async function ensureMethodCache(): Promise<Map<string, MethodInfo>> {
     if (methodCache) return methodCache;
 
     await acquireBusy();
     try {
-      // One unary reflection call. The *first* one has to be written before
-      // the reader is opened: IpcStreamReader.create() blocks on reader.open()
-      // reading the first schema message, and the server writes nothing until
-      // it has a request. Sending first is what avoids the deadlock.
-      const call = async (method: string, protocol?: string): Promise<Uint8Array> => {
-        writeFn(reflectionRequest(method, protocol));
-        const r = await ensureReader();
-        // ensureReader() consumed the schema via open(). readStream() — on the
-        // first call (initialized=false) — returns the current stream without
-        // calling reset().
-        const response = await r.readStream();
-        if (!response) {
-          throw new RpcError("TransportError", `EOF reading the '${method}' reflection response`, "");
-        }
-        return reflectionResult(response.batches as any, onLog, externalConfig);
-      };
+      const call = reflectionCallUnlocked;
 
       // Two round trips: what does this server host, then describe one of
       // them. The first is unavoidable now that a server may host several
@@ -697,7 +702,7 @@ export function pipeConnect(
     }
   }
 
-  return {
+  const client: RpcClient = {
     async call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null> {
       const methods = await ensureMethodCache();
       await acquireBusy();
@@ -960,6 +965,18 @@ export function pipeConnect(
       writable.end();
     },
   };
+  // listProtocols / describeProtocol ride this client's own stream: the
+  // server routes each request by its protocol key, so one connection carries
+  // reflection beside whatever protocol the client is bound to.
+  return attachReflectionCall(client, async (method, protocol) => {
+    if (closed) throw new RpcError("TransportError", "the connection is closed", "");
+    await acquireBusy();
+    try {
+      return await reflectionCallUnlocked(method, protocol);
+    } finally {
+      releaseBusy();
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -994,9 +1011,12 @@ export function subprocessConnect(cmd: string[], options?: SubprocessConnectOpti
     },
   };
 
+  // `protocol` must ride through, as in tcpConnect: without it the client
+  // binds to whatever reflection lists first.
   const client = pipeConnect(stdout, writable, {
     onLog: options?.onLog,
     externalLocation: options?.externalLocation,
+    protocol: options?.protocol,
   });
 
   // Wrap close to also kill the subprocess

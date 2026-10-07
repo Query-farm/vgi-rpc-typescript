@@ -10,9 +10,13 @@ export {
 export { type HttpRpcClient, httpConnect, type RpcClient } from "./connect.js";
 export {
   adaptServiceDescription,
+  describeProtocol,
+  type HostedProtocol,
   httpIntrospect,
+  listProtocols,
   type MethodInfo,
   pickApplicationProtocol,
+  ReflectionNotSupportedError,
   type ServiceDescription,
 } from "./introspect.js";
 export type { OAuthResourceMetadataResponse } from "./oauth.js";

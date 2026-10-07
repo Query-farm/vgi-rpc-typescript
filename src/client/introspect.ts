@@ -22,6 +22,7 @@ import {
   type ServiceDescriptionDesc,
 } from "../reflection.js";
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
+import type { RpcClient } from "./connect.js";
 import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
 import { buildRequestIpc, dispatchLogOrError, readResponseBatches } from "./ipc.js";
 import type { LogMessage } from "./types.js";
@@ -217,34 +218,34 @@ export function reflectionRequest(method: string, protocol?: string): Uint8Array
   return buildRequestIpc(makeSchema([]) as unknown as Schema, {}, method, { protocol: REFLECTION_PROTOCOL_NAME });
 }
 
+/** Options shared by {@link httpIntrospect} and an HTTP client's reflection hook. */
+interface HttpReflectionOptions {
+  prefix?: string;
+  /** External storage config, for a server that externalizes its replies —
+   *  reflection's included. */
+  externalLocation?: ExternalLocationConfig | null;
+  authorization?: string;
+  compressionLevel?: number;
+  compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;
+  decompressFn?: (data: Uint8Array) => Promise<Uint8Array>;
+  fetch?: typeof globalThis.fetch;
+  acceptedMaxResponseBytes?: number;
+  /** @internal The owning HttpRpcClient already completed discovery. */
+  responseBudgetVerified?: boolean;
+}
+
 /**
- * Describe a server's protocol over HTTP via `vgi_rpc.Reflection.v1`.
+ * Build the function that makes one unary reflection call over HTTP and
+ * returns its `result` bytes. Shared by {@link httpIntrospect} and by
+ * {@link httpConnect}'s reflection hook, so both send the same headers, honour
+ * the same response budget and classify a bare 404 the same way.
  *
- * Two round trips: `list_protocols` to learn what the server hosts, then
- * `describe` on one of them. The first is unavoidable once a server may host
- * several protocols -- there is no longer a single "the" protocol to ask about
- * without asking. Pass `protocol` to skip it.
+ * @internal
  */
-export async function httpIntrospect(
+export async function httpReflectionCaller(
   rawBaseUrl: string,
-  options?: {
-    prefix?: string;
-    /** Which protocol to describe. Defaults to the first hosted one that is
-     *  not framework-reserved, which costs the `list_protocols` hop. */
-    protocol?: string;
-    /** External storage config, for a server that externalizes its replies —
-     *  reflection's included. */
-    externalLocation?: ExternalLocationConfig | null;
-    authorization?: string;
-    compressionLevel?: number;
-    compressFn?: (data: Uint8Array, level: number) => Promise<Uint8Array>;
-    decompressFn?: (data: Uint8Array) => Promise<Uint8Array>;
-    fetch?: typeof globalThis.fetch;
-    acceptedMaxResponseBytes?: number;
-    /** @internal The owning HttpRpcClient already completed discovery. */
-    responseBudgetVerified?: boolean;
-  },
-): Promise<ServiceDescription> {
+  options?: HttpReflectionOptions,
+): Promise<ReflectionCall> {
   // See httpConnect: a base URL ending in "/" would produce a doubled slash.
   const baseUrl = rawBaseUrl.replace(/\/+$/, "");
   const prefix = options?.prefix ?? "";
@@ -289,8 +290,7 @@ export async function httpIntrospect(
 
   const fetchFn = options?.fetch ?? globalThis.fetch;
 
-  /** One unary reflection call, returning its `result` bytes. */
-  async function call(method: string, protocol?: string): Promise<Uint8Array> {
+  return async (method: string, protocol?: string): Promise<Uint8Array> => {
     const body = reflectionRequest(method, protocol);
     const sendBody = level != null && compressFn ? await compressFn(body, level) : body;
     const response = await fetchFn(baseUrl + rpcPath(REFLECTION_PROTOCOL_NAME, method, { prefix }), {
@@ -301,6 +301,14 @@ export async function httpIntrospect(
     if (response.status === 401) {
       throw new RpcError("AuthenticationError", "Authentication required", "");
     }
+    // A server older than protocol-scoped routes has no route for reflection
+    // at all and answers a bare 404 -- no Arrow body, no capability headers.
+    // Report it as the HTTP error it is, so it can be classified as "not
+    // hosted" rather than surfacing as a missing-capability protocol error.
+    if (response.status === 404 && !(response.headers.get("Content-Type") ?? "").startsWith(ARROW_CONTENT_TYPE)) {
+      const text = await response.text().catch(() => "");
+      throw new RpcError("HttpError", `HTTP 404: ${text.slice(0, 200)}`, "");
+    }
     const responseCapabilities = requireResponseBudgetSupport(response.headers);
     responseLimit = minPositive(responseLimit, responseCapabilities.maxResponseBytes ?? undefined) ?? responseLimit;
 
@@ -308,8 +316,29 @@ export async function httpIntrospect(
     const decoded = new Uint8Array(await decodeResponseBody(response.headers, rawBody, decompressFn, responseLimit));
     const { batches } = await readResponseBatches(decoded);
     return reflectionResult(batches, undefined, options?.externalLocation);
-  }
+  };
+}
 
+/**
+ * Describe a server's protocol over HTTP via `vgi_rpc.Reflection.v1`.
+ *
+ * Two round trips: `list_protocols` to learn what the server hosts, then
+ * `describe` on one of them. The first is unavoidable once a server may host
+ * several protocols -- there is no longer a single "the" protocol to ask about
+ * without asking. Pass `protocol` to skip it.
+ *
+ * To ask through a client you already hold, use {@link listProtocols} and
+ * {@link describeProtocol} instead.
+ */
+export async function httpIntrospect(
+  rawBaseUrl: string,
+  options?: HttpReflectionOptions & {
+    /** Which protocol to describe. Defaults to the first hosted one that is
+     *  not framework-reserved, which costs the `list_protocols` hop. */
+    protocol?: string;
+  },
+): Promise<ServiceDescription> {
+  const call = await httpReflectionCaller(rawBaseUrl, options);
   let listing: ProtocolListDesc | undefined;
   let protocol = options?.protocol;
   if (!protocol) {
@@ -317,4 +346,203 @@ export async function httpIntrospect(
     protocol = pickApplicationProtocol(listing);
   }
   return adaptServiceDescription(decodeServiceDescription(await call(REFLECTION_DESCRIBE, protocol)), listing);
+}
+
+// ---------------------------------------------------------------------------
+// listProtocols / describeProtocol -- reflection over a held connection
+// ---------------------------------------------------------------------------
+
+/** One unary reflection call on a client's own connection, returning the
+ *  reply's `result` bytes. @internal */
+export type ReflectionCall = (method: string, protocol?: string) => Promise<Uint8Array>;
+
+/**
+ * Where a client keeps its reflection hook.
+ *
+ * A registry symbol rather than a module-local one: the package ships several
+ * independently bundled entry points (`.`, `./connect`), and a client built by
+ * one must still be reachable from {@link listProtocols} imported from the
+ * other. Not part of the public API -- the public route is
+ * {@link listProtocols} / {@link describeProtocol}.
+ *
+ * @internal
+ */
+export const REFLECTION_CALL: unique symbol = Symbol.for("@query-farm/vgi-rpc/reflection-call") as never;
+
+/** Install a client's reflection hook, non-enumerable so it stays out of the
+ *  client's visible surface. @internal */
+export function attachReflectionCall<T extends object>(client: T, call: ReflectionCall): T {
+  Object.defineProperty(client, REFLECTION_CALL, { value: call, enumerable: false, configurable: false });
+  return client;
+}
+
+/** One protocol a server hosts, as `vgi_rpc.Reflection.v1` lists it.
+ *
+ *  Returned by {@link listProtocols} in the server's order: application
+ *  protocols in registration order (the primary first), then the framework's
+ *  own (`vgi_rpc.Reflection.v1`, and `vgi_rpc.Identity.v1` on an HTTP server
+ *  that hosts it). Frozen. */
+export interface HostedProtocol {
+  /** The protocol's wire name -- its routing key, carrying its major version,
+   *  e.g. `"vgi_rpc.Reflection.v1"`. */
+  readonly name: string;
+  /** Its declared semver, or `""` when it declares none. */
+  readonly version: string;
+  /** SHA-256 of its canonical description, as 64 lowercase hex characters.
+   *  Equal hashes mean an identical wire surface in any port, so a caller
+   *  holding a cached description for this hash can skip
+   *  {@link describeProtocol}. */
+  readonly hash: string;
+  /** Whether callers should migrate off this protocol. Default `false`. */
+  readonly deprecated: boolean;
+  /** What to migrate to; `""` unless {@link deprecated}. */
+  readonly deprecationMessage: string;
+  /** Capability tokens the protocol announces. Default empty. */
+  readonly features: readonly string[];
+}
+
+/**
+ * The server does not host `vgi_rpc.Reflection.v1`.
+ *
+ * Thrown by {@link listProtocols} and {@link describeProtocol} when the server
+ * answers the reflection call with "not hosted" rather than with a listing: a
+ * TypeScript server built with `enableDescribe: false` (its default is
+ * `true`), a Python server built without `enable_describe=True` (its default),
+ * or one that predates reflection. Such a server still serves its own
+ * protocol, so this is a statement about discovery, not about the connection
+ * -- the connection remains usable. No listing is ever inferred.
+ *
+ * A subclass of {@link RpcError} carrying the server's original error fields,
+ * so code that already catches `RpcError` keeps working.
+ */
+export class ReflectionNotSupportedError extends RpcError {
+  constructor(
+    errorType: string,
+    errorMessage: string,
+    remoteTraceback: string,
+    model: ConstructorParameters<typeof RpcError>[3] = {},
+  ) {
+    super(errorType, errorMessage, remoteTraceback, model);
+    this.name = "ReflectionNotSupportedError";
+  }
+
+  /** Wrap the server's "not hosted" answer, keeping every field. */
+  static fromRpcError(error: RpcError): ReflectionNotSupportedError {
+    const wrapped = new ReflectionNotSupportedError(error.errorType, error.errorMessage, error.remoteTraceback, {
+      errorCode: error.errorCode,
+      errorKind: error.errorKind,
+      errorDetails: error.errorDetails,
+      requestId: error.requestId,
+    });
+    (wrapped as { cause?: unknown }).cause = error;
+    return wrapped;
+  }
+}
+
+/** `errorKind` values meaning "this server does not answer reflection". */
+const NOT_HOSTED_KINDS = new Set(["protocol_not_supported", "method_not_implemented"]);
+/** Remote exception names for the same, from servers that send no error kind. */
+const NOT_HOSTED_TYPES = new Set(["ProtocolNotSupportedError", "MethodNotImplementedError"]);
+
+/**
+ * Whether `error` says the server does not host reflection at all.
+ *
+ * Only meaningful for `list_protocols`, which is always hosted when reflection
+ * is: a "not supported" answer to it can only be about the protocol.
+ * (`describe` answers `protocol_not_supported` for an unknown *argument*,
+ * which is why {@link describeProtocol} lists first.)
+ */
+function reflectionNotHosted(error: RpcError): boolean {
+  if (NOT_HOSTED_KINDS.has(error.errorKind) || error.errorCode === "UNIMPLEMENTED") return true;
+  if (NOT_HOSTED_TYPES.has(error.errorType)) return true;
+  return error.errorType === "HttpError" && error.errorMessage.startsWith("HTTP 404");
+}
+
+/** An {@link RpcError} by shape rather than by class: the package's entry
+ *  points (`.`, `./connect`) are bundled separately, so a client from one
+ *  throws an `RpcError` that is not `instanceof` the other's. */
+function isRpcErrorLike(error: unknown): error is RpcError {
+  if (typeof error !== "object" || error === null) return false;
+  const e = error as Partial<RpcError>;
+  return typeof e.errorType === "string" && typeof e.errorMessage === "string" && typeof e.errorKind === "string";
+}
+
+/** The reflection hook of `target`, or a TypeError naming what is accepted. */
+function reflectionCallOf(target: object): ReflectionCall {
+  const call = (target as { [REFLECTION_CALL]?: ReflectionCall })[REFLECTION_CALL];
+  if (typeof call !== "function") {
+    throw new TypeError(
+      "cannot reach reflection through this object: pass a client returned by httpConnect, " +
+        "httpConnectSocks5h, httpiConnect, pipeConnect, subprocessConnect, tcpConnect, " +
+        "tcpConnectSocks5h or irohConnect",
+    );
+  }
+  return call;
+}
+
+/** Call `list_protocols`, classifying "not hosted". */
+async function listOn(call: ReflectionCall): Promise<ProtocolListDesc> {
+  let bytes: Uint8Array;
+  try {
+    bytes = await call(REFLECTION_LIST_PROTOCOLS);
+  } catch (error) {
+    if (isRpcErrorLike(error) && error.name !== "ReflectionNotSupportedError" && reflectionNotHosted(error)) {
+      throw ReflectionNotSupportedError.fromRpcError(error);
+    }
+    throw error;
+  }
+  return decodeProtocolList(bytes);
+}
+
+/**
+ * List the protocols a server hosts, over a client the caller already holds.
+ *
+ * One round trip -- `vgi_rpc.Reflection.v1.list_protocols` -- on `target`'s
+ * own connection; nothing new is opened and nothing is closed. Over HTTP the
+ * call shares the client's fetch, prefix, authorization, session scope,
+ * compression and response budget; over a byte-stream transport (pipe,
+ * subprocess, TCP, Iroh) it shares the client's stream, which the server
+ * demultiplexes by each request's protocol key -- so, like any other call on
+ * such a client, it cannot run while a stream is open on it.
+ *
+ * `target` may be bound to any protocol the server hosts; only its connection
+ * matters.
+ *
+ * @returns One {@link HostedProtocol} per hosted protocol, in the server's order.
+ * @throws {ReflectionNotSupportedError} The server does not host reflection.
+ *   The connection is still usable.
+ * @throws {RpcError} Any other server error, or a transport failure.
+ */
+export async function listProtocols(target: RpcClient): Promise<HostedProtocol[]> {
+  const listing = await listOn(reflectionCallOf(target));
+  return listing.protocols.map((p) =>
+    Object.freeze({
+      name: p.protocol,
+      version: p.protocol_version ?? "",
+      hash: p.protocol_hash,
+      deprecated: p.deprecated ?? false,
+      deprecationMessage: p.deprecation_message ?? "",
+      features: Object.freeze([...(p.features ?? [])]),
+    }),
+  );
+}
+
+/**
+ * Describe one hosted protocol, over a client the caller already holds.
+ *
+ * Two round trips on `target`'s connection: `list_protocols` (for the server
+ * identity the description carries, and to tell "no reflection" apart from
+ * "no such protocol"), then `describe(name)`. The connection rules are those
+ * of {@link listProtocols}.
+ *
+ * @param name The protocol's wire name, as {@link listProtocols} reports it.
+ * @throws {ReflectionNotSupportedError} The server does not host reflection.
+ * @throws {RpcError} The server does not host `name` (`errorKind`
+ *   `"protocol_not_supported"`), answered with another error, or the
+ *   transport failed.
+ */
+export async function describeProtocol(target: RpcClient, name: string): Promise<ServiceDescription> {
+  const call = reflectionCallOf(target);
+  const listing = await listOn(call);
+  return adaptServiceDescription(decodeServiceDescription(await call(REFLECTION_DESCRIBE, name)), listing);
 }

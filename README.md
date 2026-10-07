@@ -111,6 +111,17 @@ client2.close();
 
 All transports share the same `RpcClient` interface: `call()`, `stream()`, `describe()`, `close()`.
 
+To discover what a server hosts, ask through the client you already hold, on any transport. The connection is reused and never closed:
+
+```typescript
+import { describeProtocol, listProtocols, ReflectionNotSupportedError } from "@query-farm/vgi-rpc";
+
+for (const p of await listProtocols(client)) console.log(p.name, p.version, p.hash);
+const desc = await describeProtocol(client, "Calculator");
+```
+
+A server without `vgi_rpc.Reflection.v1` (a TypeScript server with `enableDescribe: false`; a Python server without `enable_describe=True`, its default) makes both throw `ReflectionNotSupportedError`, and the client stays usable.
+
 ### HTTP over Iroh (Node/Bun)
 
 Install the optional native adapter and connect to the worker's canonical

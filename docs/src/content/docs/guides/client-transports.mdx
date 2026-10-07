@@ -245,6 +245,63 @@ for (const method of desc.methods) {
 }
 ```
 
+### Listing and describing hosted protocols
+
+A server may host several protocols: its application protocols, then the
+framework's own (`vgi_rpc.Reflection.v1`, and `vgi_rpc.Identity.v1` on an HTTP
+server that hosts it). Ask through the client you already hold, on any
+transport, with `listProtocols()` and `describeProtocol()`:
+
+```typescript
+import { describeProtocol, listProtocols, ReflectionNotSupportedError, tcpConnect } from "@query-farm/vgi-rpc";
+
+const client = tcpConnect("127.0.0.1", 9000);
+try {
+  for (const p of await listProtocols(client)) {
+    console.log(p.name, p.version, p.hash, p.deprecated, p.features);
+  }
+  const secondary = await describeProtocol(client, "conformance.Secondary.v1");
+  console.log(secondary.methods.map((m) => m.name));
+  await client.call("echo_string", { value: "still mine" }); // the connection is still yours
+} catch (e) {
+  if (e instanceof ReflectionNotSupportedError) {
+    // The server does not host reflection; the connection is still usable.
+  } else {
+    throw e;
+  }
+} finally {
+  client.close();
+}
+```
+
+Both reuse the client's own connection and never close it. A pipe,
+subprocess, TCP or raw Iroh client sends the reflection request down its
+existing byte stream (the server routes each request by its protocol key), so,
+like any other call on such a client, not while a stream is open on it. An HTTP
+or HTTP-over-Iroh client sends it through its own `fetch`, prefix,
+authorization, session scope, compression and response budget. The client may
+be bound to any protocol the server hosts; only its connection matters.
+
+`listProtocols()` returns one frozen `HostedProtocol` (`name`, `version`,
+`hash`, `deprecated`, `deprecationMessage`, `features`) per hosted protocol, in
+the server's order: application protocols in registration order, the primary
+first, then the framework's. `hash` is the protocol's canonical SHA-256,
+identical in every port for the same wire surface, so a client holding a
+cached description for that hash can skip `describeProtocol()`.
+
+`describeProtocol(client, name)` makes two calls, `list_protocols` and then
+`describe(name)`. A name the server does not host is an ordinary `RpcError`
+with `errorKind === "protocol_not_supported"`.
+
+**Servers without reflection.** A TypeScript server built with
+`enableDescribe: false` (the default is `true`), a Python server built without
+`enable_describe=True` (there the default is off), and servers older than
+reflection answer "not hosted": `protocol_not_supported`, an unknown method,
+`UNIMPLEMENTED`, or over HTTP a bare 404. Both functions throw
+`ReflectionNotSupportedError` for that answer, an `RpcError` subclass carrying
+the server's error fields, and never infer a listing. The connection remains
+usable. Any other failure propagates as itself.
+
 For standalone HTTP introspection without creating a full client:
 
 ```typescript

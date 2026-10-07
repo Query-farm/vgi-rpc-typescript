@@ -26,7 +26,13 @@ import {
   requireResponseBudgetSupport,
 } from "./capabilities.js";
 import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
-import { httpIntrospect, type MethodInfo, type ServiceDescription } from "./introspect.js";
+import {
+  attachReflectionCall,
+  httpIntrospect,
+  httpReflectionCaller,
+  type MethodInfo,
+  type ServiceDescription,
+} from "./introspect.js";
 import {
   buildRequestIpc,
   dispatchLogOrError,
@@ -659,7 +665,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
     return { headerBatch, stateToken, callStateToken, pendingBatches, finished, outputSchema };
   }
 
-  return {
+  const client: HttpRpcClient = {
     async call(method: string, params?: Record<string, any>): Promise<Record<string, any> | null> {
       await ensureCompression();
       const methods = await ensureMethodCache();
@@ -936,6 +942,25 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       // No-op (HTTP stateless)
     },
   };
+  // listProtocols / describeProtocol: reflection's routes hang off the same
+  // prefix, through the same fetch (session scope included), with the same
+  // auth, compression and response budget as every other call on this client.
+  return attachReflectionCall(client, async (method, protocol) => {
+    await ensureCompression();
+    await ensureResponseBudgetSupport();
+    const call = await httpReflectionCaller(baseUrl, {
+      prefix,
+      externalLocation: effectiveExternalConfig,
+      authorization,
+      compressionLevel,
+      compressFn,
+      decompressFn,
+      acceptedMaxResponseBytes: responseReadLimit(),
+      fetch: fetchFn,
+      responseBudgetVerified: true,
+    });
+    return call(method, protocol);
+  });
 }
 
 /**
@@ -949,3 +974,11 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
  * that, and it cost its consumers ~160 kB.
  */
 export { RpcError } from "../errors.js";
+// The connection-reusing reflection client, here too so a client-only consumer
+// of this entry point can discover protocols without the package root.
+export {
+  describeProtocol,
+  type HostedProtocol,
+  listProtocols,
+  ReflectionNotSupportedError,
+} from "./introspect.js";
