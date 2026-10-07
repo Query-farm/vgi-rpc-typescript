@@ -458,13 +458,6 @@ export class AccessLogHook implements DispatchHook {
     if (info.requestFields) {
       rec.request_fields = info.requestFields;
       rec.request_rows = info.requestRows ?? 0;
-      // Transitional, for the 0.50.0 access-log schema, which requires a
-      // unary record to carry `request_data` unless it is marked truncated.
-      // "payload_omitted" is that schema's marker for "this emitter does not
-      // log payloads", which is now true at every level. The reference
-      // schema after 0.50.0 drops that rule and accepts the marker as legacy;
-      // remove this once the port's CI validates against that release.
-      if (info.methodType === "unary") rec.truncated = "payload_omitted";
     }
     if (info.requestStateBytes !== undefined) rec.request_state_bytes = info.requestStateBytes;
     if (info.responseStateBytes !== undefined) rec.response_state_bytes = info.responseStateBytes;

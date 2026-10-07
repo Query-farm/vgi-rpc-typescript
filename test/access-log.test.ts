@@ -250,7 +250,7 @@ describe("access log claim redaction", () => {
 });
 
 // ---------------------------------------------------------------------------
-// truncated: payload_omitted vs true
+// request description: shape, never value
 // ---------------------------------------------------------------------------
 
 describe("access log request description", () => {
@@ -263,6 +263,9 @@ describe("access log request description", () => {
     expect(rec.request_rows).toBe(1);
     expect(rec.request_data).toBeUndefined();
     expect(rec.original_request_bytes).toBeUndefined();
+    // Nothing is omitted, so a unary record carries no truncation marker:
+    // the reference stopped emitting "payload_omitted" in vgi-rpc 0.50.1.
+    expect(rec.truncated).toBeUndefined();
   });
 
   test("level DEBUG is a no-op: it brings back no payload", () => {
