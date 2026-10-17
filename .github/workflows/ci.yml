@@ -428,7 +428,7 @@ jobs:
           cd "$VGI_RPC_REPOS/vgi-rpc-python"
           timeout 300 python tools/cross-port/describe_diff.py --only typescript
 
-      - name: Audit vgi_rpc.Identity.v1 against the reference
+      - name: Audit vgi_rpc.Identity.v2 against the reference
         # A source-level grep, because Identity's security properties — guard
         # order, window sizes, transient-vs-definitive — live in code the
         # protocol hash does not cover.

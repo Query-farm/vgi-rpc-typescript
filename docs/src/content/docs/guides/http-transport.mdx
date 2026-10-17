@@ -34,7 +34,7 @@ Bun.serve({ port: 8080, fetch: handler });
 
 All routes are served under a configurable `prefix`. The default prefix is `""` (root), so the examples below show the root-mounted paths. When you set a `prefix` (e.g. `/api`), it is prepended to every path.
 
-RPC routes are **namespaced by protocol**. A server hosts one or more protocols and dispatch resolves the pair `(protocol, method)`, so method names may collide across protocols without colliding on the wire. Pass a `VgiRpcServer` rather than a bare `Protocol` for its co-hosted protocols — `vgi_rpc.Reflection.v1`, `vgi_rpc.Identity.v1` — to be reachable over HTTP.
+RPC routes are **namespaced by protocol**. A server hosts one or more protocols and dispatch resolves the pair `(protocol, method)`, so method names may collide across protocols without colliding on the wire. Pass a `VgiRpcServer` rather than a bare `Protocol` for its co-hosted protocols — `vgi_rpc.Reflection.v1`, `vgi_rpc.Identity.v2` — to be reachable over HTTP.
 
 | Route | Method | Description |
 |-------|--------|-------------|

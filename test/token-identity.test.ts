@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-// `vgi_rpc.Identity.v1` — resolving a credential, and minting a grant.
+// `vgi_rpc.Identity.v2` — resolving a credential, and minting a grant.
 //
 // The two methods are guarded very differently and the difference is the point,
 // so most of what is tested here is the *asymmetry*: introspection answers a
@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { deserializeBatch } from "../src/arrow/index.js";
 import { isList } from "../src/arrow/predicates.js";
 import { AuthContext } from "../src/auth.js";
+import { conformanceMintGrant, GRANT_EXPIRES_AT_MICROS } from "../src/conformance/identity-fixture.js";
 import { chainAuthenticate } from "../src/http/bearer.js";
 import { AuthUnavailableError } from "../src/http/unauthorized.js";
 import { Protocol } from "../src/protocol.js";
@@ -20,6 +21,7 @@ import { bindingHash, unaryHasReturn } from "../src/reflection.js";
 import { VgiRpcServer } from "../src/server.js";
 import {
   buildIdentityProtocol,
+  encodeIssuedGrant,
   GrantRefusedError,
   IDENTITY_PROTOCOL_NAME,
   IdentityImpl,
@@ -58,7 +60,7 @@ const resolver = (token: string): TokenIdentity | null =>
 
 const minter = (principal: string, _purpose: string, _scopes: readonly string[], ttlSeconds: number): IssuedGrant => ({
   token: `grant-for-${principal}`,
-  expiresAt: NOW() + ttlSeconds,
+  expiresAt: new Date((NOW() + ttlSeconds) * 1000),
   grantId: "g1",
 });
 
@@ -79,6 +81,15 @@ function hashMethods(methods: ReadonlyMap<string, MethodDefinition>): HashMethod
 }
 
 /** Decode a single-row payload stream into a plain object. */
+/** A decoded `timestamp[us]` as integer microseconds, whichever representation
+ *  the active Arrow backend hands back (bigint micros, ms Number, or Date). */
+function timestampMicros(value: unknown): bigint {
+  if (typeof value === "bigint") return value;
+  if (value instanceof Date) return BigInt(value.getTime()) * 1000n;
+  if (typeof value === "number") return BigInt(Math.round(value * 1000));
+  throw new Error(`not a timestamp: ${String(value)}`);
+}
+
 function decodePayload(bytes: Uint8Array): Record<string, unknown> {
   const batch = deserializeBatch(bytes);
   const out: Record<string, unknown> = {};
@@ -99,7 +110,7 @@ describe("the wire shape", () => {
       new IdentityImpl({ resolveToken: resolver, mintGrant: minter, introspectPrincipals: ["proxy"] }),
     )!;
     expect(await bindingHash(IDENTITY_PROTOCOL_NAME, p.getMethods())).toBe(
-      "8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5",
+      "145267755ff90d5c3313d79c7ff771306f2530626380d01cb0e57a951d0f9ec3",
     );
   });
 
@@ -108,14 +119,14 @@ describe("the wire shape", () => {
     // hash rather than hosting a method that refuses.
     const p = buildIdentityProtocol(introspecting())!;
     expect(await bindingHash(IDENTITY_PROTOCOL_NAME, p.getMethods())).toBe(
-      "27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385",
+      "4039fbf6db3e64ae234e0be605b977477150ace892f10b6c691920eaf925e7ac",
     );
   });
 
   test("hosting issue_grant alone matches the reference digest", async () => {
     const p = buildIdentityProtocol(new IdentityImpl({ mintGrant: minter }))!;
     expect(await bindingHash(IDENTITY_PROTOCOL_NAME, p.getMethods())).toBe(
-      "c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8",
+      "4199df7403c9ca1a02c4c524b405a999eb1489614a1480873ffc23a0e5b0d312",
     );
   });
 
@@ -137,7 +148,7 @@ describe("the wire shape", () => {
       new IdentityImpl({ resolveToken: resolver, mintGrant: minter, introspectPrincipals: ["proxy"] }),
     )!;
     expect(canonicalDescription(IDENTITY_PROTOCOL_NAME, hashMethods(p.getMethods()))).toBe(
-      '{"methods":[{"has_header":false,"has_return":true,"name":"introspect_token","params":[{"name":"token","nullable":false,"type":"utf8"}],"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"},{"has_header":false,"has_return":true,"name":"issue_grant","params":[{"name":"purpose","nullable":false,"type":"utf8"},{"name":"scopes","nullable":false,"type":"list<item?:utf8>"},{"name":"ttl_seconds","nullable":false,"type":"int64"}],"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"}],"protocol":"vgi_rpc.Identity.v1"}',
+      '{"methods":[{"has_header":false,"has_return":true,"name":"introspect_token","params":[{"name":"token","nullable":false,"type":"utf8"}],"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"},{"has_header":false,"has_return":true,"name":"issue_grant","params":[{"name":"purpose","nullable":false,"type":"utf8"},{"name":"scopes","nullable":false,"type":"list<item?:utf8>"},{"name":"ttl_seconds","nullable":false,"type":"int64"}],"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"}],"protocol":"vgi_rpc.Identity.v2"}',
     );
   });
 
@@ -406,7 +417,7 @@ describe("issuance is not an oracle", () => {
     const impl = new IdentityImpl({ mintGrant: minter });
     const grant = await impl.issueGrant("reports", ["read"], 3600, auth("alice", { authTime: NOW() }));
     expect(grant.token).toBe("grant-for-alice");
-    expect(grant.expiresAt).toBeGreaterThan(NOW());
+    expect(grant.expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
 
   test("the subject is the caller and is not a parameter", () => {
@@ -704,7 +715,7 @@ describe("the guards fire on the dispatch path, not only in isolation", () => {
     const impl = new IdentityImpl({
       mintGrant: (principal) => {
         minted.push(principal);
-        return { token: "t", expiresAt: NOW() + 60, grantId: "g" };
+        return { token: "t", expiresAt: new Date((NOW() + 60) * 1000), grantId: "g" };
       },
       maxAuthAge: 900,
     });
@@ -741,7 +752,32 @@ describe("the dispatched methods", () => {
     const decoded = decodePayload(out.result);
     expect(decoded.token).toBe("grant-for-alice");
     expect(decoded.grant_id).toBe("g1");
-    expect(Number(decoded.expires_at)).toBeGreaterThan(NOW());
+    expect(timestampMicros(decoded.expires_at)).toBeGreaterThan(BigInt(Math.trunc(NOW())) * 1_000_000n);
+  });
+
+  test('expires_at is a non-null timestamp[us, tz="UTC"] carrying the exact instant', () => {
+    // The column is an instant, not float64 unix seconds: a peer that still
+    // wrote float64 would decode as a different schema, so pin the type and a
+    // known value (2030-01-01T00:00:00Z) down to the microsecond.
+    const bytes = encodeIssuedGrant({ token: "t", expiresAt: new Date(Date.UTC(2030, 0, 1)) });
+    const batch = deserializeBatch(bytes);
+    const f = batch.schema.fields.find((x) => x.name === "expires_at")!;
+    expect(f.nullable).toBe(false);
+    const type = f.type as unknown as { typeId: number; unit: number; timezone: string | null };
+    expect(type.typeId).toBe(10); // Arrow Type.Timestamp
+    expect(type.unit).toBe(2); // TimeUnit.MICROSECOND
+    expect(type.timezone).toBe("UTC");
+    expect(timestampMicros(decodePayload(bytes).expires_at)).toBe(1893456000000000n);
+  });
+
+  test("the conformance fixture mints exactly 2030-01-01T00:00:00Z", () => {
+    const grant = conformanceMintGrant("alice", "reports", ["read"]);
+    expect(grant.expiresAt.toISOString()).toBe("2030-01-01T00:00:00.000Z");
+    expect(timestampMicros(decodePayload(encodeIssuedGrant(grant)).expires_at)).toBe(GRANT_EXPIRES_AT_MICROS);
+  });
+
+  test("an invalid Date is refused rather than encoded", () => {
+    expect(() => encodeIssuedGrant({ token: "t", expiresAt: new Date(Number.NaN) })).toThrow(TypeError);
   });
 
   test("a null scope arrives as an empty string rather than vanishing", async () => {
@@ -775,7 +811,7 @@ describe("the dispatched methods", () => {
 
 describe("dispatch over a raw transport", () => {
   // Writing the cross-port conformance group surfaced a framework bug in the
-  // Python reference that had made `vgi_rpc.Identity.v1` *completely
+  // Python reference that had made `vgi_rpc.Identity.v2` *completely
   // uncallable over every transport*, unnoticed, since it landed: `ctx`
   // injection resolved "does this method want a context?" against the
   // **primary** binding's method set rather than against the binding that owns

@@ -41,7 +41,7 @@ export async function dispatchUnary(
   try {
     // The context is a positional argument supplied unconditionally, for every
     // binding -- which is what keeps this port clear of the bug that made
-    // `vgi_rpc.Identity.v1` uncallable in the Python reference for the whole
+    // `vgi_rpc.Identity.v2` uncallable in the Python reference for the whole
     // life of its implementation: `ctx` injection there resolved ctx-taking
     // method names against the server's *primary* binding, so a secondary
     // protocol's methods received none and every call died on a missing

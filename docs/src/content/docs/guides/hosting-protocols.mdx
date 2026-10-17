@@ -38,7 +38,7 @@ Rules:
   (`serverId`, `dispatchHook`, …) — they belong on the server.
 - **Order is registration order, primary first.** `list_protocols` reports
   application protocols in that order; framework protocols
-  (`vgi_rpc.Reflection.v1`, `vgi_rpc.Identity.v1`) follow.
+  (`vgi_rpc.Reflection.v1`, `vgi_rpc.Identity.v2`) follow.
 - **No reserved names.** A name starting `vgi_rpc.` is refused, whether it is
   the binding name or the protocol's own name. Names must be unique.
 - **The protocol is the unit of optionality.** There is no way to host a subset
@@ -48,7 +48,7 @@ Rules:
 
 ## Identity
 
-`vgi_rpc.Identity.v1` is framework-owned and opted into with the `identity`
+`vgi_rpc.Identity.v2` is framework-owned and opted into with the `identity`
 option:
 
 ```typescript

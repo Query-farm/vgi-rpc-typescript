@@ -4,7 +4,7 @@
 /**
  * Sealed grants: the framework's own `issue_grant` credential, and its verifier.
  *
- * `vgi_rpc.Identity.v1`'s `issue_grant` mints a standing delegation that
+ * `vgi_rpc.Identity.v2`'s `issue_grant` mints a standing delegation that
  * unattended automation later presents *as an ordinary bearer*. Until this
  * module nothing accepted one. A sealed grant closes the loop without storage
  * and without author code: when a deployment configures a **grant key**, the
@@ -12,7 +12,7 @@
  * `mintGrant`) and accepts them back as bearer credentials. When it does not,
  * nothing changes.
  *
- * Normative: the reference's `IDENTITY_V1_SPEC.md` §9 and `WIRE_PROTOCOL.md`
+ * Normative: the reference's `IDENTITY_V2_SPEC.md` §9 and `WIRE_PROTOCOL.md`
  * §16; `vgi_rpc/conformance/grant_token_vectors.json` pins the bytes.
  *
  * ```
@@ -415,6 +415,6 @@ export function sealedMintGrant(keys: GrantKeys): GrantMinter {
     } catch (e) {
       throw new GrantRefusedError((e as Error).message);
     }
-    return { token: minted.token, expiresAt: minted.claims.expiresAt, grantId: minted.claims.grantId };
+    return { token: minted.token, expiresAt: new Date(minted.claims.expiresAt * 1000), grantId: minted.claims.grantId };
   };
 }

@@ -380,7 +380,7 @@ export function attachReflectionCall<T extends object>(client: T, call: Reflecti
  *
  *  Returned by {@link listProtocols} in the server's order: application
  *  protocols in registration order (the primary first), then the framework's
- *  own (`vgi_rpc.Reflection.v1`, and `vgi_rpc.Identity.v1` on an HTTP server
+ *  own (`vgi_rpc.Reflection.v1`, and `vgi_rpc.Identity.v2` on an HTTP server
  *  that hosts it). Frozen. */
 export interface HostedProtocol {
   /** The protocol's wire name -- its routing key, carrying its major version,

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance HTTP server hosting `vgi_rpc.Identity.v1` under the pinned
+ * Conformance HTTP server hosting `vgi_rpc.Identity.v2` under the pinned
  * deployment policy of `IDENTITY_CONFORMANCE_FIXTURE.md`.
  *
  * Identity is almost entirely *guards*, and every guard reads deployment

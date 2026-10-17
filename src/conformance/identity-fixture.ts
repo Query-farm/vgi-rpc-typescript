@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The `vgi_rpc.Identity.v1` conformance policy of the reference's
+ * The `vgi_rpc.Identity.v2` conformance policy of the reference's
  * `IDENTITY_CONFORMANCE_FIXTURE.md`, shared by this port's conformance worker
  * and by any SDK fixture worker that opts into Identity.
  *
@@ -93,7 +93,7 @@ export const INTROSPECTOR_PRINCIPAL = "conformance-introspector";
 export const MAX_AUTH_AGE = 900.0;
 
 // There is no introspection rate limit to configure: introspection is not rate
-// limited (IDENTITY_V1_SPEC §4, "No rate limiter"), and the shared group's
+// limited (IDENTITY_V2_SPEC §4, "No rate limiter"), and the shared group's
 // `TestIntrospectionIsNotThrottled` asserts it with a concurrent burst of 60.
 // This fixture used to raise a limiter to 100,000 to keep it out of the group's
 // way; it went with the limiter.
@@ -204,10 +204,13 @@ export const GRANT_TOKEN_PREFIX = "conformance-grant-for:";
 export const SCOPE_SEPARATOR = "|";
 
 /** Fixed rather than `now + ttl`: a constant can be asserted exactly, which
- *  also pins the float64 round trip. `expires_at` is a declaration rather than
+ *  also pins the `timestamp[us, tz="UTC"]` round trip (1893456000000000 us). `expires_at` is a declaration rather than
  *  an enforcement — the real lifetime lives inside the opaque token — so
  *  nothing is lost. 2030-01-01T00:00:00Z. */
-export const GRANT_EXPIRES_AT = 1893456000.0;
+export const GRANT_EXPIRES_AT: Date = new Date(Date.UTC(2030, 0, 1));
+
+/** {@link GRANT_EXPIRES_AT} as the wire's integer microseconds since the epoch. */
+export const GRANT_EXPIRES_AT_MICROS = 1893456000000000n;
 
 /** Correlation handle a full grant carries. */
 export const GRANT_ID = "conformance-grant-id";
@@ -242,8 +245,8 @@ export function conformanceMintGrant(principal: string, purpose: string, scopes:
   }
   const token = GRANT_TOKEN_PREFIX + principal + SCOPE_SEPARATOR + scopes.join(",");
   // `grantId` omitted rather than empty, so the wire shows the default.
-  if (purpose === MINIMAL_PURPOSE) return { token, expiresAt: GRANT_EXPIRES_AT };
-  return { token, expiresAt: GRANT_EXPIRES_AT, grantId: GRANT_ID };
+  if (purpose === MINIMAL_PURPOSE) return { token, expiresAt: new Date(GRANT_EXPIRES_AT) };
+  return { token, expiresAt: new Date(GRANT_EXPIRES_AT), grantId: GRANT_ID };
 }
 
 /** Which hooks a fixture worker configures. */

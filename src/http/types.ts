@@ -119,7 +119,7 @@ export interface HttpHandlerOptions {
    *  through {@link proxyProofRequired} contributes its own header, so this is
    *  only needed on top of that. */
   proxyAuthHeaders?: readonly string[];
-  /** Accept the hosted `vgi_rpc.Identity.v1`'s credentials as bearers -- its
+  /** Accept the hosted `vgi_rpc.Identity.v2`'s credentials as bearers -- its
    *  sealed grants (when grant keys are configured) and tokens its
    *  `resolveToken` resolves -- after {@link authenticate} (WIRE_PROTOCOL.md
    *  §16). Default `true`. `false` is for a deployment that composes

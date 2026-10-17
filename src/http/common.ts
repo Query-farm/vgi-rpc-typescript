@@ -30,7 +30,7 @@ import { zstdDecompress } from "../util/zstd.js";
  * protocol without an Arrow parser. The metadata remains canonical; see
  * {@link createHttpHandler} for what happens when the two disagree.
  *
- * @param protocol Routing key of the hosted protocol (`vgi_rpc.Identity.v1`).
+ * @param protocol Routing key of the hosted protocol (`vgi_rpc.Identity.v2`).
  * @param method RPC method name.
  * @param opts.prefix Server mount prefix (`""` or `"/vgi"`).
  * @param opts.suffix `"/init"` or `"/exchange"` for stream endpoints.

@@ -62,7 +62,7 @@ function authenticate(request: Request): AuthContext {
 
 const minted: IssuedGrant = {
   token: "grant-opaque",
-  expiresAt: Math.floor(Date.now() / 1000) + 600,
+  expiresAt: new Date(Date.now() + 600_000),
   grantId: "g-1",
 };
 
@@ -598,7 +598,7 @@ describe("reserved endpoints belong to the server, not to a protocol", () => {
   });
 
   test("the retired __introspect_token__ JSON route is not served", async () => {
-    // `vgi_rpc.Identity.v1` is the only introspection surface (IDENTITY_V1_SPEC
+    // `vgi_rpc.Identity.v2` is the only introspection surface (IDENTITY_V2_SPEC
     // §8). The prefix-level JSON route it replaced is gone -- no handler, no
     // options, no capability header -- so a request for it is a flat
     // one-segment path like any other, which no longer routes: the same 404
@@ -617,7 +617,7 @@ describe("reserved endpoints belong to the server, not to a protocol", () => {
 
   test("health no longer advertises token introspection", async () => {
     // A client learns whether a worker introspects from reflection
-    // (`vgi_rpc.Identity.v1` hosted), not from a capability header.
+    // (`vgi_rpc.Identity.v2` hosted), not from a capability header.
     const resp = await handler(new Request(`${BASE}${PREFIX}/health`, { method: "OPTIONS" }));
     expect(resp.headers.get("VGI-Token-Introspection")).toBeNull();
     expect(resp.headers.get("Access-Control-Expose-Headers") ?? "").not.toContain("VGI-Token-Introspection");

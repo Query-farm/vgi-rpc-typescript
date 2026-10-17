@@ -237,9 +237,9 @@ export {
 } from "./schema.js";
 export { type ServeStreamOptions, serveStream } from "./serve-stream.js";
 export { type RawPeer, VgiRpcServer, type VgiRpcServerOptions } from "./server.js";
-// `vgi_rpc.Identity.v1` -- the framework-owned identity protocol, and the only
+// `vgi_rpc.Identity.v2` -- the framework-owned identity protocol, and the only
 // introspection surface: the HTTP `__introspect_token__` route it replaced is
-// retired (IDENTITY_V1_SPEC §8).
+// retired (IDENTITY_V2_SPEC §8).
 export {
   buildIdentityProtocol,
   checkFreshness,

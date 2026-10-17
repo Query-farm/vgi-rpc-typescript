@@ -75,7 +75,7 @@ export interface ProtocolHost {
   seal?(): void;
   /** Whether the host's error batches carry the remote traceback. */
   readonly includeTracebacks?: boolean;
-  /** The hosted `vgi_rpc.Identity.v1`, whose sealed grants and `resolveToken`
+  /** The hosted `vgi_rpc.Identity.v2`, whose sealed grants and `resolveToken`
    *  an HTTP handler accepts as bearer credentials. Structural so this module
    *  imports neither the identity nor the grant code. */
   readonly identity?: {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Bearer authenticators that close the `vgi_rpc.Identity.v1` loop
+ * Bearer authenticators that close the `vgi_rpc.Identity.v2` loop
  * (WIRE_PROTOCOL.md §16, "Accepting identity credentials"):
  *
  * - {@link grantAuthenticate} accepts the framework's own sealed grants.
@@ -11,7 +11,7 @@
  * {@link composeIdentityAuthenticate} puts them after the deployment's own
  * authenticator in the normative order -- the deployment's (JWT, static) first,
  * then sealed grants, then `resolveToken` -- and `createHttpHandler` calls it
- * automatically for a host serving `vgi_rpc.Identity.v1`.
+ * automatically for a host serving `vgi_rpc.Identity.v2`.
  *
  * Routing is by prefix and strict in both directions. A token without the
  * `vgig1.` prefix never reaches the grant verifier. A token *with* it that

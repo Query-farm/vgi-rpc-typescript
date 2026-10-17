@@ -70,7 +70,7 @@ BUN_TRANSPORT_KIND_WORKER = [
     "run",
     os.path.join(_TS_DIR, "examples", "conformance-transport-kind.ts"),
 ]
-# The `vgi_rpc.Identity.v1` fixture worker. One binary, two configurations,
+# The `vgi_rpc.Identity.v2` fixture worker. One binary, two configurations,
 # selected by `--identity`; see IDENTITY_CONFORMANCE_FIXTURE.md §1. Kept out of
 # BUN_HTTP_WORKER on purpose — the shared group asserts against the *plain*
 # worker that a deployment configuring no hook hosts no identity protocol at
@@ -554,7 +554,7 @@ def conformance_http_access_log(tmp_path_factory: pytest.TempPathFactory) -> Ite
 
 @pytest.fixture(scope="session")
 def conformance_http_identity_port() -> Iterator[int]:
-    """Bun worker hosting ``vgi_rpc.Identity.v1`` with *both* hooks configured.
+    """Bun worker hosting ``vgi_rpc.Identity.v2`` with *both* hooks configured.
 
     Backs the shared identity group (``TestIdentityWireShape`` and the eleven
     classes after it).  The protocol is nearly all guards and every guard reads

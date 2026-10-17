@@ -6,7 +6,7 @@
  *
  * What a conformance worker -- this port's, or a VGI SDK's fixture worker --
  * hosts so the reference's shared suite can assert against it:
- * `conformance.Secondary.v1` and the `vgi_rpc.Identity.v1` fixture policy.
+ * `conformance.Secondary.v1` and the `vgi_rpc.Identity.v2` fixture policy.
  * Not for production servers: the identity fixture's authenticator trusts
  * request headers.
  */

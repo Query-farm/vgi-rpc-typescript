@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Sealed grants (IDENTITY_V1_SPEC.md §9), driven by the reference's
+ * Sealed grants (IDENTITY_V2_SPEC.md §9), driven by the reference's
  * `vgi_rpc/conformance/grant_token_vectors.json` -- the file every port mints
  * and verifies against byte for byte -- plus the authenticator chain of §9.3
  * and the end-to-end loop over the HTTP handler.
@@ -275,7 +275,7 @@ describe("the loop over HTTP", () => {
     const { conformanceAuthenticate } = await import("../src/conformance/index.js");
     const app = new Protocol("app.Test.v1").unary("noop", { params: {}, result: {}, handler: () => ({}) });
     const server = new VgiRpcServer(app, { protocols: [buildWhoamiProtocol()], grantKeys: KEYS });
-    expect([...server.bindings().keys()]).toContain("vgi_rpc.Identity.v1");
+    expect([...server.bindings().keys()]).toContain("vgi_rpc.Identity.v2");
     const handler = createHttpHandler(server, { serverId: "grant-e2e", authenticate: conformanceAuthenticate });
     const client = (protocol: string, headers: Record<string, string>) =>
       httpConnect("http://test", {
@@ -286,7 +286,7 @@ describe("the loop over HTTP", () => {
           return handler(new Request(input, { ...init, headers: merged }));
         }) as typeof globalThis.fetch,
       });
-    const minter = client("vgi_rpc.Identity.v1", {
+    const minter = client("vgi_rpc.Identity.v2", {
       "X-Conformance-Principal": "owner@example",
       "X-Conformance-Auth-Time": String(Math.trunc(Date.now() / 1000)),
     });

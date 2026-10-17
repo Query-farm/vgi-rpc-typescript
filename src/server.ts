@@ -86,7 +86,7 @@ export interface VgiRpcServerOptions {
    * hosted automatically and identity through {@link identity}.
    */
   protocols?: readonly Protocol[];
-  /** Host `vgi_rpc.Identity.v1` with this implementation. Only the methods
+  /** Host `vgi_rpc.Identity.v2` with this implementation. Only the methods
    *  whose hooks it was given are hosted; with neither hook nothing is. Host it
    *  only on servers whose transport authenticates callers (HTTP). */
   identity?: IdentityImpl;
@@ -200,7 +200,7 @@ export class VgiRpcServer {
     if (identity) this.registerIdentity(identity);
   }
 
-  /** The hosted `vgi_rpc.Identity.v1` implementation, when there is one. Its
+  /** The hosted `vgi_rpc.Identity.v2` implementation, when there is one. Its
    *  sealed grants and `resolveToken` are what an HTTP handler accepts as
    *  bearer credentials. */
   get identity(): IdentityImpl | undefined {
@@ -278,7 +278,7 @@ export class VgiRpcServer {
     this.hostBinding({ name: REFLECTION_PROTOCOL_NAME, protocol: reflection, versionExempt: true });
   }
 
-  /** Host `vgi_rpc.Identity.v1` on this server, when the deployment configured
+  /** Host `vgi_rpc.Identity.v2` on this server, when the deployment configured
    *  it. Prefer the `identity` constructor option, which registers it in the
    *  canonical place (after reflection).
    *

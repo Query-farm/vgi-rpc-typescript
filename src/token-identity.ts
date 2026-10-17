@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-// `vgi_rpc.Identity.v1` -- resolving a credential, and minting a grant.
+// `vgi_rpc.Identity.v2` -- resolving a credential, and minting a grant.
 //
 // Identity lives here, at the RPC layer, rather than in any application
 // protocol: a bearer token is not a VGI concept, the auth primitives it builds
@@ -9,7 +9,7 @@
 // here, and implementing it once is the whole point. It was previously an HTTP
 // JSON route, `POST {prefix}/__introspect_token__`, which meant it existed only
 // on one transport and had to be hand-written in every port. That route is
-// retired (IDENTITY_V1_SPEC §8): this protocol is the only introspection
+// retired (IDENTITY_V2_SPEC §8): this protocol is the only introspection
 // surface, so there is one set of guards to keep right rather than two.
 //
 // Two methods share this module's guards, and they are guarded *differently*
@@ -52,11 +52,11 @@ import {
   batchFromColumns,
   binary,
   field,
-  float64,
   int64,
   list,
   schema as makeSchema,
   serializeBatch,
+  timestampMicro,
   utf8,
 } from "./arrow/index.js";
 import type { AuthContext } from "./auth.js";
@@ -71,7 +71,7 @@ import { sha256Hex } from "./util/web-crypto.js";
  *
  *  Framework-owned, under the reserved `vgi_rpc.` prefix, so an application
  *  cannot register a protocol that impersonates it. */
-export const IDENTITY_PROTOCOL_NAME = "vgi_rpc.Identity.v1";
+export const IDENTITY_PROTOCOL_NAME = "vgi_rpc.Identity.v2";
 
 /** Three dot-separated base64url segments -- a JWS. Such a credential is
  *  validated locally against a key set and MUST NOT be routed to a resolver:
@@ -484,11 +484,12 @@ export interface IssuedGrant {
    *  the IdP are all equally valid and equally invisible here). Never parsed,
    *  never logged. */
   token: string;
-  /** Unix timestamp after which the worker will stop honouring the grant.
-   *  Required *because* the framework cannot enforce it: the real lifetime
+  /** UTC instant after which the worker will stop honouring the grant. On
+   *  the wire a non-null `timestamp[us, tz="UTC"]`; `Date` carries millisecond
+   *  precision, the SDK's mapping for every Arrow timestamp. Required *because* the framework cannot enforce it: the real lifetime
    *  lives inside the opaque token, so this is a declaration rather than an
    *  enforcement. A worker that must state a lifetime has thought about one. */
-  expiresAt: number;
+  expiresAt: Date;
   /** Correlation handle for the audit trail. Not a credential and not secret --
    *  it is what ties a mint record to later use. */
   grantId?: string;
@@ -534,7 +535,7 @@ export const TOKEN_IDENTITY_SCHEMA = makeSchema([
 /** @internal */
 export const ISSUED_GRANT_SCHEMA = makeSchema([
   field("token", utf8(), false),
-  field("expires_at", float64(), false),
+  field("expires_at", timestampMicro("UTC"), false),
   field("grant_id", utf8(), false),
 ]);
 
@@ -549,12 +550,20 @@ export function encodeTokenIdentity(identity: TokenIdentity): Uint8Array {
   );
 }
 
+function expiresAtMillis(value: Date): number {
+  const ms = value instanceof Date ? value.getTime() : Number.NaN;
+  if (!Number.isFinite(ms)) throw new TypeError("IssuedGrant.expiresAt must be a valid Date");
+  return ms;
+}
+
 /** Encode an {@link IssuedGrant} as a single-row Arrow IPC stream. */
 export function encodeIssuedGrant(grant: IssuedGrant): Uint8Array {
   return serializeBatch(
     batchFromColumns(ISSUED_GRANT_SCHEMA, {
       token: [grant.token],
-      expires_at: [grant.expiresAt],
+      // Milliseconds as a Number: both Arrow backends scale a ms Number to the
+      // microsecond unit (see the `__upload_url__` encoder in http/handler.ts).
+      expires_at: [expiresAtMillis(grant.expiresAt)],
       grant_id: [grant.grantId ?? ""],
     }),
   );
@@ -726,7 +735,7 @@ function toScopes(raw: unknown): string[] {
 }
 
 /**
- * Build `vgi_rpc.Identity.v1` for `identity`, or `null` when the deployment
+ * Build `vgi_rpc.Identity.v2` for `identity`, or `null` when the deployment
  * configured neither hook.
  *
  * Only the methods whose hooks exist are registered, so the binding's method

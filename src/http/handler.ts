@@ -236,7 +236,7 @@ function parseRequestCookies(request: Request): ReadonlyMap<string, string> {
  *
  * RPC routes are namespaced by protocol -- `{prefix}/{protocol}/{method}`,
  * plus `/init` and `/exchange` for streams -- so a server hosting
- * `vgi_rpc.Reflection.v1` and `vgi_rpc.Identity.v1` alongside its application
+ * `vgi_rpc.Reflection.v1` and `vgi_rpc.Identity.v2` alongside its application
  * protocol reaches all three over HTTP. Pass the server, not its primary
  * protocol, for the co-hosted ones to be routable.
  *
@@ -355,7 +355,7 @@ export function createHttpHandler(
 
   let authenticate = options?.authenticate;
   // Close the identity loop (WIRE_PROTOCOL.md §16): a host serving
-  // vgi_rpc.Identity.v1 with sealed grants or a resolveToken hook accepts
+  // vgi_rpc.Identity.v2 with sealed grants or a resolveToken hook accepts
   // those credentials as bearers, after the deployment's own authenticator.
   // Before the PKCE wrapper below, so the cookie path is an alternative to the
   // composed chain rather than something inserted inside it.
