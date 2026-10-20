@@ -1,4 +1,4 @@
-.PHONY: all build build-types build-js test test-unit test-integration test-conformance test-smoke typecheck lint clean distclean docs docs-dev docs-api-coverage help
+.PHONY: all build build-types build-js test test-unit test-integration test-conformance test-conformance-client test-smoke typecheck lint clean distclean docs docs-dev docs-api-coverage help
 
 # Python with vgi-rpc installed.
 #
@@ -18,6 +18,19 @@
 VGI_RPC_PYTHON_HOME ?= $(HOME)/Development/vgi-rpc-python
 PYTHON ?= $(shell test -x "$(VGI_RPC_PYTHON_HOME)/.venv/bin/python" \
 	&& echo "$(VGI_RPC_PYTHON_HOME)/.venv/bin/python" || command -v python3)
+
+# Conformance parallelism (pytest-xdist). Every fixture binds an ephemeral port
+# or a private temp dir, so xdist workers are isolated; `auto` = one per core.
+# CONFORMANCE_WORKERS=0 runs serially (in-process, no xdist). Without
+# pytest-xdist installed the suite falls back to serial with a warning.
+CONFORMANCE_WORKERS ?= auto
+CONFORMANCE_XDIST = $(shell $(PYTHON) -c "import xdist" 2>/dev/null \
+	&& echo "-n $(CONFORMANCE_WORKERS)" \
+	|| echo "WARNING: pytest-xdist not installed; conformance runs serially" >&2)
+CONFORMANCE_PYTEST = $(PYTHON) -m pytest test_ts_conformance.py $(CONFORMANCE_XDIST)
+
+# Client role: VGI_CONFORMANCE_SERVER=python is the gate; =typescript localises.
+CONFORMANCE_SERVER ?= python
 
 # Unit test files (no external dependencies)
 UNIT_TESTS := test/access-log.test.ts test/wire.test.ts test/external-ref.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/http/sticky.test.ts test/auth.test.ts test/http-auth.test.ts test/bearer.test.ts test/http/exchange-input-metadata.test.ts
@@ -44,7 +57,7 @@ dist/index.js: $(SRC) tsconfig.json | node_modules
 
 test: node_modules ## Run all tests (integration/conformance need vgi-rpc Python package)
 	bun test
-	$(PYTHON) -m pytest test_ts_conformance.py -x -v
+	$(CONFORMANCE_PYTEST) -x -v
 
 test-unit: node_modules ## Run unit tests only (no Python CLI needed)
 	bun test $(UNIT_TESTS)
@@ -58,8 +71,13 @@ test-smoke: node_modules ## Run cross-runtime smoke tests (Bun + Node.js)
 	bun build ./test/smoke-import.ts --outfile .smoke-bundle/smoke.js --target node --format esm
 	node .smoke-bundle/smoke.js
 
-test-conformance: node_modules ## Run Python conformance suite against bun worker
-	$(PYTHON) -m pytest test_ts_conformance.py -x -v
+test-conformance: node_modules ## Run Python conformance suite against bun worker (parallel; CONFORMANCE_WORKERS=0 for serial)
+	$(CONFORMANCE_PYTEST) -x -v
+
+test-conformance-client: node_modules ## Drive this port's client via the JSONL driver (CONFORMANCE_SERVER=python|typescript)
+	VGI_CONFORMANCE_ROLE=client VGI_CONFORMANCE_SERVER=$(CONFORMANCE_SERVER) \
+	  VGI_CLIENT_DRIVER="$${VGI_CLIENT_DRIVER:-bun run conformance/client-driver.ts}" \
+	  $(CONFORMANCE_PYTEST) -q -rs
 
 lint: node_modules ## Run linter and formatter checks
 	bunx biome check .

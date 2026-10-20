@@ -56,7 +56,10 @@ if ROLE == "server" and SERVER != "typescript":
     raise RuntimeError("VGI_CONFORMANCE_SERVER only applies in client role")
 
 _TS_DIR = os.path.dirname(os.path.abspath(__file__))
-_BUNDLE_DIR = os.path.join(_TS_DIR, ".conformance-bundles")
+# One bundle directory per pytest-xdist worker: the node and node-zstd fixtures
+# (and the deno pair) rebuild the *same* outfile, so two workers sharing one
+# directory would rewrite a bundle another worker's server is about to load.
+_BUNDLE_DIR = os.path.join(_TS_DIR, ".conformance-bundles", os.environ.get("PYTEST_XDIST_WORKER", "main"))
 BUN_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance.ts")]
 BUN_HTTP_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http.ts")]
 BUN_HTTP_ZSTD_WORKER = ["bun", "run", os.path.join(_TS_DIR, "examples", "conformance-http-zstd.ts")]

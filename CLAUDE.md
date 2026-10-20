@@ -69,7 +69,8 @@ The project uses a Makefile for common tasks. Run `make help` to see all targets
 - `make` / `make build` — Install deps and build (JS bundle + type declarations)
 - `make test-unit` — Run unit tests only (no external dependencies)
 - `make test-integration` — Run integration tests (requires Python CLI)
-- `make test-conformance` — Run conformance tests (requires Python CLI)
+- `make test-conformance` — Run conformance tests in parallel (pytest-xdist; requires Python CLI)
+- `make test-conformance-client` — Client-role conformance (`CONFORMANCE_SERVER=python` default, `=typescript` for triage)
 - `make test` — Run all tests
 - `make lint` — Run Biome linter/formatter checks
 - `make typecheck` — Type-check without emitting
@@ -82,6 +83,13 @@ The project uses a Makefile for common tasks. Run `make help` to see all targets
 - Run tests: `make test` or `bun test`
 - Run unit tests only (no Python CLI needed): `make test-unit`
 - Run conformance tests: `make test-conformance` (runs Python conformance suite against bun worker)
+  - **Runs in parallel** via pytest-xdist: `-n $(CONFORMANCE_WORKERS)`, default `auto` (one
+    worker per core). `make test-conformance CONFORMANCE_WORKERS=8` caps it;
+    `CONFORMANCE_WORKERS=0` runs serially. Without pytest-xdist installed (`pip install
+    pytest-xdist`) the target warns and falls back to serial. Every fixture binds an ephemeral
+    port or a private temp dir; the node/deno bundles go to a per-worker
+    `.conformance-bundles/<xdist worker>/` because two fixtures rebuild the same outfile.
+    Don't add a fixture with a fixed port or a shared output path.
 - All individual tests must complete in 5 seconds or less
 - **Always use a 60-second timeout when running tests** (e.g., `timeout 60 make test-conformance`)
 - Integration and conformance tests require `vgi-rpc[http]` installed: `pip install "vgi-rpc[http]"`
@@ -166,7 +174,7 @@ validate a client, so the run that counts is the one against the reference:
 # The gate: this port's client against the Python reference server.
 VGI_CONFORMANCE_ROLE=client VGI_CONFORMANCE_SERVER=python \
   VGI_CLIENT_DRIVER="bun run conformance/client-driver.ts" \
-  python -m pytest test_ts_conformance.py -q
+  python -m pytest test_ts_conformance.py -q -n auto   # or: make test-conformance-client
 
 # A regression check, not a conformance claim. Useful because when the two
 # legs disagree, the gap localises the defect to one side in one run.
