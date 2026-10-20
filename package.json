@@ -130,7 +130,8 @@
     "@opentelemetry/sdk-metrics": "^2.7.1",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@opentelemetry/semantic-conventions": "^1.41.1",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "typescript": "^7.0.2"
   },
   "scripts": {
     "build": "bun run build:types && bun run build:js",
