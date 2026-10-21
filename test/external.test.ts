@@ -3,7 +3,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { Field, Int64, RecordBatch, RecordBatchStreamWriter, Schema, vectorFromArray } from "@query-farm/apache-arrow";
-import { withBatchMetadata } from "../src/arrow/index.js";
+import { withBatchMetadata, batchFromColumns, serializeBatch } from "../src/arrow/index.js";
 import {
   LOCATION_FETCH_MS_KEY,
   LOCATION_KEY,
@@ -475,5 +475,40 @@ describe("SHA-256 checksums", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+
+describe("gzip external publications", () => {
+  test("resolves raw gzip and transparently decoded browser responses", async () => {
+    const raw = serializeBatch(batchFromColumns(TEST_SCHEMA, { value: Array.from({ length: 25 }, (_, i) => BigInt(i)) }));
+    const compressed = new Uint8Array(Bun.gzipSync(raw));
+    const checksum = await sha256Hex(raw);
+    const pointer = makeExternalLocationBatch(TEST_SCHEMA, "https://storage.test/catalog", checksum);
+    for (const body of [compressed, raw]) {
+      const config: ExternalLocationConfig = {
+        storage: new MockStorage(),
+        maxFetchBytes: compressed.length,
+        maxDecompressedBytes: raw.length,
+        fetch: (async () => new Response(body, { headers: { "Content-Encoding": "gzip", "Content-Length": String(compressed.length) } })) as typeof fetch,
+      };
+      const resolved = await resolveExternalLocation(pointer, config);
+      expect(resolved.numRows).toBe(25);
+      expect(resolved.getChild("value")?.get(24)).toBe(24n);
+      await expect(resolveExternalLocation(pointer, { ...config, maxFetchBytes: compressed.length - 1 })).rejects.toThrow("max_fetch_bytes");
+      await expect(resolveExternalLocation(pointer, { ...config, maxDecompressedBytes: raw.length - 1 })).rejects.toThrow("max_decompressed_bytes");
+    }
+  });
+  test("caps gzip output while decoding and rejects corrupt data", async () => {
+    const raw = serializeIpc(makeBatch(100));
+    const compressed = new Uint8Array(Bun.gzipSync(raw));
+    const pointer = makeExternalLocationBatch(TEST_SCHEMA, "https://storage.test/catalog", await sha256Hex(raw));
+    const config: ExternalLocationConfig = {
+      storage: new MockStorage(), maxDecompressedBytes: 100,
+      fetch: (async () => new Response(compressed, { headers: { "Content-Encoding": "gzip" } })) as typeof fetch,
+    };
+    await expect(resolveExternalLocation(pointer, config)).rejects.toThrow("max_decompressed_bytes");
+    compressed[compressed.length - 1] ^= 1;
+    await expect(resolveExternalLocation(pointer, { ...config, maxDecompressedBytes: raw.length * 2 })).rejects.toThrow("gzip decompression failed");
   });
 });
