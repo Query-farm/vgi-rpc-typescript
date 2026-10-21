@@ -90,6 +90,9 @@ export interface ExternalLocationConfig {
   maxRedirects?: number;
   /** Request implementation for external downloads. Defaults to global `fetch`. */
   fetch?: typeof globalThis.fetch;
+  /** Optional application validator for the complete decoded, digest-verified IPC
+   * stream, before RPC log filtering or data-batch selection. Throw to reject. */
+  validateFetchedIpc?: (data: Uint8Array) => void;
 }
 
 /** Monotonic milliseconds, falling back to `Date.now` where `performance` is
@@ -152,13 +155,15 @@ async function readResponseBounded(
   response: Response,
   maxBytes: number,
   controller: AbortController,
+  limitName = "max_fetch_bytes",
+  transparentGzipMaxBytes?: number,
 ): Promise<Uint8Array> {
   const declared = response.headers.get("Content-Length");
   if (declared != null) {
     const length = Number(declared);
     if (Number.isFinite(length) && length > maxBytes) {
       controller.abort();
-      throw new Error(`External location fetch exceeds max_fetch_bytes (${length} > ${maxBytes})`);
+      throw new Error(`External location fetch exceeds ${limitName} (${length} > ${maxBytes})`);
     }
   }
 
@@ -166,14 +171,32 @@ async function readResponseBounded(
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let bodyLimit = maxBytes;
+  let bodyLimitName = limitName;
+  let decidedEncoding = transparentGzipMaxBytes == null;
+  const prefix: number[] = [];
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > maxBytes) {
+      if (!decidedEncoding) {
+        for (let i = 0; i < value.length && prefix.length < 2; i++) prefix.push(value[i]);
+        if ((prefix.length > 0 && prefix[0] !== 0x1f) || (prefix.length > 1 && prefix[1] !== 0x8b)) {
+          // Standards-based fetch may have already decoded gzip. Charge its
+          // body to the decoded cap; Content-Length above still bounds the
+          // encoded size when exposed by the server/browser.
+          bodyLimit = transparentGzipMaxBytes!;
+          bodyLimitName = "max_decompressed_bytes";
+          decidedEncoding = true;
+        } else if (prefix.length >= 2) {
+          decidedEncoding = true;
+        }
+      }
+      const activeLimit = decidedEncoding ? bodyLimit : Math.max(maxBytes, transparentGzipMaxBytes!);
+      if (total > activeLimit) {
         controller.abort();
-        throw new Error(`External location fetch exceeded max_fetch_bytes (${maxBytes} bytes)`);
+        throw new Error(`External location fetch exceeded ${bodyLimitName} (${bodyLimit} bytes)`);
       }
       chunks.push(value);
     }
@@ -184,6 +207,10 @@ async function readResponseBounded(
       // The stream may already be closed or aborted.
     }
     reader.releaseLock();
+  }
+  if (total > bodyLimit) {
+    controller.abort();
+    throw new Error(`External location fetch exceeded ${bodyLimitName} (${bodyLimit} bytes)`);
   }
 
   const data = new Uint8Array(total);
@@ -539,9 +566,9 @@ export async function resolveExternalLocation(
       `External location fetch failed: ${response.status} ${response.statusText} [url: ${redactExternalUrl(currentUrl)}]`,
     );
   }
-  let data = await readResponseBounded(response, maxFetchBytes, controller!);
-
   const contentEncoding = response.headers.get("Content-Encoding");
+  let data = await readResponseBounded(response, maxFetchBytes, controller!, "max_fetch_bytes",
+    contentEncoding?.toLowerCase() === "gzip" ? maxDecompressedBytes : undefined);
   if (contentEncoding === "zstd") {
     try {
       data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
@@ -550,6 +577,19 @@ export async function resolveExternalLocation(
         throw new Error(`External location decompressed body exceeds max_decompressed_bytes (${maxDecompressedBytes})`);
       }
       throw new Error("External location zstd decompression failed");
+    }
+  }
+  if (contentEncoding?.toLowerCase() === "gzip" && data[0] === 0x1f && data[1] === 0x8b) {
+    // Bun honors decompress:false; browsers/Node may transparently decode
+    // while retaining Content-Encoding. Only a still-compressed gzip body
+    // needs decoding. Hash/schema validation below also covers that path.
+    const compressed = new Uint8Array(data);
+    const decoded = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
+    try {
+      data = await readResponseBounded(new Response(decoded), maxDecompressedBytes, controller!, "max_decompressed_bytes");
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("max_decompressed_bytes")) throw error;
+      throw new Error("External location gzip decompression failed");
     }
   }
   if (data.byteLength > maxDecompressedBytes) {
@@ -577,6 +617,7 @@ export async function resolveExternalLocation(
   // only the first batch dropped every log a server emitted on an
   // externalized turn, and — when a log came first — handed the caller a log
   // batch as its data.
+  config.validateFetchedIpc?.(data);
   let resolved: VgiBatch | null = null;
   for (const candidate of deserializeBatches(data)) {
     if (candidate.numRows === 0 && dispatchLogOrError(candidate as never, onLog)) continue;
