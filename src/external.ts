@@ -567,8 +567,13 @@ export async function resolveExternalLocation(
     );
   }
   const contentEncoding = response.headers.get("Content-Encoding");
-  let data = await readResponseBounded(response, maxFetchBytes, controller!, "max_fetch_bytes",
-    contentEncoding?.toLowerCase() === "gzip" ? maxDecompressedBytes : undefined);
+  let data = await readResponseBounded(
+    response,
+    maxFetchBytes,
+    controller!,
+    "max_fetch_bytes",
+    contentEncoding?.toLowerCase() === "gzip" ? maxDecompressedBytes : undefined,
+  );
   if (contentEncoding === "zstd") {
     try {
       data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
@@ -586,7 +591,12 @@ export async function resolveExternalLocation(
     const compressed = new Uint8Array(data);
     const decoded = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
     try {
-      data = await readResponseBounded(new Response(decoded), maxDecompressedBytes, controller!, "max_decompressed_bytes");
+      data = await readResponseBounded(
+        new Response(decoded),
+        maxDecompressedBytes,
+        controller!,
+        "max_decompressed_bytes",
+      );
     } catch (error) {
       if (error instanceof Error && error.message.includes("max_decompressed_bytes")) throw error;
       throw new Error("External location gzip decompression failed");
