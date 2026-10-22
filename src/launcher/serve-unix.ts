@@ -186,7 +186,7 @@ export async function serveUnix(target: Protocol | VgiRpcServer, options: ServeU
 
   async function handleConnection(socket: Socket): Promise<void> {
     // The reader takes any Node Readable; sockets are duplex Readables.
-    const reader = await IpcStreamReader.create(socket);
+    const reader = await IpcStreamReader.create(socket, { useActiveBackend: true });
     // Build the writer over the Socket itself, not its raw fd. AF_UNIX
     // sockets in Node are non-blocking; a fd-based writer would do
     // `fs.writeSync` and busy-wait on EAGAIN whenever the ~8 KB kernel send

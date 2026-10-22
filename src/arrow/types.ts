@@ -59,9 +59,8 @@ export type VgiColumnData = unknown;
  * whole responses via {@link serializeBatches}.
  *
  * The arrow-js backend implements this over `RecordBatchStreamWriter`.
- * The flechette backend has no incremental-writer surface and its
- * factory throws — keeping arrow-js out of the flechette (workerd/
- * browser) bundle, which is HTTP-only anyway.
+ * The flechette backend emits schema, dictionary and record-batch frames
+ * from its native IPC encoder, preserving the same lockstep boundaries.
  */
 export interface IncrementalEncoder {
   /** Bytes for the schema preamble (continuation + schema message). */

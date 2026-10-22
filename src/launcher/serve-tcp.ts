@@ -482,7 +482,10 @@ export async function serveTcp(
     const peer = await prepareTcpPeer(socket);
     // After optional bounded admission, start framing and identity resolution
     // together. No request is dispatched until the identity snapshot completes.
-    const [identity, reader] = await Promise.all([resolveConnectionIdentity(peer), IpcStreamReader.create(socket)]);
+    const [identity, reader] = await Promise.all([
+      resolveConnectionIdentity(peer),
+      IpcStreamReader.create(socket, { useActiveBackend: true }),
+    ]);
     // Build the writer over the Socket itself, not its raw fd, so we go
     // through `socket.write` + `'drain'` and yield the event loop while the
     // kernel send buffer drains (see serve-unix.ts for the rationale).

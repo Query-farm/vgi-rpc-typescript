@@ -4,6 +4,7 @@
 import { backend, isMap, type VgiBatch, type VgiSchema } from "../arrow/index.js";
 import { PROTOCOL_KEY, REQUEST_ID_KEY, REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError, VersionError } from "../errors.js";
+import { typeToken } from "../type-tokens.js";
 import { isOpaquePassthroughType } from "./opaque.js";
 
 // Safe-integer bounds as BigInt, hoisted so per-field parsing doesn't
@@ -27,10 +28,9 @@ export interface ParsedRequest {
  * Enforce the registered parameter contract before handing values to user code.
  *
  * Arrow Schema object identity is not meaningful across an IPC boundary, so
- * compare the pieces of the field contract explicitly. `DataType#toString()`
- * is Arrow's canonical, recursive rendering and includes type parameters such
- * as integer width/sign, timestamp unit/timezone, decimal precision/scale,
- * and nested child fields.
+ * compare the pieces of the field contract explicitly. Canonical type tokens
+ * include type parameters and nested child fields on both Arrow backends;
+ * Flechette's plain type objects have no distinguishing `toString()`.
  */
 export function validateRequestSchema(actual: VgiSchema, expected: VgiSchema, methodName: string): void {
   const actualFields = actual.fields;
@@ -53,8 +53,8 @@ export function validateRequestSchema(actual: VgiSchema, expected: VgiSchema, me
         "",
       );
     }
-    const gotType = String(got.type);
-    const wantType = String(want.type);
+    const gotType = typeToken(got.type);
+    const wantType = typeToken(want.type);
     if (gotType !== wantType) {
       throw new RpcError(
         "ProtocolError",

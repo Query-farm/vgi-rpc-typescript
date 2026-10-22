@@ -24,6 +24,7 @@ export const TypeId = {
   Duration: 18,
   LargeBinary: 19,
   LargeUtf8: 20,
+  LargeList: 21,
   Dictionary: -1,
 } as const;
 

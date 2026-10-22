@@ -12,7 +12,7 @@
 // embedded-arrow / IPC-roundtrip handlers. Type *classes* used to live
 // here too; the conformance protocol now constructs schemas/types via the
 // vgi-rpc Arrow facade (imports below) so it can run on either backend.
-import { type RecordBatch, RecordBatchReader, RecordBatchStreamWriter, Vector } from "@query-farm/apache-arrow";
+import { type RecordBatch, RecordBatchReader, Vector } from "@query-farm/apache-arrow";
 import {
   batchFromColumns,
   binary,
@@ -21,6 +21,7 @@ import {
   decimal,
   dictionary,
   durationMicro,
+  type VgiField as Field,
   field,
   fixedSizeBinary,
   float32 as float32Type,
@@ -32,7 +33,9 @@ import {
   largeUtf8,
   list,
   map as mapType,
+  type VgiSchema as Schema,
   schema,
+  serializeBatches,
   struct,
   timeMicro,
   timestampMicro,
@@ -193,12 +196,8 @@ function formatFloat(n: number): string {
 }
 
 /** Serialize an IPC stream with a single batch to bytes (for dataclass binary). */
-function _serializeBatch(schema: Schema, batch: RecordBatch): Uint8Array {
-  const writer = new RecordBatchStreamWriter();
-  writer.reset(undefined, schema);
-  writer.write(batch);
-  writer.close();
-  return writer.toUint8Array(true);
+function _serializeBatch(schema: Schema, batch: VgiBatch): Uint8Array {
+  return serializeBatches(schema, [batch]);
 }
 
 // ---------------------------------------------------------------------------
@@ -642,9 +641,9 @@ protocol.unary("pack_nested_containers", {
       frozen_statuses: [statuses],
       tagged_status: [statuses[0] ?? null],
       tagged_point: [points[0] ?? null],
-      tagged_batch: [_serializeBatch(taggedSchema as Schema, taggedBatch as RecordBatch)],
+      tagged_batch: [_serializeBatch(taggedSchema, taggedBatch)],
     });
-    return { result: _serializeBatch(nestedContainersSchema as Schema, nestedBatch as RecordBatch) };
+    return { result: _serializeBatch(nestedContainersSchema, nestedBatch) };
   },
   paramTypes: {
     statuses: "list[Status]",

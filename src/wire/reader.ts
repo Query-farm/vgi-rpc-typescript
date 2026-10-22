@@ -1,8 +1,9 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { type RecordBatch, RecordBatchReader } from "@query-farm/apache-arrow";
-import type { VgiBatch, VgiSchema } from "../arrow/index.js";
+import { RecordBatchReader } from "@query-farm/apache-arrow";
+import * as arrowjs from "../arrow/impl-arrowjs/index.js";
+import { backend, deserializeBatch, deserializeSchema, type VgiBatch, type VgiSchema } from "../arrow/index.js";
 
 export interface StreamMessage {
   schema: VgiSchema;
@@ -62,18 +63,35 @@ export class IpcStreamReader {
   /** True once readNextBatch() returns null (EOS reached for current stream). */
   private streamEnded = false;
 
-  private constructor(reader: RecordBatchReader) {
+  private constructor(
+    reader: RecordBatchReader,
+    private readonly useActiveBackend: boolean,
+  ) {
     this.reader = reader;
   }
 
-  static async create(input: ReadableStream<Uint8Array> | NodeJS.ReadableStream): Promise<IpcStreamReader> {
+  static async create(
+    input: ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+    options: { useActiveBackend?: boolean } = {},
+  ): Promise<IpcStreamReader> {
     const source = isNodeReadable(input) ? clampReads(input as object) : input;
     const reader = await RecordBatchReader.from(source as any);
     await reader.open({ autoDestroy: false });
     if (reader.closed) {
       throw new Error("Input stream closed before first IPC message");
     }
-    return new IpcStreamReader(reader);
+    return new IpcStreamReader(reader, options.useActiveBackend === true && backend.name !== "arrow-js");
+  }
+
+  // Server handlers need their selected backend's schemas and columns. Clients
+  // retain the public Arrow JS result API. Cross via IPC to preserve raw units,
+  // nested buffers, dictionary values, row counts and custom batch metadata.
+  private schemaForBackend(schema: VgiSchema): VgiSchema {
+    return this.useActiveBackend ? deserializeSchema(arrowjs.serializeSchema(schema)) : schema;
+  }
+
+  private batchForBackend(batch: VgiBatch): VgiBatch {
+    return this.useActiveBackend ? deserializeBatch(arrowjs.serializeBatch(batch)) : batch;
   }
 
   /**
@@ -95,16 +113,16 @@ export class IpcStreamReader {
       return null;
     }
 
-    const batches: RecordBatch[] = [];
+    const batches: VgiBatch[] = [];
     while (true) {
       const result = await this.reader.next();
       if (result.done) break;
       // Skip Arrow-JS synthetic placeholder for empty streams
       if (result.value.constructor.name === "_InternalEmptyPlaceholderRecordBatch") break;
-      batches.push(result.value);
+      batches.push(this.batchForBackend(result.value));
     }
 
-    return { schema, batches };
+    return { schema: this.schemaForBackend(schema), batches };
   }
 
   /**
@@ -121,7 +139,7 @@ export class IpcStreamReader {
     }
     this.initialized = true;
     this.streamEnded = false;
-    return this.reader.schema ?? null;
+    return this.reader.schema ? this.schemaForBackend(this.reader.schema) : null;
   }
 
   /**
@@ -146,7 +164,7 @@ export class IpcStreamReader {
       this.streamEnded = true;
       return null;
     }
-    return result.value;
+    return this.batchForBackend(result.value);
   }
 
   async cancel(): Promise<void> {

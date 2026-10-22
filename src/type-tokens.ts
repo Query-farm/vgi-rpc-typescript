@@ -92,7 +92,7 @@ export function typeToken(type: VgiDataType): string {
       return "bool";
     case TypeId.Int: {
       const bits = Number(t.bitWidth ?? 64);
-      const signed = t.isSigned !== false;
+      const signed = (t.isSigned ?? t.signed) !== false;
       return `${signed ? "int" : "uint"}${bits}`;
     }
     case TypeId.Float: {
@@ -109,7 +109,7 @@ export function typeToken(type: VgiDataType): string {
     case TypeId.LargeBinary:
       return "large_binary";
     case TypeId.FixedSizeBinary:
-      return `fixed_size_binary(${Number(t.byteWidth)})`;
+      return `fixed_size_binary(${Number(t.byteWidth ?? t.stride)})`;
     case TypeId.Date:
       // arrow-js spells unit 0 for DAY (date32) and 1 for MILLISECOND (date64).
       return Number(t.unit ?? 0) === 0 ? "date32" : "date64";
@@ -125,14 +125,23 @@ export function typeToken(type: VgiDataType): string {
     }
     case TypeId.Duration:
       return `duration(${unitToken(t.unit)})`;
+    case TypeId.Interval: {
+      // Same vocabulary as the Python reference; interval units are distinct
+      // even when their underlying buffers have the same integer width.
+      const token = ["interval_months", "interval_day_time", "interval_month_day_nano"][Number(t.unit)];
+      if (!token) throw new UnsupportedArrowTypeError(type);
+      return token;
+    }
     case TypeId.Decimal: {
       const bits = Number(t.bitWidth ?? 128);
       return `decimal${bits}(${Number(t.precision)},${Number(t.scale)})`;
     }
     case TypeId.List:
       return `list<${anonChild(listChild(t), "item")}>`;
+    case TypeId.LargeList:
+      return `large_list<${anonChild(listChild(t), "item")}>`;
     case TypeId.FixedSizeList:
-      return `fixed_size_list(${Number(t.listSize)})<${anonChild(listChild(t), "item")}>`;
+      return `fixed_size_list(${Number(t.listSize ?? t.stride)})<${anonChild(listChild(t), "item")}>`;
     case TypeId.Struct:
       return `struct<${structChildren(t).map(child).join(",")}>`;
     case TypeId.Map: {
@@ -148,7 +157,7 @@ export function typeToken(type: VgiDataType): string {
       const valueType = t.dictionary as VgiDataType | undefined;
       if (!indexType || !valueType) throw new UnsupportedArrowTypeError(type);
       const token = `dictionary<index:${typeToken(indexType)},value:${typeToken(valueType)}>`;
-      return t.isOrdered ? `${token},ordered` : token;
+      return (t.isOrdered ?? t.ordered) ? `${token},ordered` : token;
     }
     case TypeId.Union: {
       // Type codes need not be 0..n-1, so they are spelled rather than implied

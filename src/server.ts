@@ -455,7 +455,7 @@ export class VgiRpcServer {
     peer: RawPeer = {},
   ): Promise<void> {
     this.seal();
-    const reader = await IpcStreamReader.create(readable);
+    const reader = await IpcStreamReader.create(readable, { useActiveBackend: true });
     const writer = new IpcStreamWriter(writable);
 
     try {

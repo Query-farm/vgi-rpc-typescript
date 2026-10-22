@@ -105,7 +105,7 @@ function _buildFlechetteType(type: any): any {
     case Type.LargeList:
       return (type.typeId === Type.LargeList ? largeList : list)(fField(type.children[0]));
     case Type.FixedSizeList:
-      return fixedSizeList(fField(type.children[0]), type.listSize);
+      return fixedSizeList(fField(type.children[0]), type.listSize ?? type.stride);
     case Type.Struct:
       return struct(type.children.map(fField));
     case Type.Map: {

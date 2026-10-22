@@ -1099,12 +1099,10 @@ _DEFAULT_TRANSPORTS = [
 ]
 
 # Flechette Arrow backend — same TS source, different `imports` condition.
-# Opt-in via VGI_TEST_FLECHETTE=1 because the flechette backend currently
-# has known wire-encoding gaps (list buffer layout, batch metadata
-# attachment on zero-row batches, several wide-type serialization issues).
-# Tracking issue: see TODO at top of src/arrow/impl-flechette/index.ts.
+# Enabled in CI via VGI_TEST_FLECHETTE=1. HTTP variant names begin with
+# "http" so the shared suite recognizes HTTP init-batch semantics.
 _TRANSPORTS = _DEFAULT_TRANSPORTS + (
-    ["flechette-pipe", "flechette-http"] if os.environ.get("VGI_TEST_FLECHETTE") == "1" else []
+    ["flechette-pipe", "http-flechette"] if os.environ.get("VGI_TEST_FLECHETTE") == "1" else []
 )
 
 # In client role the parameter names a *client* configuration, not a server
@@ -1271,7 +1269,7 @@ def conformance_conn(
                     transport.close()
 
             return _flechette_pipe_conn()
-        elif request.param == "flechette-http":
+        elif request.param == "http-flechette":
             port = request.getfixturevalue("ts_flechette_http_port")
             return http_connect(
                 ConformanceService,
@@ -1320,7 +1318,7 @@ def conformance_protocol_connector(
             "http-node-zstd": "ts_node_http_zstd_port",
             "http-deno": "ts_deno_http_port",
             "http-deno-zstd": "ts_deno_http_zstd_port",
-            "flechette-http": "ts_flechette_http_port",
+            "http-flechette": "ts_flechette_http_port",
         }.get(transport)
         if fixture is None:
             raise ValueError(f"no conformance transport named {transport!r}")
@@ -1493,7 +1491,7 @@ def conformance_describe(
         port = request.getfixturevalue("ts_deno_http_port")
     elif param == "http-deno-zstd":
         port = request.getfixturevalue("ts_deno_http_zstd_port")
-    elif param == "flechette-http":
+    elif param == "http-flechette":
         port = request.getfixturevalue("ts_flechette_http_port")
     else:
         raise AssertionError(f"unhandled transport for conformance_describe: {param}")
@@ -1524,31 +1522,6 @@ class TestLargeData(TestLargeData):  # type: ignore[no-redef]  # noqa: F811
     def _skip_non_pipe(self) -> None:
         pass
 
-
-# The stdio worker's `IncrementalStream` (src/wire/writer.ts) uses arrow-js's
-# `RecordBatchStreamWriter` directly because the exchange protocol is lockstep
-# — the client reads each batch before sending the next input, so we can't
-# buffer-then-emit. flechette has no equivalent streaming surface, so the
-# stdio worker effectively requires the arrow-js backend. workerd/browser
-# deployments use HTTP (no stdio), so this is fine in practice; mark the
-# stdio-flechette stream tests xfail rather than re-implementing incremental
-# encoding atop flechette.
-_FLECHETTE_PIPE_STREAM_XFAIL_CLASSES = {
-    "TestProducerStream",
-    "TestProducerStreamWithHeader",
-    "TestExchangeStream",
-    "TestExchangeStreamWithHeader",
-    "TestCancel",
-    "TestExchangeCastCompatible",
-    "TestErrorRecovery",
-    "TestDynamicRichHeader",
-    "TestDynamicSchemaProducer",
-    "TestRichHeaderExchange",
-}
-
-
-# Hook lives in conftest.py (next to this file) — pytest does not pick up
-# `pytest_collection_modifyitems` defined inside a test module.
 
 # The repo-local ``TestResponseCompressionDisabled`` that used to live here was
 # removed once the same ground landed centrally as
