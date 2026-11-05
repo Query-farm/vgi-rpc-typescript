@@ -41,6 +41,73 @@ describe("read clamp", () => {
     expect(asked).toEqual([MAX_READ_CHUNK, 1024, undefined]);
   });
 
+  it("answers the read after an oversized one with no more than was asked for", () => {
+    const asked: (number | undefined)[] = [];
+    const stream = {
+      readable: true,
+      readableLength: 3 * MAX_READ_CHUNK,
+      read(n?: number) {
+        asked.push(n);
+        return null;
+      },
+      pipe() {},
+    };
+    const wrapped = clampReads(stream);
+    wrapped.read(MAX_READ_CHUNK + 5);
+    wrapped.read();
+    // Only the read directly after an oversized one is bounded.
+    wrapped.read();
+    expect(asked).toEqual([MAX_READ_CHUNK, undefined]);
+
+    asked.length = 0;
+    stream.readableLength = 10;
+    wrapped.read(MAX_READ_CHUNK + 5);
+    wrapped.read();
+    expect(asked).toEqual([10]);
+
+    // Nothing buffered: a bare read() is what prompts the stream to fetch more.
+    asked.length = 0;
+    stream.readableLength = 0;
+    wrapped.read(MAX_READ_CHUNK + 5);
+    wrapped.read();
+    expect(asked).toEqual([undefined]);
+  });
+
+  it("finishes a stream whose peer sent everything and is now waiting", async () => {
+    // One chunk holding a body over MAX_READ_CHUNK and what follows it, with the
+    // stream left open: no further 'readable' or 'end' is ever coming. Draining
+    // the stream on the oversized read used to hang here, at the second message.
+    const payload = new Uint8Array(2 * MAX_READ_CHUNK + 17);
+    payload[payload.length - 1] = 2;
+    const s = schema([field("v", binary())]);
+    const stream = serializeBatches(s, [batchFromColumns(s, { v: [payload] })]);
+    const input = new Readable({ read() {} });
+    input.push(Buffer.concat([stream, stream]));
+
+    const readAll = async () => {
+      const reader = await IpcStreamReader.create(input);
+      const sizes: number[] = [];
+      for (let i = 0; i < 2; i++) {
+        await reader.openNextStream();
+        let batch = await reader.readNextBatch();
+        while (batch !== null) {
+          sizes.push(batch.numRows);
+          batch = await reader.readNextBatch();
+        }
+      }
+      return sizes;
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const hung = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("reader hung with every byte delivered")), 4000);
+    });
+    try {
+      expect(await Promise.race([readAll(), hung])).toEqual([1, 1]);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   it("delivers a body over MAX_READ_CHUNK that is already buffered", async () => {
     // With 64 MiB buffered, a short answer to the adapter's oversized read gets
     // overwritten by the `read()` that follows, and that chunk is lost.

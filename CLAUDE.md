@@ -206,7 +206,7 @@ GitHub Actions workflow at `.github/workflows/ci.yml`:
 
 ## Large payloads
 
-Every transport write is split before it reaches the syscall, and every Node-stream read is clamped before it reaches `Readable.read`. `src/wire/writer.ts` caps a single `fs.writeSync` at 1 GiB and a single `socket.write` at 128 KiB; `src/client/pipe.ts` applies the same 128 KiB split to the client's writable (Bun subprocess `FileSink`, tcp socket); `src/wire/reader.ts` wraps Node readables so `read(n)` never exceeds 64 MiB, answering a larger request with `null` because arrow-js discards a short non-null answer. Four separate ceilings make all of it necessary, and none of them are visible on Linux:
+Every transport write is split before it reaches the syscall, and every Node-stream read is clamped before it reaches `Readable.read`. `src/wire/writer.ts` caps a single `fs.writeSync` at 1 GiB and a single `socket.write` at 128 KiB; `src/client/pipe.ts` applies the same 128 KiB split to the client's writable (Bun subprocess `FileSink`, tcp socket); `src/wire/reader.ts` wraps Node readables so `read(n)` never exceeds 64 MiB, answering a larger request with `null` because arrow-js discards a short non-null answer, and bounding the `read()` that follows because arrow-js can hang on bytes past the message it asked for. Four separate ceilings make all of it necessary, and none of them are visible on Linux:
 
 - `fs.writeSync` throws `ERR_OUT_OF_RANGE` for a `length` past `INT32_MAX` (Node and Bun both).
 - `Readable.read(n)` throws the same for `n` past 1 GiB (`MAX_HWM`). arrow-js's Node adapter asks for a whole IPC message body in one call, so this fires on any Arrow body over 1 GiB — the one that was actually reachable before the clamps went in.

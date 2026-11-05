@@ -33,17 +33,35 @@ function isNodeReadable(input: unknown): boolean {
  * the `read`/`pipe`/`readable` trio arrow-js sniffs to pick this adapter.
  *
  * An oversized read answers `null`, not a shorter chunk. That is `read(n)`'s
- * normal answer when `n` bytes are not available, and the adapter responds by
- * draining the buffer with `read()`, which has no size limit. A short non-null
- * answer would lose data: the adapter overwrites it with that `read()` result.
+ * normal answer when `n` bytes are not available, and the adapter responds with
+ * a bare `read()`. A short non-null answer would lose data: the adapter
+ * overwrites it with that `read()` result.
+ *
+ * That bare `read()` has to be bounded by what the adapter still needs, because
+ * this wrapper answers `null` even when the bytes are there. Draining the stream
+ * would hand the adapter the start of the next message, and its serve loop
+ * (`while (size < bufferLength)`) then waits for another `'readable'` when a
+ * request exactly empties its buffer. A peer that has sent everything and is
+ * waiting for a reply never causes that event. Unwrapped, the adapter only falls
+ * back to `read()` when fewer than `n` bytes are buffered, so it cannot get there.
  */
 export function clampReads<T extends object>(stream: T): T {
+  const source = stream as { read(n?: number): unknown; readableLength?: number };
+  // What the adapter asked for in the read just answered with `null`.
+  let owed = 0;
   return new Proxy(stream, {
     get(target, prop) {
       if (prop === "read") {
         return (size?: number) => {
-          if (typeof size === "number" && size > MAX_READ_CHUNK) return null;
-          return (target as { read(n?: number): unknown }).read(size);
+          if (typeof size === "number" && size > MAX_READ_CHUNK) {
+            owed = size;
+            return null;
+          }
+          const limit = size === undefined ? owed : 0;
+          owed = 0;
+          if (limit === 0) return source.read(size);
+          const take = Math.min(limit, MAX_READ_CHUNK, source.readableLength ?? 0);
+          return take > 0 ? source.read(take) : source.read();
         };
       }
       // `target` as the receiver, not the proxy: a getter on a Node stream
