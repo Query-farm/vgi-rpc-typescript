@@ -14,9 +14,10 @@
 // than the clamp — on payloads small enough to run anywhere in milliseconds.
 
 import { describe, expect, it } from "bun:test";
+import { Readable } from "node:stream";
 import { batchFromColumns, binary, field, schema, serializeBatches } from "../src/arrow/index.js";
 import { MAX_ENCODABLE_BYTES, requireEncodable } from "../src/arrow/limits.js";
-import { clampReads, MAX_READ_CHUNK } from "../src/wire/reader.js";
+import { clampReads, IpcStreamReader, MAX_READ_CHUNK } from "../src/wire/reader.js";
 import { IpcStreamWriter, MAX_STREAM_CHUNK } from "../src/wire/writer.js";
 
 describe("read clamp", () => {
@@ -33,11 +34,35 @@ describe("read clamp", () => {
     const wrapped = clampReads(stream);
     // arrow-js's Node adapter asks for a whole IPC message body in one call,
     // so a >2 GiB Arrow body becomes a >2 GiB request.
-    wrapped.read(2 ** 31 + 1);
+    expect(wrapped.read(2 ** 31 + 1)).toBeNull();
+    wrapped.read(MAX_READ_CHUNK);
     wrapped.read(1024);
     wrapped.read();
     expect(asked).toEqual([MAX_READ_CHUNK, 1024, undefined]);
   });
+
+  it("delivers a body over MAX_READ_CHUNK that is already buffered", async () => {
+    // With 64 MiB buffered, a short answer to the adapter's oversized read gets
+    // overwritten by the `read()` that follows, and that chunk is lost.
+    const payload = new Uint8Array(2 * MAX_READ_CHUNK + 17);
+    payload[0] = 1;
+    payload[payload.length - 1] = 2;
+    const s = schema([field("v", binary())]);
+    const input = new Readable({ read() {} });
+    input.push(serializeBatches(s, [batchFromColumns(s, { v: [payload] })]));
+    input.push(null);
+
+    const reader = await IpcStreamReader.create(input);
+    await reader.openNextStream();
+    const batch = (await reader.readNextBatch()) as unknown as {
+      getChild(name: string): { get(row: number): Uint8Array };
+    };
+
+    const received = batch.getChild("v").get(0);
+    expect(received.length).toBe(payload.length);
+    expect(received[0]).toBe(1);
+    expect(received[received.length - 1]).toBe(2);
+  }, 30_000);
 
   it("passes everything else through to the underlying stream", () => {
     const events: string[] = [];

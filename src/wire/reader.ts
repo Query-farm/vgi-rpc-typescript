@@ -17,9 +17,7 @@ export interface StreamMessage {
  * call. Both Node and Bun throw `ERR_OUT_OF_RANGE` from `read(n)` once `n`
  * exceeds their shared 1 GiB `MAX_HWM`, so a record batch with a body over
  * 1 GiB dies before a single byte is decoded — the read-side twin of the
- * write clamp in ./writer.ts. The adapter already loops until it has the
- * bytes it asked for, so answering with less is absorbed; it only ever
- * mis-handles being answered with *more*.
+ * write clamp in ./writer.ts.
  */
 export const MAX_READ_CHUNK = 1 << 26; // 64 MiB
 
@@ -33,15 +31,20 @@ function isNodeReadable(input: unknown): boolean {
  * Wrap a Node `Readable` so `read(n)` never asks for more than
  * {@link MAX_READ_CHUNK}. Everything else passes through untouched, including
  * the `read`/`pipe`/`readable` trio arrow-js sniffs to pick this adapter.
+ *
+ * An oversized read answers `null`, not a shorter chunk. That is `read(n)`'s
+ * normal answer when `n` bytes are not available, and the adapter responds by
+ * draining the buffer with `read()`, which has no size limit. A short non-null
+ * answer would lose data: the adapter overwrites it with that `read()` result.
  */
 export function clampReads<T extends object>(stream: T): T {
   return new Proxy(stream, {
     get(target, prop) {
       if (prop === "read") {
-        return (size?: number) =>
-          (target as { read(n?: number): unknown }).read(
-            typeof size === "number" ? Math.min(size, MAX_READ_CHUNK) : size,
-          );
+        return (size?: number) => {
+          if (typeof size === "number" && size > MAX_READ_CHUNK) return null;
+          return (target as { read(n?: number): unknown }).read(size);
+        };
       }
       // `target` as the receiver, not the proxy: a getter on a Node stream
       // runs with `this` bound to the real object, so private fields and
