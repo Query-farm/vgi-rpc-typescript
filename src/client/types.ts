@@ -47,6 +47,15 @@ export interface HttpConnectOptions {
    * HTTP request. Minimum 64 KiB. Defaults to 64 MiB in browser/workerd builds
    * and 256 MiB in native builds. */
   acceptedMaxResponseBytes?: number;
+  /**
+   * How row-object results (`call`, stream `exchange`/`tick`/iteration,
+   * stream headers) surface top-level 64-bit integers. `"number-if-safe"`
+   * (default) narrows values within `Number.MAX_SAFE_INTEGER` to `number` and
+   * leaves larger ones as `bigint`, so one column can mix both;
+   * `"bigint"` keeps every such value a `bigint`. See {@link Int64Mode}.
+   * Raw-batch APIs are unaffected.
+   */
+  int64?: import("./ipc.js").Int64Mode;
 }
 
 /** A log or error message delivered to an {@link HttpConnectOptions.onLog} callback. */
@@ -94,6 +103,15 @@ export interface PipeConnectOptions {
   onLog?: (msg: LogMessage) => void;
   /** External storage config for resolving externalized batches. */
   externalLocation?: import("../external.js").ExternalLocationConfig;
+  /**
+   * How row-object results (`call`, stream `exchange`/`tick`/iteration,
+   * stream headers) surface top-level 64-bit integers. `"number-if-safe"`
+   * (default) narrows values within `Number.MAX_SAFE_INTEGER` to `number` and
+   * leaves larger ones as `bigint`, so one column can mix both;
+   * `"bigint"` keeps every such value a `bigint`. See {@link Int64Mode}.
+   * Raw-batch APIs are unaffected.
+   */
+  int64?: import("./ipc.js").Int64Mode;
 }
 
 /**

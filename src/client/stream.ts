@@ -20,7 +20,7 @@ import { ARROW_CONTENT_TYPE, rpcPathFromPrefix, serializeIpcStream } from "../ht
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { decodeResponseBody, readResponseBodyBounded } from "./decode.js";
-import { dispatchLogOrError, extractBatchRows, inferArrowType, readResponseBatches } from "./ipc.js";
+import { dispatchLogOrError, extractBatchRows, type Int64Mode, inferArrowType, readResponseBatches } from "./ipc.js";
 import { serializeRequest, withMetadata } from "./outbound.js";
 import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
 import { rawBatchOf, rawInputBatch } from "./raw-util.js";
@@ -109,6 +109,7 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
   private _outputSchema: Schema;
   private _inputSchema?: Schema;
   private _onLog?: (msg: LogMessage) => void;
+  private _int64: Int64Mode;
   private _pendingBatches: RecordBatch[];
   private _finished: boolean;
   private _header: Record<string, any> | null;
@@ -134,6 +135,8 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
     outputSchema: Schema;
     inputSchema?: Schema;
     onLog?: (msg: LogMessage) => void;
+    /** Row-object int64 surfacing; see {@link Int64Mode}. Default `"number-if-safe"`. */
+    int64?: Int64Mode;
     pendingBatches: RecordBatch[];
     finished: boolean;
     header: Record<string, any> | null;
@@ -154,6 +157,7 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
     this._outputSchema = opts.outputSchema;
     this._inputSchema = opts.inputSchema;
     this._onLog = opts.onLog;
+    this._int64 = opts.int64 ?? "number-if-safe";
     this._pendingBatches = opts.pendingBatches;
     this._finished = opts.finished;
     this._header = opts.header;
@@ -356,7 +360,7 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
   /** Send one producer continuation tick with application custom metadata. */
   async tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]> {
     const item = await this.tickRaw(metadata);
-    return item === null ? [] : extractBatchRows(item.batch);
+    return item === null ? [] : extractBatchRows(item.batch, this._int64);
   }
 
   /**
@@ -489,7 +493,7 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
 
   /** Decode an exchange reply for the row-oriented surface. */
   private _rowsOfExchange(reply: RecordBatch | null): Record<string, any>[] {
-    return reply === null ? [] : extractBatchRows(reply);
+    return reply === null ? [] : extractBatchRows(reply, this._int64);
   }
 
   /**
@@ -506,7 +510,7 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
           continue;
         }
       }
-      yield extractBatchRows(batch);
+      yield extractBatchRows(batch, this._int64);
     }
     this._pendingBatches = [];
 
@@ -544,7 +548,7 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
         if (dataRows !== null) {
           throw new RpcError("ProtocolError", "A producer turn returned more than one data batch", "");
         }
-        dataRows = extractBatchRows(batch);
+        dataRows = extractBatchRows(batch, this._int64);
       }
 
       if (dataRows !== null) yield dataRows;
@@ -574,7 +578,7 @@ export class HttpStreamSession implements StreamSession, RawStreamSession {
    */
   async nextWithToken(): Promise<RowsWithToken | null> {
     const next = await this.nextWithTokenRaw();
-    return next === null ? null : { rows: extractBatchRows(next.item.batch), token: next.token };
+    return next === null ? null : { rows: extractBatchRows(next.item.batch, this._int64), token: next.token };
   }
 
   /**

@@ -149,18 +149,42 @@ export async function readResponseBatches(body: Uint8Array): Promise<{ schema: S
 }
 
 /**
- * Extract all rows from a batch as Record<string, any>[].
- * Converts BigInt to Number when safe.
+ * How the row-object client APIs surface top-level 64-bit integer values
+ * (int64 / uint64 columns, and any other column whose Arrow reader yields a
+ * `bigint`).
+ *
+ * - `"number-if-safe"` (the default): a value inside
+ *   `Number.MIN_SAFE_INTEGER..Number.MAX_SAFE_INTEGER` becomes a `number`;
+ *   anything outside stays a `bigint`. Convenient, but ONE column can then
+ *   hold both `number` and `bigint` values depending on magnitude.
+ * - `"bigint"`: every such value stays a `bigint` — one JS type per column,
+ *   lossless, and what `typeof` checks / `===` comparisons can rely on.
+ *
+ * Only top-level row values are affected; nested values (inside lists,
+ * structs, maps) are returned as the Arrow reader produced them. The default
+ * may flip to `"bigint"` in a future minor release; pass the option explicitly
+ * to be insulated from that.
  */
-export function extractBatchRows(batch: RecordBatch): Record<string, any>[] {
+export type Int64Mode = "number-if-safe" | "bigint";
+
+const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
+const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
+ * Extract all rows from a batch as Record<string, any>[].
+ * 64-bit integers follow `int64` (see {@link Int64Mode}; default
+ * `"number-if-safe"`: converts BigInt to Number when safe).
+ */
+export function extractBatchRows(batch: RecordBatch, int64: Int64Mode = "number-if-safe"): Record<string, any>[] {
+  const narrow = int64 !== "bigint";
   const rows: Record<string, any>[] = [];
   for (let r = 0; r < batch.numRows; r++) {
     const row: Record<string, any> = {};
     for (let i = 0; i < batch.schema.fields.length; i++) {
       const field = batch.schema.fields[i];
       let value = batch.getChildAt(i)?.get(r);
-      if (typeof value === "bigint") {
-        if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      if (narrow && typeof value === "bigint") {
+        if (value >= MIN_SAFE_BIGINT && value <= MAX_SAFE_BIGINT) {
           value = Number(value);
         }
       }

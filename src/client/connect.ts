@@ -174,6 +174,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   const baseUrl = rawBaseUrl.replace(/\/+$/, "");
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
   const onLog = options?.onLog;
+  const int64 = options?.int64 ?? "number-if-safe";
   const compressionLevel = options?.compressionLevel;
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
@@ -711,7 +712,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       }
 
       // Extract single-row result
-      const rows = extractBatchRows(resultBatch);
+      const rows = extractBatchRows(resultBatch, int64);
       if (rows.length === 0) return null;
 
       const result = rows[0];
@@ -738,7 +739,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         protocol: serverProtocolName,
       });
       const init = await openStreamOverHttp(method, body, info.headerSchema != null);
-      const header = init.headerBatch === null ? null : (extractBatchRows(init.headerBatch)[0] ?? null);
+      const header = init.headerBatch === null ? null : (extractBatchRows(init.headerBatch, int64)[0] ?? null);
 
       return new HttpStreamSession({
         baseUrl,
@@ -749,6 +750,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         outputSchema: init.outputSchema ?? info.outputSchema ?? info.resultSchema,
         inputSchema: info.inputSchema,
         onLog,
+        int64,
         pendingBatches: init.pendingBatches,
         finished: init.finished,
         header,
@@ -818,6 +820,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         callStateToken: init.callStateToken,
         outputSchema: init.outputSchema ?? (makeSchema([]) as unknown as Schema),
         onLog,
+        int64,
         pendingBatches: init.pendingBatches,
         finished: init.finished,
         header: null,
@@ -853,6 +856,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         callStateToken: callToken,
         outputSchema: outputSchema ?? (makeSchema([]) as unknown as Schema),
         onLog,
+        int64,
         pendingBatches: [],
         finished: false,
         header: null,

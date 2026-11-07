@@ -57,6 +57,7 @@ export function tcpConnect(host: string, port: number, options?: TcpConnectOptio
     onLog: options?.onLog,
     externalLocation: options?.externalLocation,
     protocol: options?.protocol,
+    int64: options?.int64,
   });
 
   const originalClose = client.close;

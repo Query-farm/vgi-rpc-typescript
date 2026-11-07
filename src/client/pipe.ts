@@ -27,7 +27,7 @@ import {
   reflectionResult,
   type ServiceDescription,
 } from "./introspect.js";
-import { buildRequestIpc, dispatchLogOrError, extractBatchRows, inferArrowType } from "./ipc.js";
+import { buildRequestIpc, dispatchLogOrError, extractBatchRows, type Int64Mode, inferArrowType } from "./ipc.js";
 import { createRequestEncoder, serializeRequest } from "./outbound.js";
 import type { RawBatch, RawBatchWithToken, RawStreamSession } from "./raw.js";
 import { rawBatchOf, rawInputBatch } from "./raw-util.js";
@@ -130,6 +130,7 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
   private _readerCache: IpcStreamReader | null;
   private _writeFn: WriteFn;
   private _onLog?: (msg: LogMessage) => void;
+  private _int64: Int64Mode;
   private _header: Record<string, any> | null;
   private _rawHeader: RawBatch | null;
   private _inputWriter: PipeIncrementalWriter | null = null;
@@ -145,6 +146,8 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
     reader: IpcStreamReader | (() => Promise<IpcStreamReader>);
     writeFn: WriteFn;
     onLog?: (msg: LogMessage) => void;
+    /** Row-object int64 surfacing; see {@link Int64Mode}. Default `"number-if-safe"`. */
+    int64?: Int64Mode;
     header: Record<string, any> | null;
     rawHeader?: RawBatch | null;
     outputSchema: Schema;
@@ -156,6 +159,7 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
     this._readerCache = typeof opts.reader === "function" ? null : opts.reader;
     this._writeFn = opts.writeFn;
     this._onLog = opts.onLog;
+    this._int64 = opts.int64 ?? "number-if-safe";
     this._header = opts.header;
     this._rawHeader = opts.rawHeader ?? null;
     this._outputSchema = opts.outputSchema;
@@ -224,7 +228,7 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
   /** Send one producer tick, preserving application message metadata. */
   async tick(metadata?: ReadonlyMap<string, string>): Promise<Record<string, any>[]> {
     const outputBatch = await this._tickBatch(metadata);
-    return outputBatch === null ? [] : extractBatchRows(outputBatch);
+    return outputBatch === null ? [] : extractBatchRows(outputBatch, this._int64);
   }
 
   /** Send one producer tick and return the server's batch undecoded. */
@@ -451,7 +455,7 @@ export class PipeStreamSession implements StreamSession, RawStreamSession {
       if (outputBatch === null) {
         return [];
       }
-      return extractBatchRows(outputBatch);
+      return extractBatchRows(outputBatch, this._int64);
     } catch (e) {
       // On error, clean up the pipe so it's ready for the next request
       await this._cleanup();
@@ -577,6 +581,7 @@ export function pipeConnect(
   options?: PipeConnectOptions,
 ): RpcClient {
   const onLog = options?.onLog;
+  const int64 = options?.int64 ?? "number-if-safe";
   const externalConfig = options?.externalLocation;
 
   let reader: IpcStreamReader | null = null;
@@ -751,7 +756,7 @@ export function pipeConnect(
           return null;
         }
 
-        const rows = extractBatchRows(resultBatch);
+        const rows = extractBatchRows(resultBatch, int64);
         if (rows.length === 0) return null;
 
         if (info.resultSchema.fields.length === 0) return null;
@@ -841,6 +846,7 @@ export function pipeConnect(
           reader: ensureReader,
           writeFn,
           onLog,
+          int64,
           header: null,
           rawHeader,
           outputSchema: makeSchema([]) as unknown as Schema,
@@ -903,7 +909,7 @@ export function pipeConnect(
                   continue;
                 }
               }
-              const rows = extractBatchRows(batch);
+              const rows = extractBatchRows(batch, int64);
               if (rows.length > 0) {
                 header = rows[0];
               }
@@ -919,6 +925,7 @@ export function pipeConnect(
           reader: r,
           writeFn,
           onLog,
+          int64,
           header,
           outputSchema,
           releaseBusy,
@@ -1017,6 +1024,7 @@ export function subprocessConnect(cmd: string[], options?: SubprocessConnectOpti
     onLog: options?.onLog,
     externalLocation: options?.externalLocation,
     protocol: options?.protocol,
+    int64: options?.int64,
   });
 
   // Wrap close to also kill the subprocess

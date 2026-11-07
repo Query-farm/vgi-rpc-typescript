@@ -19,6 +19,7 @@ export {
   ReflectionNotSupportedError,
   type ServiceDescription,
 } from "./introspect.js";
+export type { Int64Mode } from "./ipc.js";
 export type { OAuthResourceMetadataResponse } from "./oauth.js";
 export {
   fetchOAuthMetadata,

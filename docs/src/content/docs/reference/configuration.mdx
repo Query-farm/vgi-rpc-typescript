@@ -333,6 +333,7 @@ const client = httpConnect("http://localhost:8080", {
 | `compressionLevel` | `number` | — | zstd compression level (omit to disable) |
 | `authorization` | `string` | — | `Authorization` header value (e.g. `"Bearer <token>"`) sent with every request |
 | `externalLocation` | `ExternalLocationConfig` | — | External storage config for resolving externalized batches |
+| `int64` | `"number-if-safe" \| "bigint"` | `"number-if-safe"` | How row-object results surface top-level int64/uint64 values. The default narrows values within `Number.MAX_SAFE_INTEGER` to `number` and leaves larger ones as `bigint` (one column can hold both); `"bigint"` keeps every such value a `bigint`. The default may flip to `"bigint"` in a future minor release — pass it explicitly to pin the behaviour. Raw-batch APIs are unaffected. |
 | `fetch` | `typeof globalThis.fetch` | global `fetch` | Request implementation for every SDK-owned HTTP operation. Prefer `httpConnectSocks5h` for the built-in strict SOCKS adapter. |
 
 ## PipeConnectOptions
@@ -343,6 +344,7 @@ The `pipeConnect` function accepts an optional `PipeConnectOptions` object:
 |--------|------|---------|-------------|
 | `onLog` | `(msg: LogMessage) => void` | — | Log message callback |
 | `externalLocation` | `ExternalLocationConfig` | — | External storage config for resolving externalized batches |
+| `int64` | `"number-if-safe" \| "bigint"` | `"number-if-safe"` | How row-object results surface top-level int64/uint64 values. The default narrows values within `Number.MAX_SAFE_INTEGER` to `number` and leaves larger ones as `bigint` (one column can hold both); `"bigint"` keeps every such value a `bigint`. The default may flip to `"bigint"` in a future minor release — pass it explicitly to pin the behaviour. Raw-batch APIs are unaffected. |
 
 ## SubprocessConnectOptions
 
@@ -364,3 +366,4 @@ const client = subprocessConnect(["bun", "run", "server.ts"], {
 | `stderr` | `"inherit" \| "pipe" \| "ignore"` | `"ignore"` | Subprocess stderr handling |
 | `onLog` | `(msg: LogMessage) => void` | — | Log message callback (inherited from `PipeConnectOptions`) |
 | `externalLocation` | `ExternalLocationConfig` | — | External storage config for resolving externalized batches (inherited from `PipeConnectOptions`) |
+| `int64` | `"number-if-safe" \| "bigint"` | `"number-if-safe"` | Row-object int64 surfacing (inherited from `PipeConnectOptions`; see above) |
