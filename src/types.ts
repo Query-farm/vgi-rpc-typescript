@@ -646,6 +646,22 @@ export class OutputCollector implements CallContext {
     this._finished = true;
   }
 
+  /**
+   * Throw unless this call emitted a data batch. The dispatchers call it after
+   * every call that did not {@link finish}: a call that emits nothing would
+   * otherwise send the client nothing for its request, and the client waits for
+   * that batch forever (stdio/unix) or re-polls the same cursor forever (HTTP).
+   * Mirrors vgi-python's `OutputCollector.validate()`.
+   */
+  validate(): void {
+    if (this._dataBatchIdx === null) {
+      throw new Error(
+        "No data batch was emitted: every call must emit() a batch (zero rows is fine)" +
+          (this._producerMode ? " or call finish() to end the stream" : ""),
+      );
+    }
+  }
+
   /** Emit a zero-row client-directed log batch. */
   clientLog(level: string, message: string, extra?: Record<string, string>): void {
     const batch = buildLogBatch(this._outputSchema, level, message, extra, this._serverId, this._requestId);

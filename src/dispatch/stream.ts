@@ -184,6 +184,7 @@ export async function dispatchStream(
       } else {
         await method.exchangeFn!(state, inputBatch, out);
       }
+      if (!out.finished) out.validate();
 
       for (const emitted of out.batches) {
         let batch = emitted.batch;

@@ -853,6 +853,7 @@ export async function httpDispatchStreamExchange(
       } else {
         await method.producerFn!(state, out);
       }
+      if (!out.finished) out.validate();
     } catch (error: any) {
       if (dispatchDebug())
         console.error(
@@ -1009,6 +1010,7 @@ async function produceStreamResponse(
       const tickBatch = buildEmptyBatch(inputSchema, requestMetadata);
       await method.exchangeFn!(state, tickBatch, out);
     }
+    if (!out.finished) out.validate();
   } catch (error: any) {
     if (dispatchDebug())
       console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));
