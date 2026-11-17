@@ -61,6 +61,9 @@ jobs:
           # identity fixture policy), imported by every VGI SDK fixture worker.
           test -f dist/conformance/index.js
           test -f dist/conformance/index.d.ts
+          # Every file package.json `exports` names. The `./otel`, `./s3` and
+          # `./gcs` subpaths shipped with no JS at all (issue #54).
+          node scripts/check-exports.mjs
 
       - name: Verify dist actually loads
         # Guards against bundler re-export bugs that emit a syntactically valid
@@ -75,6 +78,10 @@ jobs:
           # a missing or unloadable dist build.
           node -e "import('./dist/arrow/index.js').then((m) => { if (typeof m.batchFromColumns !== 'function' || m.backend?.name !== 'arrow-js') { console.error('dist/arrow/index.js is missing exports'); process.exit(1); } console.log('dist/arrow/index.js loaded OK under node'); }).catch((e) => { console.error('dist/arrow/index.js failed to load:', e); process.exit(1); })"
           node -e "import('./dist/client/connect.js').then((m) => { if (typeof m.httpConnect !== 'function' || typeof m.RpcError !== 'function') { console.error('dist/client/connect.js is missing exports'); process.exit(1); } console.log('dist/client/connect.js loaded OK under node'); }).catch((e) => { console.error('dist/client/connect.js failed to load:', e); process.exit(1); })"
+
+          for s in otel:createOtelHook s3:createS3Storage gcs:createGCSStorage; do
+            node -e "import('./dist/${s%%:*}.js').then((m) => { if (typeof m['${s#*:}'] !== 'function') { console.error('dist/${s%%:*}.js is missing ${s#*:}'); process.exit(1); } console.log('dist/${s%%:*}.js loaded OK under node'); }).catch((e) => { console.error('dist/${s%%:*}.js failed to load:', e); process.exit(1); })"
+          done
 
       - name: Publish to npm
         run: npm publish --access public --provenance

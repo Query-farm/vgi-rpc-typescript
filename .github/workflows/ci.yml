@@ -80,6 +80,7 @@ jobs:
         run: |
           test -f dist/index.js
           test -f dist/index.d.ts
+          node scripts/check-exports.mjs
 
   docs:
     runs-on: ubuntu-latest
