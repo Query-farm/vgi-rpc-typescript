@@ -80,8 +80,9 @@ export interface ExternalLocationConfig {
     /** zstd compression level. Default: 3. */
     level?: number;
   };
-  /** URL validator called before fetching. Throw to reject. Default: HTTPS-only. */
-  urlValidator?: ((url: string) => void) | null;
+  /** URL validator called before fetching (and on every redirect target).
+   *  Throw, or reject, to refuse the URL. Default: HTTPS-only. */
+  urlValidator?: ((url: string) => void | Promise<void>) | null;
   /** Maximum compressed/on-wire bytes accepted from one fetch. Default: 256 MiB. */
   maxFetchBytes?: number;
   /** Maximum bytes accepted after decompression. Default: 16 * maxFetchBytes. */
@@ -519,7 +520,7 @@ export async function resolveExternalLocation(
   for (let redirects = 0; ; redirects++) {
     if (validator) {
       try {
-        validator(currentUrl);
+        await validator(currentUrl);
       } catch (error) {
         const reason = validator === httpsOnlyValidator && error instanceof Error ? `: ${error.message}` : "";
         throw new Error(`External location URL rejected [url: ${redactExternalUrl(currentUrl)}]${reason}`);

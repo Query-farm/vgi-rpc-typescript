@@ -97,7 +97,10 @@ export {
   type PublishExternalOptions,
   publishExternal,
   publishExternalResult,
+  redactExternalUrl,
   resolveExternalLocation,
+  type UploadUrl,
+  type UploadUrlProvider,
 } from "./external.js";
 // Sealed grants (WIRE_PROTOCOL.md §16): mint/verify, and the bearer
 // authenticators that accept grants and resolveToken credentials.
@@ -291,6 +294,38 @@ export {
   TransportKind,
   type UnaryHandler,
 } from "./types.js";
+// Blob vendor (region-pinned pre-signed URLs): result externalization,
+// client upload URLs, raw blobs for value-level externalization, host pinning.
+export {
+  type BlobLocation,
+  type BlobRef,
+  type BlobScope,
+  clientExternalConfigFromEnv,
+  ENV_COMPRESSION as VENDOR_ENV_COMPRESSION,
+  ENV_MAX_UPLOAD_BYTES as VENDOR_ENV_MAX_UPLOAD_BYTES,
+  ENV_THRESHOLD as VENDOR_ENV_THRESHOLD,
+  ENV_TOKEN as VENDOR_ENV_TOKEN,
+  ENV_TOKEN_FALLBACK as VENDOR_ENV_TOKEN_FALLBACK,
+  ENV_URL as VENDOR_ENV_URL,
+  type EnvLike,
+  externalConfigFromEnv,
+  maxUploadBytesFromEnv,
+  type PinnedHostsOptions,
+  type PutGrant,
+  pinnedHostsValidator,
+  type UrlValidator,
+  VendorBlobClient,
+  type VendorBlobClientOptions,
+  type VendorClientExternalConfig,
+  type VendorClientOptions,
+  VendorError,
+  type VendorExternalLocationConfig,
+  type VendorInfo,
+  type VendorPurpose,
+  VendorStorage,
+  type VendorStorageOptions,
+  vendorUrlValidator,
+} from "./vendor.js";
 export {
   buildErrorStream,
   findProtocolVersion,

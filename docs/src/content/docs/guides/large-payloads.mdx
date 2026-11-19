@@ -224,6 +224,33 @@ const client = httpConnect("https://api.example.com", {
 Resolving a pointer means fetching an arbitrary URL chosen by the peer. Keep `urlValidator` strict (HTTPS-only at minimum, ideally a host allowlist) unless you fully trust the other side.
 :::
 
+## Blob vendor
+
+The *blob vendor* is a small HTTP service that holds the object-storage credentials, so a worker never does. The worker asks it for a pre-signed URL for one object of a declared size and SHA-256 and uploads straight to storage; the storage enforces the signed `Content-Length` and `x-amz-checksum-sha256`. `VendorStorage` is both an `ExternalStorage` (results, purpose `rpc`) and an `UploadUrlProvider` (client upload URLs), and `externalConfigFromEnv` builds the whole server config from the environment:
+
+```typescript
+import { createHttpHandler, externalConfigFromEnv, maxUploadBytesFromEnv } from "@query-farm/vgi-rpc";
+
+// VGI_BLOB_VENDOR_URL, VGI_BLOB_VENDOR_TOKEN (fallback VGI_CF_DO_TOKEN),
+// VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES (default 1 MiB), VGI_RPC_EXTERNAL_COMPRESSION (none | zstd[:level]).
+// On Cloudflare Workers pass the Worker's `env` instead of relying on process.env.
+const external = externalConfigFromEnv(env); // null when VGI_BLOB_VENDOR_URL is unset
+const handler = createHttpHandler(protocol, {
+  ...(external && {
+    externalLocation: external,
+    uploadUrlProvider: external.storage,
+    maxUploadBytes: maxUploadBytesFromEnv(env) ?? undefined,
+  }),
+  maxRequestBytes: 32_768, // clients upload anything larger through a vended URL
+});
+```
+
+Every pointer carries `vgi_rpc.location.sha256`, and inbound pointer URLs are pinned to the vendor's storage hosts and URL prefixes (`GET /v1/info`, cached). `http://` vendor URLs are accepted only for loopback test vendors.
+
+`VendorBlobClient` stores raw byte blobs (purpose `fs`) for callers that keep their own references, such as a key-value store that externalizes large values. `putBytes(data, { scope, idempotencyKey })` returns a `BlobRef` (`objectId`, `size`, `sha256`); `getBytes(ref)` downloads it and verifies it against the ref's size and SHA-256, failing with a `VendorError` whose `code` is `size_mismatch` or `sha256_mismatch` (or whose `status` is 404 when the blob is gone); `delete` and `deleteScope` clean up.
+
+Requests to the signed URLs go out on the global `fetch` with exactly the headers the grant requires: never the vendor token, never a caller-supplied `fetch`, and no redirects. Errors never contain the token or a signed query string. `pinnedHostsValidator(hosts, { allowHttp, prefixes })` is the same pinning as a standalone validator.
+
 ## Related
 
 - [HTTP Transport](/guides/http-transport/) — routes, configuration, and where these options live.

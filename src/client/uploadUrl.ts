@@ -183,8 +183,8 @@ export interface ExternalizeOptions {
   baseUrl: string;
   prefix: string;
   authorization?: string;
-  /** Optional per-URL validator; throw to reject. */
-  urlValidator?: ((url: string) => void) | null;
+  /** Optional per-URL validator; throw (or reject) to refuse. */
+  urlValidator?: ((url: string) => void | Promise<void>) | null;
   fetch?: typeof globalThis.fetch;
   acceptedMaxResponseBytes?: number;
   /** @internal Owning client already completed response-budget discovery. */
@@ -210,8 +210,8 @@ export async function externalizeRequestBody(body: Uint8Array, opts: Externalize
   const pair = pairs[0];
 
   if (opts.urlValidator) {
-    opts.urlValidator(pair.uploadUrl);
-    opts.urlValidator(pair.downloadUrl);
+    await opts.urlValidator(pair.uploadUrl);
+    await opts.urlValidator(pair.downloadUrl);
   }
 
   const putResp = await fetchFn(pair.uploadUrl, {

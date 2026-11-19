@@ -43,6 +43,8 @@ src/
   types.ts          — Handler types, OutputCollector, LogContext
   schema.ts         — Schema shorthand (str, int, float, etc.) and toSchema/inferParamTypes
   errors.ts         — RpcError, VersionError
+  external.ts       — External-location pointers: externalize/resolve batches, ExternalRef
+  vendor.ts         — Blob-vendor client (VendorStorage, VendorBlobClient, host pinning, env configs)
   constants.ts      — Wire protocol metadata keys
   wire/             — Low-level IPC reader/writer and request/response serialization
   dispatch/         — Method dispatch (unary, stream, describe)
