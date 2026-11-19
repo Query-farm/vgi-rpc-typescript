@@ -25,6 +25,18 @@ function scope(over: Partial<TokenScope> = {}): TokenScope {
 }
 
 describe("State Token", () => {
+  test("call tokens compress wide schemas and round-trip them exactly", () => {
+    const tokenKey = new Uint8Array(32).fill(7);
+    const callId = new Uint8Array(16).fill(3);
+    // A wide, repetitive schema, the shape of echo over all_types.
+    const schema = new TextEncoder().encode("field_name_with_a_long_type_descriptor;".repeat(300));
+    const token = packCallToken(callId, schema, schema, tokenKey, scope());
+    expect(token.length).toBeLessThan(schema.length / 4);
+    const { callId: back, call } = unpackCallToken(token, tokenKey, scope());
+    expect(back).toEqual(callId);
+    expect(call.schemaBytes).toEqual(schema);
+    expect(call.inputSchemaBytes).toEqual(schema);
+  });
   test("call tokens seal response budgets", () => {
     const tokenKey = new Uint8Array(32).fill(7);
     const callId = new Uint8Array(16).fill(3);

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { openBytes, SealError, sealBytes } from "../crypto.js";
+import { zstdCompressSyncOrNull, zstdDecompressSync } from "../util/zstd.js";
 
 const _UTF8 = new TextEncoder();
 
@@ -10,7 +11,16 @@ const _UTF8 = new TextEncoder();
 // the schemas, which moved into the call token; a v4 reader would mis-frame
 // it, so the bump turns a rolling deploy's stale token into a clean failure.
 const TOKEN_VERSION = 5;
-const CALL_TOKEN_VERSION = 2;
+// Call token v3 compresses the schemas (zstd where the runtime can encode):
+// the client resends this token on every exchange turn, a turn the DuckDB
+// extension never moves to an upload URL, so its size counts against the
+// server's request cap. A wide schema (echo over all_types) sent it to 17 KB
+// of base64 -- with the input batch, over a 32 KiB cap.
+const CALL_TOKEN_VERSION = 3;
+const CALL_BODY_RAW = 0;
+const CALL_BODY_ZSTD = 1;
+/** Cap on a call token's decompressed body (it is authenticated first). */
+const MAX_CALL_BODY_BYTES = 64 * 1024 * 1024;
 
 /** Length of the random per-stream id minted at `/init`. */
 export const CALL_ID_LEN = 16;
@@ -253,28 +263,36 @@ export function packCallToken(
   }
   const now = createdAt ?? Math.floor(Date.now() / 1000);
 
-  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 4 + schemaBytes.length + 4 + inputSchemaBytes.length + 16);
-  const view = new DataView(plaintext.buffer);
+  // createdAt | callId | codec | body, where body (raw or zstd) carries the
+  // schemas and the response budget. The header stays outside the codec so
+  // the TTL is checked before anything is decompressed.
+  const body = new Uint8Array(4 + schemaBytes.length + 4 + inputSchemaBytes.length + 16);
+  const view = new DataView(body.buffer);
   let offset = 0;
-
-  writeU64LE(view, offset, BigInt(now));
-  offset += 8;
-  plaintext.set(callId, offset);
-  offset += CALL_ID_LEN;
 
   writeU32LE(view, offset, schemaBytes.length);
   offset += 4;
-  plaintext.set(schemaBytes, offset);
+  body.set(schemaBytes, offset);
   offset += schemaBytes.length;
 
   writeU32LE(view, offset, inputSchemaBytes.length);
   offset += 4;
-  plaintext.set(inputSchemaBytes, offset);
+  body.set(inputSchemaBytes, offset);
   offset += inputSchemaBytes.length;
 
   writeU64LE(view, offset, BigInt(responseBudget?.responseLimitBytes ?? 0));
   offset += 8;
   writeU64LE(view, offset, BigInt(responseBudget?.preferredResponseBytes ?? 0));
+
+  const compressed = zstdCompressSyncOrNull(body);
+  const useZstd = compressed !== null && compressed.byteLength < body.byteLength;
+  const payload = useZstd ? compressed! : body;
+  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 1 + payload.byteLength);
+  const header = new DataView(plaintext.buffer);
+  writeU64LE(header, 0, BigInt(now));
+  plaintext.set(callId, 8);
+  plaintext[8 + CALL_ID_LEN] = useZstd ? CALL_BODY_ZSTD : CALL_BODY_RAW;
+  plaintext.set(payload, 8 + CALL_ID_LEN + 1);
 
   const wire = sealBytes(plaintext, tokenKey, {
     aad: computeCallAad(scope),
@@ -415,9 +433,36 @@ export function unpackCallToken(
     }
     throw err;
   }
-  if (plaintext.length < 8 + CALL_ID_LEN) {
+  if (plaintext.length < 8 + CALL_ID_LEN + 1) {
     throw new Error("State token truncated");
   }
+
+  const headerView = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
+  const createdAt = Number(readU64LE(headerView, 0));
+  if (tokenTtl > 0) {
+    const now = Math.floor(Date.now() / 1000);
+    if (now - createdAt > tokenTtl) {
+      throw new Error("State token expired");
+    }
+  }
+  const callId = new Uint8Array(CALL_ID_LEN);
+  callId.set(plaintext.subarray(8, 8 + CALL_ID_LEN));
+
+  const codec = plaintext[8 + CALL_ID_LEN];
+  const payload = plaintext.subarray(8 + CALL_ID_LEN + 1);
+  let body: Uint8Array;
+  if (codec === CALL_BODY_RAW) {
+    body = payload;
+  } else if (codec === CALL_BODY_ZSTD) {
+    try {
+      body = zstdDecompressSync(payload, MAX_CALL_BODY_BYTES);
+    } catch {
+      throw new Error("State token call body could not be decompressed");
+    }
+  } else {
+    throw new Error(`Unsupported call token body codec ${codec}`);
+  }
+  plaintext = body;
 
   const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
   const copyAligned = (start: number, len: number) => {
@@ -427,18 +472,6 @@ export function unpackCallToken(
   };
 
   let offset = 0;
-  const createdAt = Number(readU64LE(view, offset));
-  offset += 8;
-  if (tokenTtl > 0) {
-    const now = Math.floor(Date.now() / 1000);
-    if (now - createdAt > tokenTtl) {
-      throw new Error("State token expired");
-    }
-  }
-
-  const callId = copyAligned(offset, CALL_ID_LEN);
-  offset += CALL_ID_LEN;
-
   const schemaLen = readU32LE(view, offset);
   offset += 4;
   if (offset + schemaLen > plaintext.length) {

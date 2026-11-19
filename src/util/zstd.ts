@@ -122,6 +122,43 @@ export async function zstdDecompress(data: Uint8Array, maxOutputSize?: number): 
 }
 
 /**
+ * Synchronous zstd compression, or `null` where the runtime has no encoder
+ * (workerd, older Node). For small framework payloads (sealed tokens) that are
+ * built synchronously and may fall back to storing raw bytes.
+ */
+export function zstdCompressSyncOrNull(data: Uint8Array, level = 3): Uint8Array | null {
+  if (isBun) return new Uint8Array(Bun.zstdCompressSync(data, { level }));
+  const zlib = _loadZlibOrNull();
+  const fn = zlib?.zstdCompressSync;
+  if (typeof fn !== "function") return null;
+  return new Uint8Array(fn(data, { params: { [zlib.constants.ZSTD_c_compressionLevel]: level } }));
+}
+
+/**
+ * Synchronous zstd decompression on every runtime (fzstd on workerd), refusing
+ * output over `maxOutputSize`. The result has `byteOffset` 0.
+ */
+export function zstdDecompressSync(data: Uint8Array, maxOutputSize: number): Uint8Array<ArrayBuffer> {
+  const declared = readZstdFrameContentSize(data);
+  if (declared !== null && declared > maxOutputSize) {
+    throw new Error(`zstd decompressed size (${declared}) would exceed cap (${maxOutputSize})`);
+  }
+  let decoded: Uint8Array;
+  if (isBun) {
+    decoded = Bun.zstdDecompressSync(data);
+  } else {
+    const fn = _loadZlibOrNull()?.zstdDecompressSync;
+    decoded = typeof fn === "function" ? fn(data) : fzstdDecompress(data);
+  }
+  if (decoded.byteLength > maxOutputSize) {
+    throw new Error(`zstd decompressed size (${decoded.byteLength}) exceeds cap (${maxOutputSize})`);
+  }
+  const out = new Uint8Array(decoded.byteLength);
+  out.set(decoded);
+  return out;
+}
+
+/**
  * Parse `Frame_Content_Size` from a zstd frame header.
  *
  * Returns the declared decompressed size, or `null` if the frame header
