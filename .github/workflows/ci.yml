@@ -152,6 +152,9 @@ jobs:
         with:
           repository: Query-farm/vgi-rpc-python
           path: .vgi-rpc-python
+          # TODO(release-wave): drop the ref (back to main) once vgi-rpc-python's
+          # protocol-3.4 (upload URLs v2) is merged; this branch needs its suite.
+          ref: a07ccf2e1bf1c0832ae43757a55e8b4817674b2d
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -337,6 +340,9 @@ jobs:
         with:
           repository: Query-farm/vgi-rpc-python
           path: .vgi-rpc-python
+          # TODO(release-wave): drop the ref (back to main) once vgi-rpc-python's
+          # protocol-3.4 (upload URLs v2) is merged; this branch needs its suite.
+          ref: a07ccf2e1bf1c0832ae43757a55e8b4817674b2d
 
       - uses: oven-sh/setup-bun@v2
         with:
