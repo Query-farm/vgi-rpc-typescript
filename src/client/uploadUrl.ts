@@ -47,14 +47,19 @@ import { buildRequestIpc, dispatchLogOrError } from "./ipc.js";
 /** One upload a client intends to make: its exact byte length and lowercase
  *  hex SHA-256 (`__upload_url__` v2 request entry). */
 export interface UploadUrlRequest {
+  /** Exact byte length of the body that will be uploaded (positive integer). */
   size: number;
+  /** SHA-256 of that body, 64 lowercase hex characters. */
   sha256: string;
 }
 
 /** One vended upload: the PUT/GET pair for a declared (size, sha256). */
 export interface UploadUrlPair {
+  /** Pre-signed URL the client PUTs the body to. */
   uploadUrl: string;
+  /** Pre-signed URL the server reads the uploaded body from. */
   downloadUrl: string;
+  /** When the pair stops being usable. */
   expiresAt: Date;
   /** Headers the PUT must carry verbatim (e.g. `x-amz-checksum-sha256`). */
   uploadHeaders: Record<string, string>;

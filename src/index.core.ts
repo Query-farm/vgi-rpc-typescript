@@ -303,6 +303,7 @@ export {
   type BlobLocation,
   type BlobRef,
   type BlobScope,
+  CLIENT_UPLOAD_ORIGIN as VENDOR_CLIENT_UPLOAD_ORIGIN,
   clientExternalConfigFromEnv,
   ENV_COMPRESSION as VENDOR_ENV_COMPRESSION,
   ENV_MAX_UPLOAD_BYTES as VENDOR_ENV_MAX_UPLOAD_BYTES,

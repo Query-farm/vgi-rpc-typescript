@@ -68,6 +68,14 @@ export const ENV_COMPRESSION = "VGI_RPC_EXTERNAL_COMPRESSION";
 /** Environment variable: the client-upload size the server advertises. */
 export const ENV_MAX_UPLOAD_BYTES = "VGI_RPC_MAX_UPLOAD_BYTES";
 
+/**
+ * Advisory `origin` on a `/v1/blobs/put` grant minted for a client to upload a
+ * request ({@link VendorStorage.generateUploadUrl}). The vendor ignores it;
+ * test fakes count and fault client uploads by it. Server result and storage
+ * writes never send it. Matches vgi-rpc-python's `CLIENT_UPLOAD_ORIGIN`.
+ */
+export const CLIENT_UPLOAD_ORIGIN = "client_upload";
+
 const DEFAULT_THRESHOLD = 1_048_576;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_INFO_TTL_MS = 600_000;
@@ -641,8 +649,10 @@ class VendorApi {
     scope?: BlobScope | null;
     contentEncoding?: string | null;
     idempotencyKey?: string | null;
+    origin?: string | null;
   }): Promise<PutGrant> {
     const body: Json = { size: req.size, sha256_b64: req.sha256B64, purpose: req.purpose };
+    if (req.origin) body.origin = req.origin;
     if (req.scope) body.scope = { shard: req.scope.shard, execution_id: req.scope.executionId };
     if (req.contentEncoding) body.content_encoding = req.contentEncoding;
     if (req.idempotencyKey) body.idempotency_key = req.idempotencyKey;
@@ -879,7 +889,9 @@ export class VendorStorage extends VendorClientBase implements ExternalStorage, 
   /**
    * Ask the vendor for one sized PUT/GET pair (`POST /v1/blobs/put`, purpose
    * `rpc`) for a client upload of exactly `size` bytes hashing to `sha256Hex`.
-   * The returned headers are the grant's required headers minus
+   * The request carries the advisory `origin: "client_upload"`
+   * ({@link CLIENT_UPLOAD_ORIGIN}): the vendor ignores it, test fakes use it
+   * to tell client uploads from the server's own writes. The returned headers are the grant's required headers minus
    * `Content-Length`; the expiry is the earlier of the two URLs'.
    */
   async generateUploadUrl(size: number, sha256Hex: string): Promise<UploadUrl> {
@@ -889,7 +901,12 @@ export class VendorStorage extends VendorClientBase implements ExternalStorage, 
     if (!/^[0-9a-f]{64}$/.test(sha256Hex)) {
       throw new Error("upload sha256 must be 64 lowercase hex characters");
     }
-    const grant = await this.api.put({ size, sha256B64: toBase64(fromHex(sha256Hex)), purpose: "rpc" });
+    const grant = await this.api.put({
+      size,
+      sha256B64: toBase64(fromHex(sha256Hex)),
+      purpose: "rpc",
+      origin: CLIENT_UPLOAD_ORIGIN,
+    });
     // An `rpc` grant always carries its GET URL; the object does not exist yet,
     // so there is nothing to look one up from.
     const downloadUrl = grant.downloadUrl;

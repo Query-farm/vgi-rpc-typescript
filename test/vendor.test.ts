@@ -16,6 +16,7 @@ import { batchFromColumns, field, int64, schema } from "../src/arrow/index.js";
 import { LOCATION_KEY, LOCATION_SHA256_KEY } from "../src/constants.js";
 import { maybeExternalizeBatch, resolveExternalLocation } from "../src/external.js";
 import {
+  CLIENT_UPLOAD_ORIGIN,
   externalConfigFromEnv,
   maxUploadBytesFromEnv,
   pinnedHostsValidator,
@@ -111,6 +112,31 @@ describe("vendor client construction", () => {
     expect(() => externalConfigFromEnv({ ...base, VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES: "0" })).toThrow(/positive/);
     expect(() => externalConfigFromEnv({ ...base, VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES: "1k" })).toThrow(/integer/);
     expect(() => externalConfigFromEnv({ ...base, VGI_RPC_EXTERNAL_COMPRESSION: "brotli" })).toThrow(/none or zstd/);
+  });
+
+  test("generateUploadUrl marks its grant request origin=client_upload", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://v.example/v1/blobs/put");
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(
+        JSON.stringify({
+          object_id: "o1",
+          upload_url: "https://storage.example/o1?put",
+          upload_method: "PUT",
+          required_headers: { "content-length": "3", "x-amz-checksum-sha256": "c2hh" },
+          download_url: "https://storage.example/o1?get",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof globalThis.fetch;
+    const storage = new VendorStorage("https://v.example", TOKEN, { fetch: fakeFetch, pinHosts: false });
+    const pair = await storage.generateUploadUrl(3, "ab".repeat(32));
+    expect(CLIENT_UPLOAD_ORIGIN).toBe("client_upload");
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatchObject({ size: 3, purpose: "rpc", origin: "client_upload" });
+    expect(pair.headers).toEqual({ "x-amz-checksum-sha256": "c2hh" });
   });
 
   test("maxUploadBytesFromEnv", () => {
@@ -302,10 +328,16 @@ describe.skipIf(!hasFake)("against the fake vendor", () => {
   test("VendorStorage.upload returns a pinned rpc download URL holding the bytes", async () => {
     const storage = new VendorStorage(base, TOKEN);
     const data = bytes(9000, 9);
+    const before = await stats();
     const url = await storage.upload(data, "");
     await storage.urlValidator(url);
     const back = new Uint8Array(await (await fetch(url)).arrayBuffer());
     expect(back).toEqual(data);
+    // A server write is not marked as a client upload.
+    const after = await stats();
+    expect(after.puts_rpc! - before.puts_rpc!).toBe(1);
+    expect(after.puts_upload! - before.puts_upload!).toBe(0);
+    expect(after.client_uploads! - before.client_uploads!).toBe(0);
   });
 
   test("VendorStorage.generateUploadUrl vends a sized PUT/GET pair the store verifies", async () => {
@@ -340,6 +372,12 @@ describe.skipIf(!hasFake)("against the fake vendor", () => {
     expect(after.puts! - before.puts!).toBe(1);
     expect(after.upload_urls! - before.upload_urls!).toBe(0);
     expect(after.upload_refusals! - before.upload_refusals!).toBe(2);
+    // The grant was marked origin=client_upload (fake vendor >= vgi-rpc-python f0fb675).
+    expect(after.puts_upload! - before.puts_upload!).toBe(1);
+    expect(after.puts_rpc! - before.puts_rpc!).toBe(0);
+    expect(after.client_uploads! - before.client_uploads!).toBe(1);
+    expect(after.client_upload_bytes! - before.client_upload_bytes!).toBe(data.byteLength);
+    expect(after.client_upload_refusals! - before.client_upload_refusals!).toBe(2);
   });
 
   test("the upload fault corrupts a client PUT in transit and storage refuses it", async () => {
