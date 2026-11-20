@@ -494,6 +494,7 @@ async function handleHttpOp(op: string, request: Json): Promise<Json> {
           sticky_default_ttl: caps.stickyDefaultTtl,
           sticky_echo_headers: caps.stickyEchoHeaders,
           upload_url_support: caps.uploadUrlSupport,
+          upload_url_version: caps.uploadUrlVersion,
           max_request_bytes: caps.maxRequestBytes,
           max_response_bytes: caps.maxResponseBytes,
           max_externalized_response_bytes: caps.maxExternalizedResponseBytes,
@@ -504,14 +505,19 @@ async function handleHttpOp(op: string, request: Json): Promise<Json> {
       };
     }
     case "request_upload_urls": {
-      const count = typeof request.count === "number" ? request.count : 1;
-      const urls = await http.requestUploadUrls(count);
+      const raw = Array.isArray(request.uploads) ? request.uploads : [];
+      const uploads = raw.map((u: { size?: unknown; sha256?: unknown }) => ({
+        size: Number(u?.size),
+        sha256: String(u?.sha256 ?? ""),
+      }));
+      const urls = await http.requestUploadUrls(uploads);
       return {
         ok: true,
         urls: urls.map((url) => ({
           upload_url: url.uploadUrl,
           download_url: url.downloadUrl,
           expires_at: expiresAtSeconds(url.expiresAt),
+          upload_headers: url.uploadHeaders,
         })),
       };
     }

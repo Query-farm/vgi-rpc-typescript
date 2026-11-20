@@ -55,7 +55,7 @@ export interface WireRequest {
 export async function readRequest(data: Uint8Array, externalConfig?: ExternalLocationConfig): Promise<WireRequest> {
   let batch: VgiBatch = deserializeBatch(data);
   if (externalConfig) {
-    batch = await resolveExternalLocation(batch, externalConfig);
+    batch = await resolveExternalLocation(batch, externalConfig, undefined, { requireSha256: true });
   }
   const parsed = parseRequest(batch.schema, batch);
   return { methodName: parsed.methodName, params: parsed.params, schema: batch.schema };

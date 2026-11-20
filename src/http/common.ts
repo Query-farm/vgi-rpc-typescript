@@ -6,11 +6,15 @@ import {
   deserializeBatch,
   field,
   int64,
+  list,
   schema as makeSchema,
+  map,
   serializeBatches,
+  struct,
   timestampMicro,
   utf8,
   type VgiBatch,
+  type VgiDataType,
   type VgiSchema,
 } from "../arrow/index.js";
 import { RPC_ERROR_HEADER } from "../constants.js";
@@ -70,17 +74,33 @@ export const ARROW_CONTENT_TYPE = "application/vnd.apache.arrow.stream";
 /** Synthetic method name for the pre-signed upload-URL endpoint. */
 export const UPLOAD_URL_METHOD = "__upload_url__";
 
-/** Server-side ceiling on `count` in one `__upload_url__` request. */
+/** Value of `VGI-Upload-URL-Support` a server sends, and the only one a client
+ *  uploads to: version 2, where each URL is requested for one body's exact
+ *  size and SHA-256. Version 1 (`"true"`, a bare `count`) is retired. */
+export const UPLOAD_URL_SUPPORT_VERSION = "2";
+
+/** Most `uploads` entries one `__upload_url__` request may carry. */
 export const MAX_UPLOAD_URL_COUNT = 100;
 
-/** Request schema for `__upload_url__`: how many URL pairs to vend. */
-export const UPLOAD_URL_PARAMS_SCHEMA: VgiSchema = makeSchema([field("count", int64(), true)]);
+/** One `uploads` entry: the exact byte length and lowercase-hex SHA-256 of a
+ *  body the client will PUT. */
+export const UPLOAD_URL_ENTRY_TYPE: VgiDataType = struct([
+  field("size", int64(), false),
+  field("sha256", utf8(), false),
+]);
 
-/** Response schema for `__upload_url__`. */
+/** Request schema for `__upload_url__`: one (size, sha256) entry per upload. */
+export const UPLOAD_URL_PARAMS_SCHEMA: VgiSchema = makeSchema([
+  field("uploads", list(field("item", UPLOAD_URL_ENTRY_TYPE, true)), false),
+]);
+
+/** Response schema for `__upload_url__`: one row per request entry, in order.
+ *  `upload_headers` are headers the client must send on its PUT verbatim. */
 export const UPLOAD_URL_RESPONSE_SCHEMA: VgiSchema = makeSchema([
   field("upload_url", utf8(), false),
   field("download_url", utf8(), false),
   field("expires_at", timestampMicro("UTC"), false),
+  field("upload_headers", map(field("key", utf8(), false), field("value", utf8(), true)), false),
 ]);
 
 /**

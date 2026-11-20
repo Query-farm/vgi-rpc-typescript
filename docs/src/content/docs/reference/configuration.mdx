@@ -238,7 +238,7 @@ External storage config for externalizing large response batches.
 - **Type:** `UploadUrlProvider`
 - **Default:** —
 
-Provider for vending pre-signed upload URLs to clients via `{prefix}/__upload_url__/init`.
+Provider for vending pre-signed upload URLs to clients via `{prefix}/__upload_url__/init`: `generateUploadUrl(size, sha256Hex)` mints one PUT/GET pair for a body of that exact size and SHA-256, plus the headers the client must send. Advertised as `VGI-Upload-URL-Support: 2`.
 
 ### HTML pages
 

@@ -643,8 +643,8 @@ describe("HTTP Handler", () => {
     });
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new Uint8Array(4096));
-        controller.enqueue(new Uint8Array(4096));
+        // The endpoint's own cap is 32 KiB (100 sized entries plus framing).
+        for (let i = 0; i < 8; i++) controller.enqueue(new Uint8Array(4096));
         controller.enqueue(new Uint8Array(1));
         controller.close();
       },

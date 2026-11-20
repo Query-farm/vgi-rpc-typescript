@@ -45,3 +45,4 @@ export type {
   SubprocessConnectOptions,
   TcpConnectOptions,
 } from "./types.js";
+export type { UploadUrlPair, UploadUrlRequest } from "./uploadUrl.js";

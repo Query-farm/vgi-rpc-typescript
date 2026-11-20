@@ -16,7 +16,8 @@ import {
  * Mirrors Python's `http_capabilities()`: probes `OPTIONS {prefix}/health`
  * and reads three response headers:
  *   - `VGI-Max-Request-Bytes`  — server-enforced inline request cap
- *   - `VGI-Upload-URL-Support` — "true" when the server vends upload URLs
+ *   - `VGI-Upload-URL-Support` — the upload-URL protocol version the server
+ *     vends (`2`; the retired v1 sent `true`)
  *   - `VGI-Max-Upload-Bytes`   — cap on out-of-band upload size
  *   - `VGI-Max-Response-Bytes` — server-side response cap
  *   - `VGI-Accept-Max-Response-Bytes-Support` — negotiated client cap support
@@ -27,8 +28,13 @@ import {
 export interface HttpServerCapabilities {
   /** Server's advertised max inline request body size (bytes). */
   maxRequestBytes: number | null;
-  /** Whether the server vends upload URLs via `__upload_url__/init`. */
+  /** Whether the server vends upload URLs via `__upload_url__/init` at all
+   *  (any version, including the retired v1 a client refuses to use). */
   uploadUrlSupport: boolean;
+  /** The upload-URL protocol version the server advertises: `2` for the
+   *  current sized (size, sha256) form, `1` for a retired `true` server, `null`
+   *  when it vends none. A client uploads only to version 2. */
+  uploadUrlVersion: number | null;
   /** Cap on the size of an externalized upload (bytes). */
   maxUploadBytes: number | null;
   /** Server/hosting maximum response bytes, when advertised. */
@@ -92,10 +98,21 @@ function parseHeaderInt(headers: Headers, name: string, responseBudget = false):
   return responseBudget ? parseResponseBudgetDecimal(raw) : parsePositiveSafeDecimal(raw);
 }
 
+/** `VGI-Upload-URL-Support` → version: `true` is the retired v1, a positive
+ *  integer is that version, anything else (absent, `false`, junk) is none. */
+function parseUploadUrlVersion(raw: string | null): number | null {
+  if (raw == null) return null;
+  const value = raw.trim().toLowerCase();
+  if (value === "true") return 1;
+  if (!/^[1-9][0-9]{0,8}$/.test(value)) return null;
+  return Number(value);
+}
+
 /** Parse one HTTP response's VGI capability headers into a validated snapshot. */
 export function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabilities {
   const uploadRaw = headers.get(UPLOAD_URL_HEADER) ?? headers.get(UPLOAD_URL_HEADER.toLowerCase());
-  const uploadUrlSupport = uploadRaw === "true";
+  const uploadUrlVersion = parseUploadUrlVersion(uploadRaw);
+  const uploadUrlSupport = uploadUrlVersion !== null;
 
   let cacheExpiresAt: number | null = null;
   const cc = headers.get("Cache-Control") ?? headers.get("cache-control");
@@ -123,6 +140,7 @@ export function parseCapabilitiesFromHeaders(headers: Headers): HttpServerCapabi
   return {
     maxRequestBytes: parseHeaderInt(headers, MAX_REQUEST_BYTES_HEADER),
     uploadUrlSupport,
+    uploadUrlVersion,
     maxUploadBytes: parseHeaderInt(headers, MAX_UPLOAD_BYTES_HEADER),
     maxResponseBytes: parseHeaderInt(headers, MAX_RESPONSE_BYTES_HEADER, true),
     acceptMaxResponseBytesSupport:

@@ -174,7 +174,7 @@ The size caps and external storage above protect the response side. For large **
 
 ### Server: vending upload URLs
 
-Set `uploadUrlProvider` to expose `POST {prefix}/__upload_url__/init`. The route is exempt from `maxRequestBytes` (it exists precisely to escape that limit). A client POSTs a tiny request asking for `count` URL pairs (clamped to 100); the handler responds with an Arrow batch of `upload_url`, `download_url`, and `expires_at` rows.
+Set `uploadUrlProvider` to expose `POST {prefix}/__upload_url__/init` (upload-URL protocol v2). A client POSTs a small request whose one parameter, `uploads: list<struct<size: int64, sha256: utf8>>`, carries the exact byte length and lowercase-hex SHA-256 of each body it will PUT (1 to 100 entries). The handler responds with one row per entry, in order: `upload_url`, `download_url`, `expires_at`, and `upload_headers` (a `map<utf8, utf8>` of headers the client must send on the PUT verbatim; never `Content-Length`). Before minting anything it refuses, with HTTP 400 and an RPC error batch, the retired `count` request shape, an entry count outside 1..100, a `size` below 1 or above `maxUploadBytes`, and a `sha256` that is not 64 lowercase hex characters.
 
 ```typescript
 import { createHttpHandler } from "@query-farm/vgi-rpc";
@@ -183,9 +183,10 @@ const handler = createHttpHandler(protocol, {
   maxRequestBytes: 10_000_000,   // inline request bodies above this should externalize
   maxUploadBytes: 500_000_000,   // advertised max external upload (VGI-Max-Upload-Bytes)
   uploadUrlProvider: {
-    async generateUploadUrl() {
-      const { putUrl, getUrl, expires } = await signUploadPair();
-      return { uploadUrl: putUrl, downloadUrl: getUrl, expiresAt: expires };
+    async generateUploadUrl(size: number, sha256Hex: string) {
+      // Sign the PUT for exactly this length and checksum where the backend can.
+      const { putUrl, getUrl, expires, headers } = await signSizedUploadPair(size, sha256Hex);
+      return { uploadUrl: putUrl, downloadUrl: getUrl, expiresAt: expires, headers };
     },
   },
   // To then resolve the uploaded request payload server-side, also configure
@@ -194,13 +195,13 @@ const handler = createHttpHandler(protocol, {
 });
 ```
 
-The provider implements `generateUploadUrl()`, returning `{ uploadUrl, downloadUrl, expiresAt }`: `uploadUrl` is the pre-signed PUT the client uploads to, `downloadUrl` is the GET the server fetches from, and `expiresAt` is the pair's UTC expiry. Implementations must be safe to call concurrently, and the operator owns object cleanup.
+The provider implements `generateUploadUrl(size, sha256Hex)`, returning `{ uploadUrl, downloadUrl, expiresAt, headers? }`: `uploadUrl` is the pre-signed PUT the client uploads to, signed for that size and hash where the backend can; `downloadUrl` is the GET the server fetches from; `expiresAt` is the pair's UTC expiry; and `headers` are what the client must send on the PUT. For S3/R2 sign `content-length` and `x-amz-checksum-sha256` (base64 of the 32 digest bytes) and return `{ "x-amz-checksum-sha256": ... }`, so storage itself refuses a mismatched body; for GCS sign the length (for example `x-goog-content-length-range: N,N`) and return those headers. Implementations must be safe to call concurrently, and the operator owns object cleanup.
 
-When configured, the handler advertises `VGI-Upload-URL-Support: true` and (if set) `VGI-Max-Upload-Bytes` on responses. On the dispatch side, when a request arrives as an external-location pointer, the unary handler resolves it via the configured `externalLocation`, re-attaches the outer dispatch metadata (method name, version, request id), and parses parameters as usual.
+When configured, the handler advertises `VGI-Upload-URL-Support: 2` and (if set) `VGI-Max-Upload-Bytes` on responses. On the dispatch side, when a request arrives as an external-location pointer, the handler requires `vgi_rpc.location.sha256` (a pointer without it is refused with `missing vgi_rpc.location.sha256`), resolves it via the configured `externalLocation`, verifies the fetched bytes against that digest (`sha256 mismatch` otherwise), re-attaches the outer dispatch metadata (method name, version, request id), and parses parameters as usual.
 
 ### Client: automatic request externalization
 
-When the client (`httpConnect`) sees that the server advertises upload-URL support and a `maxRequestBytes` smaller than the body it is about to send, it transparently fetches a pre-signed pair from `/__upload_url__/init`, PUTs the request IPC bytes to `uploadUrl`, and sends the server a pointer referencing `downloadUrl`. It also retries this way if a plain POST returns `413 Payload Too Large`. The client passes its `externalLocation.urlValidator` through to validate vended URLs.
+When the client (`httpConnect`) sees that the server advertises `VGI-Upload-URL-Support: 2` and a `maxRequestBytes` smaller than the body it is about to send, it hashes the body (Web Crypto, so this works in Cloudflare Workers and browsers too), requests one URL for its (size, sha256) from `/__upload_url__/init`, PUTs exactly those bytes to `uploadUrl` with every `upload_headers` entry, and sends the server a pointer carrying `vgi_rpc.location` = `downloadUrl` and `vgi_rpc.location.sha256`. A server still advertising the retired v1 (`true`) is refused with `upload protocol is too old`; there is no fallback to the `count` form. It also retries this way if a plain POST returns `413 Payload Too Large`. The client passes its `externalLocation.urlValidator` through to validate vended URLs.
 
 ## Client-side `externalLocation`
 
@@ -226,7 +227,7 @@ Resolving a pointer means fetching an arbitrary URL chosen by the peer. Keep `ur
 
 ## Blob vendor
 
-The *blob vendor* is a small HTTP service that holds the object-storage credentials, so a worker never does. The worker asks it for a pre-signed URL for one object of a declared size and SHA-256 and uploads straight to storage; the storage enforces the signed `Content-Length` and `x-amz-checksum-sha256`. `VendorStorage` is both an `ExternalStorage` (results, purpose `rpc`) and an `UploadUrlProvider` (client upload URLs), and `externalConfigFromEnv` builds the whole server config from the environment:
+The *blob vendor* is a small HTTP service that holds the object-storage credentials, so a worker never does. The worker asks it for a pre-signed URL for one object of a declared size and SHA-256 and uploads straight to storage; the storage enforces the signed `Content-Length` and `x-amz-checksum-sha256`. `VendorStorage` is both an `ExternalStorage` (results, purpose `rpc`) and an `UploadUrlProvider` (client upload URLs, through the same sized `POST /v1/blobs/put` with purpose `rpc`, so a client PUT is checked by storage exactly like a server one), and `externalConfigFromEnv` builds the whole server config from the environment:
 
 ```typescript
 import { createHttpHandler, externalConfigFromEnv, maxUploadBytesFromEnv } from "@query-farm/vgi-rpc";

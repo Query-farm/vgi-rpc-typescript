@@ -12,6 +12,7 @@ import {
   UPLOAD_URL_METHOD,
   UPLOAD_URL_PARAMS_SCHEMA,
   UPLOAD_URL_RESPONSE_SCHEMA,
+  UPLOAD_URL_SUPPORT_VERSION,
 } from "../../src/http/index.js";
 import { gzipCompress } from "../../src/util/gzip.js";
 import { isZstdCompressAvailable, zstdCompress } from "../../src/util/zstd.js";
@@ -20,8 +21,14 @@ describe("__upload_url__ public wire contract", () => {
   test("the contract is exported so intermediaries needn't copy it", () => {
     expect(UPLOAD_URL_METHOD).toBe("__upload_url__");
     expect(MAX_UPLOAD_URL_COUNT).toBe(100);
-    expect(UPLOAD_URL_PARAMS_SCHEMA.fields.map((f) => f.name)).toEqual(["count"]);
-    expect(UPLOAD_URL_RESPONSE_SCHEMA.fields.map((f) => f.name)).toEqual(["upload_url", "download_url", "expires_at"]);
+    expect(UPLOAD_URL_SUPPORT_VERSION).toBe("2");
+    expect(UPLOAD_URL_PARAMS_SCHEMA.fields.map((f) => f.name)).toEqual(["uploads"]);
+    expect(UPLOAD_URL_RESPONSE_SCHEMA.fields.map((f) => f.name)).toEqual([
+      "upload_url",
+      "download_url",
+      "expires_at",
+      "upload_headers",
+    ]);
   });
 });
 

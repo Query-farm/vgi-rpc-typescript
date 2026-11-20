@@ -2,66 +2,142 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Client-side request-body externalization.
+ * Client-side request-body externalization (upload-URL protocol v2).
  *
  * When a request body would exceed the server-advertised `maxRequestBytes`,
- * we (1) call `{prefix}/__upload_url__/init` to get a pre-signed upload URL,
- * (2) PUT the body to that URL, and (3) replace the inline body with a
- * zero-row "pointer" IPC stream that carries the original RPC dispatch
- * metadata plus `vgi_rpc.location: <download-url>`. The server then resolves
- * the pointer and dispatches normally.
+ * we (1) hash it and call `{prefix}/__upload_url__/init` with its exact size
+ * and SHA-256 to get one pre-signed upload URL, (2) PUT exactly those bytes to
+ * it with every header the server returned, and (3) replace the inline body
+ * with a zero-row "pointer" IPC stream that carries the original RPC dispatch
+ * metadata plus `vgi_rpc.location: <download-url>` and
+ * `vgi_rpc.location.sha256: <hex>`. The server then resolves the pointer,
+ * verifies the digest, and dispatches normally.
+ *
+ * Only a server advertising `VGI-Upload-URL-Support: 2` is uploaded to; a v1
+ * (`true`) server is refused rather than sent the retired `count` form.
  *
  * Mirrors Python's `_externalize_via_upload_url()` and `request_upload_urls()`.
+ * Hashing is Web Crypto and the PUT is a plain `fetch` with explicit headers,
+ * so this runs unchanged in Bun, Node, browsers and Cloudflare Workers.
  */
 
-import { RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
+import { type RecordBatch, RecordBatchReader, type Schema } from "@query-farm/apache-arrow";
 import { withBatchMetadata } from "#vgi-rpc-arrow";
 import { DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES } from "#vgi-rpc-client-response-budget";
 import { REQUEST_VERSION, REQUEST_VERSION_KEY, RPC_METHOD_KEY } from "../constants.js";
 import { RpcError } from "../errors.js";
-import { makeExternalLocationBatch } from "../external.js";
+import { makeExternalLocationBatch, sha256Hex } from "../external.js";
 import {
   ARROW_CONTENT_TYPE,
   reservedPath,
   serializeIpcStream,
   UPLOAD_URL_METHOD,
   UPLOAD_URL_PARAMS_SCHEMA,
+  UPLOAD_URL_SUPPORT_VERSION,
 } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { readResponseBodyBounded } from "./decode.js";
-import { buildRequestIpc } from "./ipc.js";
+import { buildRequestIpc, dispatchLogOrError } from "./ipc.js";
 
 // The method name and params schema come from the one place that defines the
-// `__upload_url__` wire contract, rather than being restated here. The private
-// copy declared `count` non-nullable while the shared definition (and the
-// reference) declare it nullable, so this client's own server refused every
-// request it made — a disagreement that only a foreign peer, or a client
-// driven against its own server, could ever surface.
+// `__upload_url__` wire contract, rather than being restated here.
 
+/** One upload a client intends to make: its exact byte length and lowercase
+ *  hex SHA-256 (`__upload_url__` v2 request entry). */
+export interface UploadUrlRequest {
+  size: number;
+  sha256: string;
+}
+
+/** One vended upload: the PUT/GET pair for a declared (size, sha256). */
 export interface UploadUrlPair {
   uploadUrl: string;
   downloadUrl: string;
   expiresAt: Date;
+  /** Headers the PUT must carry verbatim (e.g. `x-amz-checksum-sha256`). */
+  uploadHeaders: Record<string, string>;
+}
+
+const SUPPORTED_UPLOAD_URL_VERSION = Number(UPLOAD_URL_SUPPORT_VERSION);
+
+/**
+ * Refuse anything but an upload-URL v2 server. A v1 (`true`) server only takes
+ * the retired `count` request and vends unsized URLs, and there is no fallback.
+ */
+export function requireUploadUrlV2(version: number | null): void {
+  if (version === SUPPORTED_UPLOAD_URL_VERSION) return;
+  if (version === null) {
+    throw new RpcError("NotSupported", "Server does not support upload URLs", "");
+  }
+  if (version < SUPPORTED_UPLOAD_URL_VERSION) {
+    throw new RpcError(
+      "ProtocolError",
+      `Server upload protocol is too old: it advertises VGI-Upload-URL-Support version ${version}, this client needs ${UPLOAD_URL_SUPPORT_VERSION}`,
+      "",
+    );
+  }
+  throw new RpcError(
+    "ProtocolError",
+    `Server upload protocol is newer than this client: it advertises VGI-Upload-URL-Support version ${version}, this client speaks ${UPLOAD_URL_SUPPORT_VERSION}`,
+    "",
+  );
+}
+
+/** Coerce a decoded `upload_headers` map cell (arrow-js MapRow, JS Map, or a
+ *  plain object) to a string record. */
+function headersFromCell(cell: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (cell == null) return out;
+  let entries: Iterable<[unknown, unknown]>;
+  if (cell instanceof Map) {
+    entries = cell.entries();
+  } else if (typeof (cell as { toJSON?: unknown }).toJSON === "function") {
+    entries = Object.entries((cell as { toJSON(): Record<string, unknown> }).toJSON());
+  } else if (typeof (cell as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function") {
+    entries = cell as Iterable<[unknown, unknown]>;
+  } else {
+    entries = Object.entries(cell as Record<string, unknown>);
+  }
+  for (const [k, v] of entries) {
+    if (typeof k !== "string" || typeof v !== "string") {
+      throw new RpcError("ProtocolError", "Server returned malformed upload_headers", "");
+    }
+    out[k] = v;
+  }
+  return out;
 }
 
 /**
- * POST `__upload_url__/init` and return the requested number of pre-signed
- * URL pairs. Server must have an `uploadUrlProvider` configured; otherwise
- * the route returns 404 and we surface that as `RpcError("NotSupported")`.
+ * POST `__upload_url__/init` for one pre-signed URL pair per `uploads` entry
+ * (each the exact size and SHA-256 of a body to be PUT). Server must have an
+ * `uploadUrlProvider` configured; otherwise the route returns 404 and we
+ * surface that as `RpcError("NotSupported")`. A server that does not
+ * advertise `VGI-Upload-URL-Support: 2` is refused before any request.
  */
 export async function requestUploadUrls(
   baseUrl: string,
   prefix: string,
-  count: number,
+  uploads: readonly UploadUrlRequest[],
   authorization?: string,
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
   acceptedMaxResponseBytes = DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES,
   responseBudgetVerified = false,
+  uploadUrlVersion?: number | null,
 ): Promise<UploadUrlPair[]> {
   optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
+  // Entries go to the server as given: it is the authority on what it accepts
+  // (1..100 entries, size >= 1 and within VGI-Max-Upload-Bytes, 64 lowercase
+  // hex), and its refusal names the problem. Only what cannot be encoded at
+  // all is stopped here.
+  for (const u of uploads) {
+    if (!Number.isSafeInteger(u.size)) {
+      throw new RpcError("ProtocolError", `upload size must be an integer, got ${u.size}`, "");
+    }
+  }
   let responseLimit = acceptedMaxResponseBytes;
-  if (!responseBudgetVerified) {
+  let version = uploadUrlVersion;
+  if (!responseBudgetVerified || version === undefined) {
     const capabilities = await discoverHttpCapabilities(
       baseUrl,
       prefix,
@@ -78,10 +154,12 @@ export async function requestUploadUrls(
     }
     responseLimit =
       minPositive(acceptedMaxResponseBytes, capabilities.maxResponseBytes ?? undefined) ?? acceptedMaxResponseBytes;
+    version = capabilities.uploadUrlVersion;
   }
+  requireUploadUrlV2(version ?? null);
   const body = buildRequestIpc(
     UPLOAD_URL_PARAMS_SCHEMA as unknown as Schema,
-    { count: BigInt(count) },
+    { uploads: uploads.map((u) => ({ size: BigInt(u.size), sha256: u.sha256 })) },
     UPLOAD_URL_METHOD,
   );
   const headers: Record<string, string> = { "Content-Type": ARROW_CONTENT_TYPE };
@@ -100,7 +178,7 @@ export async function requestUploadUrls(
     throw new RpcError("AuthenticationError", "Authentication required", "");
   }
   if (!resp.ok) {
-    throw new RpcError("HttpError", `__upload_url__/init failed: HTTP ${resp.status}`, "");
+    await throwUploadInitError(resp, responseLimit);
   }
   const responseCapabilities = requireResponseBudgetSupport(resp.headers);
   responseLimit = minPositive(responseLimit, responseCapabilities.maxResponseBytes ?? undefined) ?? responseLimit;
@@ -112,10 +190,14 @@ export async function requestUploadUrls(
   const pairs: UploadUrlPair[] = [];
   for (const batch of reader.readAll()) {
     if (batch.numRows === 0) continue;
+    const uploadCol = batch.getChild("upload_url");
+    const downloadCol = batch.getChild("download_url");
+    const expiresCol = batch.getChild("expires_at");
+    const headersCol = batch.getChild("upload_headers");
     for (let r = 0; r < batch.numRows; r++) {
-      const uploadUrl = batch.getChildAt(0)?.get(r) as string;
-      const downloadUrl = batch.getChildAt(1)?.get(r) as string;
-      const expiresRaw = batch.getChildAt(2)?.get(r);
+      const uploadUrl = uploadCol?.get(r) as string;
+      const downloadUrl = downloadCol?.get(r) as string;
+      const expiresRaw = expiresCol?.get(r);
       // Timestamp(us) → either a Date, a number (ms), or a bigint (us)
       let expiresAt: Date;
       if (expiresRaw instanceof Date) {
@@ -127,14 +209,44 @@ export async function requestUploadUrls(
       } else {
         expiresAt = new Date();
       }
-      pairs.push({ uploadUrl, downloadUrl, expiresAt });
+      pairs.push({ uploadUrl, downloadUrl, expiresAt, uploadHeaders: headersFromCell(headersCol?.get(r)) });
     }
   }
 
-  if (pairs.length === 0) {
-    throw new RpcError("ProtocolError", "Server returned no upload URLs", "");
+  if (pairs.length !== uploads.length) {
+    throw new RpcError(
+      "ProtocolError",
+      `Server returned ${pairs.length} upload URLs for ${uploads.length} requested uploads`,
+      "",
+    );
   }
   return pairs;
+}
+
+/** A refused `__upload_url__/init` carries an RPC error batch (HTTP 400 for
+ *  a malformed request): raise it as the server's typed error. Anything else
+ *  becomes an `HttpError` with whatever text the body had. */
+async function throwUploadInitError(resp: Response, limit: number): Promise<never> {
+  let body: Uint8Array | null = null;
+  try {
+    body = await readResponseBodyBounded(resp, Math.min(limit, 1024 * 1024));
+  } catch {
+    // fall through: status alone
+  }
+  if (body && body.byteLength > 0) {
+    let batches: Iterable<RecordBatch> | null = null;
+    try {
+      const reader = await RecordBatchReader.from(body);
+      await reader.open();
+      batches = reader.readAll();
+    } catch {
+      const text = new TextDecoder().decode(body).trim();
+      if (text)
+        throw new RpcError("HttpError", `__upload_url__/init failed: HTTP ${resp.status}: ${text.slice(0, 500)}`, "");
+    }
+    for (const batch of batches ?? []) dispatchLogOrError(batch);
+  }
+  throw new RpcError("HttpError", `__upload_url__/init failed: HTTP ${resp.status}`, "");
 }
 
 /**
@@ -143,11 +255,16 @@ export async function requestUploadUrls(
  * The pointer is a zero-row IPC stream whose first batch carries:
  *   - same schema as the original request batch
  *   - merged custom_metadata: original RPC dispatch keys + `vgi_rpc.location`
+ *     + `vgi_rpc.location.sha256` (mandatory on request pointers)
  *
  * The server's request reader honours the dispatch keys for routing, then
  * resolves the pointer to fetch the inline batch for parameter extraction.
  */
-async function buildPointerRequestBody(originalBody: Uint8Array, downloadUrl: string): Promise<Uint8Array> {
+async function buildPointerRequestBody(
+  originalBody: Uint8Array,
+  downloadUrl: string,
+  sha256: string,
+): Promise<Uint8Array> {
   const reader = await RecordBatchReader.from(originalBody);
   await reader.open();
   const schema = reader.schema;
@@ -161,7 +278,7 @@ async function buildPointerRequestBody(originalBody: Uint8Array, downloadUrl: st
   const original = batches[0];
   const originalMeta = original.metadata ?? new Map<string, string>();
 
-  const pointer = makeExternalLocationBatch(schema, downloadUrl);
+  const pointer = makeExternalLocationBatch(schema, downloadUrl, sha256);
   const merged = new Map<string, string>(pointer.metadata ?? new Map());
   // Preserve the original RPC dispatch metadata so the server can route.
   const method = originalMeta.get(RPC_METHOD_KEY);
@@ -189,39 +306,80 @@ export interface ExternalizeOptions {
   acceptedMaxResponseBytes?: number;
   /** @internal Owning client already completed response-budget discovery. */
   responseBudgetVerified?: boolean;
+  /** @internal The upload-URL version the owning client's capability snapshot
+   *  holds; omitted, it is discovered. */
+  uploadUrlVersion?: number | null;
 }
 
 /**
  * Upload *body* via a server-vended URL and return the pointer-batch body
  * that should be sent in place of the original. Throws if the server does
- * not advertise upload-URL support or the upload fails.
+ * not advertise upload-URL v2 support or the upload fails.
  */
 export async function externalizeRequestBody(body: Uint8Array, opts: ExternalizeOptions): Promise<Uint8Array> {
   const fetchFn = opts.fetch ?? globalThis.fetch;
+  if (opts.uploadUrlVersion !== undefined) requireUploadUrlV2(opts.uploadUrlVersion);
+  const sha256 = await sha256Hex(body);
   const pairs = await requestUploadUrls(
     opts.baseUrl,
     opts.prefix,
-    1,
+    [{ size: body.byteLength, sha256 }],
     opts.authorization,
     fetchFn,
     opts.acceptedMaxResponseBytes,
     opts.responseBudgetVerified,
+    opts.uploadUrlVersion,
   );
-  const pair = pairs[0];
+  const pair = pairs[0]!;
 
   if (opts.urlValidator) {
     await opts.urlValidator(pair.uploadUrl);
     await opts.urlValidator(pair.downloadUrl);
   }
 
+  // Every server-returned header goes on verbatim (the signature covers them).
+  // Content-Length is never among them: fetch derives it from the fixed-size
+  // body, which is exactly what was signed. A server that sends one anyway is
+  // checked rather than forwarded (Fetch forbids setting it).
+  const headers: Record<string, string> = {};
+  let hasContentType = false;
+  for (const [name, value] of Object.entries(pair.uploadHeaders)) {
+    const lower = name.toLowerCase();
+    if (lower === "content-length") {
+      if (value.trim() !== String(body.byteLength)) {
+        throw new RpcError(
+          "ProtocolError",
+          `Server upload_headers declare Content-Length ${value} for a ${body.byteLength}-byte body`,
+          "",
+        );
+      }
+      continue;
+    }
+    if (lower === "content-type") hasContentType = true;
+    headers[name] = value;
+  }
+  if (!hasContentType) headers["Content-Type"] = ARROW_CONTENT_TYPE;
+
   const putResp = await fetchFn(pair.uploadUrl, {
     method: "PUT",
-    headers: { "Content-Type": ARROW_CONTENT_TYPE },
+    headers,
     body: body as unknown as BodyInit,
   });
   if (!putResp.ok) {
-    throw new RpcError("ExternalUploadFailed", `PUT to upload URL failed: HTTP ${putResp.status}`, "");
+    const code = s3ErrorCode(await putResp.text().catch(() => ""));
+    throw new RpcError(
+      "ExternalUploadFailed",
+      `PUT to upload URL failed: HTTP ${putResp.status}${code ? ` ${code}` : ""}`,
+      "",
+    );
   }
+  await putResp.body?.cancel().catch(() => {});
 
-  return buildPointerRequestBody(body, pair.downloadUrl);
+  return buildPointerRequestBody(body, pair.downloadUrl, sha256);
+}
+
+/** The `<Code>` of an S3-style XML error body (`BadDigest`, `IncompleteBody`, ...). */
+function s3ErrorCode(text: string): string | null {
+  const m = /<Code>([^<]{1,64})<\/Code>/.exec(text);
+  return m ? m[1]! : null;
 }

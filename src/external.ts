@@ -45,26 +45,39 @@ export interface ExternalStorage {
   upload(data: Uint8Array, contentEncoding: string): Promise<string>;
 }
 
-/** A pre-signed PUT/GET URL pair for client-side data upload. */
+/** A pre-signed PUT/GET URL pair for one client-side upload of known size and hash. */
 export interface UploadUrl {
-  /** Pre-signed PUT URL the client uploads to. */
+  /** Pre-signed PUT URL the client uploads to, signed for the requested size
+   *  and SHA-256 where the backend can. */
   uploadUrl: string;
   /** Pre-signed GET URL the server fetches from. */
   downloadUrl: string;
   /** Expiration time (UTC) for the URL pair. */
   expiresAt: Date;
+  /** Headers the client must send on the PUT, verbatim (for S3/R2,
+   *  `x-amz-checksum-sha256`). Never `Content-Length`: the client sends exactly
+   *  the requested size and the runtime derives that header. */
+  headers?: Readonly<Record<string, string>>;
 }
 
 /**
  * Generates pre-signed upload URL pairs for client-vended externalization.
  *
- * Implementations must be safe to call from multiple concurrent requests.
- * Object lifecycle is the operator's responsibility — uploaded objects are
- * not automatically deleted by vgi-rpc.
+ * Each URL is minted for one body whose exact byte length and SHA-256 the
+ * client declares up front (`__upload_url__` v2), so a backend that can sign
+ * both makes storage itself refuse a mismatched body. Implementations must be
+ * safe to call from multiple concurrent requests. Object lifecycle is the
+ * operator's responsibility — uploaded objects are not automatically deleted
+ * by vgi-rpc.
  */
 export interface UploadUrlProvider {
-  /** Allocate one upload/download URL pair. */
-  generateUploadUrl(): Promise<UploadUrl> | UploadUrl;
+  /**
+   * Allocate one upload/download URL pair for a body of `size` bytes.
+   *
+   * @param size - Exact byte length the client will PUT (>= 1).
+   * @param sha256Hex - Lowercase hex SHA-256 of those bytes.
+   */
+  generateUploadUrl(size: number, sha256Hex: string): Promise<UploadUrl> | UploadUrl;
 }
 
 /** Configuration for external storage of large batches. */
@@ -227,7 +240,9 @@ async function readResponseBounded(
 // SHA-256 helpers
 // ---------------------------------------------------------------------------
 
-async function sha256Hex(data: Uint8Array): Promise<string> {
+/** Lowercase hex SHA-256 of `data`, via Web Crypto (Bun, Node, browsers and
+ *  Cloudflare Workers alike). */
+export async function sha256Hex(data: Uint8Array): Promise<string> {
   // Copy to a plain ArrayBuffer to satisfy Web Crypto API type requirements
   const buf = new ArrayBuffer(data.byteLength);
   new Uint8Array(buf).set(data);
@@ -496,6 +511,15 @@ export async function publishExternalResult(
 // Read path: resolution
 // ---------------------------------------------------------------------------
 
+/** Options for {@link resolveExternalLocation}. */
+export interface ResolveExternalOptions {
+  /** The pointer is a client *request* pointer: `vgi_rpc.location.sha256` is
+   *  mandatory (refused with `missing vgi_rpc.location.sha256` when absent) and
+   *  a digest mismatch reports `sha256 mismatch`. Server-side resolution of an
+   *  uploaded request body sets this. */
+  requireSha256?: boolean;
+}
+
 /**
  * Resolve an external pointer batch by fetching the data from the URL.
  * Returns the original batch unchanged if not a pointer or no config.
@@ -504,12 +528,19 @@ export async function resolveExternalLocation(
   batch: VgiBatch,
   config?: ExternalLocationConfig | null,
   onLog?: (message: LogMessage) => void,
+  options?: ResolveExternalOptions,
 ): Promise<VgiBatch> {
   if (!config) return batch;
   if (!isExternalLocationBatch(batch)) return batch;
 
   const url = batch.metadata?.get(LOCATION_KEY);
   if (!url) return batch;
+  const requireSha256 = options?.requireSha256 === true;
+  if (requireSha256 && !batch.metadata?.get(LOCATION_SHA256_KEY)) {
+    // A request pointer names bytes a client uploaded; without the digest the
+    // server cannot tell them from whatever else sits at that URL.
+    throw new Error(`Request pointer is missing ${LOCATION_SHA256_KEY} [url: ${redactExternalUrl(url)}]`);
+  }
 
   const { maxFetchBytes, maxDecompressedBytes, maxRedirects } = validateFetchConfig(config);
   const validator = config.urlValidator === null ? undefined : (config.urlValidator ?? httpsOnlyValidator);
@@ -615,7 +646,9 @@ export async function resolveExternalLocation(
     const actualSha256 = await sha256Hex(data);
     if (actualSha256 !== expectedSha256) {
       throw new Error(
-        `SHA-256 checksum mismatch for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`,
+        requireSha256
+          ? `Request pointer sha256 mismatch for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`
+          : `SHA-256 checksum mismatch for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`,
       );
     }
   }

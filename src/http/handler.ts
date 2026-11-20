@@ -1,7 +1,17 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-import { batchFromColumns, deserializeBatch, schema as makeSchema, type VgiSchema } from "../arrow/index.js";
+import {
+  batchFromColumns,
+  deserializeBatch,
+  isList,
+  isStruct,
+  schema as makeSchema,
+  type VgiBatch,
+  type VgiDataType,
+  type VgiField,
+  type VgiSchema,
+} from "../arrow/index.js";
 import { AuthContext } from "../auth.js";
 import {
   gateProtocolVersion,
@@ -14,6 +24,7 @@ import {
 } from "../binding.js";
 import { PROTOCOL_KEY, PROTOCOL_VERSION_KEY, REQUEST_ID_HEADER, RPC_ERROR_HEADER } from "../constants.js";
 import { MethodNotImplementedError, ResponseTooLargeError, SessionLostError } from "../errors.js";
+import type { UploadUrl } from "../external.js";
 import type { GrantKeys } from "../grants.js";
 import {
   PeerEvidenceSet,
@@ -46,7 +57,7 @@ import { gzipCompress, gzipDecompress } from "../util/gzip.js";
 import { isWorkerd } from "../util/runtime.js";
 import { randomBytes } from "../util/web-crypto.js";
 import { isZstdCompressAvailable, zstdCompress, zstdDecompress } from "../util/zstd.js";
-import { parseRequest, validateRequestSchema } from "../wire/request.js";
+import { parseRequest } from "../wire/request.js";
 import { buildErrorBatch } from "../wire/response.js";
 import { buildWwwAuthenticateHeader, oauthResourceMetadataToJson, wellKnownPath } from "./auth.js";
 import { chainAuthenticate } from "./bearer.js";
@@ -77,8 +88,8 @@ import {
   STICKY_ENABLED_HEADER,
   serializeIpcStream,
   UPLOAD_URL_METHOD,
-  UPLOAD_URL_PARAMS_SCHEMA,
   UPLOAD_URL_RESPONSE_SCHEMA,
+  UPLOAD_URL_SUPPORT_VERSION,
 } from "./common.js";
 import {
   type DispatchObserver,
@@ -134,10 +145,104 @@ const EMPTY_SCHEMA: VgiSchema = makeSchema([]);
 
 const EMPTY_COOKIES: ReadonlyMap<string, string> = new Map();
 
-/** The upload-URL request is one nullable int64 parameter. Keep a hard cap
- * even when the general handler body cap is disabled so this helper endpoint
- * can never become an unbounded buffering exception. */
-const MAX_UPLOAD_URL_REQUEST_BYTES = 8 * 1024;
+/** The upload-URL request is at most 100 (size, sha256) entries, about 8 KiB
+ * of values plus IPC framing. Keep a hard cap even when the general handler
+ * body cap is disabled so this helper endpoint can never become an unbounded
+ * buffering exception. */
+const MAX_UPLOAD_URL_REQUEST_BYTES = 32 * 1024;
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/** A 400 refusal of a malformed `__upload_url__` request (RPC error batch). */
+function uploadUrlRefusal(message: string): HttpRpcError {
+  const error = new HttpRpcError(message, 400);
+  error.name = "ProtocolError";
+  return error;
+}
+
+/** Field `name` of one decoded struct value: an arrow-js StructRow, a
+ *  flechette row object, or a Map. */
+function structField(entry: unknown, name: string): unknown {
+  if (entry == null || typeof entry !== "object") return undefined;
+  if (entry instanceof Map) return entry.get(name);
+  const json = (entry as { toJSON?: () => Record<string, unknown> }).toJSON;
+  if (typeof json === "function") return json.call(entry)[name];
+  return (entry as Record<string, unknown>)[name];
+}
+
+/** The decoded `uploads` list cell as a plain array. */
+function listEntries(value: unknown): unknown[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value;
+  const toArray = (value as { toArray?: () => ArrayLike<unknown> }).toArray;
+  if (typeof toArray === "function") return Array.from(toArray.call(value));
+  if (typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function") {
+    return Array.from(value as Iterable<unknown>);
+  }
+  return [];
+}
+
+/**
+ * Validate an `__upload_url__` v2 request and return its (size, sha256)
+ * entries, refusing (HTTP 400, before any URL is minted) the retired `count`
+ * shape, an entry count outside 1..100, a size below 1 or above
+ * `VGI-Max-Upload-Bytes`, and a sha256 that is not 64 lowercase hex.
+ */
+function parseUploadUrlRequest(
+  reqSchema: VgiSchema,
+  reqBatch: VgiBatch,
+  maxUploadBytes: number | undefined,
+): { size: number; sha256: string }[] {
+  const names = reqSchema.fields.map((f) => f.name);
+  if (names.includes("count") || !names.includes("uploads")) {
+    throw uploadUrlRefusal(
+      `__upload_url__ request uses the retired count shape; this server requires VGI-Upload-URL-Support: ${UPLOAD_URL_SUPPORT_VERSION} (an 'uploads' list of (size, sha256) entries)`,
+    );
+  }
+  const uploadsField = reqSchema.fields[names.indexOf("uploads")]!;
+  const childrenOf = (t: VgiDataType): readonly VgiField[] => (t as { children?: readonly VgiField[] }).children ?? [];
+  const entryType = isList(uploadsField.type) ? childrenOf(uploadsField.type)[0]?.type : undefined;
+  const entryNames = entryType && isStruct(entryType) ? childrenOf(entryType).map((f) => f.name) : [];
+  if (names.length !== 1 || !entryNames.includes("size") || !entryNames.includes("sha256")) {
+    throw uploadUrlRefusal(
+      "Parameter schema mismatch for method '__upload_url__': expected one field 'uploads' of type list<struct<size: int64, sha256: utf8>>",
+    );
+  }
+  if (reqBatch.numRows !== 1) {
+    throw uploadUrlRefusal(`Expected 1 row in __upload_url__ request batch, got ${reqBatch.numRows}`);
+  }
+  const entries = listEntries(reqBatch.getChild("uploads")?.get(0));
+  if (entries.length < 1 || entries.length > MAX_UPLOAD_URL_COUNT) {
+    throw uploadUrlRefusal(`uploads must have 1 to ${MAX_UPLOAD_URL_COUNT} entries, got ${entries.length}`);
+  }
+  return entries.map((entry, i) => {
+    const rawSize = structField(entry, "size");
+    const size = typeof rawSize === "bigint" ? Number(rawSize) : typeof rawSize === "number" ? rawSize : Number.NaN;
+    if (!Number.isSafeInteger(size) || size < 1) {
+      throw uploadUrlRefusal(`uploads[${i}].size must be an integer >= 1, got ${String(rawSize)}`);
+    }
+    const sha256 = structField(entry, "sha256");
+    if (typeof sha256 !== "string" || !SHA256_HEX.test(sha256)) {
+      throw uploadUrlRefusal(`uploads[${i}].sha256 must be 64 lowercase hex characters`);
+    }
+    if (maxUploadBytes != null && size > maxUploadBytes) {
+      throw uploadUrlRefusal(`uploads[${i}].size ${size} exceeds VGI-Max-Upload-Bytes (${maxUploadBytes})`);
+    }
+    return { size, sha256 };
+  });
+}
+
+/** The provider's PUT headers for the response's `upload_headers` cell, minus
+ *  any `Content-Length` (the client sends exactly `size` bytes; the runtime
+ *  derives that header). */
+function uploadHeadersFor(url: UploadUrl): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [name, value] of Object.entries(url.headers ?? {})) {
+    if (name.toLowerCase() === "content-length") continue;
+    out.set(name, String(value));
+  }
+  return out;
+}
 
 /** How much of an oversized body is read and discarded before the 413. */
 const MAX_DRAIN_BYTES = 64 * 1024 * 1024;
@@ -684,7 +789,7 @@ export function createHttpHandler(
     // expect externalised payloads.
     headers.set("VGI-Externalization-Enabled", externalLocation?.storage ? "true" : "false");
     if (uploadUrlProvider) {
-      headers.set("VGI-Upload-URL-Support", "true");
+      headers.set("VGI-Upload-URL-Support", UPLOAD_URL_SUPPORT_VERSION);
       if (maxUploadBytes != null) {
         headers.set("VGI-Max-Upload-Bytes", String(maxUploadBytes));
       }
@@ -1646,22 +1751,11 @@ export function createHttpHandler(
             400,
           );
         }
-        try {
-          validateRequestSchema(reqSchema, UPLOAD_URL_PARAMS_SCHEMA, UPLOAD_URL_METHOD);
-        } catch (error) {
-          const message = (error as { errorMessage?: unknown })?.errorMessage;
-          const httpError = new HttpRpcError(typeof message === "string" ? message : String(error), 400);
-          httpError.name = "ProtocolError";
-          throw httpError;
-        }
-        const rawCount = parsed.params.count;
-        let count = typeof rawCount === "bigint" ? Number(rawCount) : Number(rawCount ?? 1);
-        if (!Number.isFinite(count) || count < 1) count = 1;
-        if (count > MAX_UPLOAD_URL_COUNT) count = MAX_UPLOAD_URL_COUNT;
+        const uploads = parseUploadUrlRequest(reqSchema, reqBatch, maxUploadBytes);
 
-        const urls: { uploadUrl: string; downloadUrl: string; expiresAt: Date }[] = [];
-        for (let i = 0; i < count; i++) {
-          urls.push(await uploadUrlProvider.generateUploadUrl());
+        const urls: UploadUrl[] = [];
+        for (const u of uploads) {
+          urls.push(await uploadUrlProvider.generateUploadUrl(u.size, u.sha256));
         }
 
         // Timestamp(MICROSECOND) — arrow-js's `setTimestampMicrosecond`
@@ -1675,6 +1769,7 @@ export function createHttpHandler(
           upload_url: urls.map((u) => u.uploadUrl),
           download_url: urls.map((u) => u.downloadUrl),
           expires_at: expiresAt,
+          upload_headers: urls.map((u) => uploadHeadersFor(u)),
         });
         const responseBody = serializeIpcStream(UPLOAD_URL_RESPONSE_SCHEMA, [resultBatch]);
         const response = arrowResponse(responseBody);

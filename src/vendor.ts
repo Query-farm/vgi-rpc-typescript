@@ -211,6 +211,12 @@ function toHex(bytes: Uint8Array): string {
   return out;
 }
 
+function fromHex(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
 function toBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
@@ -500,9 +506,7 @@ class VendorApi {
   static readonly GET_PATH = "/v1/blobs/get";
   static readonly DELETE_PATH = "/v1/blobs/delete";
   static readonly DELETE_SCOPE_PATH = "/v1/blobs/delete_scope";
-  static readonly UPLOAD_URLS_PATH = "/v1/upload_urls";
   static readonly INFO_PATH = "/v1/info";
-  static readonly MAX_UPLOAD_URLS = 100;
   static readonly MAX_DELETE_IDS = 1000;
 
   readonly baseUrl: string;
@@ -694,28 +698,6 @@ class VendorApi {
     return typeof resp.deleted === "number" ? resp.deleted : 0;
   }
 
-  async uploadUrls(count: number): Promise<UploadUrl[]> {
-    if (!Number.isInteger(count) || count < 1 || count > VendorApi.MAX_UPLOAD_URLS) {
-      throw new Error(`count must be between 1 and ${VendorApi.MAX_UPLOAD_URLS}`);
-    }
-    const resp = await this.call("POST", VendorApi.UPLOAD_URLS_PATH, "upload_urls", { count });
-    const urls = field(resp, "urls", "upload_urls");
-    if (!Array.isArray(urls) || urls.length === 0) {
-      throw new VendorError("Blob vendor upload_urls response has malformed 'urls'");
-    }
-    return urls.map((item) => {
-      if (item === null || typeof item !== "object" || Array.isArray(item)) {
-        throw new VendorError("Blob vendor upload_urls response has a malformed entry");
-      }
-      const entry = item as Json;
-      return {
-        uploadUrl: strField(entry, "upload_url", "upload_urls"),
-        downloadUrl: strField(entry, "download_url", "upload_urls"),
-        expiresAt: parseExpires(field(entry, "expires_at", "upload_urls")),
-      };
-    });
-  }
-
   async info(): Promise<VendorInfo> {
     const resp = await this.call("GET", VendorApi.INFO_PATH, "info", null);
     return {
@@ -852,8 +834,11 @@ export interface VendorStorageOptions extends VendorClientOptions {
  *
  * `upload()` (server-side externalization) asks the vendor for a sized,
  * checksummed grant, PUTs the bytes with exactly the grant's required headers,
- * and returns the grant's download URL. `generateUploadUrl()` (client
- * uploads) asks `/v1/upload_urls` for one unsized PUT/GET pair. Objects are
+ * and returns the grant's download URL. `generateUploadUrl(size, sha256)`
+ * (client uploads, `__upload_url__` v2) asks the same sized endpoint, purpose
+ * `rpc`, for a PUT signed for exactly that length and checksum, so storage
+ * itself refuses any other body; the grant's required headers go back to the
+ * client as `upload_headers`. Objects are
  * cleaned up by the vendor (registry alarm plus storage lifecycle rules);
  * vgi-rpc never deletes them.
  */
@@ -891,14 +876,41 @@ export class VendorStorage extends VendorClientBase implements ExternalStorage, 
     return downloadUrl;
   }
 
-  /** Ask the vendor for one unsized PUT/GET pair. */
-  async generateUploadUrl(): Promise<UploadUrl> {
-    const [upload] = await this.api.uploadUrls(1);
-    if (this.pin) {
-      await this.check(upload!.uploadUrl);
-      await this.check(upload!.downloadUrl);
+  /**
+   * Ask the vendor for one sized PUT/GET pair (`POST /v1/blobs/put`, purpose
+   * `rpc`) for a client upload of exactly `size` bytes hashing to `sha256Hex`.
+   * The returned headers are the grant's required headers minus
+   * `Content-Length`; the expiry is the earlier of the two URLs'.
+   */
+  async generateUploadUrl(size: number, sha256Hex: string): Promise<UploadUrl> {
+    if (!Number.isSafeInteger(size) || size < 1) {
+      throw new Error(`upload size must be a positive integer, got ${size}`);
     }
-    return upload!;
+    if (!/^[0-9a-f]{64}$/.test(sha256Hex)) {
+      throw new Error("upload sha256 must be 64 lowercase hex characters");
+    }
+    const grant = await this.api.put({ size, sha256B64: toBase64(fromHex(sha256Hex)), purpose: "rpc" });
+    // An `rpc` grant always carries its GET URL; the object does not exist yet,
+    // so there is nothing to look one up from.
+    const downloadUrl = grant.downloadUrl;
+    if (!downloadUrl) throw new VendorError("Blob vendor rpc put grant has no download_url");
+    if (this.pin) {
+      await this.check(grant.uploadUrl);
+      await this.check(downloadUrl);
+    }
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(grant.requiredHeaders)) {
+      if (name.toLowerCase() === "content-length") {
+        if (value.trim() !== String(size)) {
+          throw new VendorError(`Blob vendor granted Content-Length ${value} for a ${size}-byte upload`);
+        }
+        continue;
+      }
+      headers[name] = value;
+    }
+    const expiresAt =
+      grant.downloadExpiresAt && grant.downloadExpiresAt < grant.expiresAt ? grant.downloadExpiresAt : grant.expiresAt;
+    return { uploadUrl: grant.uploadUrl, downloadUrl, expiresAt, headers };
   }
 }
 

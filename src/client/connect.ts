@@ -45,7 +45,7 @@ import type { RawBatch, RawStreamSession } from "./raw.js";
 import { rawBatchOf, rawInputBatch } from "./raw-util.js";
 import { HttpStreamSession, unpackResumeToken } from "./stream.js";
 import type { HttpConnectOptions, StreamSession } from "./types.js";
-import { externalizeRequestBody, requestUploadUrls, type UploadUrlPair } from "./uploadUrl.js";
+import { externalizeRequestBody, requestUploadUrls, type UploadUrlPair, type UploadUrlRequest } from "./uploadUrl.js";
 
 type CompressFn = (data: Uint8Array, level: number) => Promise<Uint8Array>;
 type DecompressFn = (data: Uint8Array) => Promise<Uint8Array>;
@@ -124,8 +124,13 @@ export interface HttpRpcClient extends RpcClient {
   ): Promise<HttpStreamSession>;
   /** Discover what this server advertises on `OPTIONS {prefix}/health`. */
   capabilities(): Promise<HttpServerCapabilities>;
-  /** Ask the server for `count` pre-signed upload/download URL pairs. */
-  requestUploadUrls(count?: number): Promise<UploadUrlPair[]>;
+  /**
+   * Ask the server for one pre-signed upload/download URL pair per entry, each
+   * minted for that entry's exact byte length and lowercase-hex SHA-256
+   * (upload-URL protocol v2). PUT exactly those bytes with every
+   * `uploadHeaders` entry.
+   */
+  requestUploadUrls(uploads: readonly UploadUrlRequest[]): Promise<UploadUrlPair[]>;
   /**
    * Enter a sticky-session scope on this connection.
    *
@@ -350,6 +355,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       fetch: fetchFn,
       acceptedMaxResponseBytes,
       responseBudgetVerified: true,
+      uploadUrlVersion: caps.uploadUrlVersion,
     });
   }
 
@@ -378,6 +384,7 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
         fetch: fetchFn,
         acceptedMaxResponseBytes,
         responseBudgetVerified: true,
+        uploadUrlVersion: capabilities.uploadUrlVersion,
       });
       resp = await fetchFn(url, {
         method: "POST",
@@ -899,8 +906,8 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       return snapshot;
     },
 
-    async requestUploadUrls(count = 1): Promise<UploadUrlPair[]> {
-      return requestUploadUrls(baseUrl, prefix, count, authorization, fetchFn, acceptedMaxResponseBytes);
+    async requestUploadUrls(uploads: readonly UploadUrlRequest[]): Promise<UploadUrlPair[]> {
+      return requestUploadUrls(baseUrl, prefix, uploads, authorization, fetchFn, acceptedMaxResponseBytes);
     },
 
     beginSession(token?: string | null): void {

@@ -17,16 +17,23 @@ interface Allocation {
   object_url: string;
   upload_url?: string;
   download_url?: string;
+  upload_headers?: Record<string, string>;
+}
+
+function hexToBase64(hex: string): string {
+  let binary = "";
+  for (let i = 0; i < hex.length; i += 2) binary += String.fromCharCode(Number.parseInt(hex.slice(i, i + 2), 16));
+  return btoa(binary);
 }
 
 export class FakeStorage implements ExternalStorage, UploadUrlProvider {
   constructor(private readonly baseUrl: string) {}
 
-  private async alloc(contentEncoding = ""): Promise<Allocation> {
+  private async alloc(request: Record<string, unknown> = {}): Promise<Allocation> {
     const response = await fetch(`${this.baseUrl}/alloc`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: contentEncoding ? JSON.stringify({ content_encoding: contentEncoding }) : "{}",
+      body: JSON.stringify(request),
     });
     if (!response.ok) {
       throw new Error(`fake-storage /alloc failed: ${response.status}`);
@@ -35,7 +42,7 @@ export class FakeStorage implements ExternalStorage, UploadUrlProvider {
   }
 
   async upload(data: Uint8Array, contentEncoding: string): Promise<string> {
-    const allocation = await this.alloc(contentEncoding);
+    const allocation = await this.alloc(contentEncoding ? { content_encoding: contentEncoding } : {});
     const uploadUrl = allocation.upload_url ?? allocation.object_url;
     const downloadUrl = allocation.download_url ?? allocation.object_url;
 
@@ -48,12 +55,15 @@ export class FakeStorage implements ExternalStorage, UploadUrlProvider {
     return downloadUrl;
   }
 
-  async generateUploadUrl(): Promise<UploadUrl> {
-    const allocation = await this.alloc();
+  /** A sized allocation (upload-URL v2): the store verifies the PUT's length
+   *  and `x-amz-checksum-sha256` like S3/R2 and refuses any other body. */
+  async generateUploadUrl(size: number, sha256Hex: string): Promise<UploadUrl> {
+    const allocation = await this.alloc({ size, sha256_b64: hexToBase64(sha256Hex) });
     return {
       uploadUrl: allocation.upload_url ?? allocation.object_url,
       downloadUrl: allocation.download_url ?? allocation.object_url,
       expiresAt: new Date(Date.now() + 3600_000),
+      headers: { ...(allocation.upload_headers ?? {}) },
     };
   }
 }

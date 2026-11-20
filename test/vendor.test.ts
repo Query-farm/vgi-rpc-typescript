@@ -308,18 +308,55 @@ describe.skipIf(!hasFake)("against the fake vendor", () => {
     expect(back).toEqual(data);
   });
 
-  test("VendorStorage.generateUploadUrl vends a working unsized PUT/GET pair", async () => {
+  test("VendorStorage.generateUploadUrl vends a sized PUT/GET pair the store verifies", async () => {
     const storage = new VendorStorage(base, TOKEN);
     const before = await stats();
-    const pair = await storage.generateUploadUrl();
-    expect(pair.expiresAt).toBeInstanceOf(Date);
     const data = bytes(1234, 5);
-    const put = await fetch(pair.uploadUrl, { method: "PUT", body: data });
+    const sha = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", data)))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const pair = await storage.generateUploadUrl(data.byteLength, sha);
+    expect(pair.expiresAt).toBeInstanceOf(Date);
+    // The signed checksum header comes back for the client; Content-Length never does.
+    expect(Object.keys(pair.headers ?? {}).map((k) => k.toLowerCase())).toContain("x-amz-checksum-sha256");
+    expect(Object.keys(pair.headers ?? {}).map((k) => k.toLowerCase())).not.toContain("content-length");
+
+    // Wrong bytes of the right length: BadDigest, nothing stored.
+    const wrong = bytes(1234, 6);
+    const bad = await fetch(pair.uploadUrl, { method: "PUT", headers: pair.headers, body: wrong });
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toContain("BadDigest");
+    // Wrong length: IncompleteBody.
+    const short = await fetch(pair.uploadUrl, { method: "PUT", headers: pair.headers, body: data.slice(1) });
+    expect(short.status).toBe(400);
+    expect(await short.text()).toContain("IncompleteBody");
+
+    const put = await fetch(pair.uploadUrl, { method: "PUT", headers: pair.headers, body: data });
     expect(put.status).toBeLessThan(300);
     const back = new Uint8Array(await (await fetch(pair.downloadUrl)).arrayBuffer());
     expect(back).toEqual(data);
     const after = await stats();
-    expect(after.upload_urls! - before.upload_urls!).toBe(1);
+    // The sized /v1/blobs/put path, never the retired unsized /v1/upload_urls.
+    expect(after.puts! - before.puts!).toBe(1);
+    expect(after.upload_urls! - before.upload_urls!).toBe(0);
+    expect(after.upload_refusals! - before.upload_refusals!).toBe(2);
+  });
+
+  test("the upload fault corrupts a client PUT in transit and storage refuses it", async () => {
+    const storage = new VendorStorage(base, TOKEN);
+    const data = bytes(4096, 7);
+    const sha = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", data)))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const pair = await storage.generateUploadUrl(data.byteLength, sha);
+    await admin("fault?purpose=upload&action=corrupt&count=1");
+    const before = await stats();
+    const put = await fetch(pair.uploadUrl, { method: "PUT", headers: pair.headers, body: data });
+    expect(put.status).toBe(400);
+    expect(await put.text()).toContain("BadDigest");
+    const after = await stats();
+    expect(after.uploads_corrupted! - before.uploads_corrupted!).toBe(1);
+    expect(after.upload_bad_digest! - before.upload_bad_digest!).toBe(1);
   });
 
   test("externalConfigFromEnv: a result batch round-trips through a pointer with sha256", async () => {

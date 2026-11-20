@@ -345,7 +345,7 @@ async function readInboundRequest(
     return { schema, batch, dataMetadata: batch.metadata ?? undefined };
   }
 
-  const resolved = await resolveExternalLocation(batch, ctx.externalLocation);
+  const resolved = await resolveExternalLocation(batch, ctx.externalLocation, undefined, { requireSha256: true });
   const mergedMetadata = new Map<string, string>(resolved.metadata ?? []);
   for (const [key, value] of batch.metadata ?? []) mergedMetadata.set(key, value);
   return {

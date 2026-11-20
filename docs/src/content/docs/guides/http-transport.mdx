@@ -41,7 +41,7 @@ RPC routes are **namespaced by protocol**. A server hosts one or more protocols 
 | `/{protocol}/{method}` | POST | Unary method call |
 | `/{protocol}/{method}/init` | POST | Initialize a stream (producer or exchange) |
 | `/{protocol}/{method}/exchange` | POST | Send/receive a stream batch |
-| `/__upload_url__/init` | POST | Request a pre-signed upload URL (when `uploadUrlProvider` is set) |
+| `/__upload_url__/init` | POST | Request pre-signed upload URLs, one per (size, sha256) entry (when `uploadUrlProvider` is set; `VGI-Upload-URL-Support: 2`) |
 | `/__session__` | DELETE | Tear down a sticky session (when `enableSticky` is set) |
 | `/describe` | GET | HTML describe / API-reference page |
 | `/` | GET | HTML landing page |
