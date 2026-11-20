@@ -274,7 +274,7 @@ describe("__upload_url__/init v2 (server)", () => {
       const entries = Array.from({ length: n }, () => ({ size: 1, sha256: HEX_A }));
       const resp = await postInit(uploadsBody(entries), uncappedHandler);
       expect(resp.status).toBe(400);
-      expect(await errorMessage(resp)).toContain("1 to 100 entries");
+      expect(await errorMessage(resp)).toContain("1-100 entries");
     }
     // 100 is fine, and fits the endpoint's own 32 KiB cap.
     const ok = await postInit(
@@ -440,9 +440,9 @@ describe("client upload (v2)", () => {
     expect(await short.text()).toContain("IncompleteBody");
   });
 
-  test("malformed entries go to the server, whose refusal surfaces", async () => {
+  test("the client validates entries before asking, as the reference does", async () => {
     await expect(requestUploadUrls(rpcBase, "", [{ size: 0, sha256: HEX_A }])).rejects.toThrow("size");
     await expect(requestUploadUrls(rpcBase, "", [{ size: 1, sha256: "XYZ" }])).rejects.toThrow("sha256");
-    await expect(requestUploadUrls(rpcBase, "", [])).rejects.toThrow("1 to 100");
+    await expect(requestUploadUrls(rpcBase, "", [])).rejects.toThrow("1-100");
   });
 });

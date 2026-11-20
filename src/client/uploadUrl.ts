@@ -29,6 +29,7 @@ import { RpcError } from "../errors.js";
 import { makeExternalLocationBatch, sha256Hex } from "../external.js";
 import {
   ARROW_CONTENT_TYPE,
+  MAX_UPLOAD_URL_COUNT,
   reservedPath,
   serializeIpcStream,
   UPLOAD_URL_METHOD,
@@ -59,6 +60,7 @@ export interface UploadUrlPair {
   uploadHeaders: Record<string, string>;
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 const SUPPORTED_UPLOAD_URL_VERSION = Number(UPLOAD_URL_SUPPORT_VERSION);
 
 /**
@@ -73,13 +75,13 @@ export function requireUploadUrlV2(version: number | null): void {
   if (version < SUPPORTED_UPLOAD_URL_VERSION) {
     throw new RpcError(
       "ProtocolError",
-      `Server upload protocol is too old: it advertises VGI-Upload-URL-Support version ${version}, this client needs ${UPLOAD_URL_SUPPORT_VERSION}`,
+      `Server upload protocol is too old: it advertises VGI-Upload-URL-Support v${version} and this client needs ${UPLOAD_URL_SUPPORT_VERSION}`,
       "",
     );
   }
   throw new RpcError(
     "ProtocolError",
-    `Server upload protocol is newer than this client: it advertises VGI-Upload-URL-Support version ${version}, this client speaks ${UPLOAD_URL_SUPPORT_VERSION}`,
+    `Server upload protocol is newer than this client: it advertises VGI-Upload-URL-Support: ${version} and this client speaks ${UPLOAD_URL_SUPPORT_VERSION}`,
     "",
   );
 }
@@ -126,13 +128,21 @@ export async function requestUploadUrls(
   uploadUrlVersion?: number | null,
 ): Promise<UploadUrlPair[]> {
   optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
-  // Entries go to the server as given: it is the authority on what it accepts
-  // (1..100 entries, size >= 1 and within VGI-Max-Upload-Bytes, 64 lowercase
-  // hex), and its refusal names the problem. Only what cannot be encoded at
-  // all is stopped here.
+  // Checked here as the reference client does; the server re-checks (and adds
+  // VGI-Max-Upload-Bytes), so a raw request is what exercises its refusals.
+  if (!Array.isArray(uploads) || uploads.length < 1 || uploads.length > MAX_UPLOAD_URL_COUNT) {
+    throw new RpcError(
+      "ValueError",
+      `uploads must have 1-${MAX_UPLOAD_URL_COUNT} entries, got ${Array.isArray(uploads) ? uploads.length : "none"}`,
+      "",
+    );
+  }
   for (const u of uploads) {
-    if (!Number.isSafeInteger(u.size)) {
-      throw new RpcError("ProtocolError", `upload size must be an integer, got ${u.size}`, "");
+    if (!Number.isSafeInteger(u.size) || u.size < 1) {
+      throw new RpcError("ValueError", `upload size must be an integer >= 1, got ${u.size}`, "");
+    }
+    if (typeof u.sha256 !== "string" || !SHA256_HEX.test(u.sha256)) {
+      throw new RpcError("ValueError", "upload sha256 must be 64 lowercase hex characters", "");
     }
   }
   let responseLimit = acceptedMaxResponseBytes;
@@ -358,7 +368,9 @@ export async function externalizeRequestBody(body: Uint8Array, opts: Externalize
     if (lower === "content-type") hasContentType = true;
     headers[name] = value;
   }
-  if (!hasContentType) headers["Content-Type"] = ARROW_CONTENT_TYPE;
+  // As the reference's upload_put_headers: octet-stream unless the server
+  // listed (and so may have signed) a content type.
+  if (!hasContentType) headers["Content-Type"] = "application/octet-stream";
 
   const putResp = await fetchFn(pair.uploadUrl, {
     method: "PUT",

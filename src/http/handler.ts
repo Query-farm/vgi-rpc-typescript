@@ -153,10 +153,11 @@ const MAX_UPLOAD_URL_REQUEST_BYTES = 32 * 1024;
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
-/** A 400 refusal of a malformed `__upload_url__` request (RPC error batch). */
+/** A 400 refusal of a malformed `__upload_url__` request (RPC error batch;
+ *  `ValueError`, as the reference raises). */
 function uploadUrlRefusal(message: string): HttpRpcError {
   const error = new HttpRpcError(message, 400);
-  error.name = "ProtocolError";
+  error.name = "ValueError";
   return error;
 }
 
@@ -196,7 +197,7 @@ function parseUploadUrlRequest(
   const names = reqSchema.fields.map((f) => f.name);
   if (names.includes("count") || !names.includes("uploads")) {
     throw uploadUrlRefusal(
-      `__upload_url__ request uses the retired count shape; this server requires VGI-Upload-URL-Support: ${UPLOAD_URL_SUPPORT_VERSION} (an 'uploads' list of (size, sha256) entries)`,
+      `__upload_url__ request uses the retired count shape: this server requires VGI-Upload-URL-Support: ${UPLOAD_URL_SUPPORT_VERSION} and an 'uploads' parameter (list<struct<size: int64, sha256: utf8>>, one entry per upload)`,
     );
   }
   const uploadsField = reqSchema.fields[names.indexOf("uploads")]!;
@@ -211,22 +212,27 @@ function parseUploadUrlRequest(
   if (reqBatch.numRows !== 1) {
     throw uploadUrlRefusal(`Expected 1 row in __upload_url__ request batch, got ${reqBatch.numRows}`);
   }
-  const entries = listEntries(reqBatch.getChild("uploads")?.get(0));
+  const cell = reqBatch.getChild("uploads")?.get(0);
+  const entries = listEntries(cell);
   if (entries.length < 1 || entries.length > MAX_UPLOAD_URL_COUNT) {
-    throw uploadUrlRefusal(`uploads must have 1 to ${MAX_UPLOAD_URL_COUNT} entries, got ${entries.length}`);
+    throw uploadUrlRefusal(
+      `__upload_url__ 'uploads' must have 1-${MAX_UPLOAD_URL_COUNT} entries, got ${cell == null ? "null" : entries.length}`,
+    );
   }
   return entries.map((entry, i) => {
     const rawSize = structField(entry, "size");
     const size = typeof rawSize === "bigint" ? Number(rawSize) : typeof rawSize === "number" ? rawSize : Number.NaN;
     if (!Number.isSafeInteger(size) || size < 1) {
-      throw uploadUrlRefusal(`uploads[${i}].size must be an integer >= 1, got ${String(rawSize)}`);
+      throw uploadUrlRefusal(`__upload_url__ uploads[${i}].size must be an integer >= 1, got ${String(rawSize)}`);
     }
     const sha256 = structField(entry, "sha256");
     if (typeof sha256 !== "string" || !SHA256_HEX.test(sha256)) {
-      throw uploadUrlRefusal(`uploads[${i}].sha256 must be 64 lowercase hex characters`);
+      throw uploadUrlRefusal(`__upload_url__ uploads[${i}].sha256 must be 64 lowercase hex characters`);
     }
     if (maxUploadBytes != null && size > maxUploadBytes) {
-      throw uploadUrlRefusal(`uploads[${i}].size ${size} exceeds VGI-Max-Upload-Bytes (${maxUploadBytes})`);
+      throw uploadUrlRefusal(
+        `__upload_url__ uploads[${i}].size ${size} exceeds VGI-Max-Upload-Bytes (${maxUploadBytes})`,
+      );
     }
     return { size, sha256 };
   });

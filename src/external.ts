@@ -514,9 +514,10 @@ export async function publishExternalResult(
 /** Options for {@link resolveExternalLocation}. */
 export interface ResolveExternalOptions {
   /** The pointer is a client *request* pointer: `vgi_rpc.location.sha256` is
-   *  mandatory (refused with `missing vgi_rpc.location.sha256` when absent) and
-   *  a digest mismatch reports `sha256 mismatch`. Server-side resolution of an
-   *  uploaded request body sets this. */
+   *  mandatory (refused with `missing vgi_rpc.location.sha256` before any
+   *  fetch when absent, and refused when not 64 lowercase hex). Server-side
+   *  resolution of an uploaded request body sets this. A digest mismatch
+   *  reports `sha256 mismatch` either way. */
   requireSha256?: boolean;
 }
 
@@ -536,10 +537,21 @@ export async function resolveExternalLocation(
   const url = batch.metadata?.get(LOCATION_KEY);
   if (!url) return batch;
   const requireSha256 = options?.requireSha256 === true;
-  if (requireSha256 && !batch.metadata?.get(LOCATION_SHA256_KEY)) {
+  if (requireSha256) {
     // A request pointer names bytes a client uploaded; without the digest the
-    // server cannot tell them from whatever else sits at that URL.
-    throw new Error(`Request pointer is missing ${LOCATION_SHA256_KEY} [url: ${redactExternalUrl(url)}]`);
+    // server cannot tell them from whatever else sits at that URL. Refused
+    // before any network work.
+    const digest = batch.metadata?.get(LOCATION_SHA256_KEY);
+    if (digest === undefined) {
+      throw new Error(
+        `Request pointer is missing ${LOCATION_SHA256_KEY} (required on request pointers since vgi-rpc upload-URL protocol v2): ${redactExternalUrl(url)}`,
+      );
+    }
+    if (!/^[0-9a-f]{64}$/.test(digest)) {
+      throw new Error(
+        `Request pointer ${LOCATION_SHA256_KEY} is not 64 lowercase hex characters: ${redactExternalUrl(url)}`,
+      );
+    }
   }
 
   const { maxFetchBytes, maxDecompressedBytes, maxRedirects } = validateFetchConfig(config);
@@ -646,9 +658,7 @@ export async function resolveExternalLocation(
     const actualSha256 = await sha256Hex(data);
     if (actualSha256 !== expectedSha256) {
       throw new Error(
-        requireSha256
-          ? `Request pointer sha256 mismatch for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`
-          : `SHA-256 checksum mismatch for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`,
+        `ExternalLocation sha256 mismatch (SHA-256 checksum mismatch) for ${redactExternalUrl(currentUrl)}: expected ${expectedSha256}, got ${actualSha256}`,
       );
     }
   }
