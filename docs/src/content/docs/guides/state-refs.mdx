@@ -1,0 +1,79 @@
+---
+title: StateRef and Large Values
+description: Keep immutable per-stream data out of every HTTP continuation, resolve argument references, and size cursors against the turn budget.
+---
+
+Over HTTP every stream continuation echoes the stream's state back to the server in a sealed cursor token. A `StateRef` is how a server says "this part of my stream state does not change": it is stored once, a small sealed tag rides the cursor, and any later turn on any replica reads it back. The client never parses it, so no client change is involved. (Normative contract: vgi-rpc-python `tools/cross-port/specs/STATE_REF_V1.md`, protocol 3.4.)
+
+## API
+
+```typescript
+import { type StateRef } from "@query-farm/vgi-rpc";
+
+protocol.producer<{ query: StateRef; offset: number }>("scan", {
+  params: { query: bytes },
+  outputSchema,
+  // The init handler's context is the one place stateRef() is allowed.
+  init: (p, ctx) => ({ query: ctx.stateRef(p.query), offset: 0 }),
+  produce: async (state, out) => {
+    const query = await out.resolve(state.query); // any turn, any replica
+    // ...
+  },
+});
+```
+
+- `ctx.stateRef(value)` takes bytes, or a record with `toBytes()` / `serializeToBytes()`. Identical or byte-equal values within one init share one ref. Called anywhere but the stream init handler (a continuation, or the first producer turn that HTTP folds into `/init`) it throws `state_ref_misuse`.
+- `ctx.resolve(ref)` returns the bytes; `ctx.resolve(ref, decode)` decodes them (a ref still in memory made from a record returns that record).
+- It works the same on every transport and with or without storage. On pipe, stdio, Unix and TCP the state never leaves the process, so the value stays in memory.
+- A custom `stateSerializer` stores `ref.toBytes()` and rebuilds with `StateRef.fromBytes()`; the default JSON serializer does it for you.
+
+## Inline or stored
+
+The form is decided when the state is first sealed into a cursor:
+
+- **inline** (`0x01 || codec || body`): the compressed value sits inside the cursor. Always the case without storage, or when the compressed value is at most `stateRefInlineBytes` (default 16384, `VGI_RPC_STATE_REF_INLINE_BYTES`, and never more than a quarter of the turn budget);
+- **stored** (`0x02 || sealed tag`): the value is sealed (AEAD, bound to the stream and the principal) and uploaded once with the storage's `putObject`; the cursor carries a ~130-byte tag. Any replica resolves it with one `get`, then from the object cache.
+
+"Storage" is the `externalLocation.storage` of the handler when it implements `ObjectStore` (`putObject(data)`, `get(objectId, { maxBytes })`): `VendorStorage`, the S3 and GCS backends and the conformance fake storage all do. Objects carry no TTL: set a bucket lifecycle rule of at least one day on the `rpc` prefix.
+
+**Deployments with more than one replica must set a shared `tokenKey`**: the tag, like the cursor, is opened with it.
+
+## Turn budget and the cursor rule
+
+```
+turn_budget = floor((maxRequestBytes - 4096) / 1.34) - call_token_bytes
+```
+
+A sealed cursor over the budget is checked on every turn: with `cursorRule: "warn"` (default) the server emits a `cursor_large` event and sends the client a WARN log starting `cursor_large:`; with `cursorRule: "error"` the turn fails with `cursor_too_large` (only when a request cap is set). Below a 16 KiB `maxRequestBytes` the rule is disabled with a startup warning. Producer turns mint the cursor before any data is flushed, so a refusal never follows data the client already received.
+
+Cursors and call tokens are compressed before sealing (codec byte `0x00` raw / `0x01` zstd). The call token carries both schemas behind a `StateRef`, so very wide schemas are stored once too.
+
+## Argument references
+
+`__upload_url__/init` grants carry two more columns, `object_id` and `ref`: a sealed reference to the object the PUT creates, bound to the requesting principal (the grant is authenticated exactly like a method). A layer above (the VGI framework) resolves it with:
+
+```typescript
+const bytes = await ctx.resolveArgumentRef(ref, { size, sha256 });
+// or, outside a call context:
+import { resolveArgumentRef } from "@query-farm/vgi-rpc";
+```
+
+Resolution opens the ref for the presenting principal, checks the claimed size and SHA-256 against the sealed ones, fetches through the object cache and verifies the bytes.
+
+## Object cache
+
+One per process (`defaultObjectCache()`): keyed by `object_id` (never a digest), single-flight, byte-bounded LRU (`VGI_RPC_OBJECT_CACHE_BYTES`, default `min(1 GiB, 40%` of the memory limit`)`), and entries older than one day are re-fetched.
+
+## Errors
+
+| Kind | Code | When |
+|---|---|---|
+| `invalid_state_ref` | `INVALID_ARGUMENT` (HTTP 400) | unknown form, tag fails to open, expired, digest mismatch |
+| `state_ref_missing` | `NOT_FOUND` | the stored object is gone |
+| `state_ref_too_large` | `RESOURCE_EXHAUSTED` | stored object over `maxFetchBytes` |
+| `state_ref_misuse` | `FAILED_PRECONDITION` | `stateRef()` outside the init handler |
+| `cursor_too_large` | `RESOURCE_EXHAUSTED` | cursor over the turn budget under `cursorRule: "error"` |
+| `storage_unavailable` | `UNAVAILABLE` | transient storage failure |
+| `invalid_arguments_ref` / `arguments_ref_integrity` / `arguments_ref_missing` | `INVALID_ARGUMENT` / `DATA_LOSS` / `NOT_FOUND` | argument-reference failures |
+
+Events (`state_ref.store`, `state_ref.resolve`, `arguments_ref.*`, `object_cache`, `cursor_large`, `cursor_too_large`) go to the sink installed with `setStateRefEventSink`.

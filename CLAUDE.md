@@ -45,6 +45,9 @@ src/
   errors.ts         — RpcError, VersionError
   external.ts       — External-location pointers: externalize/resolve batches, ExternalRef
   vendor.ts         — Blob-vendor client (VendorStorage, VendorBlobClient, host pinning, env configs)
+  state-ref.ts      — StateRef, argument references, turn budget / cursor rule (STATE_REF_V1.md, protocol 3.4)
+  object-cache.ts   — Per-process object cache (object_id-keyed, single-flight, byte-bounded, 1-day age)
+  token-codec.ts    — Standard token codec (codec byte 0x00 raw / 0x01 zstd / 0x02 deflate read), compress-then-seal
   constants.ts      — Wire protocol metadata keys
   wire/             — Low-level IPC reader/writer and request/response serialization
   dispatch/         — Method dispatch (unary, stream, describe)
@@ -54,7 +57,7 @@ examples/
   calculator.ts     — Unary methods example
   greeter.ts        — String params example
   streaming.ts      — Producer and exchange streams
-  conformance.ts    — 90-method conformance suite for wire-protocol testing
+  conformance.ts    — 94-method conformance suite for wire-protocol testing
 test/
   wire.test.ts      — Unit tests for wire serialization
   dispatch-identity.test.ts — Access records name the owning binding, and its digest
@@ -222,3 +225,7 @@ Every transport write is split before it reaches the syscall, and every Node-str
 `src/arrow/limits.ts` turns that into an honest refusal instead. `requireEncodable` runs on every value entering a batch — including the raw `Data` an echo-style handler hands straight back, which is the path a large payload actually takes — and throws a `RangeError` naming the field, the real size, and whose limit it is. It measures a `Data` by its **largest single buffer**, not the sum, because alignment is applied per buffer and totalling would refuse a payload of exactly the ceiling on account of its own validity bytes.
 
 That is what the conformance suite asks for. `large_payload.echo_binary_over_int32_max` accepts either an intact round-trip or a typed error that leaves the connection usable — it proves the latter by issuing an ordinary call afterwards — and records the outcome as `note: payload refused, transport survived`. What it forbids is the silent pair: a truncated body, or a peer left waiting on bytes that never arrive. A negative `bodyLength` was the second of those, so this port **passes** the group, by the refusal path, and will switch to the round-trip path for free if the dependencies ever lift their ceilings.
+
+## StateRef (protocol 3.4)
+
+Port of vgi-rpc-python's `STATE_REF_V1.md` (reference `f22d435`/`8f689a7`). `ctx.stateRef()` exists only on the stream init handler's context (`ProducerInit`/`ExchangeInit` take a second `StreamInitContext` argument); every other context, the first producer turn included, throws `state_ref_misuse`. Refs created on the init turn are encoded when the first cursor is minted: `serializeWithStateRefs` serializes the state once to find un-encoded refs (they register through `toBytes()`/`toJSON()`), encodes them -- inline, or sealed and `putObject`-ed once -- and serializes again, so any `stateSerializer` that stores `ref.toBytes()` works. The cursor (v6) and call token (v4, schemas behind `schemas_ref`) are compressed before sealing. The shared suite (`_state_ref_pytest.py`, 32 cases) needs the runner fixtures `conformance_state_ref_replicas`, `conformance_state_ref_short_ttl_port` and `conformance_cursor_budget_ports` in `test_ts_conformance.py`; the conformance HTTP worker takes `--cursor-rule`, `--token-ttl`, `--object-cache-bytes`, `--require-principal` and `--max-request-bytes 0` ("no cap") for them.

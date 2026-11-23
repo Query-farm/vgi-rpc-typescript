@@ -97,8 +97,8 @@ State tokens are sealed with **XChaCha20-Poly1305 AEAD** (wire format v4):
 
 - The Poly1305 authentication tag makes tokens tamper- and forgery-resistant — any modification to the ciphertext fails to decrypt.
 - Tokens are bound to the authenticated principal via the AEAD associated data (AAD). A token sealed for principal A cannot be replayed by principal B (or by an anonymous caller, and vice versa).
-- Tokens are time-limited (default `tokenTtl`: 1 hour; `0` disables the TTL check).
-- The sealing key is the 32-byte `tokenKey` master key. If you omit it, a random key is generated at startup — fine for a single process, but tokens then won't survive a restart or work across load-balanced workers. Supply a shared `tokenKey` to make tokens portable across workers.
+- Tokens are time-limited (default `tokenTtl`: 6 hours, the maximum stream duration; `0` disables the TTL check). Cursors are compressed before sealing; immutable per-stream data can ride by reference, see [StateRef and Large Values](/guides/state-refs/).
+- The sealing key is the 32-byte `tokenKey` master key. If you omit it, a random key is generated at startup — fine for a single process, but tokens then won't survive a restart or work across load-balanced workers. **A deployment with more than one replica must supply a shared `tokenKey`.**
 
 ## Configuration
 
@@ -108,7 +108,7 @@ Pass `HttpHandlerOptions` to customize behavior:
 const handler = createHttpHandler(protocol, {
   prefix: "/api",                    // path prefix for all routes (default: "" / root)
   tokenKey: myKey,                   // 32-byte XChaCha20-Poly1305 master key (random if omitted)
-  tokenTtl: 7200,                    // state-token TTL in seconds (default: 3600; 0 disables)
+  tokenTtl: 7200,                    // state-token TTL in seconds (default: 21600; 0 disables)
   serverId: "my-server",             // server ID in response metadata (random if omitted)
   corsOrigins: "*",                  // CORS allowed origins
   corsMaxAge: 300,                   // Access-Control-Max-Age for preflight (default: 300; null omits)
@@ -128,7 +128,10 @@ Key options:
 |--------|-------------|
 | `prefix` | Path prefix for all routes. Default `""` (root). |
 | `tokenKey` | 32-byte XChaCha20-Poly1305 master key sealing stream-state tokens. Random if omitted. |
-| `tokenTtl` | State-token TTL in seconds. Default `3600`; `0` disables TTL checks. |
+| `tokenTtl` | Max age of cursor tokens, call tokens and stored `StateRef` tags, in seconds. Default `21600` (6 h); `0` disables TTL checks. |
+| `cursorRule` | `"warn"` (default) or `"error"`: what a cursor over the turn budget does. See [StateRef](/guides/state-refs/). |
+| `stateRefInlineBytes` | Largest compressed `StateRef` kept inline. Default `VGI_RPC_STATE_REF_INLINE_BYTES` or 16384. |
+| `maxUploadBytes` | Advertised `VGI-Max-Upload-Bytes`; defaults to, and never exceeds, the fetch cap (256 MiB unless `externalLocation.maxFetchBytes` is set). |
 | `corsOrigins` | CORS allowed origins; enables CORS headers when set. |
 | `corsMaxAge` | `Access-Control-Max-Age` for preflight responses. Default `300`; `null` omits it. |
 | `maxRequestBytes` | Max request body size. Advertised via `VGI-Max-Request-Bytes`. |

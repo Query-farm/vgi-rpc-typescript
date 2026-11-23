@@ -155,6 +155,7 @@ export default defineConfig({
             { label: "Error Handling", slug: "guides/error-handling" },
             { label: "Hosting Several Protocols", slug: "guides/hosting-protocols" },
             { label: "HTTP Transport", slug: "guides/http-transport" },
+            { label: "StateRef and Large Values", slug: "guides/state-refs" },
             { label: "Compression", slug: "guides/compression" },
             { label: "Large Payloads", slug: "guides/large-payloads" },
             { label: "Sticky Sessions", slug: "guides/sticky-sessions" },
