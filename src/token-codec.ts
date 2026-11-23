@@ -17,15 +17,24 @@
  * |--------|----------------------------|-----------------------------------------|
  * | `0x00` | raw plaintext              | used when compression does not shrink   |
  * | `0x01` | one zstd frame             | the default; level 3                    |
- * | `0x02` | raw DEFLATE (RFC 1951)     | read where the runtime has `node:zlib`  |
+ * | `0x02` | raw DEFLATE (RFC 1951)     | for runtimes without a zstd encoder     |
  * | other  | --                         | reserved; refused                       |
  *
- * The writer emits `0x00` and `0x01`. On a runtime with no zstd *encoder*
- * (Cloudflare workerd) it emits `0x00`, which every reader accepts; the reader
- * decodes zstd everywhere (fzstd on workerd).
+ * The writer emits `0x01` where the runtime can encode zstd (Bun, Node >=
+ * 22.15, Deno); on a runtime without a zstd *encoder* (Cloudflare workerd)
+ * {@link packTokenAsync} emits `0x02` through the Web `CompressionStream`
+ * (`"deflate-raw"`), like vgi-rpc-python's bare-install fallback. `0x00` is
+ * used whenever compression does not shrink the payload. Every reader accepts
+ * all three: {@link unpackTokenAsync} decodes DEFLATE with `node:zlib` or,
+ * failing that, `DecompressionStream`; zstd decodes everywhere (fzstd on
+ * workerd).
+ *
+ * The synchronous {@link packToken} cannot reach `CompressionStream`, so on
+ * workerd it falls back to `0x00`; the framework's token mints use the async
+ * variants.
  */
 
-import { zstdCompressSyncOrNull, zstdDecompressSync } from "./util/zstd.js";
+import { isZstdCompressAvailable, zstdCompressSyncOrNull, zstdDecompressSync } from "./util/zstd.js";
 
 /** Body is the plaintext as-is. */
 export const CODEC_RAW = 0x00;
@@ -73,6 +82,98 @@ function inflateRawOrNull(): ((data: Uint8Array, opts: { maxOutputLength: number
     return typeof fn === "function" ? fn : null;
   } catch {
     return null;
+  }
+}
+
+function tagged(codec: number, body: Uint8Array): Uint8Array {
+  const out = new Uint8Array(1 + body.byteLength);
+  out[0] = codec;
+  out.set(body, 1);
+  return out;
+}
+
+async function streamThrough(
+  data: Uint8Array,
+  transform: TransformStream<Uint8Array, Uint8Array>,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  const reader = new Blob([copy]).stream().pipeThrough(transform).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) throw new TokenCodecError("payload exceeds the decompression bound");
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+/**
+ * Raw-DEFLATE {@link packToken}: `0x02 || deflate-raw(plaintext)` when that is
+ * shorter, else `0x00 || plaintext`. Uses the Web `CompressionStream`, which
+ * every runtime (workerd included) provides.
+ */
+export async function packTokenDeflate(plaintext: Uint8Array): Promise<Uint8Array> {
+  const compressed = await streamThrough(
+    plaintext,
+    new CompressionStream("deflate-raw" as CompressionFormat) as unknown as TransformStream<Uint8Array, Uint8Array>,
+    Number.MAX_SAFE_INTEGER,
+  );
+  return compressed.byteLength < plaintext.byteLength
+    ? tagged(CODEC_DEFLATE, compressed)
+    : tagged(CODEC_RAW, plaintext);
+}
+
+/**
+ * {@link packToken} on every runtime: zstd (`0x01`) where the runtime can
+ * encode it, raw DEFLATE (`0x02`) where it cannot (workerd), raw (`0x00`)
+ * when compression does not shrink the payload.
+ */
+export async function packTokenAsync(plaintext: Uint8Array): Promise<Uint8Array> {
+  if (isZstdCompressAvailable()) return packToken(plaintext);
+  return packTokenDeflate(plaintext);
+}
+
+/**
+ * {@link unpackToken} on every runtime: also decodes DEFLATE (`0x02`) where
+ * `node:zlib` is absent (workerd), through `DecompressionStream`, bounded
+ * while it streams.
+ */
+export async function unpackTokenAsync(
+  data: Uint8Array,
+  maxOutputBytes: number = MAX_TOKEN_PLAINTEXT_BYTES,
+): Promise<Uint8Array> {
+  if (data.byteLength === 0 || data[0] !== CODEC_DEFLATE || inflateRawOrNull() !== null) {
+    return unpackToken(data, maxOutputBytes);
+  }
+  return inflateRawStream(data.subarray(1), maxOutputBytes);
+}
+
+/** @internal Inflate a raw DEFLATE body with `DecompressionStream`, bounded. */
+export async function inflateRawStream(body: Uint8Array, maxOutputBytes: number): Promise<Uint8Array> {
+  try {
+    return await streamThrough(
+      body,
+      new DecompressionStream("deflate-raw" as CompressionFormat) as unknown as TransformStream<Uint8Array, Uint8Array>,
+      maxOutputBytes,
+    );
+  } catch (error) {
+    if (error instanceof TokenCodecError) throw error;
+    throw new TokenCodecError("deflate body does not decompress");
   }
 }
 

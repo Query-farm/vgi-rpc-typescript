@@ -18,7 +18,7 @@ export {
   UPLOAD_URL_RESPONSE_SCHEMA,
   UPLOAD_URL_SUPPORT_VERSION,
 } from "./common.js";
-export { createHttpHandler, resolveMaxUploadBytes } from "./handler.js";
+export { createHttpHandler, resolveUploadCaps, type UploadCaps } from "./handler.js";
 export type { JwtAuthenticateOptions } from "./jwt.js";
 export { jwtAuthenticate } from "./jwt.js";
 export type { CertValidateFn, XfccElement, XfccValidateFn } from "./mtls.js";

@@ -12,7 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import { AuthContext } from "../src/auth.js";
 import { ObjectMissingError, type ObjectStore } from "../src/external.js";
-import { createHttpHandler, resolveMaxUploadBytes } from "../src/http/index.js";
+import { createHttpHandler, resolveUploadCaps } from "../src/http/index.js";
 import { jsonStateSerializer } from "../src/http/types.js";
 import { Protocol } from "../src/index.js";
 import { ObjectCache } from "../src/object-cache.js";
@@ -39,7 +39,17 @@ import {
   stateRefInlineBytesFromEnv,
   turnBudget,
 } from "../src/state-ref.js";
-import { CODEC_RAW, CODEC_ZSTD, packToken, TokenCodecError, unpackToken } from "../src/token-codec.js";
+import {
+  CODEC_DEFLATE,
+  CODEC_RAW,
+  CODEC_ZSTD,
+  inflateRawStream,
+  packToken,
+  packTokenDeflate,
+  TokenCodecError,
+  unpackToken,
+  unpackTokenAsync,
+} from "../src/token-codec.js";
 
 const KEY = new Uint8Array(32).fill(9);
 const PROTO = "test.StateRef.v1";
@@ -101,6 +111,21 @@ describe("token codec", () => {
   test("bounds the decompressed size by the frame's declared content size", () => {
     const big = new Uint8Array(1 << 20);
     expect(() => unpackToken(packToken(big), 1000)).toThrow("decompression bound");
+  });
+
+  test("the DEFLATE writer (workerd's codec) round-trips through every reader", async () => {
+    const value = new TextEncoder().encode("deflate fallback ".repeat(500));
+    const packed = await packTokenDeflate(value);
+    expect(packed[0]).toBe(CODEC_DEFLATE);
+    expect(packed.length).toBeLessThan(value.length / 10);
+    expect(await unpackTokenAsync(packed)).toEqual(value);
+    expect(unpackToken(packed)).toEqual(value);
+    // The DecompressionStream path a runtime without node:zlib takes.
+    expect(await inflateRawStream(packed.subarray(1), 1 << 20)).toEqual(value);
+    await expect(inflateRawStream(packed.subarray(1), 100)).rejects.toThrow("decompression bound");
+    // A payload that does not shrink stays raw.
+    const tiny = await packTokenDeflate(new Uint8Array([1, 2]));
+    expect(Array.from(tiny)).toEqual([CODEC_RAW, 1, 2]);
   });
 
   test("reads raw DEFLATE (codec 0x02)", async () => {
@@ -412,15 +437,45 @@ describe("fix 1: the advertised upload cap never exceeds the fetch cap", () => {
   };
   const storage = { upload: async () => "" };
 
-  test("defaults to the fetch cap, clamps to the default cap, refuses only an explicit lower fetch cap", () => {
-    expect(resolveMaxUploadBytes(undefined, 5, undefined)).toBe(0);
-    expect(resolveMaxUploadBytes(provider, undefined, undefined)).toBe(256 * 1024 * 1024);
-    expect(resolveMaxUploadBytes(provider, undefined, { storage, maxFetchBytes: 1000 })).toBe(1000);
-    expect(resolveMaxUploadBytes(provider, 500, { storage, maxFetchBytes: 1000 })).toBe(500);
-    expect(resolveMaxUploadBytes(provider, 2 ** 40, undefined)).toBe(256 * 1024 * 1024);
-    expect(() => resolveMaxUploadBytes(provider, 2000, { storage, maxFetchBytes: 1000 })).toThrow(
+  test("defaults to the fetch cap, raises an unset fetch cap to the upload cap, refuses only an explicit lower fetch cap", () => {
+    const MiB256 = 256 * 1024 * 1024;
+    expect(resolveUploadCaps(undefined, 5, undefined)).toEqual({ maxUploadBytes: 0, maxFetchBytes: MiB256 });
+    expect(resolveUploadCaps(provider, undefined, undefined)).toEqual({
+      maxUploadBytes: MiB256,
+      maxFetchBytes: MiB256,
+    });
+    expect(resolveUploadCaps(provider, undefined, { storage, maxFetchBytes: 1000 })).toEqual({
+      maxUploadBytes: 1000,
+      maxFetchBytes: 1000,
+    });
+    expect(resolveUploadCaps(provider, 500, { storage, maxFetchBytes: 1000 })).toEqual({
+      maxUploadBytes: 500,
+      maxFetchBytes: 1000,
+    });
+    expect(resolveUploadCaps(provider, 500, undefined)).toEqual({ maxUploadBytes: 500, maxFetchBytes: MiB256 });
+    // A 1 GiB upload with no explicit fetch cap works as written: the fetch cap follows it.
+    expect(resolveUploadCaps(provider, 2 ** 30, { storage })).toEqual({
+      maxUploadBytes: 2 ** 30,
+      maxFetchBytes: 2 ** 30,
+    });
+    expect(() => resolveUploadCaps(provider, 2000, { storage, maxFetchBytes: 1000 })).toThrow(
       "exceeds the server's inbound fetch cap",
     );
+  });
+
+  test("the handler fetches under the raised cap and advertises the upload cap unchanged", async () => {
+    const protocol = new Protocol("Fix1b").unary("echo", {
+      params: { value: str },
+      result: { result: str },
+      handler: (p) => ({ result: p.value }),
+    });
+    const handler = createHttpHandler(protocol, {
+      uploadUrlProvider: provider,
+      maxUploadBytes: 2 ** 30,
+      externalLocation: { storage },
+    });
+    const res = await handler(new Request("http://h/health"));
+    expect(res.headers.get("VGI-Max-Upload-Bytes")).toBe(String(2 ** 30));
   });
 
   test("VGI-Max-Upload-Bytes is always advertised alongside upload URLs", async () => {

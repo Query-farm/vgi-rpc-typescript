@@ -167,41 +167,54 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /** A 400 refusal of a malformed `__upload_url__` request (RPC error batch;
  *  `ValueError`, as the reference raises). */
+/** The upload and fetch caps a handler runs with (fix 1). */
+export interface UploadCaps {
+  /** `VGI-Max-Upload-Bytes`, advertised whenever upload URLs are offered;
+   *  `0` (never advertised) when there is no provider. */
+  maxUploadBytes: number;
+  /** The inbound fetch cap request pointers are fetched under. */
+  maxFetchBytes: number;
+}
+
 /**
- * The `VGI-Max-Upload-Bytes` to advertise (fix 1).
+ * Resolve the advertised upload cap and the inbound fetch cap together (fix 1,
+ * vgi-rpc-python `3a8d584`, decision 16).
  *
- * An upload comes back to the server as a pointer that it fetches under its
- * external config's `maxFetchBytes` (256 MiB unless set). Advertising more
- * would let a client upload a request the server then refuses after the whole
- * upload, so the advertised size defaults to the fetch cap and never exceeds
- * it. Startup is refused only when the operator set an explicit fetch cap
- * below an explicit upload cap -- a contradiction only they can resolve; an
- * upload cap over the *default* fetch cap is clamped to it.
+ * An upload comes back to the server as a pointer it fetches under its fetch
+ * cap, so a server never advertises an upload size it would then refuse to
+ * fetch:
  *
- * @returns the size to advertise whenever upload URLs are offered; `0` (never
- *   advertised) when there is no provider.
+ * - no upload cap configured: it is the fetch cap (`maxFetchBytes`, 256 MiB
+ *   unless set);
+ * - an upload cap with no explicit fetch cap: the fetch cap is **raised** to
+ *   it when it is above the 256 MiB default, so the operator's upload size
+ *   works as written;
+ * - an explicit fetch cap below an explicit upload cap is a contradiction
+ *   only the operator can resolve: startup is refused.
  */
-export function resolveMaxUploadBytes(
+export function resolveUploadCaps(
   provider: UploadUrlProvider | undefined,
   maxUploadBytes: number | undefined,
   externalLocation: ExternalLocationConfig | undefined,
-): number {
-  if (!provider) return 0;
+): UploadCaps {
   const explicitFetchCap = externalLocation?.maxFetchBytes;
   const fetchCap = explicitFetchCap ?? DEFAULT_MAX_FETCH_BYTES;
-  if (maxUploadBytes == null) return fetchCap;
+  if (!provider) return { maxUploadBytes: 0, maxFetchBytes: fetchCap };
+  if (maxUploadBytes == null) return { maxUploadBytes: fetchCap, maxFetchBytes: fetchCap };
   if (!Number.isSafeInteger(maxUploadBytes) || maxUploadBytes < 1) {
     throw new Error(`maxUploadBytes must be a positive integer, got ${maxUploadBytes}`);
   }
-  if (maxUploadBytes <= fetchCap) return maxUploadBytes;
   if (explicitFetchCap != null) {
-    throw new Error(
-      `maxUploadBytes (${maxUploadBytes}) exceeds the server's inbound fetch cap ` +
-        `(externalLocation.maxFetchBytes = ${explicitFetchCap}): clients would upload requests the server then ` +
-        "refuses to fetch. Raise maxFetchBytes or lower maxUploadBytes (VGI_RPC_MAX_UPLOAD_BYTES).",
-    );
+    if (maxUploadBytes > explicitFetchCap) {
+      throw new Error(
+        `maxUploadBytes (${maxUploadBytes}) exceeds the server's inbound fetch cap ` +
+          `(externalLocation.maxFetchBytes = ${explicitFetchCap}): clients would upload requests the server then ` +
+          "refuses to fetch. Raise maxFetchBytes (VGI_RPC_MAX_FETCH_BYTES) or lower maxUploadBytes (VGI_RPC_MAX_UPLOAD_BYTES), or unset maxFetchBytes so it follows the upload cap.",
+      );
+    }
+    return { maxUploadBytes, maxFetchBytes: explicitFetchCap };
   }
-  return fetchCap;
+  return { maxUploadBytes, maxFetchBytes: Math.max(DEFAULT_MAX_FETCH_BYTES, maxUploadBytes) };
 }
 
 function uploadUrlRefusal(message: string): HttpRpcError {
@@ -746,12 +759,18 @@ export function createHttpHandler(
   const describeHtml = enableDescribePage ? buildDescribePage(displayName, serverId, methods, repoUrl) : null;
   const notFoundHtml = enableNotFoundPage ? buildNotFoundPage(prefix, displayName) : null;
 
-  const externalLocation = options?.externalLocation;
   const uploadUrlProvider = options?.uploadUrlProvider;
   // Fix 1: an upload comes back as a pointer the server fetches under its
-  // fetch cap, so the advertised upload cap never exceeds it, and is always
-  // advertised alongside upload URLs.
-  const maxUploadBytes = resolveMaxUploadBytes(uploadUrlProvider, options?.maxUploadBytes, externalLocation);
+  // fetch cap, so the two are resolved together: the upload cap is always
+  // advertised alongside upload URLs and never exceeds the fetch cap, which
+  // follows an upload cap above its default when no fetch cap was set.
+  const uploadCaps = resolveUploadCaps(uploadUrlProvider, options?.maxUploadBytes, options?.externalLocation);
+  const maxUploadBytes = uploadCaps.maxUploadBytes;
+  const externalLocation =
+    options?.externalLocation &&
+    (options.externalLocation.maxFetchBytes ?? DEFAULT_MAX_FETCH_BYTES) !== uploadCaps.maxFetchBytes
+      ? { ...options.externalLocation, maxFetchBytes: uploadCaps.maxFetchBytes }
+      : options?.externalLocation;
 
   // StateRef machinery (STATE_REF_V1.md): the tokens' key, the server's
   // storage (read per use), its fetch cap, and the advertised request cap the

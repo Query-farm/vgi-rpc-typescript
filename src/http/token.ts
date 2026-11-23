@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { openBytes, SealError, sealBytes } from "../crypto.js";
-import { MAX_TOKEN_PLAINTEXT_BYTES, packToken, TokenCodecError, unpackToken } from "../token-codec.js";
+import {
+  MAX_TOKEN_PLAINTEXT_BYTES,
+  packToken,
+  packTokenAsync,
+  TokenCodecError,
+  unpackToken,
+  unpackTokenAsync,
+} from "../token-codec.js";
 
 const _UTF8 = new TextEncoder();
 
@@ -223,12 +230,26 @@ export function packStateToken(
   scope: TokenScope,
   createdAt?: number,
 ): string {
-  return bytesToBase64(sealStateToken(stateBytes, callId, tokenKey, scope, createdAt));
+  return bytesToBase64(sealStatePayload(packToken(stateBytes), callId, tokenKey, scope, createdAt));
 }
 
-/** {@link packStateToken} without the base64 step: the sealed envelope. */
-export function sealStateToken(
+/**
+ * {@link packStateToken} without the base64 step, compressing on every
+ * runtime (raw DEFLATE where there is no zstd encoder): the sealed envelope.
+ * The framework's cursor mint.
+ */
+export async function sealStateToken(
   stateBytes: Uint8Array,
+  callId: Uint8Array,
+  tokenKey: Uint8Array,
+  scope: TokenScope,
+  createdAt?: number,
+): Promise<Uint8Array> {
+  return sealStatePayload(await packTokenAsync(stateBytes), callId, tokenKey, scope, createdAt);
+}
+
+function sealStatePayload(
+  payload: Uint8Array,
   callId: Uint8Array,
   tokenKey: Uint8Array,
   scope: TokenScope,
@@ -238,7 +259,6 @@ export function sealStateToken(
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
   const now = createdAt ?? Math.floor(Date.now() / 1000);
-  const payload = packToken(stateBytes);
   const plaintext = new Uint8Array(8 + CALL_ID_LEN + payload.byteLength);
   const view = new DataView(plaintext.buffer);
   writeU64LE(view, 0, BigInt(now));
@@ -269,11 +289,32 @@ export function packCallToken(
   createdAt?: number,
   responseBudget?: { responseLimitBytes?: number; preferredResponseBytes?: number },
 ): string {
-  if (tokenKey.length !== 32) {
-    throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
-  }
-  const now = createdAt ?? Math.floor(Date.now() / 1000);
+  return sealCallPayload(packToken(callBody(schemasRef, responseBudget)), callId, tokenKey, scope, createdAt);
+}
 
+/** {@link packCallToken}, compressing on every runtime (raw DEFLATE where
+ *  there is no zstd encoder). The framework's call-token mint. */
+export async function packCallTokenAsync(
+  callId: Uint8Array,
+  schemasRef: Uint8Array,
+  tokenKey: Uint8Array,
+  scope: TokenScope,
+  createdAt?: number,
+  responseBudget?: { responseLimitBytes?: number; preferredResponseBytes?: number },
+): Promise<string> {
+  return sealCallPayload(
+    await packTokenAsync(callBody(schemasRef, responseBudget)),
+    callId,
+    tokenKey,
+    scope,
+    createdAt,
+  );
+}
+
+function callBody(
+  schemasRef: Uint8Array,
+  responseBudget?: { responseLimitBytes?: number; preferredResponseBytes?: number },
+): Uint8Array {
   const body = new Uint8Array(4 + schemasRef.length + 16);
   const view = new DataView(body.buffer);
   writeU32LE(view, 0, schemasRef.length);
@@ -282,8 +323,20 @@ export function packCallToken(
   writeU64LE(view, offset, BigInt(responseBudget?.responseLimitBytes ?? 0));
   offset += 8;
   writeU64LE(view, offset, BigInt(responseBudget?.preferredResponseBytes ?? 0));
+  return body;
+}
 
-  const payload = packToken(body);
+function sealCallPayload(
+  payload: Uint8Array,
+  callId: Uint8Array,
+  tokenKey: Uint8Array,
+  scope: TokenScope,
+  createdAt?: number,
+): string {
+  if (tokenKey.length !== 32) {
+    throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
+  }
+  const now = createdAt ?? Math.floor(Date.now() / 1000);
   const plaintext = new Uint8Array(8 + CALL_ID_LEN + payload.byteLength);
   const header = new DataView(plaintext.buffer);
   writeU64LE(header, 0, BigInt(now));
@@ -370,6 +423,42 @@ export function unpackStateToken(
   tokenTtl: number,
   scope: TokenScope,
 ): UnpackedToken {
+  const { payload, callId, createdAt } = openStateEnvelope(tokenBase64, tokenKey, tokenTtl, scope);
+  let stateBytes: Uint8Array;
+  try {
+    stateBytes = unpackToken(payload, MAX_CALL_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof TokenCodecError) throw new Error("Malformed token payload");
+    throw error;
+  }
+  return { stateBytes, callId, createdAt };
+}
+
+/** {@link unpackStateToken} that decodes every codec on every runtime
+ *  (raw DEFLATE through `DecompressionStream` on workerd). */
+export async function unpackStateTokenAsync(
+  tokenBase64: string,
+  tokenKey: Uint8Array,
+  tokenTtl: number,
+  scope: TokenScope,
+): Promise<UnpackedToken> {
+  const { payload, callId, createdAt } = openStateEnvelope(tokenBase64, tokenKey, tokenTtl, scope);
+  let stateBytes: Uint8Array;
+  try {
+    stateBytes = await unpackTokenAsync(payload, MAX_CALL_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof TokenCodecError) throw new Error("Malformed token payload");
+    throw error;
+  }
+  return { stateBytes, callId, createdAt };
+}
+
+function openStateEnvelope(
+  tokenBase64: string,
+  tokenKey: Uint8Array,
+  tokenTtl: number,
+  scope: TokenScope,
+): { payload: Uint8Array; callId: Uint8Array; createdAt: number } {
   let raw: Uint8Array;
   try {
     raw = base64ToBytes(tokenBase64);
@@ -422,27 +511,61 @@ export function unpackStateToken(
   const callId = copyAligned(offset, CALL_ID_LEN);
   offset += CALL_ID_LEN;
 
-  let stateBytes: Uint8Array;
-  try {
-    stateBytes = unpackToken(plaintext.subarray(offset), MAX_CALL_BODY_BYTES);
-  } catch (error) {
-    if (error instanceof TokenCodecError) throw new Error("Malformed token payload");
-    throw error;
-  }
-
-  return { stateBytes, callId, createdAt };
+  return { payload: plaintext.subarray(offset), callId, createdAt };
 }
 
 /**
  * Open and verify a call token, returning it paired with its embedded
  * `callId` so the caller can check it against the cursor that named it.
  */
-export function unpackCallToken(
+/** An opened call token: its id, the encoded `schemas_ref`, and the sealed response budget. */
+export interface OpenedCallToken {
+  /** The stream's call id. */
+  callId: Uint8Array;
+  /** Encoded `StateRef` of both schemas (see {@link packSchemas}). */
+  schemasRef: Uint8Array;
+  /** Initial hard response cap; undefined when unbounded. */
+  responseLimitBytes?: number;
+  /** Initial advisory batching target. */
+  preferredResponseBytes?: number;
+}
+
+export function unpackCallToken(token: string, tokenKey: Uint8Array, scope: TokenScope, tokenTtl = 0): OpenedCallToken {
+  const { callId, payload } = openCallEnvelope(token, tokenKey, scope, tokenTtl);
+  let body: Uint8Array;
+  try {
+    body = unpackToken(payload, MAX_CALL_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof TokenCodecError) throw new Error("State token call body could not be decompressed");
+    throw error;
+  }
+  return parseCallBody(callId, body);
+}
+
+/** {@link unpackCallToken} that decodes every codec on every runtime. */
+export async function unpackCallTokenAsync(
   token: string,
   tokenKey: Uint8Array,
   scope: TokenScope,
   tokenTtl = 0,
-): { callId: Uint8Array; schemasRef: Uint8Array; responseLimitBytes?: number; preferredResponseBytes?: number } {
+): Promise<OpenedCallToken> {
+  const { callId, payload } = openCallEnvelope(token, tokenKey, scope, tokenTtl);
+  let body: Uint8Array;
+  try {
+    body = await unpackTokenAsync(payload, MAX_CALL_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof TokenCodecError) throw new Error("State token call body could not be decompressed");
+    throw error;
+  }
+  return parseCallBody(callId, body);
+}
+
+function openCallEnvelope(
+  token: string,
+  tokenKey: Uint8Array,
+  scope: TokenScope,
+  tokenTtl: number,
+): { callId: Uint8Array; payload: Uint8Array } {
   const raw = base64ToBytes(token);
   if (raw.length >= 1 && raw[0] !== CALL_TOKEN_VERSION) {
     throw new Error(`Unsupported call token version ${raw[0]}`);
@@ -474,14 +597,10 @@ export function unpackCallToken(
   const callId = new Uint8Array(CALL_ID_LEN);
   callId.set(plaintext.subarray(8, 8 + CALL_ID_LEN));
 
-  let body: Uint8Array;
-  try {
-    body = unpackToken(plaintext.subarray(8 + CALL_ID_LEN), MAX_CALL_BODY_BYTES);
-  } catch (error) {
-    if (error instanceof TokenCodecError) throw new Error("State token call body could not be decompressed");
-    throw error;
-  }
+  return { callId, payload: plaintext.subarray(8 + CALL_ID_LEN) };
+}
 
+function parseCallBody(callId: Uint8Array, body: Uint8Array): OpenedCallToken {
   const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
   if (body.length < 4) throw new Error("State token truncated (schemas)");
   const refLen = readU32LE(view, 0);

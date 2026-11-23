@@ -131,7 +131,7 @@ Key options:
 | `tokenTtl` | Max age of cursor tokens, call tokens and stored `StateRef` tags, in seconds. Default `21600` (6 h); `0` disables TTL checks. |
 | `cursorRule` | `"warn"` (default) or `"error"`: what a cursor over the turn budget does. See [StateRef](/guides/state-refs/). |
 | `stateRefInlineBytes` | Largest compressed `StateRef` kept inline. Default `VGI_RPC_STATE_REF_INLINE_BYTES` or 16384. |
-| `maxUploadBytes` | Advertised `VGI-Max-Upload-Bytes`; defaults to, and never exceeds, the fetch cap (256 MiB unless `externalLocation.maxFetchBytes` is set). |
+| `maxUploadBytes` | Advertised `VGI-Max-Upload-Bytes`; defaults to the fetch cap (256 MiB unless `externalLocation.maxFetchBytes` is set). With no explicit fetch cap, a larger upload cap raises the fetch cap to match; an explicit fetch cap below the upload cap is refused at startup. |
 | `corsOrigins` | CORS allowed origins; enables CORS headers when set. |
 | `corsMaxAge` | `Access-Control-Max-Age` for preflight responses. Default `300`; `null` omits it. |
 | `maxRequestBytes` | Max request body size. Advertised via `VGI-Max-Request-Bytes`. |

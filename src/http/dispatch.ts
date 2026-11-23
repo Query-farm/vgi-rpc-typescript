@@ -42,14 +42,15 @@ import { minPositive } from "./response-budget.js";
 import {
   bytesToBase64,
   CALL_ID_LEN,
-  packCallToken,
+  type OpenedCallToken,
+  packCallTokenAsync,
   packSchemas,
   type ResolvedCall,
   sealStateToken,
   type TokenScope,
-  unpackCallToken,
+  unpackCallTokenAsync,
   unpackSchemas,
-  unpackStateToken,
+  unpackStateTokenAsync,
 } from "./token.js";
 
 /**
@@ -151,7 +152,7 @@ async function mintCallToken(
         }),
       )
     : inlineStateRefBytes(schemas);
-  const callToken = packCallToken(callId, schemasRef, ctx.tokenKey, tokenScope(ctx), undefined, {
+  const callToken = await packCallTokenAsync(callId, schemasRef, ctx.tokenKey, tokenScope(ctx), undefined, {
     responseLimitBytes: ctx.maxResponseBytes,
     preferredResponseBytes: ctx.preferredResponseBytes,
   });
@@ -197,7 +198,7 @@ async function mintCursor(
       })
     : null;
   const stateBytes = await serializeWithStateRefs(() => ctx.stateSerializer.serialize(state), encoder);
-  const sealed = sealStateToken(stateBytes, callId, ctx.tokenKey, tokenScope(ctx));
+  const sealed = await sealStateToken(stateBytes, callId, ctx.tokenKey, tokenScope(ctx));
   const warning = runtime
     ? runtime.checkCursor({
         cursorBytes: sealed.byteLength,
@@ -276,9 +277,9 @@ async function resolveCall(
   if (!callTokenB64) {
     throw new HttpRpcError("Missing call token in exchange request", 400);
   }
-  let opened: ReturnType<typeof unpackCallToken>;
+  let opened: OpenedCallToken;
   try {
-    opened = unpackCallToken(callTokenB64, ctx.tokenKey, tokenScope(ctx), ctx.tokenTtl);
+    opened = await unpackCallTokenAsync(callTokenB64, ctx.tokenKey, tokenScope(ctx), ctx.tokenTtl);
   } catch (error: any) {
     throw new HttpRpcError(`Invalid state token: ${error?.message ?? error}`, 400);
   }
@@ -866,7 +867,7 @@ export async function httpDispatchStreamExchange(
   // the caller, so the id is authenticated before it resolves anything.
   let unpacked: import("./token.js").UnpackedToken;
   try {
-    unpacked = unpackStateToken(tokenBase64, ctx.tokenKey, ctx.tokenTtl, tokenScope(ctx));
+    unpacked = await unpackStateTokenAsync(tokenBase64, ctx.tokenKey, ctx.tokenTtl, tokenScope(ctx));
   } catch (error: any) {
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }

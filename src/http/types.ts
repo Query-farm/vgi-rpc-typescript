@@ -186,9 +186,9 @@ export interface HttpHandlerOptions {
   uploadUrlProvider?: UploadUrlProvider;
   /** Advertised maximum upload size, surfaced via VGI-Max-Upload-Bytes
    *  whenever {@link uploadUrlProvider} is set. Defaults to the server's fetch
-   *  cap (`externalLocation.maxFetchBytes`, 256 MiB unless set) and is clamped
-   *  to it; an explicit fetch cap below an explicit upload cap is refused at
-   *  startup. */
+   *  cap (`externalLocation.maxFetchBytes`, 256 MiB unless set). With no
+   *  explicit fetch cap, a larger upload cap raises the fetch cap to match;
+   *  an explicit fetch cap below an explicit upload cap is refused at startup. */
   maxUploadBytes?: number;
   /** OAuth scope for PKCE authorization requests. Default: "openid email". */
   oauthPkceScope?: string;

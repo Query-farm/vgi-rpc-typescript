@@ -309,8 +309,11 @@ export {
   CODEC_ZSTD,
   MAX_TOKEN_PLAINTEXT_BYTES,
   packToken,
+  packTokenAsync,
+  packTokenDeflate,
   TokenCodecError,
   unpackToken,
+  unpackTokenAsync,
 } from "./token-codec.js";
 // `vgi_rpc.Identity.v2` -- the framework-owned identity protocol, and the only
 // introspection surface: the HTTP `__introspect_token__` route it replaced is

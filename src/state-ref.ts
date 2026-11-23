@@ -56,7 +56,13 @@ import { DEFAULT_MAX_FETCH_BYTES, isObjectStore, ObjectMissingError, type Object
 import { computeAad, SERVER_SCOPE, type TokenScope } from "./http/token.js";
 import { defaultObjectCache, type ObjectCache } from "./object-cache.js";
 import { emitStateRefEvent } from "./state-ref-events.js";
-import { MAX_TOKEN_PLAINTEXT_BYTES, packToken, TokenCodecError, unpackToken } from "./token-codec.js";
+import {
+  MAX_TOKEN_PLAINTEXT_BYTES,
+  packToken,
+  packTokenAsync,
+  TokenCodecError,
+  unpackTokenAsync,
+} from "./token-codec.js";
 
 const UTF8 = new TextEncoder();
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -618,7 +624,8 @@ export function stateRefEncoder(
 
 /** Decide a value's form and encode it (§5.2), storing it when it is stored. */
 export async function encodeStateRefValue(value: Uint8Array, encoder: StateRefEncoder): Promise<Uint8Array> {
-  const payload = packToken(value);
+  // Compressed on every runtime: raw DEFLATE where there is no zstd encoder.
+  const payload = await packTokenAsync(value);
   const runtime = encoder.runtime;
   const storage = runtime.storage;
   if (storage === null || payload.byteLength <= encoder.inlineBytes) {
@@ -698,9 +705,9 @@ export async function serializeWithStateRefs(
   return serialize();
 }
 
-function unpackValue(payload: Uint8Array, cap: number): Uint8Array {
+async function unpackValue(payload: Uint8Array, cap: number): Promise<Uint8Array> {
   try {
-    return unpackToken(payload, cap);
+    return await unpackTokenAsync(payload, cap);
   } catch (error) {
     if (error instanceof TokenCodecError)
       throw new InvalidStateRefError(`StateRef payload is malformed: ${error.message}`);
@@ -782,7 +789,7 @@ async function resolveStored(
       if (error instanceof SealError) throw new InvalidStateRefError("StateRef object does not open");
       throw error;
     }
-    return unpackValue(payload, runtime.decompressCap);
+    return await unpackValue(payload, runtime.decompressCap);
   });
   emitStateRefEvent("state_ref.resolve", { form: "stored", cache: hit ? "hit" : "miss", bytes: value.byteLength });
   return value;
@@ -802,7 +809,7 @@ export async function resolveEncodedStateRef(
   if (encoded.byteLength === 0) throw new InvalidStateRefError("StateRef is empty");
   const form = encoded[0];
   if (form === FORM_INLINE) {
-    const value = unpackValue(encoded.subarray(1), runtime?.decompressCap ?? MAX_TOKEN_PLAINTEXT_BYTES);
+    const value = await unpackValue(encoded.subarray(1), runtime?.decompressCap ?? MAX_TOKEN_PLAINTEXT_BYTES);
     emitStateRefEvent("state_ref.resolve", { form: "inline", cache: "miss", bytes: value.byteLength });
     return value;
   }
