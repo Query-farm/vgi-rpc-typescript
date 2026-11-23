@@ -152,9 +152,6 @@ jobs:
         with:
           repository: Query-farm/vgi-rpc-python
           path: .vgi-rpc-python
-          # TODO(release-wave): drop the ref (back to main) once vgi-rpc-python's
-          # protocol-3.4 (StateRef, STATE_REF_V1.md) is merged; this branch needs its suite.
-          ref: 3a069830eb296ab452bd83f87a243ca71f7f7a3e
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -340,9 +337,6 @@ jobs:
         with:
           repository: Query-farm/vgi-rpc-python
           path: .vgi-rpc-python
-          # TODO(release-wave): drop the ref (back to main) once vgi-rpc-python's
-          # protocol-3.4 (StateRef, STATE_REF_V1.md) is merged; this branch needs its suite.
-          ref: 3a069830eb296ab452bd83f87a243ca71f7f7a3e
 
       - uses: oven-sh/setup-bun@v2
         with:
