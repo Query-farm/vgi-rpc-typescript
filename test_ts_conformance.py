@@ -806,6 +806,78 @@ def conformance_fake_storage() -> Iterator[str]:
         shutdown()
 
 
+# --- StateRef / object cache / argument references (STATE_REF_V1.md §15) ---
+#
+# The fixture names are load-bearing: `vgi_rpc.conformance._state_ref_pytest`
+# looks them up with `getfixturevalue` and skips loudly without them.
+
+
+@contextlib.contextmanager
+def _state_ref_workers(*flag_sets: list[str]) -> Iterator[list[int]]:
+    """Start one HTTP worker per flag set (this port's, or the reference's)."""
+    procs: list[subprocess.Popen[bytes]] = []
+    ports: list[int] = []
+    try:
+        for flags in flag_sets:
+            proc, port = _start_variant(
+                "state_ref",
+                [*BUN_HTTP_WORKER, *flags],
+                [_PY_SERVE_HTTP, "--http", *flags],
+            )
+            procs.append(proc)
+            ports.append(port)
+        yield ports
+    finally:
+        for proc in procs:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def conformance_state_ref_replicas(conformance_fake_storage: str) -> Iterator[Any]:
+    """Two workers sharing a token key and the fake storage: no request cap,
+    cursor rule ``error``, object-cache bound ``OBJECT_CACHE_TEST_BYTES``,
+    ``X-Conformance-Principal`` required."""
+    from vgi_rpc.conformance._state_ref_pytest import OBJECT_CACHE_TEST_BYTES, StateRefReplicas
+
+    flags = [
+        "--fake-storage",
+        conformance_fake_storage,
+        "--token-key",
+        os.urandom(32).hex(),
+        "--max-request-bytes",
+        "0",
+        "--cursor-rule",
+        "error",
+        "--object-cache-bytes",
+        str(OBJECT_CACHE_TEST_BYTES),
+        "--require-principal",
+    ]
+    with _state_ref_workers(flags, flags) as (a, b):
+        yield StateRefReplicas(ports=(a, b), storage_url=conformance_fake_storage)
+
+
+@pytest.fixture(scope="session")
+def conformance_state_ref_short_ttl_port(conformance_fake_storage: str) -> Iterator[int]:
+    """One worker with the fake storage, no request cap and ``token_ttl`` 2 s."""
+    flags = ["--fake-storage", conformance_fake_storage, "--max-request-bytes", "0", "--token-ttl", "2"]
+    with _state_ref_workers(flags) as (port,):
+        yield port
+
+
+@pytest.fixture(scope="session")
+def conformance_cursor_budget_ports() -> Iterator[Any]:
+    """The warn / error / floor cursor-rule workers (no storage)."""
+    from vgi_rpc.conformance._state_ref_pytest import CursorBudgetPorts
+
+    with _state_ref_workers(
+        ["--max-request-bytes", "32768", "--cursor-rule", "warn"],
+        ["--max-request-bytes", "32768", "--cursor-rule", "error"],
+        ["--max-request-bytes", "9000", "--cursor-rule", "error"],
+    ) as (warn, error, floor):
+        yield CursorBudgetPorts(warn=warn, error=error, floor=floor)
+
+
 @pytest.fixture(scope="session")
 def conformance_bytestream_external_target(
     conformance_fake_storage: str,

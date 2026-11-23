@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Conformance protocol — 90-method reference RPC service exercising all framework
+ * Conformance protocol — 94-method reference RPC service exercising all framework
  * capabilities. Used by the Python CLI to verify wire-protocol compatibility.
  *
  * This module exports the Protocol instance so it can be reused by both the
@@ -50,6 +50,7 @@ import {
   publishExternalResult,
 } from "../src/external.js";
 import { Protocol } from "../src/index.js";
+import { defaultObjectCache } from "../src/object-cache.js";
 import {
   bool,
   bytes,
@@ -66,6 +67,8 @@ import {
   uint64,
 } from "../src/schema.js";
 import { VgiRpcServer, type VgiRpcServerOptions } from "../src/server.js";
+import { StateRef } from "../src/state-ref.js";
+import type { CallContext } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
 // Error classes
@@ -1410,6 +1413,142 @@ protocol.exchange<Record<string, never>>("exchange_session_counter", {
     counter.value += Number(total);
     out.emitRow({ value: BigInt(counter.value) });
   },
+});
+
+// ===== StateRef, the object cache and argument references (protocol 3.4) =====
+//
+// STATE_REF_V1.md §15. The shared suite (vgi_rpc.conformance._state_ref_pytest)
+// drives these over raw HTTP; mirrors ConformanceServiceImpl in the reference.
+
+const _STATE_REF_INPUT = schema([field("override", binary(), true)]);
+const _STATE_REF_OUTPUT = schema([
+  field("size", int64(), false),
+  field("sha256", utf8(), false),
+  field("form", utf8(), false),
+  field("ref", binary(), true),
+]);
+const _OBJECT_CACHE_STATS = schema([
+  field("resident_bytes", int64(), false),
+  field("entries", int64(), false),
+  field("max_bytes", int64(), false),
+  field("hits", int64(), false),
+  field("misses", int64(), false),
+  field("evictions", int64(), false),
+  field("fetches", int64(), false),
+]);
+
+async function sha256HexOf(data: Uint8Array): Promise<string> {
+  const buf = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buf).set(data);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * The deterministic `state_ref_exchange` payload every port builds
+ * (`vgi_rpc.conformance.state_ref_payload`): compressible repeats
+ * `"vgi-rpc StateRef conformance {seed} "`; incompressible concatenates
+ * `SHA-256(seed || u64le(i))` for i = 0, 1, ...; both truncated to `size`.
+ */
+async function stateRefPayload(size: number, compressible: boolean, seed: string): Promise<Uint8Array> {
+  if (size <= 0) return new Uint8Array(0);
+  const out = new Uint8Array(size);
+  if (compressible) {
+    const unit = new TextEncoder().encode(`vgi-rpc StateRef conformance ${seed} `);
+    for (let i = 0; i < size; i++) out[i] = unit[i % unit.length];
+    return out;
+  }
+  const seedBytes = new TextEncoder().encode(seed);
+  const block = new Uint8Array(seedBytes.length + 8);
+  block.set(seedBytes);
+  const view = new DataView(block.buffer);
+  for (let i = 0, offset = 0; offset < size; i++, offset += 32) {
+    view.setBigUint64(seedBytes.length, BigInt(i), true);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", block));
+    out.set(digest.subarray(0, Math.min(32, size - offset)), offset);
+  }
+  return out;
+}
+
+function toB64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+/** Cursor state: the stream's own ref, incompressible padding held directly
+ *  in the cursor (base64, to drive the cursor rule), and the misuse switch. */
+interface StateRefExchangeState {
+  value: StateRef;
+  padding: string;
+  misuse: boolean;
+}
+
+protocol.exchange<StateRefExchangeState>("state_ref_exchange", {
+  params: { size: int, compressible: bool, seed: str, misuse: bool, cursor_padding: int },
+  inputSchema: _STATE_REF_INPUT,
+  outputSchema: _STATE_REF_OUTPUT,
+  // The init handler: the one place ctx.stateRef() is allowed.
+  init: async (p, ctx) => {
+    const value = ctx.stateRef(await stateRefPayload(Number(p.size), Boolean(p.compressible), String(p.seed)));
+    const padding = await stateRefPayload(Number(p.cursor_padding), false, `${p.seed}:padding`);
+    return { value, padding: toB64(padding), misuse: Boolean(p.misuse) };
+  },
+  exchange: async (state, input: RecordBatch, out) => {
+    if (state.misuse) out.stateRef(new TextEncoder().encode("a continuation may not create a StateRef"));
+    const override = input.numRows > 0 ? (input.getChild("override")?.get(0) as Uint8Array | null) : null;
+    const ref = override instanceof Uint8Array ? StateRef.fromBytes(override) : state.value;
+    const data = await out.resolve(ref);
+    out.emit({
+      size: [BigInt(data.byteLength)],
+      sha256: [await sha256HexOf(data)],
+      form: [state.value.form],
+      ref: [state.value.encoded],
+    });
+  },
+  paramTypes: { size: "int", compressible: "bool", seed: "str", misuse: "bool", cursor_padding: "int" },
+  doc: "Hold a StateRef of state_ref_payload(size, compressible, seed) and resolve it per exchange.",
+});
+
+protocol.unary("object_cache_stats", {
+  params: {},
+  result: { result: bytes },
+  handler: () => {
+    const stats = defaultObjectCache().stats();
+    const batch = batchFromColumns(_OBJECT_CACHE_STATS, {
+      resident_bytes: [BigInt(stats.residentBytes)],
+      entries: [BigInt(stats.entries)],
+      max_bytes: [BigInt(stats.maxBytes)],
+      hits: [BigInt(stats.hits)],
+      misses: [BigInt(stats.misses)],
+      evictions: [BigInt(stats.evictions)],
+      fetches: [BigInt(stats.fetches)],
+    });
+    return { result: _serializeBatch(_OBJECT_CACHE_STATS, batch) };
+  },
+  doc: "Return this worker process's object-cache counters.",
+});
+
+protocol.unary("object_cache_age", {
+  params: { seconds: int },
+  result: { result: int },
+  handler: (p) => ({ result: BigInt(defaultObjectCache().ageEntries(Number(p.seconds))) }),
+  paramTypes: { seconds: "int" },
+  doc: "Move every object-cache entry's fetched_at back by seconds; return how many (test hook).",
+});
+
+protocol.unary("resolve_argument_ref", {
+  params: { ref: bytes, size: int, sha256: str },
+  result: { result: str },
+  handler: async (p, ctx) => {
+    const data = await (ctx as CallContext).resolveArgumentRef(p.ref as Uint8Array, {
+      size: Number(p.size),
+      sha256: String(p.sha256),
+    });
+    return { result: await sha256HexOf(data) };
+  },
+  paramTypes: { ref: "bytes", size: "int", sha256: "str" },
+  doc: "Resolve an argument reference minted by this worker's __upload_url__ grant; return the bytes' SHA-256 hex.",
 });
 
 /**

@@ -4,16 +4,24 @@
 /**
  * Adapter for the conformance fake object store.
  *
- * Speaks the four-endpoint contract documented in
- * `vgi_rpc.conformance.fake_storage` (POST /alloc, PUT /blob/{id}, GET
- * /blob/{id}, GET /_stats). Shared by every conformance worker that
+ * Speaks the contract documented in `vgi_rpc.conformance.fake_storage`
+ * (POST /alloc, PUT /blob/{id}, GET /blob/{id}, GET /_stats), plus its object
+ * API (`ObjectStore`: an allocation with `purpose: "object"` is a
+ * `putObject`, `GET /objects/{id}` is `get`). Shared by every conformance worker that
  * externalizes — the HTTP one and the byte-stream one — so a fixture cannot
  * be wired against a second, subtly different implementation of the same
  * four calls.
  */
-import type { ExternalStorage, UploadUrl, UploadUrlProvider } from "../src/external.js";
+import {
+  type ExternalStorage,
+  ObjectMissingError,
+  type ObjectStore,
+  type UploadUrl,
+  type UploadUrlProvider,
+} from "../src/external.js";
 
 interface Allocation {
+  object_id: string;
   object_url: string;
   upload_url?: string;
   download_url?: string;
@@ -26,7 +34,16 @@ function hexToBase64(hex: string): string {
   return btoa(binary);
 }
 
-export class FakeStorage implements ExternalStorage, UploadUrlProvider {
+async function sha256Base64(data: Uint8Array): Promise<string> {
+  const buf = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buf).set(data);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+  let binary = "";
+  for (const b of digest) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+export class FakeStorage implements ExternalStorage, UploadUrlProvider, ObjectStore {
   constructor(private readonly baseUrl: string) {}
 
   private async alloc(request: Record<string, unknown> = {}): Promise<Allocation> {
@@ -64,6 +81,38 @@ export class FakeStorage implements ExternalStorage, UploadUrlProvider {
       downloadUrl: allocation.download_url ?? allocation.object_url,
       expiresAt: new Date(Date.now() + 3600_000),
       headers: { ...(allocation.upload_headers ?? {}) },
+      objectId: String(allocation.object_id),
     };
+  }
+
+  /** A sized object allocation (counted `object_puts`) and a verified PUT. */
+  async putObject(data: Uint8Array): Promise<string> {
+    const allocation = await this.alloc({
+      size: data.byteLength,
+      sha256_b64: await sha256Base64(data),
+      purpose: "object",
+    });
+    const headers: Record<string, string> = {
+      "Content-Type": "application/octet-stream",
+      ...(allocation.upload_headers ?? {}),
+    };
+    const put = await fetch(allocation.upload_url ?? allocation.object_url, { method: "PUT", headers, body: data });
+    if (!put.ok) throw new Error(`fake-storage PUT failed: ${put.status}`);
+    return String(allocation.object_id);
+  }
+
+  /** `GET /objects/{id}` (counted `object_gets`); 404 is a missing object. */
+  async get(objectId: string, options: { maxBytes?: number } = {}): Promise<Uint8Array> {
+    const response = await fetch(`${this.baseUrl}/objects/${encodeURIComponent(objectId)}`);
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => {});
+      throw new ObjectMissingError("fake storage object is gone");
+    }
+    if (!response.ok) throw new Error(`fake-storage object GET failed: ${response.status}`);
+    const data = new Uint8Array(await response.arrayBuffer());
+    if (options.maxBytes != null && data.byteLength > options.maxBytes) {
+      throw new Error(`object is ${data.byteLength} bytes, over max_fetch_bytes (${options.maxBytes})`);
+    }
+    return data;
   }
 }

@@ -92,6 +92,10 @@ let accessLogDebug = false;
 // the real HTTP handler so the shared suite observes the same first-request
 // path an application would use.
 let failServeStartOnce = false;
+// StateRef fixture knobs (STATE_REF_V1.md §15; the reference worker's flags).
+let cursorRule: "warn" | "error" | undefined;
+let tokenTtlArg: number | undefined;
+let requirePrincipal = false;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--server-id" && i + 1 < args.length) {
@@ -146,8 +150,22 @@ for (let i = 0; i < args.length; i++) {
     accessLogDebug = true;
   } else if (a === "--fail-serve-start-once") {
     failServeStartOnce = true;
+  } else if (a === "--cursor-rule" && i + 1 < args.length) {
+    const v = args[++i];
+    if (v !== "warn" && v !== "error") throw new Error(`--cursor-rule must be warn or error, got ${v}`);
+    cursorRule = v;
+  } else if (a === "--token-ttl" && i + 1 < args.length) {
+    tokenTtlArg = Number.parseInt(args[++i], 10);
+  } else if (a === "--object-cache-bytes" && i + 1 < args.length) {
+    // Read once, when the process-wide cache is first created.
+    process.env.VGI_RPC_OBJECT_CACHE_BYTES = args[++i];
+  } else if (a === "--require-principal") {
+    requirePrincipal = true;
   }
 }
+// `--max-request-bytes 0` means "no request cap" (storage mode otherwise
+// defaults the cap to the externalize threshold).
+const noRequestCap = maxRequestBytesArg === 0;
 // Strict-cap mode: tight body + external caps so the http_response_cap.*
 // conformance tests can deliberately overshoot. Defaults to 1 MiB matching
 // Python's tests/serve_conformance_http_strict.py.
@@ -163,7 +181,7 @@ const maxExternalizedResponseBytes = maxExternalizedResponseBytesArg ?? STRICT_D
 // with previous worker invocations. The ``externalize-always`` variant passes
 // both flags explicitly so server-side externalization fires on every batch
 // while clients can still send normal-sized inline requests.
-const maxRequestBytes = maxRequestBytesArg ?? externalizeThreshold;
+const maxRequestBytes = noRequestCap ? undefined : (maxRequestBytesArg ?? externalizeThreshold);
 
 let externalLocation: ExternalLocationConfig | undefined;
 let fakeStorage: FakeStorage | undefined;
@@ -276,6 +294,16 @@ const principalHeaderAuth: AuthenticateFn = (request: Request) => {
   return principal ? new AuthContext("conformance", true, principal) : AuthContext.anonymous();
 };
 
+/** `--require-principal`: like {@link principalHeaderAuth}, but a request
+ *  without the header is refused (401) -- the shared StateRef /
+ *  argument-reference cases need two principals and an unauthenticated grant
+ *  refused exactly like an unauthenticated method call. */
+const requiredPrincipalAuth: AuthenticateFn = (request: Request) => {
+  const principal = request.headers.get("X-Conformance-Principal");
+  if (!principal) throw new Error("X-Conformance-Principal is required");
+  return new AuthContext("conformance", true, principal);
+};
+
 const handler = createHttpHandler(conformanceHost({ serverId: serverIdArg ?? "conformance-http" }), {
   serverId: serverIdArg ?? "conformance-http",
   protocolName: "ConformanceService",
@@ -284,6 +312,9 @@ const handler = createHttpHandler(conformanceHost({ serverId: serverIdArg ?? "co
   ...(tokenKeyHex ? { tokenKey: hexToBytes(tokenKeyHex) } : {}),
   ...(callStateCacheEntries !== undefined ? { callStateCacheEntries } : {}),
   ...(stickyAuth ? { authenticate: principalHeaderAuth } : {}),
+  ...(requirePrincipal ? { authenticate: requiredPrincipalAuth } : {}),
+  ...(cursorRule ? { cursorRule } : {}),
+  ...(tokenTtlArg !== undefined ? { tokenTtl: tokenTtlArg } : {}),
   ...(corsOrigin ? { corsOrigins: corsOrigin } : {}),
   stickyEchoHeaders: { "x-vgi-conformance-echo": "conformance-fixed-marker" },
   _onStickyHandle: (h) => {
@@ -323,8 +354,9 @@ const handler = createHttpHandler(conformanceHost({ serverId: serverIdArg ?? "co
   ...(fakeStorage || maxRequestBytesArg !== undefined
     ? {
         ...(fakeStorage ? { uploadUrlProvider: fakeStorage } : {}),
-        maxRequestBytes,
-        ...(fakeStorage ? { maxUploadBytes: 64 * 1024 * 1024 } : {}),
+        ...(maxRequestBytes !== undefined ? { maxRequestBytes } : {}),
+        // Never above the fetch cap (fix 1), like the reference worker.
+        ...(fakeStorage ? { maxUploadBytes: Math.min(64 * 1024 * 1024, maxFetchBytesArg ?? 256 * 1024 * 1024) } : {}),
       }
     : {}),
 });
