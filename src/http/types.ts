@@ -3,6 +3,7 @@
 
 import type { ExternalLocationConfig, UploadUrlProvider } from "../external.js";
 import type { PeerAuthenticationPolicy, PeerIdentityProvider, PeerResolutionOptions } from "../identity.js";
+import { reviveStateRef } from "../state-ref.js";
 import type { DispatchHook, ServeStartHook } from "../types.js";
 import type { AuthenticateFn, OAuthResourceMetadata } from "./auth.js";
 
@@ -11,11 +12,28 @@ export interface HttpHandlerOptions {
   /** URL path prefix for all endpoints. Default: "" (root). */
   prefix?: string;
   /** XChaCha20-Poly1305 master key (32 bytes) used to seal stream state
-   *  tokens.  A random 32-byte key is generated if omitted (tokens won't
-   *  survive a restart or load-balance across workers). */
+   *  tokens, stored `StateRef` tags and objects, and argument references.
+   *  A random 32-byte key is generated if omitted: tokens then won't survive
+   *  a restart, and **a deployment with more than one replica MUST set a
+   *  shared key**, or a continuation landing on another replica fails. */
   tokenKey?: Uint8Array;
-  /** State token time-to-live in seconds. Default: 3600 (1 hour). 0 disables TTL checks. */
+  /** Maximum age, in seconds, of cursor tokens, call tokens and stored
+   *  `StateRef` tags, each checked from its own creation time. Default: 21600
+   *  (6 hours, the maximum stream duration). 0 disables TTL checks. */
   tokenTtl?: number;
+  /** What happens when a sealed cursor exceeds the turn budget
+   *  (`floor((maxRequestBytes - 4096) / 1.34) - callTokenBytes`,
+   *  STATE_REF_V1.md §9): `"warn"` (default) emits a `cursor_large` event and
+   *  sends the client a WARN log; `"error"` refuses the turn with
+   *  `cursor_too_large` (only when a request cap is set). A framework that
+   *  keeps its unchanging state in `StateRef` should pass `"error"`. Below a
+   *  16 KiB request cap the rule is disabled with a startup warning. */
+  cursorRule?: "warn" | "error";
+  /** Largest compressed `StateRef` payload kept inline in a token before it is
+   *  stored (when storage is configured); the effective limit is also capped
+   *  at a quarter of the turn budget. Default: `VGI_RPC_STATE_REF_INLINE_BYTES`,
+   *  else 16384. Must be positive. */
+  stateRefInlineBytes?: number;
   /** CORS allowed origins. If set, CORS headers are added to all responses. */
   corsOrigins?: string;
   /** Access-Control-Max-Age value in seconds for preflight OPTIONS responses. Default: 300 (5 minutes). null omits the header. */
@@ -166,7 +184,11 @@ export interface HttpHandlerOptions {
   externalLocation?: ExternalLocationConfig;
   /** Provider for vending pre-signed upload URLs to clients via {prefix}/__upload_url__/init. */
   uploadUrlProvider?: UploadUrlProvider;
-  /** Optional advertised maximum upload size, surfaced via VGI-Max-Upload-Bytes. */
+  /** Advertised maximum upload size, surfaced via VGI-Max-Upload-Bytes
+   *  whenever {@link uploadUrlProvider} is set. Defaults to the server's fetch
+   *  cap (`externalLocation.maxFetchBytes`, 256 MiB unless set) and is clamped
+   *  to it; an explicit fetch cap below an explicit upload cap is refused at
+   *  startup. */
   maxUploadBytes?: number;
   /** OAuth scope for PKCE authorization requests. Default: "openid email". */
   oauthPkceScope?: string;
@@ -252,8 +274,10 @@ export const jsonStateSerializer: StateSerializer = {
     );
   },
   deserialize(bytes: Uint8Array): any {
+    // A StateRef serializes (through its toJSON) as a one-key object; the
+    // reviver turns it back into a StateRef holding its encoded bytes.
     return JSON.parse(new TextDecoder().decode(bytes), (_key, value) =>
-      typeof value === "string" && value.startsWith("__bigint__:") ? BigInt(value.slice(11)) : value,
+      typeof value === "string" && value.startsWith("__bigint__:") ? BigInt(value.slice(11)) : reviveStateRef(value),
     );
   },
 };

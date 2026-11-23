@@ -5,6 +5,7 @@ import type { VgiBatch } from "../arrow/index.js";
 import type { AuthContext } from "../auth.js";
 import { type ExternalLocationConfig, isExternalRef, maybeExternalizeBatch } from "../external.js";
 import type { PeerEvidenceSet } from "../identity.js";
+import { StateRefScope } from "../state-ref.js";
 import type { MethodDefinition, TransportKind } from "../types.js";
 import { OutputCollector } from "../types.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
@@ -21,6 +22,9 @@ export interface RawDispatchContext {
   kind?: TransportKind;
   authContext?: AuthContext;
   peerEvidence?: PeerEvidenceSet;
+  /** Wire name of the protocol that owns the method (names it in a
+   *  `state_ref_misuse` message). */
+  protocolName?: string;
 }
 
 /**
@@ -37,6 +41,9 @@ export async function dispatchUnary(
   const { serverId, requestId, externalConfig, kind, authContext, peerEvidence, includeTraceback } = ctx;
   const schema = method.resultSchema;
   const out = new OutputCollector(schema, true, serverId, requestId, authContext, undefined, kind, { peerEvidence });
+  // Values never leave the process here: no runtime, so argument references
+  // (an HTTP grant feature) are refused and refs stay in memory.
+  out.attachStateRefScope(new StateRefScope({ auth: authContext, protocol: ctx.protocolName, method: method.name }));
 
   try {
     // The context is a positional argument supplied unconditionally, for every

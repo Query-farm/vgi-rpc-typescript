@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  binary,
   conformBatchToSchema,
   deserializeBatch,
   field,
@@ -101,6 +102,11 @@ export const UPLOAD_URL_RESPONSE_SCHEMA: VgiSchema = makeSchema([
   field("download_url", utf8(), false),
   field("expires_at", timestampMicro("UTC"), false),
   field("upload_headers", map(field("key", utf8(), false), field("value", utf8(), true)), false),
+  // STATE_REF_V1.md §10.2: the storage id the entry's PUT creates, and a
+  // sealed argument reference to it. Clients read columns by name and may
+  // ignore these two.
+  field("object_id", utf8(), false),
+  field("ref", binary(), false),
 ]);
 
 /**

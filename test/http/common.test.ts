@@ -28,6 +28,8 @@ describe("__upload_url__ public wire contract", () => {
       "download_url",
       "expires_at",
       "upload_headers",
+      "object_id",
+      "ref",
     ]);
   });
 });

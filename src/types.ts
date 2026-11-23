@@ -6,6 +6,7 @@ import { AuthContext } from "./auth.js";
 import { RpcError } from "./errors.js";
 import type { ExternalRef } from "./external.js";
 import { PeerEvidenceSet } from "./identity.js";
+import { type StateRef, StateRefScope, type StateRefValue } from "./state-ref.js";
 import { buildLogBatch, coerceInt64 } from "./wire/response.js";
 
 /**
@@ -108,8 +109,71 @@ export interface StickyContext {
   _close(): void;
 }
 
+/**
+ * The `StateRef` surface every call context offers (`STATE_REF_V1.md` §2).
+ *
+ * `stateRef()` is allowed only on the stream init handler's context
+ * ({@link StreamInitContext}); everywhere else it throws `state_ref_misuse`.
+ * `resolve()` works on every turn and every transport.
+ */
+export interface StateRefContext {
+  /**
+   * Wrap an immutable value in a {@link StateRef} to keep in stream state.
+   * Byte-equal or identical values within one init share one ref.
+   *
+   * @throws StateRefMisuseError (`state_ref_misuse`) outside a stream's init handler.
+   */
+  stateRef(value: StateRefValue): StateRef;
+  /** The value bytes `ref` names. Valid on every turn and transport. */
+  resolve(ref: StateRef): Promise<Uint8Array>;
+  /** Resolve `ref` and decode it; a ref still in memory made from a record
+   *  returns that record. */
+  resolve<T>(ref: StateRef, decode: (bytes: Uint8Array) => T | Promise<T>): Promise<T>;
+  /**
+   * Resolve an argument reference minted by this server's `__upload_url__`
+   * grant (`ref` column), checking it against the `size` / `sha256` it was
+   * sent with; fetched through the object cache and verified. HTTP only.
+   *
+   * @throws InvalidArgumentsRefError, ArgumentsRefIntegrityError,
+   *   ArgumentsRefMissingError, StorageUnavailableError.
+   */
+  resolveArgumentRef(ref: Uint8Array, location: { size: number; sha256: string }): Promise<Uint8Array>;
+}
+
+/**
+ * The context handed to a stream's init handler (`init` of
+ * {@link Protocol.producer} / {@link Protocol.exchange}): the one place
+ * {@link StateRefContext.stateRef} is allowed.
+ */
+export interface StreamInitContext extends StateRefContext {
+  /** Authenticated principal for this call; {@link AuthContext.anonymous} when
+   *  the request was not authenticated. */
+  readonly auth: AuthContext;
+  /** Coarse identifier of the bound transport. */
+  readonly kind?: TransportKind;
+  /** Immutable, off-wire transport peer identity evidence for this call. */
+  readonly peerEvidence?: PeerEvidenceSet;
+}
+
+/** @internal Build the init handler's context over an init {@link StateRefScope}. */
+export function makeStreamInitContext(
+  scope: StateRefScope,
+  facts: { auth?: AuthContext; kind?: TransportKind; peerEvidence?: PeerEvidenceSet },
+): StreamInitContext {
+  return {
+    auth: facts.auth ?? AuthContext.anonymous(),
+    kind: facts.kind,
+    peerEvidence: facts.peerEvidence ?? PeerEvidenceSet.EMPTY,
+    stateRef: (value: StateRefValue) => scope.stateRef(value),
+    resolve: ((ref: StateRef, decode?: (bytes: Uint8Array) => unknown) =>
+      decode === undefined ? scope.resolve(ref) : scope.resolve(ref, decode)) as StateRefContext["resolve"],
+    resolveArgumentRef: (ref: Uint8Array, location: { size: number; sha256: string }) =>
+      scope.resolveArgumentRef(ref, location),
+  };
+}
+
 /** Extended context with authentication info, available to handlers. */
-export interface CallContext extends LogContext {
+export interface CallContext extends LogContext, StateRefContext {
   /** Authenticated principal for this call; {@link AuthContext.anonymous} when
    *  the request was not authenticated. */
   readonly auth: AuthContext;
@@ -224,13 +288,15 @@ export type UnaryHandler = (
   ctx: LogContext,
 ) => Promise<Record<string, any> | ExternalRef> | Record<string, any> | ExternalRef;
 
-/** Initialization function for producer streams. Returns the initial state object. */
-export type ProducerInit<S = any> = (params: Record<string, any>) => Promise<S> | S;
+/** Initialization function for producer streams. Returns the initial state
+ *  object. `ctx` is the one place `ctx.stateRef()` is allowed. */
+export type ProducerInit<S = any> = (params: Record<string, any>, ctx: StreamInitContext) => Promise<S> | S;
 /** Called repeatedly to produce output batches. Call `out.finish()` to end the stream. */
 export type ProducerFn<S = any> = (state: S, out: OutputCollector) => Promise<void> | void;
 
-/** Initialization function for exchange streams. Returns the initial state object. */
-export type ExchangeInit<S = any> = (params: Record<string, any>) => Promise<S> | S;
+/** Initialization function for exchange streams. Returns the initial state
+ *  object. `ctx` is the one place `ctx.stateRef()` is allowed. */
+export type ExchangeInit<S = any> = (params: Record<string, any>, ctx: StreamInitContext) => Promise<S> | S;
 /** Called once per input batch. Must emit exactly one output batch per call. */
 export type ExchangeFn<S = any> = (state: S, input: VgiBatch, out: OutputCollector) => Promise<void> | void;
 
@@ -446,6 +512,7 @@ export class OutputCollector implements CallContext {
   private _cookieSinkEnabled = false;
   private _responseCookies: CookieSpec[] = [];
   private _stickyContext: StickyContext | null = null;
+  private _stateRefScope: StateRefScope;
   /** Authenticated principal for this call; {@link AuthContext.anonymous} when
    *  the request was not authenticated. */
   readonly auth: AuthContext;
@@ -494,6 +561,29 @@ export class OutputCollector implements CallContext {
     this.preferredResponseBytes = budgets?.preferredResponseBytes;
     this.remainingExternalizedResponseBytes = budgets?.remainingExternalizedResponseBytes;
     this.externalizationEnabled = budgets?.externalizationEnabled;
+    // In-memory scope until a dispatcher attaches the request's own: resolves
+    // refs that never left the process, refuses stateRef().
+    this._stateRefScope = new StateRefScope({ auth: this.auth });
+  }
+
+  /** Attach the request's `StateRef` scope (runtime, stream, principal).
+   *  @internal */
+  attachStateRefScope(scope: StateRefScope): void {
+    this._stateRefScope = scope;
+  }
+
+  stateRef(value: StateRefValue): StateRef {
+    return this._stateRefScope.stateRef(value);
+  }
+
+  resolve(ref: StateRef): Promise<Uint8Array>;
+  resolve<T>(ref: StateRef, decode: (bytes: Uint8Array) => T | Promise<T>): Promise<T>;
+  resolve<T>(ref: StateRef, decode?: (bytes: Uint8Array) => T | Promise<T>): Promise<Uint8Array | T> {
+    return decode === undefined ? this._stateRefScope.resolve(ref) : this._stateRefScope.resolve(ref, decode);
+  }
+
+  resolveArgumentRef(ref: Uint8Array, location: { size: number; sha256: string }): Promise<Uint8Array> {
+    return this._stateRefScope.resolveArgumentRef(ref, location);
   }
 
   /**

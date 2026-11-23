@@ -86,14 +86,18 @@ export {
   VersionError,
 } from "./errors.js";
 export {
+  DEFAULT_MAX_FETCH_BYTES,
   type ExternalLocationConfig,
   ExternalRef,
   type ExternalStorage,
   httpsOnlyValidator,
   isExternalLocationBatch,
   isExternalRef,
+  isObjectStore,
   makeExternalLocationBatch,
   maybeExternalizeBatch,
+  ObjectMissingError,
+  type ObjectStore,
   type PublishExternalOptions,
   publishExternal,
   publishExternalResult,
@@ -222,6 +226,18 @@ export {
   irohForwardedHeaderIdentityProvider,
   irohHttpBridgeOptions,
 } from "./iroh.js";
+// StateRef, argument references, the turn budget and the object cache
+// (STATE_REF_V1.md, protocol 3.4).
+export {
+  defaultObjectCache,
+  defaultObjectCacheBytes,
+  OBJECT_CACHE_BYTES_ENV,
+  OBJECT_CACHE_MAX_AGE_SECONDS,
+  ObjectCache,
+  type ObjectCacheLookup,
+  type ObjectCacheOptions,
+  type ObjectCacheStats,
+} from "./object-cache.js";
 export { Protocol } from "./protocol.js";
 export {
   bool,
@@ -243,6 +259,59 @@ export {
 } from "./schema.js";
 export { type ServeStreamOptions, serveStream } from "./serve-stream.js";
 export { type RawPeer, VgiRpcServer, type VgiRpcServerOptions } from "./server.js";
+export {
+  type ArgumentRef,
+  ArgumentsRefIntegrityError,
+  ArgumentsRefMissingError,
+  argumentRefAad,
+  authTokenScope,
+  CURSOR_RULE_FLOOR_BYTES,
+  type CursorRule,
+  CursorTooLargeError,
+  DEFAULT_STATE_REF_INLINE_BYTES,
+  DEFAULT_TOKEN_TTL_SECONDS,
+  InvalidArgumentsRefError,
+  InvalidStateRefError,
+  mintArgumentRef,
+  openArgumentRef,
+  type ResolveArgumentRefOptions,
+  resolveArgumentRef,
+  resolveEncodedStateRef,
+  reviveStateRef,
+  STATE_REF_INLINE_BYTES_ENV,
+  STATE_REF_JSON_KEY,
+  StateRef,
+  StateRefError,
+  StateRefMissingError,
+  StateRefMisuseError,
+  type StateRefRecord,
+  StateRefRuntime,
+  type StateRefRuntimeOptions,
+  StateRefScope,
+  type StateRefScopeOptions,
+  StateRefTooLargeError,
+  type StateRefValue,
+  StorageUnavailableError,
+  sealedLength,
+  stateRefInlineBytesFromEnv,
+  TURN_BUDGET_HEADROOM_BYTES,
+  turnBudget,
+} from "./state-ref.js";
+export {
+  type StateRefEvent,
+  type StateRefEventLevel,
+  type StateRefEventSink,
+  setStateRefEventSink,
+} from "./state-ref-events.js";
+export {
+  CODEC_DEFLATE,
+  CODEC_RAW,
+  CODEC_ZSTD,
+  MAX_TOKEN_PLAINTEXT_BYTES,
+  packToken,
+  TokenCodecError,
+  unpackToken,
+} from "./token-codec.js";
 // `vgi_rpc.Identity.v2` -- the framework-owned identity protocol, and the only
 // introspection surface: the HTTP `__introspect_token__` route it replaced is
 // retired (IDENTITY_V2_SPEC §8).
@@ -294,6 +363,8 @@ export {
   type ProducerFn,
   type ProducerInit,
   type ServeStartHook,
+  type StateRefContext,
+  type StreamInitContext,
   TransportKind,
   type UnaryHandler,
 } from "./types.js";
@@ -306,6 +377,7 @@ export {
   CLIENT_UPLOAD_ORIGIN as VENDOR_CLIENT_UPLOAD_ORIGIN,
   clientExternalConfigFromEnv,
   ENV_COMPRESSION as VENDOR_ENV_COMPRESSION,
+  ENV_MAX_FETCH_BYTES as VENDOR_ENV_MAX_FETCH_BYTES,
   ENV_MAX_UPLOAD_BYTES as VENDOR_ENV_MAX_UPLOAD_BYTES,
   ENV_THRESHOLD as VENDOR_ENV_THRESHOLD,
   ENV_TOKEN as VENDOR_ENV_TOKEN,
@@ -313,10 +385,12 @@ export {
   ENV_URL as VENDOR_ENV_URL,
   type EnvLike,
   externalConfigFromEnv,
+  maxFetchBytesFromEnv,
   maxUploadBytesFromEnv,
   type PinnedHostsOptions,
   type PutGrant,
   pinnedHostsValidator,
+  STATE_REF_ORIGIN as VENDOR_STATE_REF_ORIGIN,
   type UrlValidator,
   VendorBlobClient,
   type VendorBlobClientOptions,

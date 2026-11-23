@@ -20,7 +20,7 @@
  * ```
  */
 
-import type { ExternalStorage } from "./external.js";
+import { DEFAULT_MAX_FETCH_BYTES, type ExternalStorage, ObjectMissingError, type ObjectStore } from "./external.js";
 
 /** Configuration for the GCS storage backend. */
 export interface GCSStorageConfig {
@@ -40,7 +40,7 @@ export interface GCSStorageConfig {
  * Lazily imports `@google-cloud/storage` on first upload to avoid
  * loading the SDK unless needed.
  */
-export function createGCSStorage(config: GCSStorageConfig): ExternalStorage {
+export function createGCSStorage(config: GCSStorageConfig): ExternalStorage & ObjectStore {
   const bucket = config.bucket;
   const prefix = config.prefix ?? "vgi-rpc/";
   const presignExpiry = config.presignExpirySeconds ?? 3600;
@@ -81,6 +81,44 @@ export function createGCSStorage(config: GCSStorageConfig): ExternalStorage {
       });
 
       return url;
+    },
+
+    /** Store one object (no TTL: set a bucket lifecycle rule of at least one
+     *  day on the prefix); the object name is the id. GCS verifies the body
+     *  against the MD5/CRC32C the client library sends. */
+    async putObject(data: Uint8Array): Promise<string> {
+      const client = await ensureClient();
+      const name = `${prefix}obj/${crypto.randomUUID()}`;
+      await client
+        .bucket(bucket)
+        .file(name)
+        .save(Buffer.from(data), { contentType: "application/octet-stream", resumable: false, validation: "crc32c" });
+      return name;
+    },
+
+    async get(objectId: string, options: { maxBytes?: number } = {}): Promise<Uint8Array> {
+      const limit = options.maxBytes ?? DEFAULT_MAX_FETCH_BYTES;
+      const client = await ensureClient();
+      const file = client.bucket(bucket).file(objectId);
+      let metadata: any;
+      try {
+        [metadata] = await file.getMetadata();
+      } catch (error: any) {
+        if (error?.code === 404) throw new ObjectMissingError("GCS object is gone");
+        throw error;
+      }
+      if (Number(metadata?.size) > limit) {
+        throw new Error(`GCS object is ${metadata.size} bytes, over max_fetch_bytes (${limit})`);
+      }
+      let contents: Uint8Array;
+      try {
+        [contents] = await file.download();
+      } catch (error: any) {
+        if (error?.code === 404) throw new ObjectMissingError("GCS object is gone");
+        throw error;
+      }
+      if (contents.byteLength > limit) throw new Error(`GCS object exceeds max_fetch_bytes (${limit})`);
+      return new Uint8Array(contents);
     },
   };
 }

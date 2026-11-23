@@ -45,8 +45,61 @@ export interface ExternalStorage {
   upload(data: Uint8Array, contentEncoding: string): Promise<string>;
 }
 
+/**
+ * The object API every storage backend offers next to {@link ExternalStorage}
+ * (`STATE_REF_V1.md` §10.1): store bytes once and fetch them back by id.
+ *
+ * Used for stored `StateRef` objects and argument references. Kept a separate
+ * interface rather than new members of `ExternalStorage`, so a third-party
+ * `ExternalStorage` keeps type-checking; a server whose storage is not an
+ * `ObjectStore` keeps every `StateRef` inline and cannot resolve argument
+ * references. Every in-tree backend implements both.
+ */
+export interface ObjectStore {
+  /**
+   * Store `data` as one `rpc`-purpose object and return the backend's id
+   * (1-1024 bytes of UTF-8). The backend MUST send the size and SHA-256 so
+   * storage verifies the body. Objects carry no TTL: operators set a bucket
+   * lifecycle rule of at least one day on the `rpc` prefix.
+   */
+  putObject(data: Uint8Array): Promise<string>;
+  /**
+   * Fetch an object by id. The download is minted server-side, pinned to the
+   * backend's hosts and capped at `maxBytes` (default 256 MiB). Rejects with
+   * {@link ObjectMissingError} when storage reports the object absent, and
+   * with any other error for a transient failure. Callers verify size and
+   * SHA-256 themselves.
+   */
+  get(objectId: string, options?: { maxBytes?: number }): Promise<Uint8Array>;
+}
+
+/** Storage reports an object absent (404, vendor `not_found` / `not_uploaded`). */
+export class ObjectMissingError extends Error {
+  constructor(message = "object is gone") {
+    super(message);
+    this.name = "ObjectMissingError";
+  }
+}
+
+/** Whether `storage` implements the {@link ObjectStore} API. */
+export function isObjectStore(storage: unknown): storage is ObjectStore {
+  return (
+    storage !== null &&
+    typeof storage === "object" &&
+    typeof (storage as ObjectStore).putObject === "function" &&
+    typeof (storage as ObjectStore).get === "function"
+  );
+}
+
 /** A pre-signed PUT/GET URL pair for one client-side upload of known size and hash. */
 export interface UploadUrl {
+  /** The storage id of the object this entry's PUT creates (`STATE_REF_V1.md`
+   *  §10.2). Every provider MUST supply one; the server refuses a grant
+   *  without it. On the client, filled from the response's `object_id`. */
+  objectId?: string;
+  /** The sealed argument reference for that object (client side only: filled
+   *  from the response's `ref` column; providers leave it unset). */
+  ref?: Uint8Array;
   /** Pre-signed PUT URL the client uploads to, signed for the requested size
    *  and SHA-256 where the backend can. */
   uploadUrl: string;
@@ -116,7 +169,8 @@ function performanceNow(): number {
 }
 
 const DEFAULT_THRESHOLD = 1_048_576; // 1 MB
-const DEFAULT_MAX_FETCH_BYTES = 256 * 1024 * 1024;
+/** Default `maxFetchBytes`: 256 MiB. */
+export const DEFAULT_MAX_FETCH_BYTES = 256 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS = 5;
 
 // ---------------------------------------------------------------------------

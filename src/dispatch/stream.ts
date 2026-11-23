@@ -4,8 +4,9 @@
 import { conformBatchToSchema, schema as makeSchema, withBatchMetadata } from "../arrow/index.js";
 import { CANCEL_KEY } from "../constants.js";
 import { maybeExternalizeBatch } from "../external.js";
+import { StateRefScope } from "../state-ref.js";
 import type { MethodDefinition } from "../types.js";
-import { OutputCollector } from "../types.js";
+import { makeStreamInitContext, OutputCollector } from "../types.js";
 import type { IpcStreamReader } from "../wire/reader.js";
 import { buildErrorBatch, buildResultBatch } from "../wire/response.js";
 import type { IpcStreamWriter } from "../wire/writer.js";
@@ -38,12 +39,23 @@ export async function dispatchStream(
   const { serverId, requestId, externalConfig, kind, authContext, peerEvidence, includeTraceback } = ctx;
   const isProducer = !!method.producerFn;
 
+  // On a byte-stream transport the state never leaves the process: every
+  // StateRef stays in memory and no storage call is ever made, but worker code
+  // is identical to HTTP. The init handler's context is the one place
+  // stateRef() is allowed; every later turn is a continuation.
+  const scopeFacts = { auth: authContext, protocol: ctx.protocolName, method: method.name };
+  const initCtx = makeStreamInitContext(new StateRefScope({ ...scopeFacts, init: true }), {
+    auth: authContext,
+    kind,
+    peerEvidence,
+  });
+  const turnScope = new StateRefScope(scopeFacts);
   let state: any;
   try {
     if (isProducer) {
-      state = await method.producerInit!(params);
+      state = await method.producerInit!(params, initCtx);
     } else {
-      state = await method.exchangeInit!(params);
+      state = await method.exchangeInit!(params, initCtx);
     }
   } catch (error: any) {
     const errSchema = method.headerSchema ?? EMPTY_SCHEMA;
@@ -178,6 +190,7 @@ export async function dispatchStream(
           peerEvidence,
         },
       );
+      out.attachStateRefScope(turnScope);
 
       if (isProducer) {
         await method.producerFn!(state, out);

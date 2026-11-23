@@ -21,20 +21,34 @@ import {
 } from "../external.js";
 import type { PeerEvidenceSet } from "../identity.js";
 import { requestShape } from "../request-shape.js";
+import {
+  encodeStateRefValue,
+  InvalidStateRefError,
+  inlineStateRefBytes,
+  resolveEncodedStateRef,
+  type StateRefRuntime,
+  StateRefScope,
+  sealedLength,
+  serializeWithStateRefs,
+  stateRefEncoder,
+} from "../state-ref.js";
 import type { AccessLogRequestField, MethodDefinition } from "../types.js";
-import { OutputCollector, TransportKind } from "../types.js";
+import { makeStreamInitContext, OutputCollector, TransportKind } from "../types.js";
 import { serializeSchema } from "../util/schema.js";
 import { applyDefaults, parseRequest, validateRequestSchema } from "../wire/request.js";
-import { buildEmptyBatch, buildErrorBatch, buildResultBatch } from "../wire/response.js";
+import { buildEmptyBatch, buildErrorBatch, buildLogBatch, buildResultBatch } from "../wire/response.js";
 import { appendCookieHeaders, arrowResponse, HttpRpcError, readRequestFromBody, serializeIpcStream } from "./common.js";
 import { minPositive } from "./response-budget.js";
 import {
+  bytesToBase64,
   CALL_ID_LEN,
   packCallToken,
-  packStateToken,
+  packSchemas,
   type ResolvedCall,
+  sealStateToken,
   type TokenScope,
   unpackCallToken,
+  unpackSchemas,
   unpackStateToken,
 } from "./token.js";
 
@@ -89,6 +103,112 @@ function tokenScope(ctx: DispatchContext): TokenScope {
   };
 }
 
+/** HTTP status for an error a method (or its state) raised: `invalid_state_ref`
+ *  is a 400 like every other token failure (STATE_REF_V1.md §6); everything
+ *  else is the ordinary `200 + X-VGI-RPC-Error` (signalled internally as 500). */
+export function methodErrorStatus(error: unknown): number {
+  return error instanceof InvalidStateRefError ? 400 : 500;
+}
+
+/** The request's `StateRef` scope for a continuation (or unary) context. */
+function continuationScope(ctx: DispatchContext, methodName: string, callId: Uint8Array | null): StateRefScope {
+  return new StateRefScope({
+    runtime: ctx.stateRefs ?? null,
+    auth: ctx.authContext,
+    protocol: ctx.protocolName,
+    method: methodName,
+    callId,
+  });
+}
+
+/** The client-directed WARN log carrying a `cursor_large` warning. */
+function cursorWarningBatch(schema: VgiSchema, warning: string, ctx: DispatchContext): VgiBatch {
+  return buildLogBatch(schema, "WARN", warning, { kind: "cursor_large" }, ctx.serverId);
+}
+
+/**
+ * Mint this stream's call token (`/init` only): both schemas behind one
+ * `StateRef` (`schemas_ref`, sized with `call_token_bytes = 0`), so a very wide
+ * table's schemas are stored once instead of riding every request.
+ */
+async function mintCallToken(
+  callId: Uint8Array,
+  schemaBytes: Uint8Array,
+  inputSchemaBytes: Uint8Array,
+  ctx: DispatchContext,
+  methodName: string,
+): Promise<{ callToken: string; callTokenBytes: number }> {
+  const schemas = packSchemas(schemaBytes, inputSchemaBytes);
+  const schemasRef = ctx.stateRefs
+    ? await encodeStateRefValue(
+        schemas,
+        stateRefEncoder(ctx.stateRefs, {
+          auth: ctx.authContext,
+          protocol: ctx.protocolName,
+          method: methodName,
+          callId,
+          callTokenBytes: 0,
+        }),
+      )
+    : inlineStateRefBytes(schemas);
+  const callToken = packCallToken(callId, schemasRef, ctx.tokenKey, tokenScope(ctx), undefined, {
+    responseLimitBytes: ctx.maxResponseBytes,
+    preferredResponseBytes: ctx.preferredResponseBytes,
+  });
+  const callTokenBytes = sealedLength(callToken);
+  // Warm the cache with what we already hold, so this stream's first
+  // continuation need not open the token it was just handed.
+  cacheCall(callId, ctx, {
+    schemaBytes,
+    inputSchemaBytes,
+    responseLimitBytes: ctx.maxResponseBytes,
+    preferredResponseBytes: ctx.preferredResponseBytes,
+    callTokenBytes,
+  });
+  return { callToken, callTokenBytes };
+}
+
+/**
+ * Serialize and seal one cursor.
+ *
+ * Serialization runs under the stream's `StateRef` encoder, so a ref created
+ * on this init turn has its form decided (and is stored, when it is stored)
+ * here, once; refs read back from a token re-emit their bytes. The sealed
+ * cursor is then checked against the turn budget (STATE_REF_V1.md §9).
+ *
+ * @returns the token and, under the `warn` rule, the `cursor_large` warning.
+ * @throws CursorTooLargeError over budget under the `error` rule.
+ */
+async function mintCursor(
+  state: unknown,
+  callId: Uint8Array,
+  callTokenBytes: number,
+  ctx: DispatchContext,
+  methodName: string,
+): Promise<{ token: string; warning: string | null }> {
+  const runtime = ctx.stateRefs ?? null;
+  const encoder = runtime
+    ? stateRefEncoder(runtime, {
+        auth: ctx.authContext,
+        protocol: ctx.protocolName,
+        method: methodName,
+        callId,
+        callTokenBytes,
+      })
+    : null;
+  const stateBytes = await serializeWithStateRefs(() => ctx.stateSerializer.serialize(state), encoder);
+  const sealed = sealStateToken(stateBytes, callId, ctx.tokenKey, tokenScope(ctx));
+  const warning = runtime
+    ? runtime.checkCursor({
+        cursorBytes: sealed.byteLength,
+        callTokenBytes,
+        protocol: ctx.protocolName,
+        method: methodName,
+      })
+    : null;
+  return { token: bytesToBase64(sealed), warning };
+}
+
 function callCacheKey(callId: Uint8Array, ctx: DispatchContext): string {
   const auth = ctx.authContext;
   let hex = "";
@@ -116,7 +236,7 @@ function cacheCall(callId: Uint8Array, ctx: DispatchContext, call: ResolvedCall)
   }
   const ttl = ctx.tokenTtl;
   callStates.set(callCacheKey(callId, ctx), {
-    expiresAt: Math.floor(Date.now() / 1000) + (ttl > 0 ? ttl : 3600),
+    expiresAt: Math.floor(Date.now() / 1000) + (ttl > 0 ? ttl : 21600),
     call,
   });
 }
@@ -142,7 +262,11 @@ function newCallId(): Uint8Array {
  * opened and verified, and its embedded callId must match the one the cursor
  * named.
  */
-function resolveCall(callId: Uint8Array, callTokenB64: string | null | undefined, ctx: DispatchContext): ResolvedCall {
+async function resolveCall(
+  callId: Uint8Array,
+  callTokenB64: string | null | undefined,
+  ctx: DispatchContext,
+): Promise<ResolvedCall> {
   const key = callCacheKey(callId, ctx);
   const hit = cacheEntriesFor(ctx) > 0 ? callStates.get(key) : undefined;
   if (hit) {
@@ -152,43 +276,40 @@ function resolveCall(callId: Uint8Array, callTokenB64: string | null | undefined
   if (!callTokenB64) {
     throw new HttpRpcError("Missing call token in exchange request", 400);
   }
-  const { callId: tokenCallId, call } = unpackCallToken(callTokenB64, ctx.tokenKey, tokenScope(ctx), ctx.tokenTtl);
-  if (tokenCallId.length !== callId.length || !tokenCallId.every((b, i) => b === callId[i])) {
+  let opened: ReturnType<typeof unpackCallToken>;
+  try {
+    opened = unpackCallToken(callTokenB64, ctx.tokenKey, tokenScope(ctx), ctx.tokenTtl);
+  } catch (error: any) {
+    throw new HttpRpcError(`Invalid state token: ${error?.message ?? error}`, 400);
+  }
+  if (opened.callId.length !== callId.length || !opened.callId.every((b, i) => b === callId[i])) {
     // The cursor named a different call. Uniform message: reachable only by
     // pairing two tokens the same principal legitimately holds.
     throw new HttpRpcError("Invalid state token: Malformed state token", 400);
   }
+  // Both schemas live behind a StateRef (call token v4): inline in the common
+  // case, one GET per process per stream when a very wide table stored them,
+  // then the object cache. A StateRefError propagates with its kind
+  // (invalid_state_ref is answered 400 by the handler).
+  const schemas = await resolveEncodedStateRef(opened.schemasRef, ctx.stateRefs ?? null, {
+    auth: ctx.authContext,
+    protocol: ctx.protocolName,
+    callId,
+  });
+  let unpacked: ReturnType<typeof unpackSchemas>;
+  try {
+    unpacked = unpackSchemas(schemas);
+  } catch (error: any) {
+    throw new HttpRpcError(`Invalid state token: ${error?.message ?? error}`, 400);
+  }
+  const call: ResolvedCall = {
+    ...unpacked,
+    responseLimitBytes: opened.responseLimitBytes,
+    preferredResponseBytes: opened.preferredResponseBytes,
+    callTokenBytes: sealedLength(callTokenB64),
+  };
   cacheCall(callId, ctx, call);
   return call;
-}
-
-/** Mint a stream's callId, call token, and first cursor at `/init`. */
-function mintInitTokens(
-  stateBytes: Uint8Array,
-  schemaBytes: Uint8Array,
-  inputSchemaBytes: Uint8Array,
-  ctx: DispatchContext,
-): { callId: Uint8Array; token: string; callToken: string } {
-  const callId = newCallId();
-  noteStream(ctx, callId);
-  const scope = tokenScope(ctx);
-  const callToken = packCallToken(callId, schemaBytes, inputSchemaBytes, ctx.tokenKey, scope, undefined, {
-    responseLimitBytes: ctx.maxResponseBytes,
-    preferredResponseBytes: ctx.preferredResponseBytes,
-  });
-  // Warm the cache with what we already hold, so this stream's first
-  // continuation need not open the token it was just handed.
-  cacheCall(callId, ctx, {
-    schemaBytes,
-    inputSchemaBytes,
-    responseLimitBytes: ctx.maxResponseBytes,
-    preferredResponseBytes: ctx.preferredResponseBytes,
-  });
-  return {
-    callId,
-    token: packStateToken(stateBytes, callId, ctx.tokenKey, scope),
-    callToken,
-  };
 }
 
 /**
@@ -250,6 +371,9 @@ export interface DispatchContext {
    *  continuation re-opens the call token the client echoed. Default 4096. */
   callStateCacheEntries?: number;
   stateSerializer: StateSerializer;
+  /** The server's `StateRef` machinery (key, storage, budgets, object cache).
+   *  Omitted, refs render inline and no cursor rule applies. */
+  stateRefs?: StateRefRuntime;
   authContext?: AuthContext;
   peerEvidence?: PeerEvidenceSet;
   externalLocation?: ExternalLocationConfig;
@@ -411,6 +535,20 @@ function makeCapErrorResponse(schema: VgiSchema, error: Error, ctx: DispatchCont
   return response;
 }
 
+/** An error-only stream for a failure while minting a stream's tokens
+ *  (`cursor_too_large`, `state_ref_too_large`, a storage failure). */
+function stateRefErrorResponse(
+  schema: VgiSchema,
+  error: Error,
+  ctx: DispatchContext,
+  requestId: string | null,
+): Response {
+  const errBatch = buildErrorBatch(schema, error, ctx.serverId, requestId, ctx.includeTraceback);
+  const response = arrowResponse(serializeIpcStream(schema, [errBatch]), methodErrorStatus(error));
+  (response as any).__dispatchError = error;
+  return response;
+}
+
 /** Dispatch a unary HTTP request. */
 export async function httpDispatchUnary(
   method: MethodDefinition,
@@ -459,6 +597,9 @@ export async function httpDispatchUnary(
   );
   out.enableCookieSink();
   if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
+  // A unary context resolves argument references (and in-memory refs); it
+  // never creates a StateRef.
+  out.attachStateRefScope(continuationScope(ctx, method.name, null));
 
   try {
     const result = await method.handler!(parsed.params, out);
@@ -491,7 +632,7 @@ export async function httpDispatchUnary(
     return response;
   } catch (error: any) {
     const errBatch = buildErrorBatch(schema, error, ctx.serverId, parsed.requestId, ctx.includeTraceback);
-    const response = arrowResponse(serializeIpcStream(schema, [errBatch]), 500);
+    const response = arrowResponse(serializeIpcStream(schema, [errBatch]), methodErrorStatus(error));
     // Apply any cookies queued before the exception — matches Python's
     // "cookies-on-error" behavior.
     appendCookieHeaders(response.headers, out.drainResponseCookies());
@@ -530,18 +671,32 @@ export async function httpDispatchStreamInit(
 
   applyDefaults(parsed.params, method.defaults);
 
-  // Init state
+  // Init state. The init handler's context is the one place `stateRef()` is
+  // allowed (STATE_REF_V1.md §2.1); its refs are encoded when the first
+  // cursor is minted.
+  const initScope = new StateRefScope({
+    runtime: ctx.stateRefs ?? null,
+    auth: ctx.authContext,
+    protocol: ctx.protocolName,
+    method: method.name,
+    init: true,
+  });
+  const initCtx = makeStreamInitContext(initScope, {
+    auth: ctx.authContext,
+    kind: ctx.kind ?? TransportKind.HTTP,
+    peerEvidence: ctx.peerEvidence,
+  });
   let state: any;
   try {
     if (isProducer) {
-      state = await method.producerInit!(parsed.params);
+      state = await method.producerInit!(parsed.params, initCtx);
     } else {
-      state = await method.exchangeInit!(parsed.params);
+      state = await method.exchangeInit!(parsed.params, initCtx);
     }
   } catch (error: any) {
     const errSchema = method.headerSchema ?? EMPTY_SCHEMA;
     const errBatch = buildErrorBatch(errSchema, error, ctx.serverId, parsed.requestId, ctx.includeTraceback);
-    const response = arrowResponse(serializeIpcStream(errSchema, [errBatch]), 500);
+    const response = arrowResponse(serializeIpcStream(errSchema, [errBatch]), methodErrorStatus(error));
     (response as any).__dispatchError = error;
     return response;
   }
@@ -594,21 +749,18 @@ export async function httpDispatchStreamInit(
     // produceStreamResponse falls back to exchangeFn with tick batches.
     const initCallId = newCallId();
     noteStream(ctx, initCallId);
-    const initCallToken = packCallToken(
-      initCallId,
-      serializeSchema(resolvedOutputSchema),
-      serializeSchema(resolvedInputSchema),
-      ctx.tokenKey,
-      tokenScope(ctx),
-      undefined,
-      { responseLimitBytes: ctx.maxResponseBytes, preferredResponseBytes: ctx.preferredResponseBytes },
-    );
-    cacheCall(initCallId, ctx, {
-      schemaBytes: serializeSchema(resolvedOutputSchema),
-      inputSchemaBytes: serializeSchema(resolvedInputSchema),
-      responseLimitBytes: ctx.maxResponseBytes,
-      preferredResponseBytes: ctx.preferredResponseBytes,
-    });
+    let initCall: { callToken: string; callTokenBytes: number };
+    try {
+      initCall = await mintCallToken(
+        initCallId,
+        serializeSchema(resolvedOutputSchema),
+        serializeSchema(resolvedInputSchema),
+        ctx,
+        method.name,
+      );
+    } catch (error: any) {
+      return stateRefErrorResponse(resolvedOutputSchema, error, ctx, parsed.requestId);
+    }
     return produceStreamResponse(
       method,
       state,
@@ -617,15 +769,31 @@ export async function httpDispatchStreamInit(
       ctx,
       parsed.requestId,
       headerBytes,
-      { callId: initCallId, callToken: initCallToken },
+      { callId: initCallId, callToken: initCall.callToken, callTokenBytes: initCall.callTokenBytes },
       stripFrameworkMetadata(reqBatch.metadata),
     );
   } else {
-    // Exchange: serialize state into signed token, return zero-row batch with token
-    const stateBytes = ctx.stateSerializer.serialize(state);
-    const schemaBytes = serializeSchema(resolvedOutputSchema);
-    const inputSchemaBytes = serializeSchema(resolvedInputSchema);
-    const { token, callToken } = mintInitTokens(stateBytes, schemaBytes, inputSchemaBytes, ctx);
+    // Exchange: mint the call token and the first cursor (which encodes, and
+    // may store, the StateRefs the init handler created), and return a
+    // zero-row batch carrying both.
+    const callId = newCallId();
+    noteStream(ctx, callId);
+    let token: string;
+    let callToken: string;
+    let warning: string | null;
+    try {
+      const call = await mintCallToken(
+        callId,
+        serializeSchema(resolvedOutputSchema),
+        serializeSchema(resolvedInputSchema),
+        ctx,
+        method.name,
+      );
+      callToken = call.callToken;
+      ({ token, warning } = await mintCursor(state, callId, call.callTokenBytes, ctx, method.name));
+    } catch (error: any) {
+      return stateRefErrorResponse(resolvedOutputSchema, error, ctx, parsed.requestId);
+    }
 
     // /init is the one response that hands over the call token;
     // continuations re-mint the cursor alone.
@@ -634,7 +802,8 @@ export async function httpDispatchStreamInit(
     tokenMeta.set(CALL_STATE_KEY, callToken);
     noteResponseState(ctx, token);
     const tokenBatch = buildEmptyBatch(resolvedOutputSchema, tokenMeta);
-    const tokenStreamBytes = serializeIpcStream(resolvedOutputSchema, [tokenBatch]);
+    const initBatches = warning ? [cursorWarningBatch(resolvedOutputSchema, warning, ctx), tokenBatch] : [tokenBatch];
+    const tokenStreamBytes = serializeIpcStream(resolvedOutputSchema, initBatches);
 
     let responseBody: Uint8Array;
     if (headerBytes) {
@@ -702,7 +871,10 @@ export async function httpDispatchStreamExchange(
     throw new HttpRpcError(`Invalid state token: ${error.message}`, 400);
   }
   noteStream(ctx, unpacked.callId);
-  const resolvedCall = resolveCall(unpacked.callId, reqBatch.metadata?.get(CALL_STATE_KEY), ctx);
+  const callTokenB64 = reqBatch.metadata?.get(CALL_STATE_KEY);
+  const resolvedCall = await resolveCall(unpacked.callId, callTokenB64, ctx);
+  // The call token rides every continuation, so the turn budget subtracts it.
+  const callTokenBytes = resolvedCall.callTokenBytes ?? (callTokenB64 ? sealedLength(callTokenB64) : 0);
   // A continuation may tighten the initial hard cap but can never raise it.
   // The initial authenticated budget is sealed in the call token so this is
   // true on a cold node as well as a warm cache hit.
@@ -783,7 +955,7 @@ export async function httpDispatchStreamExchange(
       ctx,
       null,
       null,
-      { callId: unpacked.callId, callToken: null },
+      { callId: unpacked.callId, callToken: null, callTokenBytes },
       stripFrameworkMetadata(reqBatch.metadata),
     );
   } else {
@@ -826,6 +998,7 @@ export async function httpDispatchStreamExchange(
       },
     );
     if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
+    out.attachStateRefScope(continuationScope(ctx, method.name, unpacked.callId));
 
     // Cast compatible input types (e.g., decimal→double, int32→int64).
     // Gated on effectiveProducer (not isProducer) so methods that flip to
@@ -862,13 +1035,15 @@ export async function httpDispatchStreamExchange(
           error.stack?.split("\n").slice(0, 5).join("\n"),
         );
       const errBatch = buildErrorBatch(outputSchema, error, ctx.serverId, null, ctx.includeTraceback);
-      const response = arrowResponse(serializeIpcStream(outputSchema, [errBatch]), 500);
+      const response = arrowResponse(serializeIpcStream(outputSchema, [errBatch]), methodErrorStatus(error));
       (response as any).__dispatchError = error;
       return response;
     }
 
     // Collect emitted batches
     let batches: VgiBatch[] = [];
+    // Index of the data batch in `batches` (a cursor_large warning goes first).
+    let dataIdx = out.dataBatchIdx;
 
     if (out.finished) {
       // Stream is done — return data WITHOUT state token.
@@ -886,8 +1061,17 @@ export async function httpDispatchStreamExchange(
       }
     } else {
       // More data may follow — repack state into token for next exchange.
-      const stateBytes = ctx.stateSerializer.serialize(state);
-      const token = packStateToken(stateBytes, unpacked.callId, ctx.tokenKey, tokenScope(ctx));
+      // The call token is not re-issued: nothing it carries can have changed.
+      let token: string;
+      try {
+        const minted = await mintCursor(state, unpacked.callId, callTokenBytes, ctx, method.name);
+        token = minted.token;
+        if (minted.warning) batches.push(cursorWarningBatch(outputSchema, minted.warning, ctx));
+      } catch (error) {
+        return stateRefErrorResponse(outputSchema, error as Error, ctx, null);
+      }
+      // The data batch index shifts by any warning batch placed ahead of it.
+      if (dataIdx !== null) dataIdx += batches.length;
 
       for (const [idx, emitted] of out.batches.entries()) {
         const batch = emitted.batch;
@@ -921,7 +1105,7 @@ export async function httpDispatchStreamExchange(
     try {
       batches = await Promise.all(
         batches.map((batch, index) =>
-          index === out.dataBatchIdx ? externalizeForResponseBudget(batch, ctx, method.name) : batch,
+          index === dataIdx ? externalizeForResponseBudget(batch, ctx, method.name) : batch,
         ),
       );
     } catch (error) {
@@ -967,7 +1151,7 @@ async function produceStreamResponse(
    * callId the incoming cursor authenticated, and `callToken` is null
    * because the call token is never re-issued.
    */
-  call: { callId: Uint8Array; callToken: string | null },
+  call: { callId: Uint8Array; callToken: string | null; callTokenBytes: number },
   requestMetadata?: Map<string, string>,
 ): Promise<Response> {
   const allBatches: VgiBatch[] = [];
@@ -998,6 +1182,10 @@ async function produceStreamResponse(
     },
   );
   if (ctx.stickyContext) out.attachStickyContext(ctx.stickyContext);
+  // Every producer turn is a continuation for `stateRef()`, the first one
+  // folded into `/init` included (transport parity with the pipe).
+  out.attachStateRefScope(continuationScope(ctx, method.name, call.callId));
+  let stateRefFailure = false;
 
   try {
     if (method.producerFn) {
@@ -1016,6 +1204,28 @@ async function produceStreamResponse(
       console.error(`[produceStreamResponse] error:`, error.message, error.stack?.split("\n").slice(0, 3).join("\n"));
     allBatches.push(buildErrorBatch(outputSchema, error, ctx.serverId, requestId, ctx.includeTraceback));
     producerError = error instanceof Error ? error : new Error(String(error));
+    stateRefFailure = error instanceof InvalidStateRefError;
+  }
+
+  // Mint the cursor BEFORE flushing (or externalizing) the turn's data:
+  // minting decides -- and may store -- this stream's StateRefs and applies
+  // the cursor rule, and a cursor_too_large refusal must not follow data the
+  // client would otherwise have consumed.
+  let cursorBatch: VgiBatch | null = null;
+  if (!producerError && !out.finished) {
+    // Every unfinished invocation returns one cursor. A response-size budget
+    // never changes the fundamental one request/tick -> one invocation shape.
+    try {
+      const minted = await mintCursor(state, call.callId, call.callTokenBytes, ctx, method.name);
+      const tokenMeta = new Map<string, string>();
+      tokenMeta.set(STATE_KEY, minted.token);
+      if (call.callToken) tokenMeta.set(CALL_STATE_KEY, call.callToken);
+      noteResponseState(ctx, minted.token);
+      if (minted.warning) allBatches.push(cursorWarningBatch(outputSchema, minted.warning, ctx));
+      cursorBatch = buildEmptyBatch(outputSchema, tokenMeta);
+    } catch (error: any) {
+      return stateRefErrorResponse(outputSchema, error, ctx, requestId);
+    }
   }
 
   if (!producerError) {
@@ -1054,16 +1264,8 @@ async function produceStreamResponse(
     allBatches.length = 0;
     allBatches.push(buildErrorBatch(outputSchema, externalOvershoot, ctx.serverId, requestId, ctx.includeTraceback));
     producerError = externalOvershoot;
-  } else if (!producerError && !out.finished) {
-    // Every unfinished invocation returns one cursor. A response-size budget
-    // never changes the fundamental one request/tick -> one invocation shape.
-    const stateBytes = ctx.stateSerializer.serialize(state);
-    const token = packStateToken(stateBytes, call.callId, ctx.tokenKey, tokenScope(ctx));
-    const tokenMeta = new Map<string, string>();
-    tokenMeta.set(STATE_KEY, token);
-    if (call.callToken) tokenMeta.set(CALL_STATE_KEY, call.callToken);
-    noteResponseState(ctx, token);
-    allBatches.push(buildEmptyBatch(outputSchema, tokenMeta));
+  } else if (cursorBatch !== null) {
+    allBatches.push(cursorBatch);
   }
 
   let dataBytes = serializeIpcStream(outputSchema, allBatches);
@@ -1092,7 +1294,8 @@ async function produceStreamResponse(
   // stay 200-with-EXCEPTION-batch (the existing contract — clients see
   // RpcError on body decode but proxies don't get the header signal).
   // Mirrors c5c7091 for the cap-overshoot path only.
-  const status = externalOvershoot || responseOvershoot ? 500 : 200;
+  // A StateRef that fails to open is a 400 like any other token failure.
+  const status = externalOvershoot || responseOvershoot ? 500 : stateRefFailure ? 400 : 200;
   const response = arrowResponse(responseBody, status);
   if (producerError) {
     (response as any).__dispatchError = producerError;

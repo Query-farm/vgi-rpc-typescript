@@ -626,6 +626,7 @@ export class VgiRpcServer {
       kind: transportKind,
       authContext: peer.auth,
       peerEvidence: peer.evidence,
+      protocolName: binding.name,
     };
     try {
       if (method.type === MethodType.UNARY) {

@@ -63,6 +63,11 @@ export interface UploadUrlPair {
   expiresAt: Date;
   /** Headers the PUT must carry verbatim (e.g. `x-amz-checksum-sha256`). */
   uploadHeaders: Record<string, string>;
+  /** The storage id the PUT creates (protocol 3.4 servers; absent from older ones). */
+  objectId?: string;
+  /** A sealed argument reference to that object, for the same principal
+   *  (protocol 3.4 servers; absent from older ones). */
+  ref?: Uint8Array;
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -209,6 +214,9 @@ export async function requestUploadUrls(
     const downloadCol = batch.getChild("download_url");
     const expiresCol = batch.getChild("expires_at");
     const headersCol = batch.getChild("upload_headers");
+    // Read by name and optional: a pre-3.4 server sends neither.
+    const objectIdCol = batch.getChild("object_id");
+    const refCol = batch.getChild("ref");
     for (let r = 0; r < batch.numRows; r++) {
       const uploadUrl = uploadCol?.get(r) as string;
       const downloadUrl = downloadCol?.get(r) as string;
@@ -224,7 +232,17 @@ export async function requestUploadUrls(
       } else {
         expiresAt = new Date();
       }
-      pairs.push({ uploadUrl, downloadUrl, expiresAt, uploadHeaders: headersFromCell(headersCol?.get(r)) });
+      const pair: UploadUrlPair = {
+        uploadUrl,
+        downloadUrl,
+        expiresAt,
+        uploadHeaders: headersFromCell(headersCol?.get(r)),
+      };
+      const objectId = objectIdCol?.get(r);
+      if (typeof objectId === "string" && objectId) pair.objectId = objectId;
+      const ref = refCol?.get(r);
+      if (ref instanceof Uint8Array && ref.byteLength > 0) pair.ref = new Uint8Array(ref);
+      pairs.push(pair);
     }
   }
 

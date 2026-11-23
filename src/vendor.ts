@@ -47,13 +47,17 @@
  * | `VGI_BLOB_VENDOR_TOKEN` | Bearer token; falls back to `VGI_CF_DO_TOKEN`. |
  * | `VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES` | Result-batch size from which the server externalizes (default 1 MiB). |
  * | `VGI_RPC_EXTERNAL_COMPRESSION` | `none` (default) or `zstd`, optionally `zstd:<level>`. |
- * | `VGI_RPC_MAX_UPLOAD_BYTES` | Optional size advertised to clients for vendor upload URLs. |
+ * | `VGI_RPC_MAX_UPLOAD_BYTES` | Largest client upload a URL is vended for, advertised as `VGI-Max-Upload-Bytes`. Unset: the fetch cap below. |
+ * | `VGI_RPC_MAX_FETCH_BYTES` | Largest request the server fetches from an inbound pointer. Default 256 MiB, raised to `VGI_RPC_MAX_UPLOAD_BYTES` when that is larger; both set with the upload size above the fetch cap is a startup error. |
+ *
+ * The rule behind the last two: a server never advertises an upload size it
+ * would then refuse to fetch.
  *
  * @module
  */
 
-import type { ExternalLocationConfig, ExternalStorage, UploadUrl, UploadUrlProvider } from "./external.js";
-import { redactExternalUrl } from "./external.js";
+import type { ExternalLocationConfig, ExternalStorage, ObjectStore, UploadUrl, UploadUrlProvider } from "./external.js";
+import { ObjectMissingError, redactExternalUrl } from "./external.js";
 
 /** Environment variable naming the vendor's base URL. */
 export const ENV_URL = "VGI_BLOB_VENDOR_URL";
@@ -67,6 +71,8 @@ export const ENV_THRESHOLD = "VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES";
 export const ENV_COMPRESSION = "VGI_RPC_EXTERNAL_COMPRESSION";
 /** Environment variable: the client-upload size the server advertises. */
 export const ENV_MAX_UPLOAD_BYTES = "VGI_RPC_MAX_UPLOAD_BYTES";
+/** Environment variable for the server's inbound fetch cap. */
+export const ENV_MAX_FETCH_BYTES = "VGI_RPC_MAX_FETCH_BYTES";
 
 /**
  * Advisory `origin` on a `/v1/blobs/put` grant minted for a client to upload a
@@ -75,6 +81,13 @@ export const ENV_MAX_UPLOAD_BYTES = "VGI_RPC_MAX_UPLOAD_BYTES";
  * writes never send it. Matches vgi-rpc-python's `CLIENT_UPLOAD_ORIGIN`.
  */
 export const CLIENT_UPLOAD_ORIGIN = "client_upload";
+/**
+ * Advisory `origin` the server sends on the `put` grant for a stored
+ * `StateRef` object ({@link VendorStorage.putObject}). The vendor ignores it;
+ * the reference fake vendor counts such grants as `puts_state_ref`. Matches
+ * vgi-rpc-python's `STATE_REF_ORIGIN`.
+ */
+export const STATE_REF_ORIGIN = "state_ref";
 
 const DEFAULT_THRESHOLD = 1_048_576;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -852,7 +865,7 @@ export interface VendorStorageOptions extends VendorClientOptions {
  * cleaned up by the vendor (registry alarm plus storage lifecycle rules);
  * vgi-rpc never deletes them.
  */
-export class VendorStorage extends VendorClientBase implements ExternalStorage, UploadUrlProvider {
+export class VendorStorage extends VendorClientBase implements ExternalStorage, UploadUrlProvider, ObjectStore {
   private readonly purpose: VendorPurpose;
   private readonly pin: boolean;
 
@@ -927,7 +940,75 @@ export class VendorStorage extends VendorClientBase implements ExternalStorage, 
     }
     const expiresAt =
       grant.downloadExpiresAt && grant.downloadExpiresAt < grant.expiresAt ? grant.downloadExpiresAt : grant.expiresAt;
-    return { uploadUrl: grant.uploadUrl, downloadUrl, expiresAt, headers };
+    return { uploadUrl: grant.uploadUrl, downloadUrl, expiresAt, headers, objectId: grant.objectId };
+  }
+
+  /**
+   * Store `data` as one `rpc` object and return its `object_id`
+   * ({@link ObjectStore}): a sized, checksummed grant (`/v1/blobs/put`,
+   * purpose `rpc`, advisory `origin: "state_ref"`) and a PUT with exactly its
+   * required headers, so storage verifies the body. Objects carry no TTL; the
+   * bucket lifecycle removes them.
+   *
+   * @throws VendorError if the vendor or the signed upload fails.
+   */
+  async putObject(data: Uint8Array): Promise<string> {
+    const grant = await this.api.put({
+      size: data.byteLength,
+      sha256B64: toBase64(await sha256Bytes(data)),
+      purpose: "rpc",
+      origin: STATE_REF_ORIGIN,
+    });
+    if (this.pin) await this.check(grant.uploadUrl);
+    await this.api.putObject(grant, data);
+    return grant.objectId;
+  }
+
+  /**
+   * Fetch an object by id ({@link ObjectStore}): the download is minted
+   * server-side (`/v1/blobs/get`), pinned to the vendor's hosts, and capped at
+   * `maxBytes` (default 256 MiB). The caller verifies size and digest.
+   *
+   * @throws ObjectMissingError when the vendor reports `not_found` /
+   *   `not_uploaded`, or storage answers 404.
+   * @throws VendorError for any other vendor or download failure.
+   */
+  async get(objectId: string, options: { maxBytes?: number } = {}): Promise<Uint8Array> {
+    const limit = options.maxBytes ?? DEFAULT_MAX_FETCH_BYTES;
+    let location: BlobLocation;
+    try {
+      location = await this.api.get(objectId);
+    } catch (error) {
+      if (
+        error instanceof VendorError &&
+        (error.code === "not_found" || error.code === "not_uploaded" || error.status === 404)
+      ) {
+        throw new ObjectMissingError(`blob vendor object is gone (${error.code ?? error.status})`);
+      }
+      throw error;
+    }
+    if (location.size > limit) {
+      throw new VendorError(`Blob vendor object is ${location.size} bytes, over max_fetch_bytes (${limit})`);
+    }
+    if (location.contentEncoding !== null && location.contentEncoding !== "identity") {
+      throw new VendorError(
+        `Blob vendor object has unsupported content_encoding ${JSON.stringify(location.contentEncoding)}`,
+      );
+    }
+    if (this.pin) await this.check(location.downloadUrl);
+    const response = await this.api.send("GET", location.downloadUrl, "download", {}, null, true);
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => {});
+      throw new ObjectMissingError(`object is gone: ${redactExternalUrl(location.downloadUrl)}`);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      await response.body?.cancel().catch(() => {});
+      throw new VendorError(
+        `Signed download failed: HTTP ${response.status}: ${redactExternalUrl(location.downloadUrl)}`,
+        response.status,
+      );
+    }
+    return readBounded(response, limit, "Signed download");
   }
 }
 
@@ -1160,6 +1241,7 @@ export function externalConfigFromEnv(env?: EnvLike): VendorExternalLocationConf
     storage,
     externalizeThresholdBytes: parsePositiveInt(environ, ENV_THRESHOLD) ?? DEFAULT_THRESHOLD,
     urlValidator: storage.urlValidator,
+    maxFetchBytes: maxFetchBytesFromEnv(environ),
   };
   const compression = parseCompression(environ[ENV_COMPRESSION] ?? "");
   if (compression) config.compression = compression;
@@ -1186,8 +1268,33 @@ export function clientExternalConfigFromEnv(env?: EnvLike): VendorClientExternal
   return { urlValidator: vendorUrlValidator(url, token) };
 }
 
-/** Read `VGI_RPC_MAX_UPLOAD_BYTES` (the advertised client-upload size), or
- *  `null` when unset. */
+/** Read `VGI_RPC_MAX_UPLOAD_BYTES` (the requested client-upload size), or
+ *  `null` when unset. The HTTP handler advertises it clamped to the fetch cap
+ *  ({@link maxFetchBytesFromEnv}), and the fetch cap when unset. */
 export function maxUploadBytesFromEnv(env?: EnvLike): number | null {
   return parsePositiveInt(resolveEnv(env), ENV_MAX_UPLOAD_BYTES);
+}
+
+/**
+ * The inbound fetch cap from `VGI_RPC_MAX_FETCH_BYTES` / `VGI_RPC_MAX_UPLOAD_BYTES`:
+ * `VGI_RPC_MAX_FETCH_BYTES` when set; otherwise 256 MiB, raised to
+ * `VGI_RPC_MAX_UPLOAD_BYTES` when that is larger, so advertising an upload size
+ * is enough to accept uploads of that size.
+ *
+ * @throws Error if a variable will not parse, or both are set and the upload
+ *   size exceeds the fetch cap (the server would advertise uploads it then
+ *   refuses to fetch).
+ */
+export function maxFetchBytesFromEnv(env?: EnvLike): number {
+  const environ = resolveEnv(env);
+  const maxFetch = parsePositiveInt(environ, ENV_MAX_FETCH_BYTES);
+  const maxUpload = parsePositiveInt(environ, ENV_MAX_UPLOAD_BYTES);
+  if (maxFetch === null) return Math.max(DEFAULT_MAX_FETCH_BYTES, maxUpload ?? 0);
+  if (maxUpload !== null && maxUpload > maxFetch) {
+    throw new Error(
+      `${ENV_MAX_UPLOAD_BYTES} (${maxUpload}) exceeds ${ENV_MAX_FETCH_BYTES} (${maxFetch}): the server would ` +
+        `advertise uploads it then refuses to fetch; raise ${ENV_MAX_FETCH_BYTES} or unset it (it then follows ${ENV_MAX_UPLOAD_BYTES})`,
+    );
+  }
+  return maxFetch;
 }

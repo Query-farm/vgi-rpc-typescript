@@ -24,7 +24,12 @@ import {
 } from "../binding.js";
 import { PROTOCOL_KEY, PROTOCOL_VERSION_KEY, REQUEST_ID_HEADER, RPC_ERROR_HEADER } from "../constants.js";
 import { MethodNotImplementedError, ResponseTooLargeError, SessionLostError } from "../errors.js";
-import type { UploadUrl } from "../external.js";
+import {
+  DEFAULT_MAX_FETCH_BYTES,
+  type ExternalLocationConfig,
+  type UploadUrl,
+  type UploadUrlProvider,
+} from "../external.js";
 import type { GrantKeys } from "../grants.js";
 import {
   PeerEvidenceSet,
@@ -43,6 +48,13 @@ import {
   REFLECTION_PROTOCOL_NAME,
   RETIRED_DESCRIBE_METHOD,
 } from "../reflection.js";
+import {
+  DEFAULT_TOKEN_TTL_SECONDS,
+  InvalidStateRefError,
+  mintArgumentRef,
+  StateRefRuntime,
+  stateRefInlineBytesFromEnv,
+} from "../state-ref.js";
 import type { TokenResolver } from "../token-identity.js";
 import {
   type AccessLogDeferral,
@@ -155,6 +167,43 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /** A 400 refusal of a malformed `__upload_url__` request (RPC error batch;
  *  `ValueError`, as the reference raises). */
+/**
+ * The `VGI-Max-Upload-Bytes` to advertise (fix 1).
+ *
+ * An upload comes back to the server as a pointer that it fetches under its
+ * external config's `maxFetchBytes` (256 MiB unless set). Advertising more
+ * would let a client upload a request the server then refuses after the whole
+ * upload, so the advertised size defaults to the fetch cap and never exceeds
+ * it. Startup is refused only when the operator set an explicit fetch cap
+ * below an explicit upload cap -- a contradiction only they can resolve; an
+ * upload cap over the *default* fetch cap is clamped to it.
+ *
+ * @returns the size to advertise whenever upload URLs are offered; `0` (never
+ *   advertised) when there is no provider.
+ */
+export function resolveMaxUploadBytes(
+  provider: UploadUrlProvider | undefined,
+  maxUploadBytes: number | undefined,
+  externalLocation: ExternalLocationConfig | undefined,
+): number {
+  if (!provider) return 0;
+  const explicitFetchCap = externalLocation?.maxFetchBytes;
+  const fetchCap = explicitFetchCap ?? DEFAULT_MAX_FETCH_BYTES;
+  if (maxUploadBytes == null) return fetchCap;
+  if (!Number.isSafeInteger(maxUploadBytes) || maxUploadBytes < 1) {
+    throw new Error(`maxUploadBytes must be a positive integer, got ${maxUploadBytes}`);
+  }
+  if (maxUploadBytes <= fetchCap) return maxUploadBytes;
+  if (explicitFetchCap != null) {
+    throw new Error(
+      `maxUploadBytes (${maxUploadBytes}) exceeds the server's inbound fetch cap ` +
+        `(externalLocation.maxFetchBytes = ${explicitFetchCap}): clients would upload requests the server then ` +
+        "refuses to fetch. Raise maxFetchBytes or lower maxUploadBytes (VGI_RPC_MAX_UPLOAD_BYTES).",
+    );
+  }
+  return fetchCap;
+}
+
 function uploadUrlRefusal(message: string): HttpRpcError {
   const error = new HttpRpcError(message, 400);
   error.name = "ValueError";
@@ -433,7 +482,9 @@ export function createHttpHandler(
   const protocol = primary.protocol;
   const prefix = (options?.prefix ?? "").replace(/\/+$/, "");
   const tokenKey = options?.tokenKey ?? randomBytes(32);
-  const tokenTtl = options?.tokenTtl ?? 3600;
+  // Six hours: the maximum stream duration (STATE_REF_V1.md §12). Applies to
+  // cursor tokens, call tokens and stored StateRef tags alike.
+  const tokenTtl = options?.tokenTtl ?? DEFAULT_TOKEN_TTL_SECONDS;
   const corsOrigins = options?.corsOrigins;
   const corsMaxAge = options?.corsMaxAge === undefined ? 300 : options.corsMaxAge;
   const maxRequestBytes = minPositive(
@@ -697,7 +748,24 @@ export function createHttpHandler(
 
   const externalLocation = options?.externalLocation;
   const uploadUrlProvider = options?.uploadUrlProvider;
-  const maxUploadBytes = options?.maxUploadBytes;
+  // Fix 1: an upload comes back as a pointer the server fetches under its
+  // fetch cap, so the advertised upload cap never exceeds it, and is always
+  // advertised alongside upload URLs.
+  const maxUploadBytes = resolveMaxUploadBytes(uploadUrlProvider, options?.maxUploadBytes, externalLocation);
+
+  // StateRef machinery (STATE_REF_V1.md): the tokens' key, the server's
+  // storage (read per use), its fetch cap, and the advertised request cap the
+  // turn budget derives from. Below a 16 KiB request cap the cursor rule is
+  // disabled with a startup warning.
+  const stateRefs = new StateRefRuntime({
+    tokenKey,
+    tokenTtl,
+    storage: () => externalLocation?.storage,
+    maxFetchBytes: externalLocation?.maxFetchBytes ?? DEFAULT_MAX_FETCH_BYTES,
+    maxRequestBytes,
+    inlineBytesCap: options?.stateRefInlineBytes ?? stateRefInlineBytesFromEnv(),
+    cursorRule: options?.cursorRule ?? "warn",
+  });
 
   // Advertisement only: the proof gate is an opaque authenticate callback, so
   // the handler cannot tell `require` from `allow` and the operator states it.
@@ -796,9 +864,7 @@ export function createHttpHandler(
     headers.set("VGI-Externalization-Enabled", externalLocation?.storage ? "true" : "false");
     if (uploadUrlProvider) {
       headers.set("VGI-Upload-URL-Support", UPLOAD_URL_SUPPORT_VERSION);
-      if (maxUploadBytes != null) {
-        headers.set("VGI-Max-Upload-Bytes", String(maxUploadBytes));
-      }
+      headers.set("VGI-Max-Upload-Bytes", String(maxUploadBytes));
     }
     // Emitted only in `require` mode — `allow` never denies, so advertising
     // there would tell a proxy the hop is enforced when it is not.
@@ -832,6 +898,7 @@ export function createHttpHandler(
     preferredResponseBytes: configuredPreferredResponseBytes,
     maxExternalizedResponseBytes,
     stateSerializer,
+    stateRefs,
     externalLocation,
     kind: transportKind,
     callStateCacheEntries: options?.callStateCacheEntries,
@@ -852,9 +919,7 @@ export function createHttpHandler(
     ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER,
     SUPPORTED_ENCODINGS_HEADER,
     ...(maxRequestBytes != null ? ["VGI-Max-Request-Bytes"] : []),
-    ...(uploadUrlProvider
-      ? ["VGI-Upload-URL-Support", ...(maxUploadBytes != null ? ["VGI-Max-Upload-Bytes"] : [])]
-      : []),
+    ...(uploadUrlProvider ? ["VGI-Upload-URL-Support", "VGI-Max-Upload-Bytes"] : []),
     ...(proxyProofRequired ? [PROOF_REQUIRED_HEADER] : []),
     // Not just the advert: a client that cannot read VGI-Session never learns
     // the token it is meant to replay, and one that cannot read the
@@ -1760,8 +1825,21 @@ export function createHttpHandler(
         const uploads = parseUploadUrlRequest(reqSchema, reqBatch, maxUploadBytes);
 
         const urls: UploadUrl[] = [];
+        const refs: Uint8Array[] = [];
         for (const u of uploads) {
-          urls.push(await uploadUrlProvider.generateUploadUrl(u.size, u.sha256));
+          const url = await uploadUrlProvider.generateUploadUrl(u.size, u.sha256);
+          if (typeof url.objectId !== "string" || url.objectId.length === 0) {
+            throw new Error(
+              "the upload-URL provider returned no objectId; every provider must report the storage id of the object its PUT creates (STATE_REF_V1.md §10.2)",
+            );
+          }
+          urls.push(url);
+          // The argument reference, sealed for this request's principal: the
+          // grant is authenticated exactly like a protocol method, so the
+          // same client presenting the ref later opens it.
+          refs.push(
+            mintArgumentRef(tokenKey, ctx.authContext, { size: u.size, sha256: u.sha256, objectId: url.objectId }),
+          );
         }
 
         // Timestamp(MICROSECOND) — arrow-js's `setTimestampMicrosecond`
@@ -1776,6 +1854,8 @@ export function createHttpHandler(
           download_url: urls.map((u) => u.downloadUrl),
           expires_at: expiresAt,
           upload_headers: urls.map((u) => uploadHeadersFor(u)),
+          object_id: urls.map((u) => u.objectId as string),
+          ref: refs,
         });
         const responseBody = serializeIpcStream(UPLOAD_URL_RESPONSE_SCHEMA, [resultBatch]);
         const response = arrowResponse(responseBody);
@@ -1935,7 +2015,8 @@ export function createHttpHandler(
         info.httpStatus = r.status;
         return compressIfAccepted(r, responseEncoding, responseLimitBytes);
       }
-      const r = makeErrorResponse(error, 500);
+      // A StateRef that does not open is a 400, like any other token failure.
+      const r = makeErrorResponse(error, error instanceof InvalidStateRefError ? 400 : 500);
       addCapabilityHeaders(r.headers);
       applyStickyResponseHeaders(r.headers, stickySink);
       info.httpStatus = r.status;

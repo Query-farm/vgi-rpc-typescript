@@ -21,7 +21,16 @@
  * ```
  */
 
-import type { ExternalStorage } from "./external.js";
+import { DEFAULT_MAX_FETCH_BYTES, type ExternalStorage, ObjectMissingError, type ObjectStore } from "./external.js";
+
+async function sha256Base64(data: Uint8Array): Promise<string> {
+  const buf = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buf).set(data);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+  let s = "";
+  for (const b of digest) s += String.fromCharCode(b);
+  return btoa(s);
+}
 
 /** Configuration for the S3 storage backend. */
 export interface S3StorageConfig {
@@ -40,12 +49,16 @@ export interface S3StorageConfig {
 }
 
 /**
- * Create an S3-backed ExternalStorage.
+ * Create an S3-backed ExternalStorage (also an {@link ObjectStore}: stored
+ * `StateRef` objects and argument references, keyed by object key).
  *
  * Lazily imports `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`
  * on first upload to avoid loading the AWS SDK unless needed.
+ *
+ * Objects carry no TTL: set a bucket lifecycle rule of at least one day on
+ * the prefix.
  */
-export function createS3Storage(config: S3StorageConfig): ExternalStorage {
+export function createS3Storage(config: S3StorageConfig): ExternalStorage & ObjectStore {
   const bucket = config.bucket;
   const prefix = config.prefix ?? "vgi-rpc/";
   const presignExpiry = config.presignExpirySeconds ?? 3600;
@@ -89,6 +102,45 @@ export function createS3Storage(config: S3StorageConfig): ExternalStorage {
       const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
       const url = await getSignedUrl(client, getCommand, { expiresIn: presignExpiry });
       return url;
+    },
+
+    async putObject(data: Uint8Array): Promise<string> {
+      const client = await ensureClient();
+      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+      const key = `${prefix}obj/${crypto.randomUUID()}`;
+      // The SHA-256 checksum makes S3 verify the body it stores.
+      await client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: data,
+          ContentLength: data.byteLength,
+          ContentType: "application/octet-stream",
+          ChecksumSHA256: await sha256Base64(data),
+        }),
+      );
+      return key;
+    },
+
+    async get(objectId: string, options: { maxBytes?: number } = {}): Promise<Uint8Array> {
+      const limit = options.maxBytes ?? DEFAULT_MAX_FETCH_BYTES;
+      const client = await ensureClient();
+      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+      let response: any;
+      try {
+        response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: objectId }));
+      } catch (error: any) {
+        if (error?.name === "NoSuchKey" || error?.$metadata?.httpStatusCode === 404) {
+          throw new ObjectMissingError("S3 object is gone");
+        }
+        throw error;
+      }
+      if (typeof response.ContentLength === "number" && response.ContentLength > limit) {
+        throw new Error(`S3 object is ${response.ContentLength} bytes, over max_fetch_bytes (${limit})`);
+      }
+      const bytes: Uint8Array = await response.Body.transformToByteArray();
+      if (bytes.byteLength > limit) throw new Error(`S3 object exceeds max_fetch_bytes (${limit})`);
+      return bytes;
     },
   };
 }

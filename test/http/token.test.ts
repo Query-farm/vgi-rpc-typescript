@@ -2,18 +2,59 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, test } from "bun:test";
+import { openBytes } from "../../src/crypto.js";
 import {
+  base64ToBytes,
   computeAad,
   computeCallAad,
   packCallToken,
+  packSchemas,
   packStateToken,
   SERVER_SCOPE,
   type TokenScope,
   unpackCallToken,
+  unpackSchemas,
   unpackStateToken,
 } from "../../src/http/token.js";
 import { jsonStateSerializer } from "../../src/http/types.js";
+import { inlineStateRefBytes } from "../../src/state-ref.js";
+import { unpackToken } from "../../src/token-codec.js";
 import { randomBytes } from "../../src/util/web-crypto.js";
+
+/** A call token over two schemas, with `schemas_ref` inline (no storage). */
+function packCall(
+  callId: Uint8Array,
+  schema: Uint8Array,
+  inputSchema: Uint8Array,
+  key: Uint8Array,
+  tokenScope: TokenScope | string,
+  createdAt?: number,
+  budget?: { responseLimitBytes?: number; preferredResponseBytes?: number },
+): string {
+  return packCallToken(
+    callId,
+    inlineStateRefBytes(packSchemas(schema, inputSchema)),
+    key,
+    tokenScope as TokenScope,
+    createdAt,
+    budget,
+  );
+}
+
+/** Open a call token and resolve its inline `schemas_ref`. */
+function unpackCall(token: string, key: Uint8Array, tokenScope: TokenScope, ttl = 0) {
+  const opened = unpackCallToken(token, key, tokenScope, ttl);
+  expect(opened.schemasRef[0]).toBe(0x01);
+  const schemas = unpackSchemas(unpackToken(opened.schemasRef.subarray(1)));
+  return {
+    callId: opened.callId,
+    call: {
+      ...schemas,
+      responseLimitBytes: opened.responseLimitBytes,
+      preferredResponseBytes: opened.preferredResponseBytes,
+    },
+  };
+}
 
 /** The protocol every token in this file is scoped to unless a test varies it. */
 const PROTO = "test.Svc.v1";
@@ -30,9 +71,9 @@ describe("State Token", () => {
     const callId = new Uint8Array(16).fill(3);
     // A wide, repetitive schema, the shape of echo over all_types.
     const schema = new TextEncoder().encode("field_name_with_a_long_type_descriptor;".repeat(300));
-    const token = packCallToken(callId, schema, schema, tokenKey, scope());
+    const token = packCall(callId, schema, schema, tokenKey, scope());
     expect(token.length).toBeLessThan(schema.length / 4);
-    const { callId: back, call } = unpackCallToken(token, tokenKey, scope());
+    const { callId: back, call } = unpackCall(token, tokenKey, scope());
     expect(back).toEqual(callId);
     expect(call.schemaBytes).toEqual(schema);
     expect(call.inputSchemaBytes).toEqual(schema);
@@ -40,11 +81,11 @@ describe("State Token", () => {
   test("call tokens seal response budgets", () => {
     const tokenKey = new Uint8Array(32).fill(7);
     const callId = new Uint8Array(16).fill(3);
-    const token = packCallToken(callId, new Uint8Array([1]), new Uint8Array([2]), tokenKey, scope(), undefined, {
+    const token = packCall(callId, new Uint8Array([1]), new Uint8Array([2]), tokenKey, scope(), undefined, {
       responseLimitBytes: 65_536,
       preferredResponseBytes: 65_536,
     });
-    const { call } = unpackCallToken(token, tokenKey, scope());
+    const { call } = unpackCall(token, tokenKey, scope());
     expect(call.responseLimitBytes).toBe(65_536);
     expect(call.preferredResponseBytes).toBe(65_536);
   });
@@ -72,9 +113,9 @@ describe("State Token", () => {
   });
 
   test("a call token is bound to its protocol too, so a cold-cache continuation cannot cross", () => {
-    const token = packCallToken(CALL_ID, new Uint8Array([1]), new Uint8Array([2]), tokenKey, scope());
-    expect(() => unpackCallToken(token, tokenKey, scope(), 3600)).not.toThrow();
-    expect(() => unpackCallToken(token, tokenKey, scope({ protocol: "other.Svc.v1" }), 3600)).toThrow(
+    const token = packCall(CALL_ID, new Uint8Array([1]), new Uint8Array([2]), tokenKey, scope());
+    expect(() => unpackCall(token, tokenKey, scope(), 3600)).not.toThrow();
+    expect(() => unpackCall(token, tokenKey, scope({ protocol: "other.Svc.v1" }), 3600)).toThrow(
       "signature verification failed",
     );
   });
@@ -98,15 +139,15 @@ describe("State Token", () => {
 
   test("peer-bound call tokens reject a changed digest or empty-principal domain", () => {
     const bound = scope({ principal: "", evidenceBinding: "binding", domain: "domain-a" });
-    const token = packCallToken(CALL_ID, new Uint8Array([1]), new Uint8Array([2]), tokenKey, bound);
-    expect(() => unpackCallToken(token, tokenKey, bound, 3600)).not.toThrow();
-    expect(() => unpackCallToken(token, tokenKey, { ...bound, evidenceBinding: "other" }, 3600)).toThrow(
+    const token = packCall(CALL_ID, new Uint8Array([1]), new Uint8Array([2]), tokenKey, bound);
+    expect(() => unpackCall(token, tokenKey, bound, 3600)).not.toThrow();
+    expect(() => unpackCall(token, tokenKey, { ...bound, evidenceBinding: "other" }, 3600)).toThrow(
       "signature verification failed",
     );
-    expect(() => unpackCallToken(token, tokenKey, { ...bound, domain: "domain-b" }, 3600)).toThrow(
+    expect(() => unpackCall(token, tokenKey, { ...bound, domain: "domain-b" }, 3600)).toThrow(
       "signature verification failed",
     );
-    expect(() => unpackCallToken(token, tokenKey, { ...bound, principal: null }, 3600)).toThrow(
+    expect(() => unpackCall(token, tokenKey, { ...bound, principal: null }, 3600)).toThrow(
       "signature verification failed",
     );
   });
@@ -128,8 +169,8 @@ describe("State Token", () => {
     expect(unpacked.createdAt).toBeGreaterThan(0);
 
     // The schemas ride the call token now, not the cursor.
-    const callToken = packCallToken(CALL_ID, schemaBytes, inputSchemaBytes, tokenKey, scope({ principal: ANON }));
-    const { callId, call } = unpackCallToken(callToken, tokenKey, scope({ principal: ANON }), 3600);
+    const callToken = packCall(CALL_ID, schemaBytes, inputSchemaBytes, tokenKey, scope({ principal: ANON }));
+    const { callId, call } = unpackCall(callToken, tokenKey, scope({ principal: ANON }), 3600);
     expect(Array.from(callId)).toEqual(Array.from(CALL_ID));
     expect(Array.from(call.schemaBytes)).toEqual([1, 2, 3, 4]);
     expect(Array.from(call.inputSchemaBytes)).toEqual([5, 6, 7]);
@@ -140,9 +181,9 @@ describe("State Token", () => {
     // the AEAD tag check rather than decoding into a payload the reader
     // would misinterpret.
     const cursor = packStateToken(new Uint8Array([1]), CALL_ID, tokenKey, scope({ principal: ANON }));
-    const call = packCallToken(CALL_ID, new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
+    const call = packCall(CALL_ID, new Uint8Array([2]), new Uint8Array([3]), tokenKey, ANON);
     expect(() => unpackStateToken(call, tokenKey, 3600, scope({ principal: ANON }))).toThrow();
-    expect(() => unpackCallToken(cursor, tokenKey, scope({ principal: ANON }), 3600)).toThrow();
+    expect(() => unpackCall(cursor, tokenKey, scope({ principal: ANON }), 3600)).toThrow();
   });
 
   test("decryption fails with wrong key", () => {
@@ -267,6 +308,19 @@ describe("State Token", () => {
     );
   });
 
+  test("the cursor is compressed before sealing, and a tiny one stays raw (STATE_REF_V1.md §7)", () => {
+    const sc = scope({ principal: ANON });
+    const open = (token: string) => openBytes(base64ToBytes(token), tokenKey, { aad: computeAad(sc), version: 6 });
+    const repetitive = new TextEncoder().encode('{"init":"'.concat("x".repeat(20000), '"}'));
+    const big = packStateToken(repetitive, CALL_ID, tokenKey, sc);
+    expect(open(big)[8 + 16]).toBe(0x01);
+    expect(base64ToBytes(big).length).toBeLessThan(repetitive.length / 10);
+    expect(unpackStateToken(big, tokenKey, 3600, sc).stateBytes).toEqual(repetitive);
+    const tiny = packStateToken(new Uint8Array([7]), CALL_ID, tokenKey, sc);
+    expect(open(tiny)[8 + 16]).toBe(0x00);
+    expect(unpackStateToken(tiny, tokenKey, 3600, sc).stateBytes).toEqual(new Uint8Array([7]));
+  });
+
   test("handles large state", () => {
     const stateBytes = randomBytes(10000);
     const schemaBytes = randomBytes(500);
@@ -277,8 +331,8 @@ describe("State Token", () => {
     const equal = (x: Uint8Array, y: Uint8Array) => x.length === y.length && x.every((v, i) => v === y[i]);
     expect(equal(unpacked.stateBytes, stateBytes)).toBe(true);
 
-    const callToken = packCallToken(CALL_ID, schemaBytes, inputSchemaBytes, tokenKey, scope({ principal: ANON }));
-    const { call } = unpackCallToken(callToken, tokenKey, scope({ principal: ANON }), 3600);
+    const callToken = packCall(CALL_ID, schemaBytes, inputSchemaBytes, tokenKey, scope({ principal: ANON }));
+    const { call } = unpackCall(callToken, tokenKey, scope({ principal: ANON }), 3600);
     expect(equal(call.schemaBytes, schemaBytes)).toBe(true);
     expect(equal(call.inputSchemaBytes, inputSchemaBytes)).toBe(true);
   });

@@ -14,7 +14,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import type { Subprocess } from "bun";
 import { batchFromColumns, field, int64, schema } from "../src/arrow/index.js";
 import { LOCATION_KEY, LOCATION_SHA256_KEY } from "../src/constants.js";
-import { maybeExternalizeBatch, resolveExternalLocation } from "../src/external.js";
+import { maybeExternalizeBatch, ObjectMissingError, resolveExternalLocation } from "../src/external.js";
 import {
   CLIENT_UPLOAD_ORIGIN,
   externalConfigFromEnv,
@@ -378,6 +378,31 @@ describe.skipIf(!hasFake)("against the fake vendor", () => {
     expect(after.client_uploads! - before.client_uploads!).toBe(1);
     expect(after.client_upload_bytes! - before.client_upload_bytes!).toBe(data.byteLength);
     expect(after.client_upload_refusals! - before.client_upload_refusals!).toBe(2);
+  });
+
+  test("VendorStorage object API: putObject marks origin=state_ref, get fetches by id, a deleted object is missing", async () => {
+    const storage = new VendorStorage(base, TOKEN);
+    const before = await stats();
+    const data = bytes(5000, 3);
+    const objectId = await storage.putObject(data);
+    expect(objectId.length).toBeGreaterThan(0);
+    expect(await storage.get(objectId)).toEqual(data);
+    await expect(storage.get(objectId, { maxBytes: 100 })).rejects.toThrow("max_fetch_bytes");
+    const after = await stats();
+    // A StateRef write is a server rpc write too (STATE_REF_V1.md decision 9).
+    expect(after.puts_state_ref! - before.puts_state_ref!).toBe(1);
+    expect(after.puts_rpc! - before.puts_rpc!).toBe(1);
+    expect(after.gets_state_ref! - before.gets_state_ref!).toBeGreaterThanOrEqual(1);
+    expect(after.upload_urls).toBe(0);
+    await admin("delete?origin=state_ref");
+    await expect(storage.get(objectId)).rejects.toBeInstanceOf(ObjectMissingError);
+  });
+
+  test("generateUploadUrl reports the grant's objectId", async () => {
+    const storage = new VendorStorage(base, TOKEN);
+    const pair = await storage.generateUploadUrl(3, "ab".repeat(32));
+    expect(typeof pair.objectId).toBe("string");
+    expect(pair.objectId!.length).toBeGreaterThan(0);
   });
 
   test("the upload fault corrupts a client PUT in transit and storage refuses it", async () => {

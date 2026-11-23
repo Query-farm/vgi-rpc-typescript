@@ -2,25 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { openBytes, SealError, sealBytes } from "../crypto.js";
-import { zstdCompressSyncOrNull, zstdDecompressSync } from "../util/zstd.js";
+import { MAX_TOKEN_PLAINTEXT_BYTES, packToken, TokenCodecError, unpackToken } from "../token-codec.js";
 
 const _UTF8 = new TextEncoder();
 
 // On-wire version bytes. The cursor and call tokens carry independent
-// version lines because they change for independent reasons. Cursor v5 drops
-// the schemas, which moved into the call token; a v4 reader would mis-frame
-// it, so the bump turns a rolling deploy's stale token into a clean failure.
-const TOKEN_VERSION = 5;
-// Call token v3 compresses the schemas (zstd where the runtime can encode):
-// the client resends this token on every exchange turn, a turn the DuckDB
-// extension never moves to an upload URL, so its size counts against the
-// server's request cap. A wide schema (echo over all_types) sent it to 17 KB
-// of base64 -- with the input batch, over a 32 KiB cap.
-const CALL_TOKEN_VERSION = 3;
-const CALL_BODY_RAW = 0;
-const CALL_BODY_ZSTD = 1;
-/** Cap on a call token's decompressed body (it is authenticated first). */
-const MAX_CALL_BODY_BYTES = 64 * 1024 * 1024;
+// version lines because they change for independent reasons; a bump turns a
+// rolling deploy's stale token into a clean failure.
+//
+// Cursor v6 compresses the state with the standard token codec
+// (STATE_REF_V1.md §7: `codec || body`, compressed before sealing). v5 sealed
+// the cursor raw, so the stream state -- and VGI's carried init request in
+// it -- rode every continuation uncompressed.
+const TOKEN_VERSION = 6;
+// Call token v4 carries both schemas behind one StateRef (`schemas_ref`,
+// STATE_REF_V1.md §8), so a very wide table's schemas can be stored once
+// instead of riding every request; v3 compressed them inline. The body is
+// compressed with the standard codec either way: the client resends this
+// token on every exchange turn, so its size counts against the request cap.
+const CALL_TOKEN_VERSION = 4;
+/** Cap on a token's decompressed body (it is authenticated first). */
+const MAX_CALL_BODY_BYTES = MAX_TOKEN_PLAINTEXT_BYTES;
 
 /** Length of the random per-stream id minted at `/init`. */
 export const CALL_ID_LEN = 16;
@@ -189,28 +191,30 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
 }
 
 /**
- * Seal a state token with XChaCha20-Poly1305 AEAD (v4 wire format).
+ * Seal a cursor (state) token with XChaCha20-Poly1305 AEAD (v6 wire format).
  *
  * Layout (base64-encoded):
  *
  * ```
- *   [1B  version=4]
+ *   [1B  version=6]
  *   [24B XChaCha20-Poly1305 nonce (random)]
  *   [..  ciphertext + 16B Poly1305 tag]
  *        plaintext:
  *          [8B  created_at uint64 LE]
- *          [4B  state_len uint32 LE]   [state_len bytes]
- *          [4B  schema_len uint32 LE]  [schema_len bytes]
- *          [4B  input_schema_len LE]   [input_schema_len bytes]
+ *          [16B call_id]
+ *          [1B  codec]  [body: the state bytes, raw (0x00) or zstd (0x01)]
  * ```
  *
  * `created_at` lives inside the ciphertext so TTL enforcement runs after
- * authenticity. The version byte is informational (a self-describing
- * format marker); a tampered version byte still fails decryption because
- * we use the matching algorithm for that version. The {@link TokenScope} --
- * principal, auth domain, peer-evidence digest, and the owning protocol -- is
- * bound via AEAD associated data, so a token minted for one identity or one
- * protocol fails decryption when presented under another.
+ * authenticity, and ahead of the codec so it is checked before anything is
+ * decompressed. The state is compressed *before* sealing (STATE_REF_V1.md §7):
+ * once sealed it is ciphertext and no outer codec finds its redundancy; a
+ * small state that does not shrink goes raw, growing by the one tag byte.
+ * The {@link TokenScope} -- principal, auth domain, peer-evidence digest, and
+ * the owning protocol -- is bound via AEAD associated data, so a token minted
+ * for one identity or one protocol fails decryption under another.
+ *
+ * Returns the base64 token; {@link sealStateToken} returns the raw envelope.
  */
 export function packStateToken(
   stateBytes: Uint8Array,
@@ -219,40 +223,47 @@ export function packStateToken(
   scope: TokenScope,
   createdAt?: number,
 ): string {
+  return bytesToBase64(sealStateToken(stateBytes, callId, tokenKey, scope, createdAt));
+}
+
+/** {@link packStateToken} without the base64 step: the sealed envelope. */
+export function sealStateToken(
+  stateBytes: Uint8Array,
+  callId: Uint8Array,
+  tokenKey: Uint8Array,
+  scope: TokenScope,
+  createdAt?: number,
+): Uint8Array {
   if (tokenKey.length !== 32) {
     throw new Error("XChaCha20-Poly1305 token key must be 32 bytes");
   }
   const now = createdAt ?? Math.floor(Date.now() / 1000);
-
-  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 4 + stateBytes.length);
+  const payload = packToken(stateBytes);
+  const plaintext = new Uint8Array(8 + CALL_ID_LEN + payload.byteLength);
   const view = new DataView(plaintext.buffer);
-  let offset = 0;
-
-  writeU64LE(view, offset, BigInt(now));
-  offset += 8;
-  plaintext.set(callId, offset);
-  offset += CALL_ID_LEN;
-
-  writeU32LE(view, offset, stateBytes.length);
-  offset += 4;
-  plaintext.set(stateBytes, offset);
-
-  const wire = sealBytes(plaintext, tokenKey, {
+  writeU64LE(view, 0, BigInt(now));
+  plaintext.set(callId, 8);
+  plaintext.set(payload, 8 + CALL_ID_LEN);
+  return sealBytes(plaintext, tokenKey, {
     aad: computeAad(scope),
     version: TOKEN_VERSION,
   });
-  return bytesToBase64(wire);
 }
 
 /**
  * Seal the half of a stream's state that is fixed for the life of the call —
- * the resolved schemas — plus the `callId` binding it to its cursors. Minted
- * once, by `/init`; never re-issued.
+ * the resolved schemas, behind one `StateRef` (`schemasRef`, see
+ * {@link packSchemas}), and the response budget — plus the `callId` binding it
+ * to its cursors. Minted once, by `/init`; never re-issued.
+ *
+ * Plaintext: `created_at u64 | call_id[16] | codec | body`, where body (raw or
+ * zstd) is `u32 len | schemas_ref | u64 response_limit | u64 preferred`. The
+ * header stays outside the codec so the TTL is checked before anything is
+ * decompressed.
  */
 export function packCallToken(
   callId: Uint8Array,
-  schemaBytes: Uint8Array,
-  inputSchemaBytes: Uint8Array,
+  schemasRef: Uint8Array,
   tokenKey: Uint8Array,
   scope: TokenScope,
   createdAt?: number,
@@ -263,42 +274,53 @@ export function packCallToken(
   }
   const now = createdAt ?? Math.floor(Date.now() / 1000);
 
-  // createdAt | callId | codec | body, where body (raw or zstd) carries the
-  // schemas and the response budget. The header stays outside the codec so
-  // the TTL is checked before anything is decompressed.
-  const body = new Uint8Array(4 + schemaBytes.length + 4 + inputSchemaBytes.length + 16);
+  const body = new Uint8Array(4 + schemasRef.length + 16);
   const view = new DataView(body.buffer);
-  let offset = 0;
-
-  writeU32LE(view, offset, schemaBytes.length);
-  offset += 4;
-  body.set(schemaBytes, offset);
-  offset += schemaBytes.length;
-
-  writeU32LE(view, offset, inputSchemaBytes.length);
-  offset += 4;
-  body.set(inputSchemaBytes, offset);
-  offset += inputSchemaBytes.length;
-
+  writeU32LE(view, 0, schemasRef.length);
+  body.set(schemasRef, 4);
+  let offset = 4 + schemasRef.length;
   writeU64LE(view, offset, BigInt(responseBudget?.responseLimitBytes ?? 0));
   offset += 8;
   writeU64LE(view, offset, BigInt(responseBudget?.preferredResponseBytes ?? 0));
 
-  const compressed = zstdCompressSyncOrNull(body);
-  const useZstd = compressed !== null && compressed.byteLength < body.byteLength;
-  const payload = useZstd ? compressed! : body;
-  const plaintext = new Uint8Array(8 + CALL_ID_LEN + 1 + payload.byteLength);
+  const payload = packToken(body);
+  const plaintext = new Uint8Array(8 + CALL_ID_LEN + payload.byteLength);
   const header = new DataView(plaintext.buffer);
   writeU64LE(header, 0, BigInt(now));
   plaintext.set(callId, 8);
-  plaintext[8 + CALL_ID_LEN] = useZstd ? CALL_BODY_ZSTD : CALL_BODY_RAW;
-  plaintext.set(payload, 8 + CALL_ID_LEN + 1);
+  plaintext.set(payload, 8 + CALL_ID_LEN);
 
   const wire = sealBytes(plaintext, tokenKey, {
     aad: computeCallAad(scope),
     version: CALL_TOKEN_VERSION,
   });
   return bytesToBase64(wire);
+}
+
+/** The `schemas_ref` value: `u32 len | output schema | u32 len | input schema`. */
+export function packSchemas(schemaBytes: Uint8Array, inputSchemaBytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(8 + schemaBytes.length + inputSchemaBytes.length);
+  const view = new DataView(out.buffer);
+  writeU32LE(view, 0, schemaBytes.length);
+  out.set(schemaBytes, 4);
+  writeU32LE(view, 4 + schemaBytes.length, inputSchemaBytes.length);
+  out.set(inputSchemaBytes, 8 + schemaBytes.length);
+  return out;
+}
+
+/** Reverse {@link packSchemas}; each schema is copied to an aligned buffer. */
+export function unpackSchemas(value: Uint8Array): { schemaBytes: Uint8Array; inputSchemaBytes: Uint8Array } {
+  const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
+  if (value.length < 4) throw new Error("Malformed call token schemas");
+  const outLen = readU32LE(view, 0);
+  if (4 + outLen + 4 > value.length) throw new Error("Malformed call token schemas");
+  const inLen = readU32LE(view, 4 + outLen);
+  if (8 + outLen + inLen !== value.length) throw new Error("Malformed call token schemas");
+  const schemaBytes = new Uint8Array(outLen);
+  schemaBytes.set(value.subarray(4, 4 + outLen));
+  const inputSchemaBytes = new Uint8Array(inLen);
+  inputSchemaBytes.set(value.subarray(8 + outLen));
+  return { schemaBytes, inputSchemaBytes };
 }
 
 /** Decrypted payload of a state token, as returned by {@link unpackStateToken}. */
@@ -328,6 +350,9 @@ export interface ResolvedCall {
   responseLimitBytes?: number;
   /** Initial advisory batching target, sealed with the hard cap. */
   preferredResponseBytes?: number;
+  /** Sealed (base64-decoded) length of the stream's call token: it rides
+   *  every continuation, so the turn budget subtracts it. */
+  callTokenBytes?: number;
 }
 
 /**
@@ -397,12 +422,13 @@ export function unpackStateToken(
   const callId = copyAligned(offset, CALL_ID_LEN);
   offset += CALL_ID_LEN;
 
-  const stateLen = readU32LE(view, offset);
-  offset += 4;
-  if (offset + stateLen > plaintext.length) {
-    throw new Error("State token truncated (state)");
+  let stateBytes: Uint8Array;
+  try {
+    stateBytes = unpackToken(plaintext.subarray(offset), MAX_CALL_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof TokenCodecError) throw new Error("Malformed token payload");
+    throw error;
   }
-  const stateBytes = copyAligned(offset, stateLen);
 
   return { stateBytes, callId, createdAt };
 }
@@ -416,7 +442,7 @@ export function unpackCallToken(
   tokenKey: Uint8Array,
   scope: TokenScope,
   tokenTtl = 0,
-): { callId: Uint8Array; call: ResolvedCall } {
+): { callId: Uint8Array; schemasRef: Uint8Array; responseLimitBytes?: number; preferredResponseBytes?: number } {
   const raw = base64ToBytes(token);
   if (raw.length >= 1 && raw[0] !== CALL_TOKEN_VERSION) {
     throw new Error(`Unsupported call token version ${raw[0]}`);
@@ -448,56 +474,29 @@ export function unpackCallToken(
   const callId = new Uint8Array(CALL_ID_LEN);
   callId.set(plaintext.subarray(8, 8 + CALL_ID_LEN));
 
-  const codec = plaintext[8 + CALL_ID_LEN];
-  const payload = plaintext.subarray(8 + CALL_ID_LEN + 1);
   let body: Uint8Array;
-  if (codec === CALL_BODY_RAW) {
-    body = payload;
-  } else if (codec === CALL_BODY_ZSTD) {
-    try {
-      body = zstdDecompressSync(payload, MAX_CALL_BODY_BYTES);
-    } catch {
-      throw new Error("State token call body could not be decompressed");
-    }
-  } else {
-    throw new Error(`Unsupported call token body codec ${codec}`);
+  try {
+    body = unpackToken(plaintext.subarray(8 + CALL_ID_LEN), MAX_CALL_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof TokenCodecError) throw new Error("State token call body could not be decompressed");
+    throw error;
   }
-  plaintext = body;
 
-  const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
-  const copyAligned = (start: number, len: number) => {
-    const out = new Uint8Array(len);
-    out.set(plaintext.subarray(start, start + len));
-    return out;
-  };
-
-  let offset = 0;
-  const schemaLen = readU32LE(view, offset);
-  offset += 4;
-  if (offset + schemaLen > plaintext.length) {
-    throw new Error("State token truncated (schema)");
-  }
-  const schemaBytes = copyAligned(offset, schemaLen);
-  offset += schemaLen;
-
-  const inputSchemaLen = readU32LE(view, offset);
-  offset += 4;
-  if (offset + inputSchemaLen > plaintext.length) {
-    throw new Error("State token truncated (input schema)");
-  }
-  const inputSchemaBytes = copyAligned(offset, inputSchemaLen);
-  offset += inputSchemaLen;
-  if (offset + 16 !== plaintext.length) {
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  if (body.length < 4) throw new Error("State token truncated (schemas)");
+  const refLen = readU32LE(view, 0);
+  if (4 + refLen + 16 !== body.length) {
     throw new Error("State token truncated (response budget)");
   }
-  const responseLimitRaw = readU64LE(view, offset);
-  offset += 8;
-  const preferredResponseRaw = readU64LE(view, offset);
+  const schemasRef = new Uint8Array(refLen);
+  schemasRef.set(body.subarray(4, 4 + refLen));
+  const responseLimitRaw = readU64LE(view, 4 + refLen);
+  const preferredResponseRaw = readU64LE(view, 4 + refLen + 8);
   if (responseLimitRaw > BigInt(Number.MAX_SAFE_INTEGER) || preferredResponseRaw > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("State token contains an unsafe response budget");
   }
   const responseLimitBytes = Number(responseLimitRaw) || undefined;
   const preferredResponseBytes = Number(preferredResponseRaw) || undefined;
 
-  return { callId, call: { schemaBytes, inputSchemaBytes, responseLimitBytes, preferredResponseBytes } };
+  return { callId, schemasRef, responseLimitBytes, preferredResponseBytes };
 }

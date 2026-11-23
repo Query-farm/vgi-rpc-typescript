@@ -112,6 +112,7 @@ const provider: UploadUrlProvider = {
       expiresAt: new Date(Date.now() + 600_000),
       // Content-Length is stripped by the server before it reaches the client.
       headers: { "x-amz-checksum-sha256": shaB64, "Content-Length": String(size) },
+      objectId: id,
     };
   },
 };
@@ -237,14 +238,23 @@ describe("__upload_url__/init v2 (server)", () => {
       "download_url",
       "expires_at",
       "upload_headers",
+      "object_id",
+      "ref",
     ]);
     expect(reader.schema.fields.every((f) => !f.nullable)).toBe(true);
-    const rows: { headers: Record<string, string> }[] = [];
+    const rows: { headers: Record<string, string>; objectId: string; ref: Uint8Array }[] = [];
     for (const batch of reader.readAll()) {
       for (let r = 0; r < batch.numRows; r++) {
-        rows.push({ headers: batch.getChild("upload_headers")!.get(r).toJSON() });
+        rows.push({
+          headers: batch.getChild("upload_headers")!.get(r).toJSON(),
+          objectId: batch.getChild("object_id")!.get(r),
+          ref: batch.getChild("ref")!.get(r),
+        });
       }
     }
+    // Each entry names the object its PUT creates, with a sealed reference to it.
+    expect(new Set(rows.map((row) => row.objectId)).size).toBe(3);
+    for (const row of rows) expect(row.ref.byteLength).toBeGreaterThan(41);
     expect(rows.length).toBe(3);
     expect(minted).toEqual(entries);
     for (let i = 0; i < 3; i++) {
