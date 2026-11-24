@@ -252,6 +252,14 @@ Every pointer carries `vgi_rpc.location.sha256`, and inbound pointer URLs are pi
 
 Requests to the signed URLs go out on the global `fetch` with exactly the headers the grant requires: never the vendor token, never a caller-supplied `fetch`, and no redirects. Errors never contain the token or a signed query string. `pinnedHostsValidator(hosts, { allowHttp, prefixes })` is the same pinning as a standalone validator.
 
+## Storage timeouts
+
+Storage transfers (signed PUTs and GETs, inbound pointer fetches, client uploads, the S3 backend) use a **stall timeout**, never a whole-transfer deadline: a transfer fails only when no bytes have moved for 30 s (`VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`, or `stallTimeoutMs` on `VendorClientOptions`, `ExternalLocationConfig`, `S3StorageConfig`). A 100 MB result on a 2 MB/s link takes 50 s and completes. Connecting and waiting for the response each get one stall window (the connect timeout is the same 30 s, as in vgi-rpc-python).
+
+Signed-URL transfers retry transport errors (connect, reset, stall), 429 and 5xx up to three attempts with exponential backoff (0.25 s base, 5 s cap, jitter); a retry resends the body, since a pre-signed PUT cannot resume. Vendor API calls (`/v1/info`, `/v1/blobs/put`, ...) keep a short whole-request `timeoutMs` (30 s).
+
+On Bun and Node the request body streams as 64 KiB chunks with a fixed `Content-Length`, and each chunk the transport takes counts as progress. Runtimes that cannot stream a fixed-length body (Cloudflare Workers, browsers, Deno) send the bytes in one piece under a single window of `stall + size / minUploadRateBytesPerSecond` (default 64 KiB/s).
+
 ## Related
 
 - [HTTP Transport](/guides/http-transport/) — routes, configuration, and where these options live.

@@ -303,6 +303,23 @@ export {
   type StateRefEventSink,
   setStateRefEventSink,
 } from "./state-ref-events.js";
+// Storage HTTP timeouts: stall (idle) timeouts, never a whole-transfer deadline.
+export {
+  canStreamFixedLengthBody,
+  DEFAULT_MIN_UPLOAD_RATE_BYTES_PER_SECOND,
+  DEFAULT_STORAGE_STALL_TIMEOUT_MS,
+  discardStorageBody,
+  ENV_STORAGE_STALL_TIMEOUT,
+  readStorageBody,
+  STORAGE_UPLOAD_CHUNK_BYTES,
+  StallWatchdog,
+  StorageBodyTooLargeError,
+  type StorageFetchOptions,
+  type StorageResponse,
+  StorageStallError,
+  storageFetch,
+  storageStallTimeoutMsFromEnv,
+} from "./storage-http.js";
 export {
   CODEC_DEFLATE,
   CODEC_RAW,

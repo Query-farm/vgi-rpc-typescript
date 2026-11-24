@@ -32,6 +32,13 @@ import {
   LOG_LEVEL_KEY,
 } from "./constants.js";
 import { dispatchLogOrError } from "./log-batch.js";
+import {
+  checkStallTimeoutMs,
+  type StallWatchdog,
+  StorageStallError,
+  storageFetch,
+  storageStallTimeoutMsFromEnv,
+} from "./storage-http.js";
 import { zstdCompress, zstdDecompress } from "./util/zstd.js";
 import { buildEmptyBatch, coerceInt64 } from "./wire/response.js";
 
@@ -157,6 +164,14 @@ export interface ExternalLocationConfig {
   maxRedirects?: number;
   /** Request implementation for external downloads. Defaults to global `fetch`. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Stall timeout for a pointer fetch, ms: the fetch fails only when no bytes
+   * have moved for this long (connecting, waiting for the response, or between
+   * body chunks). There is no whole-fetch deadline, so a slow fetch that keeps
+   * moving completes. Default: `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`, else
+   * 30000.
+   */
+  stallTimeoutMs?: number;
   /** Optional application validator for the complete decoded, digest-verified IPC
    * stream, before RPC log filtering or data-batch selection. Throw to reject. */
   validateFetchedIpc?: (data: Uint8Array) => void;
@@ -225,6 +240,7 @@ async function readResponseBounded(
   controller: AbortController,
   limitName = "max_fetch_bytes",
   transparentGzipMaxBytes?: number,
+  watchdog?: StallWatchdog,
 ): Promise<Uint8Array> {
   const declared = response.headers.get("Content-Length");
   if (declared != null) {
@@ -245,8 +261,18 @@ async function readResponseBounded(
   const prefix: number[] = [];
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let step: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        step = await reader.read();
+      } catch (error) {
+        if (watchdog?.stalled) {
+          throw new Error(`External location fetch stalled: no bytes for ${watchdog.stallMs} ms`);
+        }
+        throw error;
+      }
+      const { done, value } = step;
       if (done) break;
+      watchdog?.progress();
       total += value.byteLength;
       if (!decidedEncoding) {
         for (let i = 0; i < value.length && prefix.length < 2; i++) prefix.push(value[i]);
@@ -609,11 +635,14 @@ export async function resolveExternalLocation(
   }
 
   const { maxFetchBytes, maxDecompressedBytes, maxRedirects } = validateFetchConfig(config);
+  const stallTimeoutMs =
+    config.stallTimeoutMs !== undefined ? checkStallTimeoutMs(config.stallTimeoutMs) : storageStallTimeoutMsFromEnv();
   const validator = config.urlValidator === null ? undefined : (config.urlValidator ?? httpsOnlyValidator);
   const startedAt = performanceNow();
   let currentUrl = url;
   let response: Response | undefined;
   let controller: AbortController | undefined;
+  let watchdog: StallWatchdog | undefined;
   for (let redirects = 0; ; redirects++) {
     if (validator) {
       try {
@@ -624,20 +653,26 @@ export async function resolveExternalLocation(
       }
     }
 
-    controller = new AbortController();
+    watchdog?.stop();
     try {
-      // Bun otherwise transparently decodes Content-Encoding while retaining
-      // the header, which would charge decoded bytes to the encoded-body cap
-      // and then attempt to decode them a second time.
-      response = await (config.fetch ?? globalThis.fetch)(currentUrl, {
+      // Under a stall watchdog, never a whole-fetch deadline. Bun otherwise
+      // transparently decodes Content-Encoding while retaining the header,
+      // which would charge decoded bytes to the encoded-body cap and then
+      // attempt to decode them a second time; `decompress` is Bun-specific
+      // and harmless to standards-only fetch implementations.
+      const r = await storageFetch(currentUrl, {
+        method: "GET",
+        stallTimeoutMs,
+        ...(config.fetch ? { fetch: config.fetch } : {}),
         redirect: "manual",
-        signal: controller.signal,
-        // Bun-specific and intentionally harmless to standards-only fetch
-        // implementations.
-        decompress: false,
-      } as RequestInit);
-    } catch {
-      throw new Error(`External location fetch failed [url: ${redactExternalUrl(currentUrl)}]`);
+        extra: { decompress: false },
+      });
+      response = r.response;
+      controller = r.controller;
+      watchdog = r.watchdog;
+    } catch (error) {
+      const why = error instanceof StorageStallError ? ` (stalled: no bytes for ${stallTimeoutMs} ms)` : "";
+      throw new Error(`External location fetch failed${why} [url: ${redactExternalUrl(currentUrl)}]`);
     }
 
     if (![301, 302, 303, 307, 308].includes(response.status)) break;
@@ -660,18 +695,26 @@ export async function resolveExternalLocation(
   }
 
   if (!response.ok) {
+    watchdog?.stop();
+    controller?.abort();
     throw new Error(
       `External location fetch failed: ${response.status} ${response.statusText} [url: ${redactExternalUrl(currentUrl)}]`,
     );
   }
   const contentEncoding = response.headers.get("Content-Encoding");
-  let data = await readResponseBounded(
-    response,
-    maxFetchBytes,
-    controller!,
-    "max_fetch_bytes",
-    contentEncoding?.toLowerCase() === "gzip" ? maxDecompressedBytes : undefined,
-  );
+  let data: Uint8Array;
+  try {
+    data = await readResponseBounded(
+      response,
+      maxFetchBytes,
+      controller!,
+      "max_fetch_bytes",
+      contentEncoding?.toLowerCase() === "gzip" ? maxDecompressedBytes : undefined,
+      watchdog,
+    );
+  } finally {
+    watchdog?.stop();
+  }
   if (contentEncoding === "zstd") {
     try {
       data = new Uint8Array(await zstdDecompress(data, maxDecompressedBytes));
