@@ -39,7 +39,7 @@ jobs:
         run: bun install
 
       - name: Run unit tests
-        run: bun test test/wire.test.ts test/external-ref.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/large-payload.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts test/http/exchange-input-metadata.test.ts test/flechette-declared-schema.test.ts test/flechette-stream-client.test.ts test/backend-wire.test.ts test/client-int64-mode.test.ts test/vendor.test.ts
+        run: bun test test/wire.test.ts test/external-ref.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/large-payload.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts test/http/exchange-input-metadata.test.ts test/flechette-declared-schema.test.ts test/flechette-stream-client.test.ts test/backend-wire.test.ts test/client-int64-mode.test.ts test/vendor.test.ts test/storage-timeouts.test.ts
 
       # Batch metadata is encoded differently per backend, and the bug this
       # guards against was flechette-only: its encoder needs an explicit
@@ -60,6 +60,71 @@ jobs:
 
       - name: Run client tests (bun transports only)
         run: timeout 180 bun test test/client.test.ts test/client-native-conformance.test.ts test/iroh-client.test.ts
+
+  # Storage lanes that skip without their backing service, so they run here
+  # with it and the job fails if any of their tests skip: createS3Storage
+  # against RustFS (validates SigV4 and x-amz-checksum-sha256; the same pinned
+  # image vgi-rpc-java's storage-integration job uses), including the stall
+  # timeouts through a throttling proxy, and client request externalization
+  # against the Python reference server.
+  storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      rustfs:
+        # Multi-architecture manifest for the 1.0.0-beta.12-glibc release.
+        image: ghcr.io/rustfs/rustfs@sha256:29c02251c085cb04edce556304a9ec0f8fba0c40300266cf4f3d953783fe2450
+        env:
+          RUSTFS_ACCESS_KEY: vgi-ts-access
+          RUSTFS_SECRET_KEY: vgi-ts-secret-key
+          RUSTFS_CONSOLE_ENABLE: "false"
+          RUSTFS_OBS_LOGGER_LEVEL: error
+        ports:
+          - 9000:9000
+    env:
+      VGI_S3_TEST_ENDPOINT: http://127.0.0.1:9000
+      VGI_S3_TEST_BUCKET: vgi-rpc-ts-ci
+      AWS_ACCESS_KEY_ID: vgi-ts-access
+      AWS_SECRET_ACCESS_KEY: vgi-ts-secret-key
+      AWS_REGION: us-east-1
+      VGI_RPC_PYTHON_BIN: python3
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check out vgi-rpc-python
+        uses: actions/checkout@v7
+        with:
+          repository: Query-farm/vgi-rpc-python
+          path: .vgi-rpc-python
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          bun install
+          pip install ".vgi-rpc-python[http,external]"
+
+      - name: Wait for RustFS and create the bucket
+        run: |
+          for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:9000/health >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:9000/health >/dev/null
+          bun -e 'import { S3Client, CreateBucketCommand } from "@aws-sdk/client-s3";
+            await new S3Client({ endpoint: process.env.VGI_S3_TEST_ENDPOINT, forcePathStyle: true })
+              .send(new CreateBucketCommand({ Bucket: process.env.VGI_S3_TEST_BUCKET }));'
+
+      - name: Storage tests (fail on any skip)
+        run: |
+          set -o pipefail
+          timeout 300 bun test test/s3-upload-url.test.ts test/s3-timeouts.test.ts test/storage-timeouts.test.ts test/client-externalize.test.ts 2>&1 | tee "$RUNNER_TEMP/storage.txt"
+          if grep -Eq "^ *[1-9][0-9]* skip" "$RUNNER_TEMP/storage.txt"; then
+            echo "::error::storage tests skipped: their backing service is missing"; exit 1
+          fi
 
   build:
     runs-on: ubuntu-latest
