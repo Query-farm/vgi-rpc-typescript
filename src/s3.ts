@@ -62,8 +62,16 @@ export interface S3StorageConfig {
   prefix?: string;
   /** Lifetime of pre-signed GET URLs in seconds. Default: 3600 (1 hour). */
   presignExpirySeconds?: number;
-  /** AWS region. If omitted, uses default SDK config. */
+  /** AWS region. If omitted, uses default SDK config (`AWS_REGION`, the
+   *  profile). S3-compatible stores take any name, e.g. `auto` for R2. */
   region?: string;
+  /**
+   * Credentials: an `AwsCredentialIdentity` (`{ accessKeyId, secretAccessKey,
+   * sessionToken? }`) or a provider function. If omitted, the SDK's default
+   * chain (environment, shared profile, SSO, web identity, ECS/EC2 instance
+   * role).
+   */
+  credentials?: unknown;
   /** Custom S3 endpoint URL (for MinIO, LocalStack, etc.). */
   endpointUrl?: string;
   /** Force path-style addressing (required for some S3-compatible services).
@@ -246,6 +254,7 @@ export function createS3Storage(config: S3StorageConfig): ExternalStorage & Obje
     const { S3Client } = await import("@aws-sdk/client-s3");
     const clientConfig: Record<string, any> = { requestHandler: stallTimeoutRequestHandler(stallTimeoutMs) };
     if (config.region) clientConfig.region = config.region;
+    if (config.credentials) clientConfig.credentials = config.credentials;
     if (config.endpointUrl) {
       clientConfig.endpoint = config.endpointUrl;
       clientConfig.forcePathStyle = config.forcePathStyle ?? true;

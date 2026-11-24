@@ -75,6 +75,27 @@ describe.skipIf(!endpoint || !bucket)("createS3Storage timeouts (live S3-compati
     return storage;
   };
 
+  it("explicit credentials and region work with no AWS_* environment", async () => {
+    const saved = { id: process.env.AWS_ACCESS_KEY_ID, secret: process.env.AWS_SECRET_ACCESS_KEY };
+    const credentials = { accessKeyId: saved.id!, secretAccessKey: saved.secret! };
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
+    try {
+      const storage = createS3Storage({
+        bucket: bucket!,
+        prefix: "vgi-rpc-ts-test/",
+        region: "auto",
+        endpointUrl: endpoint!,
+        credentials,
+      });
+      const id = await storage.putObject(new Uint8Array([1, 2, 3]));
+      expect([...(await storage.get(id))]).toEqual([1, 2, 3]);
+    } finally {
+      process.env.AWS_ACCESS_KEY_ID = saved.id;
+      process.env.AWS_SECRET_ACCESS_KEY = saved.secret;
+    }
+  });
+
   it("a slow putObject that keeps moving succeeds on its first attempt", async () => {
     // 24 MiB at 2 MiB/s is ~12 s against a 3 s stall timeout.
     const proxy = await throttlingProxy(new URL(endpoint!), 2 * MiB);
