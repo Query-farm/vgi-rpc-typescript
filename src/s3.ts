@@ -338,7 +338,15 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
 
   function ensureClients(): Promise<{ client: any; presigner: any }> {
     clients ??= (async () => {
-      const { S3Client } = await import("@aws-sdk/client-s3");
+      let S3Client: any;
+      try {
+        ({ S3Client } = await import("@aws-sdk/client-s3"));
+        await import("@aws-sdk/s3-request-presigner");
+      } catch {
+        throw new Error(
+          "S3 storage needs the optional packages @aws-sdk/client-s3 and @aws-sdk/s3-request-presigner: install them",
+        );
+      }
       const base = clientConfig(config.endpointUrl);
       if (config.credentials) base.credentials = config.credentials;
       const client = new S3Client(base);
@@ -349,7 +357,10 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
       // The same (memoized, refreshing) credential provider signs both.
       pub.credentials = client.config.credentials;
       return { client, presigner: new S3Client(pub) };
-    })();
+    })().catch((error) => {
+      clients = null;
+      throw error;
+    });
     return clients;
   }
 

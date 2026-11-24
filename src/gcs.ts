@@ -110,7 +110,12 @@ export function createGCSStorage(config: GCSStorageConfig): GCSStorage {
   let bucketRef: any = null;
   async function bucket(): Promise<any> {
     if (bucketRef) return bucketRef;
-    const { Storage } = await import("@google-cloud/storage");
+    let Storage: any;
+    try {
+      ({ Storage } = await import("@google-cloud/storage"));
+    } catch {
+      throw new Error("GCS storage needs the optional package @google-cloud/storage: install it");
+    }
     const options: Record<string, any> = {};
     if (config.projectId) options.projectId = config.projectId;
     if (config.keyFilename) options.keyFilename = config.keyFilename;
