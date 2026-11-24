@@ -21,7 +21,14 @@
  * ```
  */
 
-import { DEFAULT_MAX_FETCH_BYTES, type ExternalStorage, ObjectMissingError, type ObjectStore } from "./external.js";
+import {
+  DEFAULT_MAX_FETCH_BYTES,
+  type ExternalStorage,
+  ObjectMissingError,
+  type ObjectStore,
+  type UploadUrl,
+  type UploadUrlProvider,
+} from "./external.js";
 
 async function sha256Base64(data: Uint8Array): Promise<string> {
   const buf = new ArrayBuffer(data.byteLength);
@@ -29,6 +36,14 @@ async function sha256Base64(data: Uint8Array): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
   let s = "";
   for (const b of digest) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
+/** Base64 of a 64-character lowercase hex SHA-256 (the `x-amz-checksum-sha256` form). */
+function sha256Base64FromHex(sha256Hex: string): string {
+  if (!/^[0-9a-f]{64}$/.test(sha256Hex)) throw new Error("sha256 must be 64 lowercase hex characters");
+  let s = "";
+  for (let i = 0; i < 64; i += 2) s += String.fromCharCode(Number.parseInt(sha256Hex.slice(i, i + 2), 16));
   return btoa(s);
 }
 
@@ -50,7 +65,9 @@ export interface S3StorageConfig {
 
 /**
  * Create an S3-backed ExternalStorage (also an {@link ObjectStore}: stored
- * `StateRef` objects and argument references, keyed by object key).
+ * `StateRef` objects and argument references, keyed by object key, and an
+ * {@link UploadUrlProvider}: pre-signed client upload URLs, so a server with
+ * this storage accepts requests over its request cap and argument references).
  *
  * Lazily imports `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`
  * on first upload to avoid loading the AWS SDK unless needed.
@@ -58,7 +75,7 @@ export interface S3StorageConfig {
  * Objects carry no TTL: set a bucket lifecycle rule of at least one day on
  * the prefix.
  */
-export function createS3Storage(config: S3StorageConfig): ExternalStorage & ObjectStore {
+export function createS3Storage(config: S3StorageConfig): ExternalStorage & ObjectStore & UploadUrlProvider {
   const bucket = config.bucket;
   const prefix = config.prefix ?? "vgi-rpc/";
   const presignExpiry = config.presignExpirySeconds ?? 3600;
@@ -102,6 +119,38 @@ export function createS3Storage(config: S3StorageConfig): ExternalStorage & Obje
       const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
       const url = await getSignedUrl(client, getCommand, { expiresIn: presignExpiry });
       return url;
+    },
+
+    /**
+     * Pre-signed PUT and GET URLs for one sized client upload (upload URLs v2).
+     *
+     * The PUT URL signs `Content-Length` and `x-amz-checksum-sha256` (SigV4),
+     * so S3 refuses any body that is not exactly `size` bytes hashing to
+     * `sha256Hex` (`BadDigest`). The checksum stays a signed header (not a
+     * query parameter): the client sends it from {@link UploadUrl.headers}.
+     * The object is not deleted automatically: set a lifecycle rule on the prefix.
+     */
+    async generateUploadUrl(size: number, sha256Hex: string): Promise<UploadUrl> {
+      if (!Number.isSafeInteger(size) || size < 1) throw new Error(`size must be a positive integer, got ${size}`);
+      const checksum = sha256Base64FromHex(sha256Hex);
+      const client = await ensureClient();
+      const { PutObjectCommand, GetObjectCommand } = await import("@aws-sdk/client-s3");
+      const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+      const key = `${prefix}${crypto.randomUUID()}.arrow`;
+      const expiresAt = new Date(Date.now() + presignExpiry * 1000);
+      const uploadUrl = await getSignedUrl(
+        client,
+        new PutObjectCommand({ Bucket: bucket, Key: key, ContentLength: size, ChecksumSHA256: checksum }),
+        {
+          expiresIn: presignExpiry,
+          signableHeaders: new Set(["content-length", "x-amz-checksum-sha256"]),
+          unhoistableHeaders: new Set(["x-amz-checksum-sha256"]),
+        },
+      );
+      const downloadUrl = await getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), {
+        expiresIn: presignExpiry,
+      });
+      return { uploadUrl, downloadUrl, expiresAt, headers: { "x-amz-checksum-sha256": checksum }, objectId: key };
     },
 
     async putObject(data: Uint8Array): Promise<string> {
