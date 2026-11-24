@@ -23,6 +23,7 @@ import {
   type IrohHttpFetchInit,
   type IrohHttpNode,
   irohForwardedHeaderIdentityProvider,
+  irohHttpHandler,
   Protocol,
   requirePeerIdentity,
   str,
@@ -355,28 +356,30 @@ describe("HTTP-over-Iroh client", () => {
     const serverNode = await createNode({ relay: { mode: "disabled" } });
     const clientNode = await createNode({ relay: { mode: "disabled" } });
     const server = serverNode.serve(
-      createHttpHandler(addProtocol(), {
-        prefix: "/vgi",
-        serverId: "httpi-live",
-        authenticate: bearerAuthenticateStatic({
-          tokens: { "hosted-native-token": new AuthContext("bearer", true, "typescript-ci") },
-        }),
-        peerIdentityProviders: [
-          irohForwardedHeaderIdentityProvider({
-            issuer: "typescript-hosted-ci",
-            trustedProxyAddresses: ["127.0.0.1"],
+      irohHttpHandler(
+        createHttpHandler(addProtocol(), {
+          prefix: "/vgi",
+          serverId: "httpi-live",
+          authenticate: bearerAuthenticateStatic({
+            tokens: { "hosted-native-token": new AuthContext("bearer", true, "typescript-ci") },
           }),
-        ],
-        peerAuthenticationPolicy: requirePeerIdentity("iroh"),
-        peerResolutionContext(request) {
-          const peerId = request.headers.get("Peer-Id");
-          const endpointId = peerId ? Buffer.from(PublicKey.fromPeerId(peerId).bytes).toString("hex") : "";
-          return {
-            immediatePeer: "127.0.0.1",
-            headers: new Map([[IROH_FORWARDED_ENDPOINT_HEADER, [endpointId]]]),
-          };
-        },
-      }),
+          peerIdentityProviders: [
+            irohForwardedHeaderIdentityProvider({
+              issuer: "typescript-hosted-ci",
+              trustedProxyAddresses: ["127.0.0.1"],
+            }),
+          ],
+          peerAuthenticationPolicy: requirePeerIdentity("iroh"),
+          peerResolutionContext(request) {
+            const peerId = request.headers.get("Peer-Id");
+            const endpointId = peerId ? Buffer.from(PublicKey.fromPeerId(peerId).bytes).toString("hex") : "";
+            return {
+              immediatePeer: "127.0.0.1",
+              headers: new Map([[IROH_FORWARDED_ENDPOINT_HEADER, [endpointId]]]),
+            };
+          },
+        }),
+      ),
     );
     try {
       const discovery = await serverNode.discoveryInfo();

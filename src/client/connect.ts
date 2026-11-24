@@ -20,6 +20,14 @@ import {
 } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
 import {
+  CLIENT_PROTOCOL_VERSIONS_HEADER,
+  ClientVersioning,
+  EndpointNegotiation,
+  isRetrySafe,
+  isVersionRefusal,
+  PROTOCOL_VERSIONS_HEADER,
+} from "../protocol-versions.js";
+import {
   discoverHttpCapabilities,
   type HttpServerCapabilities,
   isCapabilitySnapshotFresh,
@@ -183,7 +191,37 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
   const compressionLevel = options?.compressionLevel;
   const authorization = options?.authorization;
   const externalConfig = options?.externalLocation;
-  const baseFetch = options?.fetch ?? globalThis.fetch;
+  const rawFetch = options?.fetch ?? globalThis.fetch;
+  // Protocol version negotiation (PROTOCOL_VERSIONS_V1 §6): one state per
+  // endpoint, fed by the VGI-Protocol-Versions header of every response from
+  // this server (never from storage PUTs).
+  const negotiation = options?.negotiation ?? new EndpointNegotiation(baseUrl);
+  let clientVersioning: ClientVersioning | null | undefined;
+  /** The client's declared versioning for the bound protocol, or `null` when
+   *  it declares none (it then speaks what the server describes). */
+  function versioningFor(protocolName: string): ClientVersioning | null {
+    if (clientVersioning === undefined || (clientVersioning !== null && clientVersioning.protocol !== protocolName)) {
+      clientVersioning = ClientVersioning.of(
+        protocolName,
+        options?.protocolVersion ?? "",
+        options?.protocolVersionRange ?? null,
+      );
+    }
+    return clientVersioning;
+  }
+  const baseFetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const own = url.startsWith(baseUrl) && (init?.method ?? "GET").toUpperCase() !== "PUT";
+    let request = init;
+    if (own && clientVersioning) {
+      const headers = new Headers(init?.headers);
+      headers.set(CLIENT_PROTOCOL_VERSIONS_HEADER, clientVersioning.advertised());
+      request = { ...init, headers };
+    }
+    const response = await rawFetch(input, request);
+    if (own) negotiation.observe(response.headers.get(PROTOCOL_VERSIONS_HEADER));
+    return response;
+  }) as typeof globalThis.fetch;
   const acceptedMaxResponseBytes = options?.acceptedMaxResponseBytes ?? DEFAULT_ACCEPTED_MAX_RESPONSE_BYTES;
   optionalResponseBudget(acceptedMaxResponseBytes, "acceptedMaxResponseBytes");
 
@@ -282,6 +320,29 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
     }
     return `${prefix}/${serverProtocolName}`;
   }
+  /** The `vgi_rpc.protocol_version` and `vgi_rpc.protocol_versions_client`
+   *  to send for the bound protocol. Throws NoCommonVersionError (before
+   *  anything is sent) once no common version is known. */
+  function requestVersion(): { protocolVersion: string; clientVersions?: string } {
+    const cv = serverProtocolName ? versioningFor(serverProtocolName) : null;
+    if (!cv) return { protocolVersion: serverProtocolVersion };
+    return { protocolVersion: negotiation.wireVersion(cv), clientVersions: cv.advertised() };
+  }
+
+  /** Run one request; on a version refusal learn from it and, when the call is
+   *  safe to repeat (reflection; nothing else declares idempotency here),
+   *  retry once at the renegotiated version (§6). */
+  async function withNegotiation<T>(send: () => Promise<T>): Promise<T> {
+    try {
+      return await send();
+    } catch (error) {
+      if (!isVersionRefusal(error) || !serverProtocolName) throw error;
+      negotiation.observeRefusal(serverProtocolName, error);
+      if (!isRetrySafe(serverProtocolName)) throw error;
+      return await send();
+    }
+  }
+
   let compressFn: CompressFn | undefined;
   let decompressFn: DecompressFn | undefined;
   let compressionLoaded = false;
@@ -685,15 +746,20 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       // Apply defaults
       const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
-      const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
-        protocolVersion: serverProtocolVersion,
-        protocol: serverProtocolName,
+      const batches = await withNegotiation(async () => {
+        const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
+          ...requestVersion(),
+          protocol: serverProtocolName,
+        });
+        const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(rpcPrefix(), method), body);
+        checkAuth(resp);
+        const responseBody = await readResponse(resp);
+        const { batches: got } = await readResponseBatches(responseBody);
+        // A refusal is an error batch: surface it here, inside the negotiation
+        // wrapper, so it is learned from (and retried when safe).
+        for (const b of got) if (b.numRows === 0 && !isExternalLocationBatch(b as any)) dispatchLogOrError(b, () => {});
+        return got;
       });
-      const resp = await postWithExternalization(baseUrl + rpcPathFromPrefix(rpcPrefix(), method), body);
-      checkAuth(resp);
-
-      const responseBody = await readResponse(resp);
-      const { batches } = await readResponseBatches(responseBody);
 
       // Process batches: dispatch logs, resolve external pointers, find result
       let resultBatch: RecordBatch | null = null;
@@ -742,10 +808,17 @@ export function httpConnect(rawBaseUrl: string, options?: HttpConnectOptions): H
       const fullParams = { ...(info.defaults ?? {}), ...(params ?? {}) };
 
       const body = buildRequestIpc(info.paramsSchema, fullParams, method, {
-        protocolVersion: serverProtocolVersion,
+        ...requestVersion(),
         protocol: serverProtocolName,
       });
-      const init = await openStreamOverHttp(method, body, info.headerSchema != null);
+      // Stream inits are never retried (§6); a refusal is still learned from.
+      let init: StreamInit;
+      try {
+        init = await openStreamOverHttp(method, body, info.headerSchema != null);
+      } catch (error) {
+        if (isVersionRefusal(error) && serverProtocolName) negotiation.observeRefusal(serverProtocolName, error);
+        throw error;
+      }
       const header = init.headerBatch === null ? null : (extractBatchRows(init.headerBatch, int64)[0] ?? null);
 
       return new HttpStreamSession({

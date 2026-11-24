@@ -25,6 +25,9 @@ export interface RawDispatchContext {
   /** Wire name of the protocol that owns the method (names it in a
    *  `state_ref_misuse` message). */
   protocolName?: string;
+  /** Extra custom metadata for the result batch (reflection's
+   *  `vgi_rpc.protocol_versions`). */
+  resultMetadata?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -76,7 +79,7 @@ export async function dispatchUnary(
       // inlined, whatever the storage config or threshold says.
       resultBatch = result.pointerBatch(schema);
     } else {
-      resultBatch = buildResultBatch(schema, result, serverId, requestId);
+      resultBatch = buildResultBatch(schema, result, serverId, requestId, ctx.resultMetadata);
       if (externalConfig) {
         resultBatch = await maybeExternalizeBatch(resultBatch, externalConfig);
       }

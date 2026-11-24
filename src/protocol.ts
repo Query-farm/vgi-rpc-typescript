@@ -3,6 +3,7 @@
 
 import { schema as makeSchema } from "./arrow/index.js";
 import { parseProtocolVersion } from "./errors.js";
+import { VersionRange } from "./protocol-versions.js";
 import { inferParamTypes, type SchemaLike, toSchema } from "./schema.js";
 import {
   type ExchangeFn,
@@ -26,26 +27,50 @@ export class Protocol {
   /** Service / protocol name, exposed to clients via introspection. */
   readonly name: string;
   /**
-   * Application protocol surface version. When non-empty, the server enforces
-   * exact major+minor match (patch ignored) against every request's
-   * `vgi_rpc.protocol_version` metadata; clients bound to this Protocol emit
-   * the value on every request. Format: canonical semver MAJOR.MINOR.PATCH.
+   * Application protocol surface version: the newest version spoken. When
+   * non-empty, the server accepts a request whose `vgi_rpc.protocol_version`
+   * major.minor lies in {@link versionRange} (patch ignored) and advertises
+   * that window (PROTOCOL_VERSIONS_V1); clients bound to this Protocol emit the
+   * value on every request. Format: canonical semver MAJOR.MINOR.PATCH.
    * Mirrors Python's `Protocol.protocol_version` ClassVar.
    */
   readonly protocolVersion: string;
   /** Parsed semver tuple; null when `protocolVersion` is unset. */
   readonly protocolVersionParts: readonly [number, number, number] | null;
+  /**
+   * The `major.minor` window accepted and advertised: `protocolVersionRange`
+   * when given (`"MIN-MAX"`, whose MAX must be `protocolVersion`'s
+   * major.minor), else exactly `protocolVersion`. `null` when no version is
+   * declared. Mirrors Python's `protocol_version_range` ClassVar.
+   */
+  readonly versionRange: VersionRange | null;
   private _methods: Map<string, MethodDefinition> = new Map();
 
-  constructor(name: string, options?: { protocolVersion?: string }) {
+  constructor(name: string, options?: { protocolVersion?: string; protocolVersionRange?: string }) {
     this.name = name;
     const raw = options?.protocolVersion;
     if (raw === undefined || raw === "") {
       this.protocolVersion = "";
       this.protocolVersionParts = null;
+      if (options?.protocolVersionRange) {
+        throw new Error(`Protocol '${name}' declares protocolVersionRange without a protocolVersion`);
+      }
+      this.versionRange = null;
     } else {
       this.protocolVersion = raw;
       this.protocolVersionParts = parseProtocolVersion(raw);
+      const range = options?.protocolVersionRange
+        ? VersionRange.parse(options.protocolVersionRange)
+        : VersionRange.exactly(raw);
+      const [major, minor] = this.protocolVersionParts;
+      if (range.max[0] !== major || range.max[1] !== minor) {
+        throw new Error(
+          `Protocol '${name}' protocolVersionRange '${options?.protocolVersionRange}' must end at ` +
+            `protocolVersion ${raw}'s major.minor (${major}.${minor}): the version is the newest spoken, ` +
+            "and the range widens it downward only.",
+        );
+      }
+      this.versionRange = range;
     }
   }
 

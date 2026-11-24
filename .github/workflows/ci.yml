@@ -39,7 +39,7 @@ jobs:
         run: bun install
 
       - name: Run unit tests
-        run: bun test test/wire.test.ts test/external-ref.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/large-payload.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts test/http/exchange-input-metadata.test.ts test/flechette-declared-schema.test.ts test/flechette-stream-client.test.ts test/backend-wire.test.ts test/client-int64-mode.test.ts test/vendor.test.ts test/storage-timeouts.test.ts
+        run: bun test test/wire.test.ts test/external-ref.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/batch-metadata.test.ts test/large-payload.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/proof.test.ts test/http/exchange-input-metadata.test.ts test/flechette-declared-schema.test.ts test/flechette-stream-client.test.ts test/backend-wire.test.ts test/client-int64-mode.test.ts test/vendor.test.ts test/storage-timeouts.test.ts test/protocol-versions.test.ts
 
       # Batch metadata is encoded differently per backend, and the bug this
       # guards against was flechette-only: its encoder needs an explicit
@@ -97,6 +97,9 @@ jobs:
         with:
           repository: Query-farm/vgi-rpc-python
           path: .vgi-rpc-python
+          # TODO(release-wave): back to main once vgi-rpc-python protocol-3.4
+          # (PROTOCOL_VERSIONS_V1, direct storage) is merged.
+          ref: protocol-3.4
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -218,6 +221,9 @@ jobs:
         with:
           repository: Query-farm/vgi-rpc-python
           path: .vgi-rpc-python
+          # TODO(release-wave): back to main once vgi-rpc-python protocol-3.4
+          # (PROTOCOL_VERSIONS_V1, direct storage) is merged.
+          ref: protocol-3.4
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -403,6 +409,9 @@ jobs:
         with:
           repository: Query-farm/vgi-rpc-python
           path: .vgi-rpc-python
+          # TODO(release-wave): back to main once vgi-rpc-python protocol-3.4
+          # (PROTOCOL_VERSIONS_V1, direct storage) is merged.
+          ref: protocol-3.4
 
       - uses: oven-sh/setup-bun@v2
         with:

@@ -1602,3 +1602,68 @@ class TestLargeData(TestLargeData):  # type: ignore[no-redef]  # noqa: F811
 # worker through the ``conformance_http_no_compression_port`` fixture above.
 # A local copy would keep passing while this port drifted from the other four
 # SDKs — precisely the failure the shared suite exists to catch.
+
+# --- Protocol version negotiation: the TypeScript client (PROTOCOL_VERSIONS_V1 §9) ---
+#
+# TestClientNegotiation drives this port's HTTP client against a scripted
+# reference server through conformance/negotiating-client.ts: one process per
+# client, one JSON line per ping(), so negotiation state carries across calls
+# exactly as it does inside one client.
+
+
+class _NegotiatingClientError(Exception):
+    """A failed ping(), carrying the TypeScript client's error kind and message."""
+
+    def __init__(self, kind: str, code: str, message: str) -> None:
+        super().__init__(message)
+        self.error_kind = kind
+        self.error_code = code
+        self.error_message = message
+
+
+class _NegotiatingClient:
+    def __init__(self, proc: subprocess.Popen[str]) -> None:
+        self._proc = proc
+
+    def ping(self) -> str:
+        import json
+
+        assert self._proc.stdin is not None and self._proc.stdout is not None
+        self._proc.stdin.write("ping\n")
+        self._proc.stdin.flush()
+        line = self._proc.stdout.readline()
+        if not line:
+            raise RuntimeError(f"negotiating client exited ({self._proc.poll()})")
+        reply = json.loads(line)
+        if "result" in reply:
+            return str(reply["result"])
+        raise _NegotiatingClientError(
+            reply.get("error_kind", ""), reply.get("error_code", ""), reply.get("error_message", "")
+        )
+
+
+@pytest.fixture(scope="session")
+def conformance_negotiating_client() -> Callable[..., Any]:
+    """``factory(base_url, protocol, version, version_range)`` -> the TypeScript client, negotiating."""
+    script = str(Path(__file__).parent / "conformance" / "negotiating-client.ts")
+
+    @contextlib.contextmanager
+    def factory(base_url: str, protocol: str, version: str, version_range: str) -> Iterator[_NegotiatingClient]:
+        proc = subprocess.Popen(
+            ["bun", "run", script, base_url, protocol, version, version_range],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            yield _NegotiatingClient(proc)
+        finally:
+            assert proc.stdin is not None
+            proc.stdin.close()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    return factory

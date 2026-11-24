@@ -251,14 +251,17 @@ describe("vendor storage transfers: stall timeout, no whole-transfer deadline", 
 
   test("an upload whose storage stops reading fails within the stall timeout, once per attempt", async () => {
     const storage = await startSlowServer({ rate: 1024 * 1024, stallAfter: 256 * 1024 });
-    const vendor = startVendor(storage, 8 * MiB);
+    // 64 MiB: far more than the socket buffers hold, so the stall shows up
+    // while chunks are still being pulled (a body small enough to vanish into
+    // the buffers is only caught by the end-of-body drain window).
+    const vendor = startVendor(storage, 64 * MiB);
     try {
       const client = new VendorStorage(vendor.url, "token", {
         stallTimeoutMs: STALL_MS,
         maxAttempts: 2,
         backoffMs: 10,
       });
-      const [result, ms] = await timed(() => client.upload(new Uint8Array(8 * MiB), ""));
+      const [result, ms] = await timed(() => client.upload(new Uint8Array(64 * MiB), ""));
       expect(result).toBeInstanceOf(Error);
       expect((result as Error).message).toContain("failed after 2 attempts (stalled)");
       expect((result as Error).message).not.toContain("secret");

@@ -82,8 +82,11 @@ export function buildResultBatch(
   values: Record<string, any>,
   serverId: string,
   requestId: string | null,
+  extraMetadata?: ReadonlyMap<string, string>,
 ): VgiBatch {
-  const metadata = new Map<string, string>();
+  // Extra keys first (the reflection results' `vgi_rpc.protocol_versions`), so
+  // the framework's own keys win on a collision.
+  const metadata = new Map<string, string>(extraMetadata ?? []);
   metadata.set(SERVER_ID_KEY, serverId);
   if (requestId !== null) {
     metadata.set(REQUEST_ID_KEY, requestId);
@@ -128,7 +131,11 @@ export function buildErrorBatch(
   requestId: string | null,
   includeTraceback: boolean,
 ): VgiBatch {
-  const metadata = new Map<string, string>();
+  // An error may carry machine-readable batch metadata of its own
+  // (ProtocolVersionError's `vgi_rpc.protocol_versions`); the log keys set
+  // below win on a collision.
+  const extraMeta = (error as { errorMetadata?: unknown }).errorMetadata;
+  const metadata = new Map<string, string>(extraMeta instanceof Map ? (extraMeta as Map<string, string>) : []);
   metadata.set(LOG_LEVEL_KEY, "EXCEPTION");
   // Prefer the standard `error.name` property (which user classes can set
   // via `this.name = "Foo"` even after a bundler renames the class) over

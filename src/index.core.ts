@@ -225,6 +225,7 @@ export {
   type IrohHttpHandlerOptions,
   irohForwardedHeaderIdentityProvider,
   irohHttpBridgeOptions,
+  irohHttpHandler,
 } from "./iroh.js";
 // StateRef, argument references, the turn budget and the object cache
 // (STATE_REF_V1.md, protocol 3.4).
@@ -239,6 +240,28 @@ export {
   type ObjectCacheStats,
 } from "./object-cache.js";
 export { Protocol } from "./protocol.js";
+// Protocol version negotiation (PROTOCOL_VERSIONS_V1).
+export {
+  CLIENT_PROTOCOL_VERSIONS_HEADER,
+  CLIENT_PROTOCOL_VERSIONS_KEY,
+  ClientVersioning,
+  EndpointNegotiation,
+  formatVersions,
+  highestCommon,
+  isRetrySafe,
+  isVersionRefusal,
+  legacyServerVersion,
+  type MajorMinor,
+  NoCommonVersionError,
+  PROTOCOL_VERSION_MISMATCH,
+  PROTOCOL_VERSION_UNSUPPORTED,
+  PROTOCOL_VERSIONS_HEADER,
+  PROTOCOL_VERSIONS_KEY,
+  parseMajorMinor,
+  parseVersions,
+  rangesFromError,
+  VersionRange,
+} from "./protocol-versions.js";
 export {
   bool,
   bytes,

@@ -10,6 +10,7 @@
 
 import { ProtocolVersionError, parseProtocolVersion } from "./errors.js";
 import type { Protocol } from "./protocol.js";
+import { formatVersions, PROTOCOL_VERSION_UNSUPPORTED, parseVersions, type VersionRange } from "./protocol-versions.js";
 
 /** The name grammar: an identifier, optionally dot-qualified, carrying its
  *  major version as the last component (`vgi_rpc.Reflection.v1`).
@@ -61,6 +62,49 @@ export interface ProtocolBinding {
    *  a version-mismatched client calls to learn *what* mismatched -- gating it
    *  would deny the client the diagnosis it came for. */
   readonly versionExempt: boolean;
+  /** Override of the `major.minor` window this binding accepts and advertises
+   *  (PROTOCOL_VERSIONS_V1 §5; how fixture workers impersonate an older
+   *  server). Default: the Protocol's {@link Protocol.versionRange}. */
+  readonly versionRange?: VersionRange;
+}
+
+/** The window a binding gates and advertises, or `null` when it gates
+ *  nothing (no declared version, or version-exempt). */
+export function bindingWindow(binding: ProtocolBinding): VersionRange | null {
+  if (binding.versionExempt) return null;
+  return binding.versionRange ?? binding.protocol.versionRange;
+}
+
+/** The `VGI-Protocol-Versions` advertisement: every gated protocol's window, in
+ *  hosting order (primary first). Empty when nothing is versioned. */
+export function protocolVersionsAdvertisement(bindings: Iterable<ProtocolBinding>): string {
+  const entries: [string, VersionRange][] = [];
+  for (const b of bindings) {
+    const w = bindingWindow(b);
+    if (w !== null) entries.push([b.name, w]);
+  }
+  return formatVersions(entries);
+}
+
+/** Apply `{ name: "MIN-MAX" }` window overrides to a binding table, refusing a
+ *  name that is not a hosted, versioned protocol. */
+export function applyVersionRangeOverrides(
+  bindings: Map<string, ProtocolBinding>,
+  overrides: Readonly<Record<string, string | VersionRange>> | undefined,
+  parse: (text: string) => VersionRange,
+): void {
+  if (!overrides) return;
+  for (const [name, range] of Object.entries(overrides)) {
+    const target = bindings.get(name);
+    if (target === undefined || target.versionExempt || target.protocol.versionRange === null) {
+      const versioned = [...bindings.values()].filter((b) => bindingWindow(b) !== null).map((b) => b.name);
+      throw new Error(
+        `protocolVersionRanges names '${name}', which is not a hosted protocol that declares a ` +
+          `protocolVersion. Versioned protocols here: [${versioned.join(", ")}]`,
+      );
+    }
+    bindings.set(name, { ...target, versionRange: typeof range === "string" ? parse(range) : range });
+  }
 }
 
 /** Anything that hosts one or more protocols and can enumerate them.
@@ -149,30 +193,38 @@ export class ProtocolNotSupportedError extends Error {
 }
 
 /**
- * Gate a client's declared `vgi_rpc.protocol_version` against the binding that
- * owns the resolved method. No-op for a binding that declares no version.
+ * Gate a client's declared `vgi_rpc.protocol_version` against the window of the
+ * binding that owns the resolved method (PROTOCOL_VERSIONS_V1 §5). No-op for a
+ * binding that gates nothing (no declared version, or version-exempt).
  *
- * Exact major+minor match, patch ignored; the message names which side is
- * older. Per binding, never against the primary: a server hosting several
- * protocols has a version per binding and no single "server version", so
- * gating a secondary against the primary rejects correct callers and names the
- * wrong protocol when it does. The thrown error carries a
- * `PreconditionFailure` naming the gated protocol. One implementation for
- * every transport, so the raw launchers cannot drift from stdio and HTTP.
+ * Accepts a `major.minor` inside the window (patch ignored). Per binding,
+ * never against the primary. A refusal is `protocol_version_unsupported` /
+ * `FAILED_PRECONDITION` with the reference's message texts, a
+ * `PreconditionFailure`, and an `ErrorInfo` plus error-batch metadata carrying
+ * the server's full advertisement. The client's own windows
+ * (`vgi_rpc.protocol_versions_client`) are quoted, never a reason to refuse.
+ * One implementation for every transport.
  */
-export function gateProtocolVersion(binding: ProtocolBinding, clientVersion: string | undefined): void {
-  const serverParts = binding.protocol.protocolVersionParts;
-  if (serverParts === null) return;
-  const serverVersion = binding.protocol.protocolVersion;
-  const gate = { protocol: binding.name, serverVersion };
+export function gateProtocolVersion(
+  binding: ProtocolBinding,
+  clientVersion: string | undefined,
+  context: { advertisement?: string; clientVersions?: string } = {},
+): void {
+  const window = bindingWindow(binding);
+  if (window === null) return;
+  const name = binding.name;
+  const clientVersions = context.clientVersions ?? "";
+  const gate = {
+    protocol: name,
+    serverVersion: String(window),
+    serverVersions: context.advertisement ?? "",
+    clientVersions,
+  };
+  const serverWindow = `this server supports ${name} ${window}`;
   if (clientVersion === undefined) {
     throw new ProtocolVersionError(
-      `VGI client/worker protocol_version mismatch for protocol '${binding.name}'.\n` +
-        "  Client: <not declared>\n" +
-        `  Server: ${serverVersion}\n` +
-        "  Direction: the client did not send a vgi_rpc.protocol_version " +
-        "metadata key. This is either a vgi-rpc framework bug or a " +
-        "non-VGI client connecting to a VGI worker.",
+      `${PROTOCOL_VERSION_UNSUPPORTED}: the client did not send vgi_rpc.protocol_version for ${name}; ` +
+        `${serverWindow}. This is either a vgi-rpc framework bug or a non-VGI client connecting to a VGI worker.`,
       gate,
     );
   }
@@ -181,25 +233,28 @@ export function gateProtocolVersion(binding: ProtocolBinding, clientVersion: str
     clientParts = parseProtocolVersion(clientVersion);
   } catch {
     throw new ProtocolVersionError(
-      `VGI client/worker protocol_version mismatch for protocol '${binding.name}'.\n` +
-        `  Client: ${clientVersion}\n` +
-        `  Server: ${serverVersion}\n` +
-        "  Direction: client sent a malformed protocol_version. " +
-        "Expected canonical semver MAJOR.MINOR.PATCH.",
+      `${PROTOCOL_VERSION_UNSUPPORTED}: the client sent a malformed protocol_version ${pyRepr(clientVersion)} ` +
+        `for ${name} (expected canonical semver MAJOR.MINOR.PATCH); ${serverWindow}.`,
       { ...gate, clientVersion },
     );
   }
-  if (clientParts[0] === serverParts[0] && clientParts[1] === serverParts[1]) return;
-  const clientOlder =
-    clientParts[0] < serverParts[0] || (clientParts[0] === serverParts[0] && clientParts[1] < serverParts[1]);
-  const direction = clientOlder
-    ? `client is too old; upgrade the VGI extension/client to a version supporting protocol_version ${serverVersion}.`
-    : `server is too old; upgrade the VGI worker to a version supporting protocol_version ${clientVersion}.`;
-  throw new ProtocolVersionError(
-    `VGI client/worker protocol_version mismatch for protocol '${binding.name}'.\n` +
-      `  Client: ${clientVersion}\n` +
-      `  Server: ${serverVersion}\n` +
-      `  Direction: ${direction}`,
-    { ...gate, clientVersion },
-  );
+  if (window.contains(clientParts)) return;
+  const clientMm = `${clientParts[0]}.${clientParts[1]}`;
+  const supports = parseVersions(clientVersions).get(name);
+  const speaks = `client speaks ${name} ${clientMm}${supports ? ` (supports ${supports})` : ""}`;
+  const older = clientParts[0] < window.min[0] || (clientParts[0] === window.min[0] && clientParts[1] < window.min[1]);
+  const direction = older
+    ? `The client is too old (this server is too new for it). Upgrade the client, or use a worker that ` +
+      `supports ${name} ${clientMm}.`
+    : `The server is too old (the client is too new for it). Upgrade the worker, or use a client that ` +
+      `supports ${name} ${window.max[0]}.${window.max[1]}.`;
+  throw new ProtocolVersionError(`${PROTOCOL_VERSION_UNSUPPORTED}: ${speaks}; ${serverWindow}. ${direction}`, {
+    ...gate,
+    clientVersion,
+  });
+}
+
+/** Python's `repr()` of a str, as the reference's message quotes the version. */
+function pyRepr(s: string): string {
+  return s.includes("'") && !s.includes('"') ? `"${s}"` : `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 }

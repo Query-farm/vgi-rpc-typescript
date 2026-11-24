@@ -56,6 +56,23 @@ export interface HttpConnectOptions {
    * Raw-batch APIs are unaffected.
    */
   int64?: import("./ipc.js").Int64Mode;
+  /**
+   * The newest version of the bound protocol this client speaks
+   * (`MAJOR.MINOR.PATCH`). When set, the client negotiates per
+   * PROTOCOL_VERSIONS_V1 §6: it sends its newest version until a response
+   * shows the server's window, then the highest common one (with this
+   * version's patch), sends its own window as `VGI-Client-Protocol-Versions`
+   * and `vgi_rpc.protocol_versions_client`, and fails without sending once no
+   * common version is known. Unset: the client speaks whatever version the
+   * server describes (the previous behaviour).
+   */
+  protocolVersion?: string;
+  /** The window this client supports (`MIN-MAX`), ending at
+   *  {@link protocolVersion}'s major.minor. Default: exactly that version. */
+  protocolVersionRange?: string;
+  /** Negotiation state to share between clients of one endpoint. Default: one
+   *  per client. */
+  negotiation?: import("../protocol-versions.js").EndpointNegotiation;
 }
 
 /** A log or error message delivered to an {@link HttpConnectOptions.onLog} callback. */
