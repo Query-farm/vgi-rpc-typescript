@@ -423,11 +423,16 @@ export function withBatchMetadata(batch: VgiBatch, metadata: Map<string, string>
 
 /**
  * Serialize a sequence of batches into a single multi-batch IPC stream.
- * Uses our flechette fork's `tablesToIPC` (added in
- * github:Query-farm/flechette#fix/timestamp-bigint-encode) to do the
- * concat-then-encode atomically — naive concatenation of multiple
- * `tableToIPC` outputs produces multiple EOS markers, dropping batches
- * past the first.
+ * Uses our flechette fork's `tablesToIPC` to do the concat-then-encode
+ * atomically — naive concatenation of multiple `tableToIPC` outputs produces
+ * multiple EOS markers, dropping batches past the first.
+ *
+ * Each batch may carry its own dictionary values (an HTTP reply's zero-row
+ * metadata batches and its result batches are built independently). The fork
+ * assigns dictionary ids by field position and writes a replacement dictionary
+ * before any batch whose dictionary differs, as arrow-js's writer does. Earlier
+ * fork releases emitted only the first batch's dictionary, so later batches
+ * decoded against the wrong values (test/flechette-multi-batch-dictionaries.test.ts).
  */
 export function serializeBatches(schema: VgiSchema, batches: VgiBatch[]): Uint8Array {
   if (batches.length === 0) {

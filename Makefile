@@ -33,7 +33,7 @@ CONFORMANCE_PYTEST = $(PYTHON) -m pytest test_ts_conformance.py $(CONFORMANCE_XD
 CONFORMANCE_SERVER ?= python
 
 # Unit test files (no external dependencies)
-UNIT_TESTS := test/access-log.test.ts test/wire.test.ts test/external-ref.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/http/sticky.test.ts test/auth.test.ts test/http-auth.test.ts test/bearer.test.ts test/http/exchange-input-metadata.test.ts
+UNIT_TESTS := test/access-log.test.ts test/wire.test.ts test/external-ref.test.ts test/describe.test.ts test/schema.test.ts test/output-collector.test.ts test/http/handler.test.ts test/http/landing.test.ts test/http/oauth-pkce.test.ts test/http/token.test.ts test/http/sticky.test.ts test/auth.test.ts test/http-auth.test.ts test/bearer.test.ts test/http/exchange-input-metadata.test.ts test/flechette-multi-batch-dictionaries.test.ts
 
 SRC := $(wildcard src/**/*.ts src/*.ts)
 
