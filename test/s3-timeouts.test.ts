@@ -22,9 +22,14 @@ const MiB = 1024 * 1024;
 function throttlingProxy(target: URL, rate: number, stallAfter?: number) {
   let forwarded = 0;
   let connections = 0;
+  const carriedBy: number[] = [];
   const sockets = new Set<net.Socket>();
   const server = net.createServer((client) => {
     connections++;
+    const index = carriedBy.push(0) - 1;
+    client.on("data", (d) => {
+      carriedBy[index]! += d.byteLength;
+    });
     const upstream = net.connect(Number(target.port), target.hostname);
     for (const s of [client, upstream]) {
       sockets.add(s);
@@ -47,19 +52,22 @@ function throttlingProxy(target: URL, rate: number, stallAfter?: number) {
       setTimeout(() => client.resume(), (d.byteLength / rate) * 1000);
     });
   });
-  return new Promise<{ url: string; connections: () => number; close: () => void }>((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      const port = (server.address() as net.AddressInfo).port;
-      resolve({
-        url: `http://127.0.0.1:${port}`,
-        connections: () => connections,
-        close: () => {
-          for (const s of sockets) s.destroy();
-          server.close();
-        },
+  return new Promise<{ url: string; connections: () => number; bodyConnections: () => number[]; close: () => void }>(
+    (resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as net.AddressInfo).port;
+        resolve({
+          url: `http://127.0.0.1:${port}`,
+          connections: () => connections,
+          bodyConnections: () => carriedBy.filter((n) => n > 1024 * 1024),
+          close: () => {
+            for (const s of sockets) s.destroy();
+            server.close();
+          },
+        });
       });
-    });
-  });
+    },
+  );
 }
 
 describe.skipIf(!endpoint || !bucket)("createS3Storage timeouts (live S3-compatible endpoint)", () => {
@@ -105,7 +113,9 @@ describe.skipIf(!endpoint || !bucket)("createS3Storage timeouts (live S3-compati
       const id = await storage.putObject(new Uint8Array(24 * MiB));
       const ms = performance.now() - t0;
       expect(ms).toBeGreaterThan(3 * STALL_MS);
-      expect(proxy.connections()).toBe(1);
+      // The bucket check may take its own connection; the body takes exactly one.
+      expect(proxy.bodyConnections().length).toBe(1);
+      expect(proxy.connections()).toBeLessThanOrEqual(2);
       const back = await make(endpoint!).get(id, { maxBytes: 32 * MiB });
       expect(back.byteLength).toBe(24 * MiB);
     } finally {

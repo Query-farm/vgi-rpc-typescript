@@ -121,7 +121,7 @@ jobs:
       - name: Storage tests (fail on any skip)
         run: |
           set -o pipefail
-          timeout 300 bun test test/s3-upload-url.test.ts test/s3-timeouts.test.ts test/storage-timeouts.test.ts test/client-externalize.test.ts 2>&1 | tee "$RUNNER_TEMP/storage.txt"
+          timeout 300 bun test test/s3-upload-url.test.ts test/s3-timeouts.test.ts test/s3-direct.test.ts test/gcs.test.ts test/storage-timeouts.test.ts test/client-externalize.test.ts 2>&1 | tee "$RUNNER_TEMP/storage.txt"
           if grep -Eq "^ *[1-9][0-9]* skip" "$RUNNER_TEMP/storage.txt"; then
             echo "::error::storage tests skipped: their backing service is missing"; exit 1
           fi

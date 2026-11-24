@@ -36,6 +36,7 @@ import {
   storageFetch,
   storageStallTimeoutMsFromEnv,
 } from "./storage-http.js";
+import { pinnedHostsValidator } from "./vendor.js";
 
 async function sha256Base64(data: Uint8Array): Promise<string> {
   const buf = new ArrayBuffer(data.byteLength);
@@ -60,7 +61,11 @@ export interface S3StorageConfig {
   bucket: string;
   /** Key prefix for uploaded objects. Default: "vgi-rpc/". */
   prefix?: string;
-  /** Lifetime of pre-signed GET URLs in seconds. Default: 3600 (1 hour). */
+  /**
+   * Lifetime of pre-signed URLs in seconds. Default: 3600 (1 hour). Capped at
+   * the signing credentials' expiry minus 60 s (a URL dies with the
+   * credentials that signed it) and at SigV4's 7 days.
+   */
   presignExpirySeconds?: number;
   /** AWS region. If omitted, uses default SDK config (`AWS_REGION`, the
    *  profile). S3-compatible stores take any name, e.g. `auto` for R2. */
@@ -68,24 +73,78 @@ export interface S3StorageConfig {
   /**
    * Credentials: an `AwsCredentialIdentity` (`{ accessKeyId, secretAccessKey,
    * sessionToken? }`) or a provider function. If omitted, the SDK's default
-   * chain (environment, shared profile, SSO, web identity, ECS/EC2 instance
-   * role).
+   * chain (environment, shared profile incl. `role_arn` / `credential_process`,
+   * SSO, web identity, ECS/EKS container, EC2 instance role), which refreshes
+   * temporary credentials before they expire.
    */
   credentials?: unknown;
-  /** Custom S3 endpoint URL (for MinIO, LocalStack, etc.). */
+  /** Custom S3 endpoint URL (MinIO, Ceph, R2's S3 API, Wasabi, B2,
+   *  LocalStack), `https://` or `http://`. Unset: AWS. */
   endpointUrl?: string;
+  /**
+   * Endpoint used only for the pre-signed URLs handed to clients, when the
+   * worker reaches storage at a different address than clients do (e.g.
+   * Docker-internal `http://minio:9000` vs public `https://s3.example.com`).
+   * Default: `endpointUrl`.
+   */
+  publicEndpointUrl?: string;
   /** Force path-style addressing (required for some S3-compatible services).
    *  Default: `true` when `endpointUrl` is set, else the SDK's default
    *  (virtual-hosted). */
   forcePathStyle?: boolean;
   /**
+   * `sha256` (default): upload grants sign `x-amz-checksum-sha256`, so storage
+   * refuses any other body, and stored objects carry it. `none`, for services
+   * that do not enforce `x-amz-checksum-sha256`: no upload grants (the storage
+   * is not an {@link UploadUrlProvider}; argument refs and large requests stay
+   * inline) and objects are stored without it; results and objects are still
+   * externalized, and readers verify their sha256 themselves.
+   */
+  checksum?: "sha256" | "none";
+  /**
+   * The AWS SDK's own request checksums (CRC32 by default since SDK 3.729):
+   * `when_supported` sends them on every PutObject, `when_required` only where
+   * an operation requires one. Some S3-compatible services reject the newer
+   * checksum headers, so the default is `when_required` with `endpointUrl`,
+   * `when_supported` for AWS. Explicit `x-amz-checksum-sha256` is unaffected.
+   */
+  sdkChecksum?: "when_supported" | "when_required";
+  /**
    * Stall timeout, ms: a request fails (and the SDK retries it) only when no
-   * bytes move for this long (connecting counts as one window). There is no whole-request deadline,
-   * so a large object on a slow link completes. Default:
-   * `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`, else 30000.
+   * bytes move for this long (connecting counts as one window). There is no
+   * whole-request deadline, so a large object on a slow link completes.
+   * Default: `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`, else 30000.
    */
   stallTimeoutMs?: number;
+  /** HEAD the bucket before the first request or signature (default true). */
+  verifyOnFirstUse?: boolean;
 }
+
+/** The S3 storage: results, stored objects and (unless `checksum: "none"`)
+ *  upload grants. */
+export interface S3Storage extends ExternalStorage, ObjectStore {
+  /** The checksum mode it was built with. */
+  readonly checksum: "sha256" | "none";
+  /**
+   * HEAD the bucket. Runs once on first use anyway; call it at startup to fail
+   * fast. Rejects with an actionable message: the bucket is missing, access is
+   * denied, or the bucket is in another region (naming the region the service
+   * reported).
+   */
+  verify(): Promise<void>;
+  /**
+   * A `urlValidator` for inbound pointers: accepts only URLs on this bucket's
+   * pre-signed URL host (the public endpoint) and under its bucket path.
+   */
+  readonly urlValidator: (url: string) => Promise<void>;
+  /** Upload grants; absent with `checksum: "none"`. */
+  generateUploadUrl?: UploadUrlProvider["generateUploadUrl"];
+}
+
+/** The shortest URL lifetime an upload grant needs, seconds: below it the
+ *  credentials are refreshed before signing. */
+export const UPLOAD_GRANT_MIN_TTL_SECONDS = 900;
+const SIGV4_MAX_EXPIRES_SECONDS = 604_800;
 
 /** RFC 3986 escaping, as the SDK's own query builder (the SigV4 canonical form). */
 function escapeUri(value: string): string {
@@ -228,105 +287,191 @@ export function stallTimeoutRequestHandler(stallTimeoutMs: number): any {
 }
 
 /**
- * Create an S3-backed ExternalStorage (also an {@link ObjectStore}: stored
- * `StateRef` objects and argument references, keyed by object key, and an
- * {@link UploadUrlProvider}: pre-signed client upload URLs, so a server with
- * this storage accepts requests over its request cap and argument references).
+ * Create an S3-backed storage: an {@link ExternalStorage} (externalized
+ * results: PUT + pre-signed GET), an {@link ObjectStore} (stored `StateRef`
+ * objects and argument references, keyed by object key) and, unless
+ * `checksum: "none"`, an {@link UploadUrlProvider} (pre-signed client upload
+ * URLs bound to size and sha256, so a server with this storage accepts
+ * requests over its request cap and argument references).
  *
  * Lazily imports `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`
- * on first upload to avoid loading the AWS SDK unless needed.
+ * on first use to avoid loading the AWS SDK unless needed. The first use
+ * also HEADs the bucket ({@link S3Storage.verify}).
  *
- * Objects carry no TTL: set a bucket lifecycle rule of at least one day on
- * the prefix.
+ * Objects carry no TTL and the worker never deletes them: set a bucket
+ * lifecycle rule expiring the prefix after 1-2 days.
  */
-export function createS3Storage(config: S3StorageConfig): ExternalStorage & ObjectStore & UploadUrlProvider {
+export function createS3Storage(config: S3StorageConfig & { checksum: "none" }): S3Storage;
+export function createS3Storage(config: S3StorageConfig): S3Storage & UploadUrlProvider;
+export function createS3Storage(config: S3StorageConfig): S3Storage {
   const bucket = config.bucket;
+  if (!bucket) throw new Error("S3 storage needs a bucket");
   const prefix = config.prefix ?? "vgi-rpc/";
-  const presignExpiry = config.presignExpirySeconds ?? 3600;
+  const urlTtl = Math.min(config.presignExpirySeconds ?? 3600, SIGV4_MAX_EXPIRES_SECONDS);
+  if (!Number.isFinite(urlTtl) || urlTtl < 1) throw new Error("presignExpirySeconds must be at least 1");
+  const checksum = config.checksum ?? "sha256";
+  if (checksum !== "sha256" && checksum !== "none") throw new Error(`checksum must be sha256 or none, got ${checksum}`);
+  const sdkChecksum = config.sdkChecksum ?? (config.endpointUrl ? "when_required" : "when_supported");
+  if (sdkChecksum !== "when_supported" && sdkChecksum !== "when_required") {
+    throw new Error(`sdkChecksum must be when_supported or when_required, got ${sdkChecksum}`);
+  }
   const stallTimeoutMs =
     config.stallTimeoutMs !== undefined ? checkStallTimeoutMs(config.stallTimeoutMs) : storageStallTimeoutMsFromEnv();
+  const pathStyle = config.forcePathStyle ?? (config.endpointUrl ? true : undefined);
 
-  // Lazy-loaded AWS SDK clients
-  let s3Client: any = null;
+  // Lazy-loaded AWS SDK clients: one for requests, one (sharing its
+  // credential provider) for the URLs handed out, on the public endpoint.
+  let clients: Promise<{ client: any; presigner: any }> | null = null;
+  let verified: Promise<void> | null = null;
 
-  async function ensureClient(): Promise<any> {
-    if (s3Client) return s3Client;
-    const { S3Client } = await import("@aws-sdk/client-s3");
-    const clientConfig: Record<string, any> = { requestHandler: stallTimeoutRequestHandler(stallTimeoutMs) };
-    if (config.region) clientConfig.region = config.region;
-    if (config.credentials) clientConfig.credentials = config.credentials;
-    if (config.endpointUrl) {
-      clientConfig.endpoint = config.endpointUrl;
-      clientConfig.forcePathStyle = config.forcePathStyle ?? true;
-    } else if (config.forcePathStyle !== undefined) {
-      clientConfig.forcePathStyle = config.forcePathStyle;
-    }
-    s3Client = new S3Client(clientConfig);
-    return s3Client;
+  function clientConfig(endpoint: string | undefined): Record<string, any> {
+    const c: Record<string, any> = {
+      requestHandler: stallTimeoutRequestHandler(stallTimeoutMs),
+      requestChecksumCalculation: sdkChecksum === "when_required" ? "WHEN_REQUIRED" : "WHEN_SUPPORTED",
+      responseChecksumValidation: sdkChecksum === "when_required" ? "WHEN_REQUIRED" : "WHEN_SUPPORTED",
+    };
+    if (config.region) c.region = config.region;
+    if (endpoint) c.endpoint = endpoint;
+    if (pathStyle !== undefined) c.forcePathStyle = pathStyle;
+    return c;
   }
 
-  return {
-    async upload(data: Uint8Array, contentEncoding: string): Promise<string> {
-      const client = await ensureClient();
-      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
-      const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
-      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+  function ensureClients(): Promise<{ client: any; presigner: any }> {
+    clients ??= (async () => {
+      const { S3Client } = await import("@aws-sdk/client-s3");
+      const base = clientConfig(config.endpointUrl);
+      if (config.credentials) base.credentials = config.credentials;
+      const client = new S3Client(base);
+      if (!config.publicEndpointUrl || config.publicEndpointUrl === config.endpointUrl) {
+        return { client, presigner: client };
+      }
+      const pub = clientConfig(config.publicEndpointUrl);
+      // The same (memoized, refreshing) credential provider signs both.
+      pub.credentials = client.config.credentials;
+      return { client, presigner: new S3Client(pub) };
+    })();
+    return clients;
+  }
 
-      const key = `${prefix}${crypto.randomUUID()}${contentEncoding === "zstd" ? ".arrow.zst" : ".arrow"}`;
-
-      const putCommand = new PutObjectCommand({
-        Bucket: bucket,
-        Key: key,
-        Body: data,
-        ContentType: "application/vnd.apache.arrow.stream",
-        ...(contentEncoding ? { ContentEncoding: contentEncoding } : {}),
-      });
-
-      await client.send(putCommand);
-
-      // Generate pre-signed GET URL
-      const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
-      const url = await getSignedUrl(client, getCommand, { expiresIn: presignExpiry });
-      return url;
-    },
-
-    /**
-     * Pre-signed PUT and GET URLs for one sized client upload (upload URLs v2).
-     *
-     * The PUT URL signs `Content-Length` and `x-amz-checksum-sha256` (SigV4),
-     * so S3 refuses any body that is not exactly `size` bytes hashing to
-     * `sha256Hex` (`BadDigest`). The checksum stays a signed header (not a
-     * query parameter): the client sends it from {@link UploadUrl.headers}.
-     * The object is not deleted automatically: set a lifecycle rule on the prefix.
-     */
-    async generateUploadUrl(size: number, sha256Hex: string): Promise<UploadUrl> {
-      if (!Number.isSafeInteger(size) || size < 1) throw new Error(`size must be a positive integer, got ${size}`);
-      const checksum = sha256Base64FromHex(sha256Hex);
-      const client = await ensureClient();
-      const { PutObjectCommand, GetObjectCommand } = await import("@aws-sdk/client-s3");
-      const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
-      const key = `${prefix}${crypto.randomUUID()}.arrow`;
-      const expiresAt = new Date(Date.now() + presignExpiry * 1000);
-      const uploadUrl = await getSignedUrl(
-        client,
-        new PutObjectCommand({ Bucket: bucket, Key: key, ContentLength: size, ChecksumSHA256: checksum }),
-        {
-          expiresIn: presignExpiry,
-          signableHeaders: new Set(["content-length", "x-amz-checksum-sha256"]),
-          unhoistableHeaders: new Set(["x-amz-checksum-sha256"]),
-        },
+  async function headBucket(client: any): Promise<void> {
+    const { HeadBucketCommand } = await import("@aws-sdk/client-s3");
+    const where = config.endpointUrl ? ` at ${config.endpointUrl}` : "";
+    try {
+      await client.send(new HeadBucketCommand({ Bucket: bucket }));
+    } catch (error: any) {
+      const status = error?.$metadata?.httpStatusCode;
+      const headers = error?.$response?.headers ?? {};
+      const actual = headers["x-amz-bucket-region"] ?? headers["X-Amz-Bucket-Region"];
+      const configured = (await client.config.region?.()) ?? config.region ?? "(SDK default)";
+      if (actual && actual !== configured) {
+        throw new Error(
+          `S3 bucket '${bucket}'${where} is in region ${actual}, but the storage is configured for ${configured} (set VGI_STORAGE_S3_REGION=${actual})`,
+        );
+      }
+      if (status === 404 || error?.name === "NotFound" || error?.name === "NoSuchBucket") {
+        throw new Error(`S3 bucket '${bucket}' does not exist${where}`);
+      }
+      if (status === 403 || error?.name === "Forbidden" || error?.name === "AccessDenied") {
+        throw new Error(
+          `S3 access denied to bucket '${bucket}'${where}: check the credentials and the bucket policy (s3:ListBucket, s3:GetObject, s3:PutObject on the prefix)`,
+        );
+      }
+      if (status === 301 || status === 400) {
+        throw new Error(
+          `S3 bucket '${bucket}'${where} refused the request (HTTP ${status}); the configured region ${configured} is likely wrong`,
+        );
+      }
+      throw new Error(
+        `S3 bucket '${bucket}'${where} check failed (${error?.name ?? "Error"}${status ? ` HTTP ${status}` : ""})`,
       );
-      const downloadUrl = await getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), {
-        expiresIn: presignExpiry,
+    }
+  }
+
+  async function ready(): Promise<{ client: any; presigner: any }> {
+    const c = await ensureClients();
+    if (config.verifyOnFirstUse === false) return c;
+    verified ??= headBucket(c.client).catch((error) => {
+      verified = null; // check again on the next use
+      throw error;
+    });
+    await verified;
+    return c;
+  }
+
+  /** A URL lifetime no longer than the signing credentials last (minus 60 s);
+   *  refresh them first when that leaves less than `minSeconds`. */
+  async function signingTtl(presigner: any, minSeconds: number): Promise<number> {
+    const provider = presigner.config.credentials;
+    let identity = await provider();
+    const remaining = (id: any): number =>
+      id?.expiration instanceof Date ? (id.expiration.getTime() - Date.now()) / 1000 - 60 : Number.POSITIVE_INFINITY;
+    if (remaining(identity) < minSeconds) identity = await provider({ forceRefresh: true });
+    const ttl = Math.floor(Math.min(urlTtl, remaining(identity)));
+    if (ttl < 1) throw new Error("S3 credentials expire too soon to sign a URL");
+    return ttl;
+  }
+
+  async function presignGet(presigner: any, key: string, minSeconds = 0): Promise<{ url: string; ttl: number }> {
+    const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+    const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+    const ttl = await signingTtl(presigner, minSeconds);
+    const url = await getSignedUrl(presigner, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn: ttl });
+    return { url, ttl };
+  }
+
+  let validator: Promise<(url: string) => void> | null = null;
+  async function urlValidator(url: string): Promise<void> {
+    validator ??= (async () => {
+      // The host and bucket path of a URL this storage signs (path-style or
+      // virtual-hosted), from a probe signature: no request is made.
+      const { presigner } = await ensureClients();
+      const { url: probe } = await presignGet(presigner, `${prefix}__probe__`);
+      const parsed = new URL(probe);
+      const base = `${parsed.protocol}//${parsed.host}${parsed.pathname.slice(0, parsed.pathname.length - `${prefix}__probe__`.length)}`;
+      return pinnedHostsValidator([parsed.host], { allowHttp: parsed.protocol === "http:", prefixes: [base] });
+    })().catch((error) => {
+      validator = null;
+      throw error;
+    });
+    (await validator)(url);
+  }
+
+  const storage: S3Storage = {
+    checksum,
+    verify: async () => {
+      const c = await ensureClients();
+      verified ??= headBucket(c.client).catch((error) => {
+        verified = null;
+        throw error;
       });
-      return { uploadUrl, downloadUrl, expiresAt, headers: { "x-amz-checksum-sha256": checksum }, objectId: key };
+      await verified;
+    },
+    urlValidator,
+
+    async upload(data: Uint8Array, contentEncoding: string): Promise<string> {
+      const { client, presigner } = await ready();
+      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+      const key = `${prefix}${crypto.randomUUID()}${contentEncoding === "zstd" ? ".arrow.zst" : ".arrow"}`;
+      await client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: data,
+          ContentLength: data.byteLength,
+          ContentType: "application/vnd.apache.arrow.stream",
+          ...(contentEncoding ? { ContentEncoding: contentEncoding } : {}),
+          ...(checksum === "sha256" ? { ChecksumSHA256: await sha256Base64(data) } : {}),
+        }),
+      );
+      return (await presignGet(presigner, key)).url;
     },
 
     async putObject(data: Uint8Array): Promise<string> {
-      const client = await ensureClient();
+      const { client } = await ready();
       const { PutObjectCommand } = await import("@aws-sdk/client-s3");
       const key = `${prefix}obj/${crypto.randomUUID()}`;
-      // The SHA-256 checksum makes S3 verify the body it stores.
+      // With `sha256` storage verifies the body it stores; with `none` the
+      // reader verifies size and digest on fetch.
       await client.send(
         new PutObjectCommand({
           Bucket: bucket,
@@ -334,7 +479,7 @@ export function createS3Storage(config: S3StorageConfig): ExternalStorage & Obje
           Body: data,
           ContentLength: data.byteLength,
           ContentType: "application/octet-stream",
-          ChecksumSHA256: await sha256Base64(data),
+          ...(checksum === "sha256" ? { ChecksumSHA256: await sha256Base64(data) } : {}),
         }),
       );
       return key;
@@ -342,7 +487,7 @@ export function createS3Storage(config: S3StorageConfig): ExternalStorage & Obje
 
     async get(objectId: string, options: { maxBytes?: number } = {}): Promise<Uint8Array> {
       const limit = options.maxBytes ?? DEFAULT_MAX_FETCH_BYTES;
-      const client = await ensureClient();
+      const { client } = await ready();
       const { GetObjectCommand } = await import("@aws-sdk/client-s3");
       let response: any;
       try {
@@ -354,6 +499,7 @@ export function createS3Storage(config: S3StorageConfig): ExternalStorage & Obje
         throw error;
       }
       if (typeof response.ContentLength === "number" && response.ContentLength > limit) {
+        await response.Body?.destroy?.();
         throw new Error(`S3 object is ${response.ContentLength} bytes, over max_fetch_bytes (${limit})`);
       }
       const bytes: Uint8Array = await response.Body.transformToByteArray();
@@ -361,4 +507,148 @@ export function createS3Storage(config: S3StorageConfig): ExternalStorage & Obje
       return bytes;
     },
   };
+
+  if (checksum === "sha256") {
+    /**
+     * Pre-signed PUT and GET URLs for one sized client upload (upload URLs v2).
+     *
+     * The PUT URL signs `Content-Length` and `x-amz-checksum-sha256` (SigV4),
+     * so S3 refuses any body that is not exactly `size` bytes hashing to
+     * `sha256Hex` (`BadDigest`). The checksum stays a signed header (not a
+     * query parameter): the client sends it from {@link UploadUrl.headers}.
+     * Both URLs live at least 15 minutes (credentials are refreshed first if
+     * they would expire sooner) and at most the configured lifetime.
+     */
+    storage.generateUploadUrl = async (size: number, sha256Hex: string): Promise<UploadUrl> => {
+      if (!Number.isSafeInteger(size) || size < 1) throw new Error(`size must be a positive integer, got ${size}`);
+      const sha = sha256Base64FromHex(sha256Hex);
+      const { presigner } = await ready();
+      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+      const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+      const key = `${prefix}${crypto.randomUUID()}.arrow`;
+      const ttl = await signingTtl(presigner, Math.min(UPLOAD_GRANT_MIN_TTL_SECONDS, urlTtl));
+      const uploadUrl = await getSignedUrl(
+        presigner,
+        new PutObjectCommand({ Bucket: bucket, Key: key, ContentLength: size, ChecksumSHA256: sha }),
+        {
+          expiresIn: ttl,
+          signableHeaders: new Set(["content-length", "x-amz-checksum-sha256"]),
+          unhoistableHeaders: new Set(["x-amz-checksum-sha256"]),
+        },
+      );
+      const { url: downloadUrl } = await presignGet(presigner, key, Math.min(UPLOAD_GRANT_MIN_TTL_SECONDS, urlTtl));
+      const expiresAt = new Date(Date.now() + ttl * 1000);
+      return { uploadUrl, downloadUrl, expiresAt, headers: { "x-amz-checksum-sha256": sha }, objectId: key };
+    };
+  }
+  return storage;
+}
+
+/** An environment mapping (`process.env`, or a Cloudflare Worker's `env`). */
+type EnvLike = Readonly<Record<string, string | undefined>>;
+
+/** Environment variables of the direct S3 backend (contract v1, same names in every SDK). */
+export const S3_ENV = {
+  BUCKET: "VGI_STORAGE_S3_BUCKET",
+  PREFIX: "VGI_STORAGE_S3_PREFIX",
+  ENDPOINT: "VGI_STORAGE_S3_ENDPOINT",
+  PUBLIC_ENDPOINT: "VGI_STORAGE_S3_PUBLIC_ENDPOINT",
+  REGION: "VGI_STORAGE_S3_REGION",
+  FORCE_PATH_STYLE: "VGI_STORAGE_S3_FORCE_PATH_STYLE",
+  CHECKSUM: "VGI_STORAGE_S3_CHECKSUM",
+  SDK_CHECKSUM: "VGI_STORAGE_S3_SDK_CHECKSUM",
+  ACCESS_KEY_ID: "VGI_STORAGE_S3_ACCESS_KEY_ID",
+  SECRET_ACCESS_KEY: "VGI_STORAGE_S3_SECRET_ACCESS_KEY",
+  SESSION_TOKEN: "VGI_STORAGE_S3_SESSION_TOKEN",
+  VERIFY: "VGI_STORAGE_S3_VERIFY",
+  URL_TTL_SECONDS: "VGI_STORAGE_URL_TTL_SECONDS",
+} as const;
+
+function envValue(env: EnvLike, name: string): string | undefined {
+  const v = (env[name] ?? "").trim();
+  return v === "" ? undefined : v;
+}
+
+function envBool(env: EnvLike, name: string): boolean | undefined {
+  const v = envValue(env, name)?.toLowerCase();
+  if (v === undefined) return undefined;
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  throw new Error(`${name} must be true or false, got ${JSON.stringify(v)}`);
+}
+
+function checkEndpoint(name: string, value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an http:// or https:// URL, got ${JSON.stringify(value)}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${name} must be an http:// or https:// URL, got ${JSON.stringify(value)}`);
+  }
+  return value.replace(/\/+$/, "");
+}
+
+/**
+ * {@link S3StorageConfig} from the `VGI_STORAGE_S3_*` environment (direct
+ * storage contract v1). Credentials: `VGI_STORAGE_S3_ACCESS_KEY_ID` /
+ * `_SECRET_ACCESS_KEY` (+ optional `_SESSION_TOKEN`) when set, else the AWS
+ * SDK default chain. Region: `VGI_STORAGE_S3_REGION`, `AWS_REGION`,
+ * `AWS_DEFAULT_REGION`, else `us-east-1`. Prefix: `VGI_STORAGE_S3_PREFIX`
+ * (default empty). Never includes a secret in an error message.
+ *
+ * @throws Error if the bucket is unset or a variable will not parse.
+ */
+export function s3StorageConfigFromEnv(env?: EnvLike): S3StorageConfig {
+  const e = env ?? (globalThis as { process?: { env?: EnvLike } }).process?.env ?? {};
+  const bucket = envValue(e, S3_ENV.BUCKET);
+  if (!bucket) throw new Error(`${S3_ENV.BUCKET} is not set`);
+  const config: S3StorageConfig = {
+    bucket,
+    prefix: envValue(e, S3_ENV.PREFIX) ?? "",
+    region: envValue(e, S3_ENV.REGION) ?? envValue(e, "AWS_REGION") ?? envValue(e, "AWS_DEFAULT_REGION") ?? "us-east-1",
+    stallTimeoutMs: storageStallTimeoutMsFromEnv(e),
+  };
+  const endpoint = checkEndpoint(S3_ENV.ENDPOINT, envValue(e, S3_ENV.ENDPOINT));
+  if (endpoint) config.endpointUrl = endpoint;
+  const pub = checkEndpoint(S3_ENV.PUBLIC_ENDPOINT, envValue(e, S3_ENV.PUBLIC_ENDPOINT));
+  if (pub) config.publicEndpointUrl = pub;
+  const pathStyle = envBool(e, S3_ENV.FORCE_PATH_STYLE);
+  if (pathStyle !== undefined) config.forcePathStyle = pathStyle;
+  const checksum = envValue(e, S3_ENV.CHECKSUM)?.toLowerCase();
+  if (checksum !== undefined) {
+    if (checksum !== "sha256" && checksum !== "none") {
+      throw new Error(`${S3_ENV.CHECKSUM} must be sha256 or none, got ${JSON.stringify(checksum)}`);
+    }
+    config.checksum = checksum;
+  }
+  const sdk = envValue(e, S3_ENV.SDK_CHECKSUM)?.toLowerCase();
+  if (sdk !== undefined) {
+    if (sdk !== "when_supported" && sdk !== "when_required") {
+      throw new Error(`${S3_ENV.SDK_CHECKSUM} must be when_supported or when_required, got ${JSON.stringify(sdk)}`);
+    }
+    config.sdkChecksum = sdk;
+  }
+  const ttl = envValue(e, S3_ENV.URL_TTL_SECONDS);
+  if (ttl !== undefined) {
+    if (!/^\d+$/.test(ttl) || Number(ttl) < 1) {
+      throw new Error(`${S3_ENV.URL_TTL_SECONDS} must be a positive integer, got ${JSON.stringify(ttl)}`);
+    }
+    config.presignExpirySeconds = Number(ttl);
+  }
+  const keyId = envValue(e, S3_ENV.ACCESS_KEY_ID);
+  const secret = envValue(e, S3_ENV.SECRET_ACCESS_KEY);
+  const token = envValue(e, S3_ENV.SESSION_TOKEN);
+  if ((keyId === undefined) !== (secret === undefined)) {
+    throw new Error(`${S3_ENV.ACCESS_KEY_ID} and ${S3_ENV.SECRET_ACCESS_KEY} must be set together`);
+  }
+  if (token !== undefined && keyId === undefined) {
+    throw new Error(`${S3_ENV.SESSION_TOKEN} needs ${S3_ENV.ACCESS_KEY_ID} and ${S3_ENV.SECRET_ACCESS_KEY}`);
+  }
+  if (keyId !== undefined) {
+    config.credentials = { accessKeyId: keyId, secretAccessKey: secret, ...(token ? { sessionToken: token } : {}) };
+  }
+  return config;
 }

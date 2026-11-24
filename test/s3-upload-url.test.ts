@@ -25,6 +25,7 @@ describe("createS3Storage.generateUploadUrl (offline presign)", () => {
       prefix: "p/",
       region: "us-east-1",
       endpointUrl: "http://127.0.0.1:9",
+      verifyOnFirstUse: false,
     });
     const body = new TextEncoder().encode("hello upload");
     const grant = await storage.generateUploadUrl(body.byteLength, sha256Hex(body));
@@ -41,7 +42,12 @@ describe("createS3Storage.generateUploadUrl (offline presign)", () => {
   });
 
   it("refuses a malformed digest or size", async () => {
-    const storage = createS3Storage({ bucket: "b", region: "us-east-1", endpointUrl: "http://127.0.0.1:9" });
+    const storage = createS3Storage({
+      bucket: "b",
+      region: "us-east-1",
+      endpointUrl: "http://127.0.0.1:9",
+      verifyOnFirstUse: false,
+    });
     await expect(storage.generateUploadUrl(10, "ABC")).rejects.toThrow("sha256");
     await expect(storage.generateUploadUrl(0, "0".repeat(64))).rejects.toThrow("size");
   });

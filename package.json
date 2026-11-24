@@ -66,7 +66,7 @@
     "dist",
     "src"
   ],
-  "//imports": "`browser` must resolve to the JS emit under dist/browser, not ./src \u2014 the browser export condition serves transpiled JS and a `#vgi-rpc-arrow` specifier inside it is re-resolved with the consumer's conditions, so pointing it at a .ts file would drag TypeScript back into a loader-less bundler. Keep `browser` AFTER `workerd`/`worker`: conditions match in key order and a workerd build sets both, so it must reach flechette first.",
+  "//imports": "`browser` must resolve to the JS emit under dist/browser, not ./src — the browser export condition serves transpiled JS and a `#vgi-rpc-arrow` specifier inside it is re-resolved with the consumer's conditions, so pointing it at a .ts file would drag TypeScript back into a loader-less bundler. Keep `browser` AFTER `workerd`/`worker`: conditions match in key order and a workerd build sets both, so it must reach flechette first.",
   "imports": {
     "#vgi-rpc-client-response-budget": {
       "workerd": "./dist/browser/client/default-response-budget.browser.js",
@@ -119,6 +119,7 @@
     }
   },
   "devDependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-s3": "^3.1059.0",
     "@aws-sdk/s3-request-presigner": "^3.1059.0",
     "@biomejs/biome": "^2.4.16",
@@ -130,6 +131,7 @@
     "@opentelemetry/sdk-metrics": "^2.12.0",
     "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@opentelemetry/semantic-conventions": "^1.41.1",
+    "@smithy/signature-v4": "^5",
     "@types/bun": "latest",
     "typescript": "^7.0.2"
   },
