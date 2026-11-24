@@ -267,10 +267,12 @@ A self-hosted server can use its own bucket instead of the blob vendor: `createS
 | `VGI_STORAGE_S3_CHECKSUM` | `sha256`, or `none` for services that do not enforce `x-amz-checksum-sha256` (no upload grants) | `sha256` |
 | `VGI_STORAGE_S3_SDK_CHECKSUM` | the AWS SDK's own CRC32 checksums: `when_supported` / `when_required` | `when_required` with an endpoint |
 | `VGI_STORAGE_S3_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN` | explicit credentials | the AWS default chain |
+| `VGI_STORAGE_S3_SESSION_EXPIRES` | expiry of an explicit session token (RFC 3339 or epoch seconds), for the URL-lifetime cap | none (warned) |
 | `VGI_STORAGE_URL_TTL_SECONDS` | URL lifetime, capped at the credentials' expiry minus 60 s | 3600 |
+| `VGI_STORAGE_ALLOW_PLAIN_HTTP` | `1` allows an `http://` endpoint or public endpoint | refused |
 | `VGI_STORAGE_GCS_BUCKET`, `_PREFIX`, `_ENDPOINT`, `_CREDENTIALS_FILE` | GCS bucket, prefix, endpoint, key file | ADC |
 
-The first request HEADs the bucket (`storage.verify()` does it on demand) and fails with the reason: missing bucket, denied access, or the region the service reports. Objects carry no TTL and are never deleted: add a lifecycle rule expiring the prefix after one to two days.
+Keys go under `<prefix>rpc/` (results, upload grants, StateRef and argument objects) and `<prefix>fs/` (function storage): `s3StorageConfigFromEnv(env, { role })`. The worker must be able to reach the public endpoint too, because request-upload pointers are fetched by URL. The first request HEADs the bucket (`storage.verify()` does it on demand) and fails with the reason: missing bucket, denied access, or the region the service reports. Objects carry no TTL and are never deleted: add lifecycle rules expiring `rpc/` after one day and `fs/` after two (as the vendor does). Deletes the worker issues are best effort.
 
 ## Storage timeouts
 

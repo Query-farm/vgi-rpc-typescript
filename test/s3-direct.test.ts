@@ -20,13 +20,16 @@ const rootKey = process.env.AWS_ACCESS_KEY_ID ?? "";
 const rootSecret = process.env.AWS_SECRET_ACCESS_KEY ?? "";
 
 describe("s3StorageConfigFromEnv", () => {
-  test("defaults, and every variable", () => {
+  test("defaults, and every variable", async () => {
     expect(() => s3StorageConfigFromEnv({})).toThrow(S3_ENV.BUCKET);
     expect(s3StorageConfigFromEnv({ VGI_STORAGE_S3_BUCKET: "b" })).toMatchObject({
       bucket: "b",
-      prefix: "",
+      prefix: "rpc/",
       region: "us-east-1",
     });
+    expect(
+      s3StorageConfigFromEnv({ VGI_STORAGE_S3_BUCKET: "b", VGI_STORAGE_S3_PREFIX: "p/" }, { role: "fs" }).prefix,
+    ).toBe("p/fs/");
     expect(s3StorageConfigFromEnv({ VGI_STORAGE_S3_BUCKET: "b", AWS_DEFAULT_REGION: "eu-west-1" }).region).toBe(
       "eu-west-1",
     );
@@ -43,10 +46,18 @@ describe("s3StorageConfigFromEnv", () => {
       VGI_STORAGE_S3_SECRET_ACCESS_KEY: "SK",
       VGI_STORAGE_S3_SESSION_TOKEN: "TOK",
       VGI_STORAGE_URL_TTL_SECONDS: "600",
+      VGI_STORAGE_S3_SESSION_EXPIRES: "2030-01-01T00:00:00Z",
+      VGI_STORAGE_ALLOW_PLAIN_HTTP: "1",
       AWS_REGION: "ignored",
     });
+    expect(await (c.credentials as () => Promise<unknown>)()).toEqual({
+      accessKeyId: "AK",
+      secretAccessKey: "SK",
+      sessionToken: "TOK",
+      expiration: new Date("2030-01-01T00:00:00Z"),
+    });
     expect(c).toMatchObject({
-      prefix: "vgi/",
+      prefix: "vgi/rpc/",
       endpointUrl: "http://minio:9000",
       publicEndpointUrl: "https://s3.example.com",
       region: "auto",
@@ -54,8 +65,42 @@ describe("s3StorageConfigFromEnv", () => {
       checksum: "none",
       sdkChecksum: "when_supported",
       presignExpirySeconds: 600,
-      credentials: { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "TOK" },
     });
+  });
+
+  test("plain http needs VGI_STORAGE_ALLOW_PLAIN_HTTP; a token without an expiry warns", () => {
+    const b = { VGI_STORAGE_S3_BUCKET: "b" };
+    expect(() => s3StorageConfigFromEnv({ ...b, VGI_STORAGE_S3_ENDPOINT: "http://minio:9000" })).toThrow(
+      "VGI_STORAGE_ALLOW_PLAIN_HTTP",
+    );
+    expect(() =>
+      s3StorageConfigFromEnv({
+        ...b,
+        VGI_STORAGE_S3_ENDPOINT: "https://s3.example.com",
+        VGI_STORAGE_S3_PUBLIC_ENDPOINT: "http://s3.example.com",
+      }),
+    ).toThrow("VGI_STORAGE_S3_PUBLIC_ENDPOINT");
+    const logs: string[] = [];
+    s3StorageConfigFromEnv(
+      {
+        ...b,
+        VGI_STORAGE_S3_ACCESS_KEY_ID: "A",
+        VGI_STORAGE_S3_SECRET_ACCESS_KEY: "S",
+        VGI_STORAGE_S3_SESSION_TOKEN: "T",
+      },
+      { log: (m) => logs.push(m) },
+    );
+    expect(logs.join()).toContain("VGI_STORAGE_S3_SESSION_EXPIRES");
+    expect(logs.join()).not.toContain("T,");
+    expect(() =>
+      s3StorageConfigFromEnv({
+        ...b,
+        VGI_STORAGE_S3_ACCESS_KEY_ID: "A",
+        VGI_STORAGE_S3_SECRET_ACCESS_KEY: "S",
+        VGI_STORAGE_S3_SESSION_TOKEN: "T",
+        VGI_STORAGE_S3_SESSION_EXPIRES: "soon",
+      }),
+    ).toThrow("VGI_STORAGE_S3_SESSION_EXPIRES");
   });
 
   test("refuses half-set keys, a token without keys, and junk values without echoing secrets", () => {
@@ -121,7 +166,12 @@ async function assumeRole(
 const sha256Hex = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 
 describe.skipIf(!endpoint || !bucket)("direct S3 storage (live S3-compatible endpoint with STS)", () => {
-  const base = { VGI_STORAGE_S3_BUCKET: bucket!, VGI_STORAGE_S3_ENDPOINT: endpoint!, VGI_STORAGE_S3_PREFIX: "direct/" };
+  const base = {
+    VGI_STORAGE_S3_BUCKET: bucket!,
+    VGI_STORAGE_S3_ENDPOINT: endpoint!,
+    VGI_STORAGE_S3_PREFIX: "direct/",
+    VGI_STORAGE_ALLOW_PLAIN_HTTP: "1",
+  };
 
   async function roundTrip(storage: ReturnType<typeof createS3Storage>) {
     const data = new Uint8Array(5000).fill(3);
@@ -162,6 +212,39 @@ describe.skipIf(!endpoint || !bucket)("direct S3 storage (live S3-compatible end
     // Without the token the same key pair is refused.
     const noToken = createS3Storage(s3StorageConfigFromEnv({ ...env, VGI_STORAGE_S3_SESSION_TOKEN: "" }));
     await expect(noToken.verify()).rejects.toThrow();
+  });
+
+  test("VGI_STORAGE_S3_SESSION_EXPIRES caps URL lifetimes; a session too short for a grant warns and signs what is left", async () => {
+    const creds = await assumeRole(900);
+    const logs: string[] = [];
+    const env = {
+      ...base,
+      VGI_STORAGE_S3_ACCESS_KEY_ID: creds.accessKeyId,
+      VGI_STORAGE_S3_SECRET_ACCESS_KEY: creds.secretAccessKey,
+      VGI_STORAGE_S3_SESSION_TOKEN: creds.sessionToken,
+      VGI_STORAGE_S3_SESSION_EXPIRES: String(Math.floor(Date.now() / 1000) + 600),
+    };
+    const storage = createS3Storage(s3StorageConfigFromEnv(env, { log: (m) => logs.push(m) }));
+    const data = new Uint8Array([4, 5, 6]);
+    const grant = await storage.generateUploadUrl!(3, sha256Hex(data));
+    expect(Number(new URL(grant.uploadUrl).searchParams.get("X-Amz-Expires"))).toBeLessThanOrEqual(540);
+    expect(logs.join()).toContain("signing for the remaining lifetime");
+    expect((await fetch(grant.uploadUrl, { method: "PUT", body: data, headers: grant.headers })).status).toBe(200);
+  });
+
+  test("best-effort delete removes the object and ignores a missing one", async () => {
+    const storage = createS3Storage(
+      s3StorageConfigFromEnv({
+        ...base,
+        VGI_STORAGE_S3_ACCESS_KEY_ID: rootKey,
+        VGI_STORAGE_S3_SECRET_ACCESS_KEY: rootSecret,
+      }),
+    );
+    const id = await storage.putObject(new Uint8Array([1]));
+    await storage.deleteObject(id);
+    await expect(storage.get(id)).rejects.toThrow();
+    await storage.deleteObject(id);
+    await storage.deleteObject("direct/rpc/never-existed");
   });
 
   test("URL lifetime under temporary credentials: capped at expiry - 60 s, refreshed below 15 min", async () => {

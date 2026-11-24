@@ -75,6 +75,10 @@ export interface GCSStorageConfig {
 export interface GCSStorage extends ExternalStorage, ObjectStore, UploadUrlProvider {
   /** A `urlValidator` for inbound pointers: only URLs on this bucket's signed-URL host and path. */
   readonly urlValidator: (url: string) => Promise<void>;
+  /** Check the bucket exists and is reachable; rejects with the reason. */
+  verify(): Promise<void>;
+  /** Delete one object, best effort: failures are ignored. */
+  deleteObject(objectId: string): Promise<void>;
 }
 
 const V4_MAX_EXPIRES_SECONDS = 604_800;
@@ -126,7 +130,7 @@ export function createGCSStorage(config: GCSStorageConfig): GCSStorage {
 
   async function sign(
     name: string,
-    action: "read" | "write",
+    action: "read" | "write" | "delete",
     extra: { contentType?: string; contentMd5?: string; extensionHeaders?: Record<string, string> } = {},
   ): Promise<string> {
     const file = (await bucket()).file(name);
@@ -142,7 +146,7 @@ export function createGCSStorage(config: GCSStorageConfig): GCSStorage {
 
   /** One transfer, retrying transport errors, 429 and 5xx with backoff. */
   async function transfer(
-    method: "GET" | "PUT",
+    method: "GET" | "PUT" | "DELETE",
     url: string,
     headers: Record<string, string>,
     body: Uint8Array | null,
@@ -226,6 +230,32 @@ export function createGCSStorage(config: GCSStorageConfig): GCSStorage {
       }
     },
 
+    async verify(): Promise<void> {
+      const where = endpoint ? ` at ${endpoint}` : "";
+      let exists: boolean;
+      try {
+        [exists] = await (await bucket()).exists();
+      } catch (error: any) {
+        const code = error?.code;
+        if (code === 403 || code === 401) {
+          throw new Error(`GCS access denied to bucket '${bucketName}'${where}: check the credentials and IAM roles`);
+        }
+        throw new Error(
+          `GCS bucket '${bucketName}'${where} check failed (${error?.name ?? "Error"}${code ? ` ${code}` : ""})`,
+        );
+      }
+      if (!exists) throw new Error(`GCS bucket '${bucketName}' does not exist${where}`);
+    },
+
+    async deleteObject(objectId: string): Promise<void> {
+      try {
+        const r = await transfer("DELETE", await sign(objectId, "delete"), {}, null);
+        await discardStorageBody(r);
+      } catch {
+        // Best effort: the lifecycle rule removes it anyway.
+      }
+    },
+
     async generateUploadUrl(size: number, sha256Hex: string): Promise<UploadUrl> {
       if (!Number.isSafeInteger(size) || size < 1) throw new Error(`size must be a positive integer, got ${size}`);
       if (!/^[0-9a-f]{64}$/.test(sha256Hex)) throw new Error("sha256 must be 64 lowercase hex characters");
@@ -268,17 +298,20 @@ export const GCS_ENV = {
   PREFIX: "VGI_STORAGE_GCS_PREFIX",
   ENDPOINT: "VGI_STORAGE_GCS_ENDPOINT",
   CREDENTIALS_FILE: "VGI_STORAGE_GCS_CREDENTIALS_FILE",
+  VERIFY: "VGI_STORAGE_GCS_VERIFY",
   URL_TTL_SECONDS: "VGI_STORAGE_URL_TTL_SECONDS",
+  ALLOW_PLAIN_HTTP: "VGI_STORAGE_ALLOW_PLAIN_HTTP",
 } as const;
 
 /**
  * {@link GCSStorageConfig} from the `VGI_STORAGE_GCS_*` environment (direct
- * storage contract v1): bucket, prefix (default empty), endpoint, credentials
- * file (default Application Default Credentials), URL lifetime.
+ * storage contract v1): bucket, prefix (default empty) plus `rpc/` or `fs/`
+ * for the role, endpoint (plain http only with `VGI_STORAGE_ALLOW_PLAIN_HTTP=1`),
+ * credentials file (default Application Default Credentials), URL lifetime.
  *
  * @throws Error if the bucket is unset or a variable will not parse.
  */
-export function gcsStorageConfigFromEnv(env?: EnvLike): GCSStorageConfig {
+export function gcsStorageConfigFromEnv(env?: EnvLike, options: { role?: "rpc" | "fs" } = {}): GCSStorageConfig {
   const e = env ?? (globalThis as { process?: { env?: EnvLike } }).process?.env ?? {};
   const get = (name: string): string | undefined => {
     const v = (e[name] ?? "").trim();
@@ -288,7 +321,7 @@ export function gcsStorageConfigFromEnv(env?: EnvLike): GCSStorageConfig {
   if (!bucket) throw new Error(`${GCS_ENV.BUCKET} is not set`);
   const config: GCSStorageConfig = {
     bucket,
-    prefix: get(GCS_ENV.PREFIX) ?? "",
+    prefix: `${get(GCS_ENV.PREFIX) ?? ""}${options.role ?? "rpc"}/`,
     stallTimeoutMs: storageStallTimeoutMsFromEnv(e),
   };
   const endpoint = get(GCS_ENV.ENDPOINT);
@@ -299,6 +332,14 @@ export function gcsStorageConfigFromEnv(env?: EnvLike): GCSStorageConfig {
     } catch {}
     if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
       throw new Error(`${GCS_ENV.ENDPOINT} must be an http:// or https:// URL, got ${JSON.stringify(endpoint)}`);
+    }
+    if (
+      parsed.protocol === "http:" &&
+      !["1", "true", "yes", "on"].includes((e[GCS_ENV.ALLOW_PLAIN_HTTP] ?? "").trim().toLowerCase())
+    ) {
+      throw new Error(
+        `${GCS_ENV.ENDPOINT} is plain http (${endpoint}); set ${GCS_ENV.ALLOW_PLAIN_HTTP}=1 to allow it (emulators only)`,
+      );
     }
     config.endpointUrl = endpoint;
   }

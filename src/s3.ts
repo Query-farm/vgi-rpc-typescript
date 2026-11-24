@@ -118,6 +118,9 @@ export interface S3StorageConfig {
   stallTimeoutMs?: number;
   /** HEAD the bucket before the first request or signature (default true). */
   verifyOnFirstUse?: boolean;
+  /** Warnings (e.g. a URL signed for less than the grant minimum because the
+   *  credentials expire sooner). Default `console.warn`. */
+  log?: (message: string) => void;
 }
 
 /** The S3 storage: results, stored objects and (unless `checksum: "none"`)
@@ -139,6 +142,9 @@ export interface S3Storage extends ExternalStorage, ObjectStore {
   readonly urlValidator: (url: string) => Promise<void>;
   /** Upload grants; absent with `checksum: "none"`. */
   generateUploadUrl?: UploadUrlProvider["generateUploadUrl"];
+  /** Delete one object, best effort: failures are ignored (the bucket
+   *  lifecycle rule is the real clean-up). */
+  deleteObject(objectId: string): Promise<void>;
 }
 
 /** The shortest URL lifetime an upload grant needs, seconds: below it the
@@ -416,7 +422,16 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
     let identity = await provider();
     const remaining = (id: any): number =>
       id?.expiration instanceof Date ? (id.expiration.getTime() - Date.now()) / 1000 - 60 : Number.POSITIVE_INFINITY;
-    if (remaining(identity) < minSeconds) identity = await provider({ forceRefresh: true });
+    if (remaining(identity) < minSeconds) {
+      // Refresh once; a session shorter than the minimum (e.g. a 900 s STS
+      // session) then signs for what it has left, with a warning.
+      identity = await provider({ forceRefresh: true });
+      if (remaining(identity) < minSeconds) {
+        (config.log ?? console.warn)(
+          `S3 credentials expire in ${Math.max(0, Math.floor(remaining(identity)))} s (after the 60 s margin), less than the ${minSeconds} s this URL should live; signing for the remaining lifetime`,
+        );
+      }
+    }
     const ttl = Math.floor(Math.min(urlTtl, remaining(identity)));
     if (ttl < 1) throw new Error("S3 credentials expire too soon to sign a URL");
     return ttl;
@@ -496,6 +511,16 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
       return key;
     },
 
+    async deleteObject(objectId: string): Promise<void> {
+      try {
+        const { client } = await ready();
+        const { DeleteObjectCommand } = await import("@aws-sdk/client-s3");
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: objectId }));
+      } catch {
+        // Best effort: the lifecycle rule removes it anyway.
+      }
+    },
+
     async get(objectId: string, options: { maxBytes?: number } = {}): Promise<Uint8Array> {
       const limit = options.maxBytes ?? DEFAULT_MAX_FETCH_BYTES;
       const { client } = await ready();
@@ -571,9 +596,37 @@ export const S3_ENV = {
   ACCESS_KEY_ID: "VGI_STORAGE_S3_ACCESS_KEY_ID",
   SECRET_ACCESS_KEY: "VGI_STORAGE_S3_SECRET_ACCESS_KEY",
   SESSION_TOKEN: "VGI_STORAGE_S3_SESSION_TOKEN",
+  SESSION_EXPIRES: "VGI_STORAGE_S3_SESSION_EXPIRES",
   VERIFY: "VGI_STORAGE_S3_VERIFY",
   URL_TTL_SECONDS: "VGI_STORAGE_URL_TTL_SECONDS",
+  ALLOW_PLAIN_HTTP: "VGI_STORAGE_ALLOW_PLAIN_HTTP",
 } as const;
+
+/** Which half of the bucket layout a store writes: `rpc` (results, upload
+ *  grants, StateRef and argument objects; lifecycle 1 day) or `fs`
+ *  (function storage; lifecycle 2 days). */
+export type StorageRole = "rpc" | "fs";
+
+/** Parse `VGI_STORAGE_S3_SESSION_EXPIRES`: RFC 3339 or epoch seconds. */
+export function parseSessionExpires(raw: string, name: string = S3_ENV.SESSION_EXPIRES): Date {
+  const text = raw.trim();
+  const date = /^\d+(\.\d+)?$/.test(text) ? new Date(Number(text) * 1000) : new Date(text);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`${name} must be an RFC 3339 timestamp or epoch seconds, got ${JSON.stringify(raw)}`);
+  }
+  return date;
+}
+
+/** Plain `http://` storage is refused unless `VGI_STORAGE_ALLOW_PLAIN_HTTP=1`. */
+export function checkPlainHttp(env: EnvLike, name: string, value: string | undefined): void {
+  if (value === undefined || !value.toLowerCase().startsWith("http:")) return;
+  const allow = (env[S3_ENV.ALLOW_PLAIN_HTTP] ?? "").trim().toLowerCase();
+  if (!["1", "true", "yes", "on"].includes(allow)) {
+    throw new Error(
+      `${name} is plain http (${value}); set ${S3_ENV.ALLOW_PLAIN_HTTP}=1 to allow it (test and private networks only)`,
+    );
+  }
+}
 
 function envValue(env: EnvLike, name: string): string | undefined {
   const v = (env[name] ?? "").trim();
@@ -612,19 +665,26 @@ function checkEndpoint(name: string, value: string | undefined): string | undefi
  *
  * @throws Error if the bucket is unset or a variable will not parse.
  */
-export function s3StorageConfigFromEnv(env?: EnvLike): S3StorageConfig {
+export function s3StorageConfigFromEnv(
+  env?: EnvLike,
+  options: { role?: StorageRole; log?: (message: string) => void } = {},
+): S3StorageConfig {
   const e = env ?? (globalThis as { process?: { env?: EnvLike } }).process?.env ?? {};
+  const log = options.log ?? console.warn;
   const bucket = envValue(e, S3_ENV.BUCKET);
   if (!bucket) throw new Error(`${S3_ENV.BUCKET} is not set`);
   const config: S3StorageConfig = {
     bucket,
-    prefix: envValue(e, S3_ENV.PREFIX) ?? "",
+    prefix: `${envValue(e, S3_ENV.PREFIX) ?? ""}${options.role ?? "rpc"}/`,
+    log,
     region: envValue(e, S3_ENV.REGION) ?? envValue(e, "AWS_REGION") ?? envValue(e, "AWS_DEFAULT_REGION") ?? "us-east-1",
     stallTimeoutMs: storageStallTimeoutMsFromEnv(e),
   };
   const endpoint = checkEndpoint(S3_ENV.ENDPOINT, envValue(e, S3_ENV.ENDPOINT));
+  checkPlainHttp(e, S3_ENV.ENDPOINT, endpoint);
   if (endpoint) config.endpointUrl = endpoint;
   const pub = checkEndpoint(S3_ENV.PUBLIC_ENDPOINT, envValue(e, S3_ENV.PUBLIC_ENDPOINT));
+  checkPlainHttp(e, S3_ENV.PUBLIC_ENDPOINT, pub);
   if (pub) config.publicEndpointUrl = pub;
   const pathStyle = envBool(e, S3_ENV.FORCE_PATH_STYLE);
   if (pathStyle !== undefined) config.forcePathStyle = pathStyle;
@@ -658,8 +718,25 @@ export function s3StorageConfigFromEnv(env?: EnvLike): S3StorageConfig {
   if (token !== undefined && keyId === undefined) {
     throw new Error(`${S3_ENV.SESSION_TOKEN} needs ${S3_ENV.ACCESS_KEY_ID} and ${S3_ENV.SECRET_ACCESS_KEY}`);
   }
+  const expiresRaw = envValue(e, S3_ENV.SESSION_EXPIRES);
+  if (expiresRaw !== undefined && token === undefined) {
+    throw new Error(`${S3_ENV.SESSION_EXPIRES} applies to ${S3_ENV.SESSION_TOKEN}, which is not set`);
+  }
   if (keyId !== undefined) {
-    config.credentials = { accessKeyId: keyId, secretAccessKey: secret, ...(token ? { sessionToken: token } : {}) };
+    const identity: Record<string, unknown> = {
+      accessKeyId: keyId,
+      secretAccessKey: secret,
+      ...(token ? { sessionToken: token } : {}),
+    };
+    if (expiresRaw !== undefined) identity.expiration = parseSessionExpires(expiresRaw);
+    else if (token !== undefined) {
+      log(
+        `${S3_ENV.SESSION_TOKEN} is set without ${S3_ENV.SESSION_EXPIRES}: URL lifetimes cannot be capped at the ` +
+          "session's expiry, so URLs may stop working early; set it, or use credential_process / the standard AWS chain",
+      );
+    }
+    // A provider, so the expiry reaches the URL-lifetime cap.
+    config.credentials = async () => identity;
   }
   return config;
 }
