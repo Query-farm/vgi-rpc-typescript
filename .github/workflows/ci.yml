@@ -148,6 +148,12 @@ jobs:
           test -f dist/index.d.ts
           node scripts/check-exports.mjs
 
+      # Workers ship as `bun build --compile` binaries and install none of the
+      # optional storage peers (@aws-sdk/*, @google-cloud/storage). The s3/gcs
+      # entries must compile without them and still load them when present.
+      - name: bun build --compile with and without optional peers
+        run: scripts/check-compile-optional-peers.sh
+
   docs:
     runs-on: ubuntu-latest
     steps:

@@ -293,6 +293,38 @@ export function stallTimeoutRequestHandler(stallTimeoutMs: number): any {
 }
 
 /**
+ * The optional AWS SDK packages, imported on first use.
+ *
+ * Every dynamic import of them lives here, awaited inside a `try`. Bun's
+ * bundler (like esbuild) resolves a string-literal `import()` at build time
+ * and fails the build when the package is not installed, unless the import is
+ * awaited inside a `try` (or has a `.catch`). Guarded, `bun build --compile`
+ * bundles the SDK when it is installed and otherwise leaves a runtime
+ * `import()` that fails here with a clear message. One unguarded literal
+ * import of an AWS package anywhere in this module breaks `bun build` for
+ * every consumer without the optional peers, even one that never selects S3
+ * (scripts/check-compile-optional-peers.sh guards this).
+ */
+let awsSdk: Promise<{ s3: any; presigner: any }> | null = null;
+function loadAwsSdk(): Promise<{ s3: any; presigner: any }> {
+  awsSdk ??= (async () => {
+    try {
+      const s3 = await import("@aws-sdk/client-s3");
+      const presigner = await import("@aws-sdk/s3-request-presigner");
+      return { s3, presigner };
+    } catch {
+      throw new Error(
+        "S3 storage needs the optional packages @aws-sdk/client-s3 and @aws-sdk/s3-request-presigner: install them",
+      );
+    }
+  })().catch((error) => {
+    awsSdk = null;
+    throw error;
+  });
+  return awsSdk;
+}
+
+/**
  * Create an S3-backed storage: an {@link ExternalStorage} (externalized
  * results: PUT + pre-signed GET), an {@link ObjectStore} (stored `StateRef`
  * objects and argument references, keyed by object key) and, unless
@@ -301,8 +333,8 @@ export function stallTimeoutRequestHandler(stallTimeoutMs: number): any {
  * requests over its request cap and argument references).
  *
  * Lazily imports `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`
- * on first use to avoid loading the AWS SDK unless needed. The first use
- * also HEADs the bucket ({@link S3Storage.verify}).
+ * (optional peers, see `loadAwsSdk`) on first use to avoid loading the AWS
+ * SDK unless needed. The first use also HEADs the bucket ({@link S3Storage.verify}).
  *
  * Objects carry no TTL and the worker never deletes them: set a bucket
  * lifecycle rule expiring the prefix after 1-2 days.
@@ -344,15 +376,7 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
 
   function ensureClients(): Promise<{ client: any; presigner: any }> {
     clients ??= (async () => {
-      let S3Client: any;
-      try {
-        ({ S3Client } = await import("@aws-sdk/client-s3"));
-        await import("@aws-sdk/s3-request-presigner");
-      } catch {
-        throw new Error(
-          "S3 storage needs the optional packages @aws-sdk/client-s3 and @aws-sdk/s3-request-presigner: install them",
-        );
-      }
+      const { S3Client } = (await loadAwsSdk()).s3;
       const base = clientConfig(config.endpointUrl);
       if (config.credentials) base.credentials = config.credentials;
       const client = new S3Client(base);
@@ -371,7 +395,7 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
   }
 
   async function headBucket(client: any): Promise<void> {
-    const { HeadBucketCommand } = await import("@aws-sdk/client-s3");
+    const { HeadBucketCommand } = (await loadAwsSdk()).s3;
     const where = config.endpointUrl ? ` at ${config.endpointUrl}` : "";
     try {
       await client.send(new HeadBucketCommand({ Bucket: bucket }));
@@ -438,8 +462,9 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
   }
 
   async function presignGet(presigner: any, key: string, minSeconds = 0): Promise<{ url: string; ttl: number }> {
-    const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-    const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+    const sdk = await loadAwsSdk();
+    const { GetObjectCommand } = sdk.s3;
+    const { getSignedUrl } = sdk.presigner;
     const ttl = await signingTtl(presigner, minSeconds);
     const url = await getSignedUrl(presigner, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn: ttl });
     return { url, ttl };
@@ -476,7 +501,7 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
 
     async upload(data: Uint8Array, contentEncoding: string): Promise<string> {
       const { client, presigner } = await ready();
-      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+      const { PutObjectCommand } = (await loadAwsSdk()).s3;
       const key = `${prefix}${crypto.randomUUID()}${contentEncoding === "zstd" ? ".arrow.zst" : ".arrow"}`;
       await client.send(
         new PutObjectCommand({
@@ -494,7 +519,7 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
 
     async putObject(data: Uint8Array): Promise<string> {
       const { client } = await ready();
-      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+      const { PutObjectCommand } = (await loadAwsSdk()).s3;
       const key = `${prefix}obj/${crypto.randomUUID()}`;
       // With `sha256` storage verifies the body it stores; with `none` the
       // reader verifies size and digest on fetch.
@@ -514,7 +539,7 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
     async deleteObject(objectId: string): Promise<void> {
       try {
         const { client } = await ready();
-        const { DeleteObjectCommand } = await import("@aws-sdk/client-s3");
+        const { DeleteObjectCommand } = (await loadAwsSdk()).s3;
         await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: objectId }));
       } catch {
         // Best effort: the lifecycle rule removes it anyway.
@@ -524,7 +549,7 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
     async get(objectId: string, options: { maxBytes?: number } = {}): Promise<Uint8Array> {
       const limit = options.maxBytes ?? DEFAULT_MAX_FETCH_BYTES;
       const { client } = await ready();
-      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+      const { GetObjectCommand } = (await loadAwsSdk()).s3;
       let response: any;
       try {
         response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: objectId }));
@@ -559,8 +584,9 @@ export function createS3Storage(config: S3StorageConfig): S3Storage {
       if (!Number.isSafeInteger(size) || size < 1) throw new Error(`size must be a positive integer, got ${size}`);
       const sha = sha256Base64FromHex(sha256Hex);
       const { presigner } = await ready();
-      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
-      const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+      const sdk = await loadAwsSdk();
+      const { PutObjectCommand } = sdk.s3;
+      const { getSignedUrl } = sdk.presigner;
       const key = `${prefix}${crypto.randomUUID()}.arrow`;
       const ttl = await signingTtl(presigner, Math.min(UPLOAD_GRANT_MIN_TTL_SECONDS, urlTtl));
       const uploadUrl = await getSignedUrl(

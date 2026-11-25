@@ -232,9 +232,11 @@ export function createGCSStorage(config: GCSStorageConfig): GCSStorage {
 
     async verify(): Promise<void> {
       const where = endpoint ? ` at ${endpoint}` : "";
+      // Outside the try: a missing optional package keeps its own message.
+      const ref = await bucket();
       let exists: boolean;
       try {
-        [exists] = await (await bucket()).exists();
+        [exists] = await ref.exists();
       } catch (error: any) {
         const code = error?.code;
         if (code === 403 || code === 401) {
