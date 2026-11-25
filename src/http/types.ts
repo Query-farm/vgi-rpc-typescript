@@ -113,6 +113,13 @@ export interface HttpHandlerOptions {
   peerServiceName?: string;
   /** Total peer-provider deadline in milliseconds. Default: 5000. */
   peerResolutionTimeoutMs?: number;
+  /**
+   * Override the `major.minor` window a hosted protocol accepts and advertises,
+   * keyed by wire name (`{ "vgi.v3": "3.3-3.4" }`; PROTOCOL_VERSIONS_V1 §5).
+   * Applied over the host's own windows. Naming a protocol that is not
+   * hosted, or that declares no version, throws.
+   */
+  protocolVersionRanges?: Readonly<Record<string, string>>;
   /** Maximum provider calls allowed to remain active, including calls that ignore abort after
    * their request deadline. Must be at least the configured provider count. An exhausted
    * provider contributes `UNAVAILABLE` evidence; the authentication policy decides whether

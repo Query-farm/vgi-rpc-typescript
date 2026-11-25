@@ -30,6 +30,12 @@ Bun.serve({ port: 8080, fetch: handler });
 - **Deno** — `Deno.serve(handler)`
 - **Cloudflare Workers** — `export default { fetch: handler }`
 
+## Protocol versions
+
+Every response carries `VGI-Protocol-Versions: <protocol>=<MIN>-<MAX>[, ...]`, the `major.minor` window of every protocol the server gates (present but empty when it gates nothing), and reflection results carry the same value as `vgi_rpc.protocol_versions` metadata on every transport. A request whose `vgi_rpc.protocol_version` is outside the window is refused with `protocol_version_unsupported` / `FAILED_PRECONDITION`, naming both windows and which side to upgrade. A Protocol declares `protocolVersion` (the newest version) and optionally `protocolVersionRange`; `VgiRpcServer({ protocolVersionRanges })` or `createHttpHandler(..., { protocolVersionRanges })` overrides a window, which is how a test fixture impersonates an older server.
+
+`httpConnect(url, { protocolVersion, protocolVersionRange })` negotiates: it sends its newest version until a response shows the server's window, then the highest common one (with its own patch), sends its window as `VGI-Client-Protocol-Versions`, and fails without sending once no common version is known. When serving over `iroh-http` (`node.serve`), wrap the handler in `irohHttpHandler`, because that transport refuses empty header values.
+
 ## Routes
 
 All routes are served under a configurable `prefix`. The default prefix is `""` (root), so the examples below show the root-mounted paths. When you set a `prefix` (e.g. `/api`), it is prepended to every path.

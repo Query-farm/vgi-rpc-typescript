@@ -14,12 +14,14 @@ import {
 } from "../arrow/index.js";
 import { AuthContext } from "../auth.js";
 import {
+  applyVersionRangeOverrides,
   gateProtocolVersion,
   isProtocolHost,
   type ProtocolBinding,
   type ProtocolHost,
   ProtocolNotSpecifiedError,
   ProtocolNotSupportedError,
+  protocolVersionsAdvertisement,
   validateProtocolName,
 } from "../binding.js";
 import { PROTOCOL_KEY, PROTOCOL_VERSION_KEY, REQUEST_ID_HEADER, RPC_ERROR_HEADER } from "../constants.js";
@@ -41,6 +43,13 @@ import {
   type PeerResolutionOptions,
 } from "../identity.js";
 import type { Protocol } from "../protocol.js";
+import {
+  CLIENT_PROTOCOL_VERSIONS_HEADER,
+  CLIENT_PROTOCOL_VERSIONS_KEY,
+  PROTOCOL_VERSIONS_HEADER,
+  PROTOCOL_VERSIONS_KEY,
+  VersionRange,
+} from "../protocol-versions.js";
 import {
   buildReflectionProtocol,
   describeRetiredMessage,
@@ -463,6 +472,10 @@ export function createHttpHandler(
       versionExempt: true,
     });
   }
+  // Window overrides (PROTOCOL_VERSIONS_V1 §5), then the advertisement every
+  // response carries: computed once, since the hosted set is fixed.
+  applyVersionRangeOverrides(bindings, options?.protocolVersionRanges, (t) => VersionRange.parse(t));
+  const protocolVersions = protocolVersionsAdvertisement(bindings.values());
   const hostedNames = [...bindings.keys()].sort();
   // Validated here rather than at the first request. A name that cannot be a
   // path segment cannot be addressed over HTTP at all, so hosting one would
@@ -665,7 +678,10 @@ export function createHttpHandler(
     binding: ProtocolBinding,
     reqBatchMeta: ReadonlyMap<string, string> | undefined,
   ): void {
-    gateProtocolVersion(binding, reqBatchMeta?.get(PROTOCOL_VERSION_KEY));
+    gateProtocolVersion(binding, reqBatchMeta?.get(PROTOCOL_VERSION_KEY), {
+      advertisement: protocolVersions,
+      clientVersions: reqBatchMeta?.get(CLIENT_PROTOCOL_VERSIONS_KEY),
+    });
   }
 
   // Response compression is ON by default at zstd level 1 (see
@@ -864,6 +880,11 @@ export function createHttpHandler(
 
   /** Append capability headers (advertised on every response when configured). */
   function addCapabilityHeaders(headers: Headers, isOptions = false): void {
+    // Protocol version negotiation (PROTOCOL_VERSIONS_V1 §4.1): every response
+    // names the window of every protocol this server gates. Emitted even when
+    // empty: present-but-empty is "negotiates, gates nothing", absent is a
+    // server released before negotiation.
+    headers.set(PROTOCOL_VERSIONS_HEADER, protocolVersions);
     // Always emitted, even empty: present-but-empty means "I speak no
     // compression", which a client must be able to tell apart from an absent
     // header (legacy server — assume zstd).
@@ -929,6 +950,7 @@ export function createHttpHandler(
   // expose — each conditional below mirrors the condition on the emission.
   const corsExposeHeaders = [
     "WWW-Authenticate",
+    PROTOCOL_VERSIONS_HEADER,
     REQUEST_ID_HEADER,
     VGI_CONTENT_ENCODING_HEADER,
     RPC_ERROR_HEADER,
@@ -978,7 +1000,7 @@ export function createHttpHandler(
         "Access-Control-Allow-Headers",
         requestedHeaders && requestedHeaders.length > 0
           ? requestedHeaders
-          : `Content-Type, Authorization, ${ACCEPT_MAX_RESPONSE_BYTES_HEADER}`,
+          : `Content-Type, Authorization, ${ACCEPT_MAX_RESPONSE_BYTES_HEADER}, ${CLIENT_PROTOCOL_VERSIONS_HEADER}`,
       );
       headers.set("Access-Control-Expose-Headers", corsExposeHeaders);
       // A server that has opted into serving cross-origin callers has, by
@@ -1900,7 +1922,12 @@ export function createHttpHandler(
     // method. Bound into the AEAD associated data rather than compared in
     // application code, so a cross-protocol continuation fails the tag check
     // even on the cache-hit path where the call token is never opened.
-    const dispatchCtx = { ...ctx, protocolName: binding.name };
+    const dispatchCtx = {
+      ...ctx,
+      protocolName: binding.name,
+      // Reflection results carry the advertisement (PROTOCOL_VERSIONS_V1 §4.1).
+      resultMetadata: binding.versionExempt ? new Map([[PROTOCOL_VERSIONS_KEY, protocolVersions]]) : undefined,
+    };
 
     // Routing-carriage agreement, then the application-protocol-version gate.
     // Both read the request batch's metadata, so they share one peek.
@@ -2083,7 +2110,29 @@ export function createHttpHandler(
     // — a proxy or client that minted an id needs this worker's records under
     // the same one, or the two logs cannot be joined at all.
     const requestId = resolveRequestId(request);
+    try {
+      return await handleRequest(request, requestId);
+    } catch (error) {
+      // An unexpected failure (e.g. a failing `onServeStart`) is answered as a
+      // 500 carrying the error batch and every capability header -- the
+      // client may be reading `VGI-Protocol-Versions` to diagnose this very
+      // failure (PROTOCOL_VERSIONS_V1 §4.1) -- instead of a rejection the
+      // runtime turns into a bare 500 of its own.
+      const err = error instanceof Error ? error : new Error(String(error));
+      const errBatch = buildErrorBatch(EMPTY_SCHEMA, err, serverId, requestId, includeTraceback);
+      const response = new Response(serializeIpcStream(EMPTY_SCHEMA, [errBatch]) as unknown as BodyInit, {
+        status: 500,
+        headers: { "Content-Type": ARROW_CONTENT_TYPE, [RPC_ERROR_HEADER]: "true" },
+      });
+      addCorsHeaders(response.headers);
+      addCapabilityHeaders(response.headers);
+      stampResponseBudgetSupport(response);
+      stampRequestId(response, requestId);
+      return response;
+    }
+  };
 
+  async function handleRequest(request: Request, requestId: string): Promise<Response> {
     if (!dispatchHook) {
       const plain = await dispatchRequest(request, undefined, undefined, requestId);
       stampResponseBudgetSupport(plain);
@@ -2119,11 +2168,14 @@ export function createHttpHandler(
     stampResponseBudgetSupport(response);
     stampRequestId(response, requestId);
     return response;
-  };
+  }
 
   function stampResponseBudgetSupport(response: Response): void {
     try {
       response.headers.set(ACCEPT_MAX_RESPONSE_BYTES_SUPPORT_HEADER, "true");
+      // Every response, whichever path produced it (401, 404, 413, 5xx
+      // included): PROTOCOL_VERSIONS_V1 4.1.
+      response.headers.set(PROTOCOL_VERSIONS_HEADER, protocolVersions);
     } catch {
       // Upstream fetch responses may expose immutable headers. Those are not
       // VGI RPC responses generated by this handler.

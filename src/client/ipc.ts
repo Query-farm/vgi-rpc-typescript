@@ -94,7 +94,7 @@ export function buildRequestIpc(
   schema: Schema,
   params: Record<string, any>,
   method: string,
-  options?: { protocolVersion?: string; protocol?: string },
+  options?: { protocolVersion?: string; protocol?: string; clientVersions?: string },
 ): Uint8Array {
   const metadata = new Map<string, string>();
   metadata.set(RPC_METHOD_KEY, method);
@@ -104,6 +104,10 @@ export function buildRequestIpc(
   metadata.set(REQUEST_VERSION_KEY, REQUEST_VERSION);
   if (options?.protocolVersion) {
     metadata.set(PROTOCOL_VERSION_KEY, options.protocolVersion);
+  }
+  // Informational: the client's own windows (PROTOCOL_VERSIONS_V1 §4.2).
+  if (options?.clientVersions) {
+    metadata.set("vgi_rpc.protocol_versions_client", options.clientVersions);
   }
 
   // Build the batch through the impl-agnostic #vgi-rpc-arrow layer so this

@@ -4,10 +4,12 @@
 import { schema as makeSchema } from "./arrow/index.js";
 import type { AuthContext } from "./auth.js";
 import {
+  applyVersionRangeOverrides,
   gateProtocolVersion,
   type ProtocolBinding,
   ProtocolNotSpecifiedError,
   ProtocolNotSupportedError,
+  protocolVersionsAdvertisement,
   RESERVED_PROTOCOL_PREFIX,
   validateProtocolName,
 } from "./binding.js";
@@ -19,6 +21,7 @@ import type { ExternalLocationConfig } from "./external.js";
 import { GrantKeys } from "./grants.js";
 import type { PeerEvidenceSet } from "./identity.js";
 import type { Protocol } from "./protocol.js";
+import { CLIENT_PROTOCOL_VERSIONS_KEY, PROTOCOL_VERSIONS_KEY, VersionRange } from "./protocol-versions.js";
 import {
   buildReflectionProtocol,
   describeRetiredMessage,
@@ -110,6 +113,14 @@ export interface VgiRpcServerOptions {
    * WIRE_PROTOCOL.md §8, "Tracebacks".
    */
   includeTracebacks?: boolean;
+  /**
+   * Override the `major.minor` window a hosted protocol accepts and advertises,
+   * keyed by wire name (`{ "vgi.v3": "3.3-3.4" }`; PROTOCOL_VERSIONS_V1 §5) --
+   * how fixture workers impersonate an older server. Default: each Protocol's
+   * `versionRange`. Naming a protocol that is not hosted, or that declares no
+   * version, throws when the server starts serving.
+   */
+  protocolVersionRanges?: Readonly<Record<string, string>>;
 }
 
 /** Who is calling, as a raw transport resolved it. */
@@ -158,6 +169,8 @@ export class VgiRpcServer {
    *  The primary stays in `protocol` so every existing path is untouched; it is
    *  projected into a binding on demand by {@link bindings}. */
   private extraBindings: Map<string, ProtocolBinding> = new Map();
+  private versionRangeOverrides: Readonly<Record<string, string>> | undefined;
+  private advertisementCache: string | null = null;
 
   constructor(protocol: Protocol, options?: VgiRpcServerOptions) {
     this.protocol = protocol;
@@ -167,6 +180,7 @@ export class VgiRpcServer {
     this.protocolVersion = options?.protocolVersion ?? "";
     this.onServeStart = options?.onServeStart ?? null;
     this.tracebacks = options?.includeTracebacks ?? true;
+    this.versionRangeOverrides = options?.protocolVersionRanges;
     // The primary is an application protocol like any other: the reserved
     // prefix rule applies to it too, however its name was derived.
     validateApplicationProtocol(protocol.name, protocol.name, "the primary protocol");
@@ -224,7 +238,23 @@ export class VgiRpcServer {
       versionExempt: false,
     });
     for (const [name, b] of this.extraBindings) out.set(name, b);
+    applyVersionRangeOverrides(out, this.versionRangeOverrides, (t) => VersionRange.parse(t));
     return out;
+  }
+
+  /** Override protocol version windows (see {@link VgiRpcServerOptions.protocolVersionRanges}). */
+  setProtocolVersionRanges(ranges: Readonly<Record<string, string>>): void {
+    this.assertOpen("set protocol version ranges");
+    this.versionRangeOverrides = { ...(this.versionRangeOverrides ?? {}), ...ranges };
+  }
+
+  /** The `VGI-Protocol-Versions` advertisement: every gated protocol's window,
+   *  primary first; empty when nothing is versioned (PROTOCOL_VERSIONS_V1 §4.1). */
+  get protocolVersions(): string {
+    if (this.sealed && this.advertisementCache !== null) return this.advertisementCache;
+    const value = protocolVersionsAdvertisement(this.bindings().values());
+    if (this.sealed) this.advertisementCache = value;
+    return value;
   }
 
   /** Whether this server's error batches carry the remote traceback. One
@@ -237,6 +267,8 @@ export class VgiRpcServer {
    *  idempotent. After this {@link addProtocol}, {@link registerReflection}
    *  and {@link registerIdentity} throw. */
   seal(): void {
+    // Validates the window overrides against the final hosted set.
+    this.bindings();
     this.sealed = true;
   }
 
@@ -553,7 +585,10 @@ export class VgiRpcServer {
     // what a mismatched client calls to learn what mismatched.
     if (!binding.versionExempt) {
       try {
-        gateProtocolVersion(binding, batch.metadata?.get(PROTOCOL_VERSION_KEY));
+        gateProtocolVersion(binding, batch.metadata?.get(PROTOCOL_VERSION_KEY), {
+          advertisement: this.protocolVersions,
+          clientVersions: batch.metadata?.get(CLIENT_PROTOCOL_VERSIONS_KEY),
+        });
       } catch (exc) {
         const errSchema = method.type === MethodType.UNARY ? method.resultSchema : EMPTY_SCHEMA;
         const errBatch = buildErrorBatch(errSchema, exc as Error, this.serverId, requestId, includeTraceback);
@@ -627,6 +662,9 @@ export class VgiRpcServer {
       authContext: peer.auth,
       peerEvidence: peer.evidence,
       protocolName: binding.name,
+      // Reflection results carry the advertisement on every transport, present
+      // even when empty (PROTOCOL_VERSIONS_V1 §4.1).
+      resultMetadata: binding.versionExempt ? new Map([[PROTOCOL_VERSIONS_KEY, this.protocolVersions]]) : undefined,
     };
     try {
       if (method.type === MethodType.UNARY) {

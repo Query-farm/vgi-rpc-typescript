@@ -153,17 +153,21 @@ export const ERROR_KIND_SESSION_LOST = "session_lost";
 /** `vgi_rpc.error_kind` batch-metadata value for {@link ServerDrainingError}. */
 export const ERROR_KIND_SERVER_DRAINING = "server_draining";
 export const ERROR_KIND_PROTOCOL_VERSION_MISMATCH = "protocol_version_mismatch";
+/** `vgi_rpc.error_kind` of a version refusal since protocol version negotiation
+ *  (PROTOCOL_VERSIONS_V1 §4.3); {@link ERROR_KIND_PROTOCOL_VERSION_MISMATCH} is
+ *  what servers released before it sent. */
+export const ERROR_KIND_PROTOCOL_VERSION_UNSUPPORTED = "protocol_version_unsupported";
 
-/** Raised when the client's declared `vgi_rpc.protocol_version` is
- *  incompatible with the server's. Subclass of `VersionError` so existing
- *  catch sites continue to write a typed error stream and keep serving.
- *  Carries a directional message that tells the reader which side to
- *  upgrade. Mirrors Python's `vgi_rpc.rpc.ProtocolVersionError`. */
+/** Raised when the client's declared `vgi_rpc.protocol_version` is outside the
+ *  server's supported window. Subclass of `VersionError` so existing catch
+ *  sites continue to write a typed error stream and keep serving. Its message
+ *  names both sides' windows and which side to upgrade (PROTOCOL_VERSIONS_V1
+ *  §4.3). Mirrors Python's `vgi_rpc.rpc.ProtocolVersionError`. */
 export class ProtocolVersionError extends VersionError {
   /** Typed `vgi_rpc.error_kind` marker hoisted onto the error batch metadata. */
-  static readonly errorKind = ERROR_KIND_PROTOCOL_VERSION_MISMATCH;
+  static readonly errorKind = ERROR_KIND_PROTOCOL_VERSION_UNSUPPORTED;
   /** Typed `vgi_rpc.error_kind` marker hoisted onto the error batch metadata. */
-  readonly errorKind = ERROR_KIND_PROTOCOL_VERSION_MISMATCH;
+  readonly errorKind = ERROR_KIND_PROTOCOL_VERSION_UNSUPPORTED;
   /** Canonical code hoisted as `vgi_rpc.error_code` (WIRE_PROTOCOL.md §8). */
   static readonly errorCode: ErrorCode = "FAILED_PRECONDITION";
   /** Canonical code hoisted as `vgi_rpc.error_code` (WIRE_PROTOCOL.md §8). */
@@ -172,32 +176,58 @@ export class ProtocolVersionError extends VersionError {
   readonly protocol: string;
   /** What the client declared, or `""` when it declared none. */
   readonly clientVersion: string;
-  /** What the server's binding declares. */
+  /** The server's supported window for {@link protocol} (`MIN-MAX`). */
   readonly serverVersion: string;
+  /** The server's full `VGI-Protocol-Versions` advertisement. */
+  readonly serverVersions: string;
+  /** The client's own advertised windows, when it sent them. */
+  readonly clientVersions: string;
 
-  constructor(message: string, gate: { protocol?: string; clientVersion?: string; serverVersion?: string } = {}) {
+  constructor(
+    message: string,
+    gate: {
+      protocol?: string;
+      clientVersion?: string;
+      serverVersion?: string;
+      serverVersions?: string;
+      clientVersions?: string;
+    } = {},
+  ) {
     super(message);
     this.name = "ProtocolVersionError";
     this.protocol = gate.protocol ?? "";
     this.clientVersion = gate.clientVersion ?? "";
     this.serverVersion = gate.serverVersion ?? "";
+    this.serverVersions = gate.serverVersions ?? "";
+    this.clientVersions = gate.clientVersions ?? "";
   }
 
-  /** One `protocol_version` violation naming the gated protocol. With several
-   *  bindings hosted, "Server: 2.0.0" alone does not say which server. */
-  get errorDetails(): PreconditionFailure[] {
-    if (!this.protocol) return [];
-    return [
-      preconditionFailure([
-        {
-          type: "protocol_version",
-          subject: this.protocol,
-          description:
-            `client declares ${this.clientVersion || "<none>"}, server requires ${this.serverVersion}; ` +
-            "major and minor must match",
-        },
-      ]),
-    ];
+  /** A `protocol_version` violation naming the gated protocol, and the
+   *  windows as a `vgi_rpc.ErrorInfo`. */
+  get errorDetails(): (PreconditionFailure | ErrorInfo)[] {
+    const out: (PreconditionFailure | ErrorInfo)[] = [];
+    if (this.protocol) {
+      out.push(
+        preconditionFailure([
+          {
+            type: "protocol_version",
+            subject: this.protocol,
+            description: `client declares ${this.clientVersion || "<none>"}, server supports ${this.serverVersion || "<unknown>"}`,
+          },
+        ]),
+      );
+    }
+    if (this.serverVersions) {
+      const metadata: Record<string, string> = { "vgi_rpc.protocol_versions": this.serverVersions };
+      if (this.clientVersions) metadata["vgi_rpc.protocol_versions_client"] = this.clientVersions;
+      out.push({ "@type": "vgi_rpc.ErrorInfo", metadata });
+    }
+    return out;
+  }
+
+  /** Extra custom metadata for the error batch: the server's windows. */
+  get errorMetadata(): ReadonlyMap<string, string> {
+    return this.serverVersions ? new Map([["vgi_rpc.protocol_versions", this.serverVersions]]) : new Map();
   }
 }
 

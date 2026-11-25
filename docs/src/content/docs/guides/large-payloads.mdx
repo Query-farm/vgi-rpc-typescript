@@ -252,6 +252,36 @@ Every pointer carries `vgi_rpc.location.sha256`, and inbound pointer URLs are pi
 
 Requests to the signed URLs go out on the global `fetch` with exactly the headers the grant requires: never the vendor token, never a caller-supplied `fetch`, and no redirects. Errors never contain the token or a signed query string. `pinnedHostsValidator(hosts, { allowHttp, prefixes })` is the same pinning as a standalone validator.
 
+## Direct S3 and GCS storage
+
+A self-hosted server can use its own bucket instead of the blob vendor: `createS3Storage(s3StorageConfigFromEnv())` (`@query-farm/vgi-rpc/s3`) or `createGCSStorage(gcsStorageConfigFromEnv())` (`@query-farm/vgi-rpc/gcs`). Both are `ExternalStorage` and `ObjectStore`, and S3 with `checksum: "sha256"` and GCS are also `UploadUrlProvider`s; pass `storage.urlValidator` as the `urlValidator` so inbound pointers are pinned to the bucket.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `VGI_STORAGE_S3_BUCKET` | bucket | required |
+| `VGI_STORAGE_S3_PREFIX` | key prefix | empty |
+| `VGI_STORAGE_S3_ENDPOINT` | custom endpoint (`http://` or `https://`) | AWS |
+| `VGI_STORAGE_S3_PUBLIC_ENDPOINT` | endpoint for the URLs handed to clients | the endpoint |
+| `VGI_STORAGE_S3_REGION` | signing region (`auto` for R2) | `AWS_REGION`, `AWS_DEFAULT_REGION`, `us-east-1` |
+| `VGI_STORAGE_S3_FORCE_PATH_STYLE` | bucket in the path | `true` with an endpoint |
+| `VGI_STORAGE_S3_CHECKSUM` | `sha256`, or `none` for services that do not enforce `x-amz-checksum-sha256` (no upload grants) | `sha256` |
+| `VGI_STORAGE_S3_SDK_CHECKSUM` | the AWS SDK's own CRC32 checksums: `when_supported` / `when_required` | `when_required` with an endpoint |
+| `VGI_STORAGE_S3_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN` | explicit credentials | the AWS default chain |
+| `VGI_STORAGE_S3_SESSION_EXPIRES` | expiry of an explicit session token (RFC 3339 or epoch seconds), for the URL-lifetime cap | none (warned) |
+| `VGI_STORAGE_URL_TTL_SECONDS` | URL lifetime, capped at the credentials' expiry minus 60 s | 3600 |
+| `VGI_STORAGE_ALLOW_PLAIN_HTTP` | `1` allows an `http://` endpoint or public endpoint | refused |
+| `VGI_STORAGE_GCS_BUCKET`, `_PREFIX`, `_ENDPOINT`, `_CREDENTIALS_FILE` | GCS bucket, prefix, endpoint, key file | ADC |
+
+Keys go under `<prefix>rpc/` (results, upload grants, StateRef and argument objects) and `<prefix>fs/` (function storage): `s3StorageConfigFromEnv(env, { role })`. The worker must be able to reach the public endpoint too, because request-upload pointers are fetched by URL. The first request HEADs the bucket (`storage.verify()` does it on demand) and fails with the reason: missing bucket, denied access, or the region the service reports. Objects carry no TTL and are never deleted: add lifecycle rules expiring `rpc/` after one day and `fs/` after two (as the vendor does). Deletes the worker issues are best effort.
+
+## Storage timeouts
+
+Storage transfers (signed PUTs and GETs, inbound pointer fetches, client uploads, the S3 backend) use a **stall timeout**, never a whole-transfer deadline: a transfer fails only when no bytes have moved for 30 s (`VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`, or `stallTimeoutMs` on `VendorClientOptions`, `ExternalLocationConfig`, `S3StorageConfig`). A 100 MB result on a 2 MB/s link takes 50 s and completes. Connecting and waiting for the response each get one stall window (the connect timeout is the same 30 s, as in vgi-rpc-python).
+
+Signed-URL transfers retry transport errors (connect, reset, stall), 429 and 5xx up to three attempts with exponential backoff (0.25 s base, 5 s cap, jitter); a retry resends the body, since a pre-signed PUT cannot resume. Vendor API calls (`/v1/info`, `/v1/blobs/put`, ...) keep a short whole-request `timeoutMs` (30 s).
+
+On Bun and Node the request body streams as 64 KiB chunks with a fixed `Content-Length`, and each chunk the transport takes counts as progress. Runtimes that cannot stream a fixed-length body (Cloudflare Workers, browsers, Deno) send the bytes in one piece under a single window of `stall + size / minUploadRateBytesPerSecond` (default 64 KiB/s).
+
 ## Related
 
 - [HTTP Transport](/guides/http-transport/) — routes, configuration, and where these options live.

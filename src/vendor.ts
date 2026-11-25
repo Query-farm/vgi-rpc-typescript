@@ -49,6 +49,7 @@
  * | `VGI_RPC_EXTERNAL_COMPRESSION` | `none` (default) or `zstd`, optionally `zstd:<level>`. |
  * | `VGI_RPC_MAX_UPLOAD_BYTES` | Largest client upload a URL is vended for, advertised as `VGI-Max-Upload-Bytes`. Unset: the fetch cap below. |
  * | `VGI_RPC_MAX_FETCH_BYTES` | Largest request the server fetches from an inbound pointer. Default 256 MiB, raised to `VGI_RPC_MAX_UPLOAD_BYTES` when that is larger; both set with the upload size above the fetch cap is a startup error. |
+ * | `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS` | Seconds a storage transfer (signed PUT/GET) may move no bytes before it is abandoned and retried (default 30). There is no whole-transfer deadline. |
  *
  * The rule behind the last two: a server never advertises an upload size it
  * would then refuse to fetch.
@@ -58,6 +59,17 @@
 
 import type { ExternalLocationConfig, ExternalStorage, ObjectStore, UploadUrl, UploadUrlProvider } from "./external.js";
 import { ObjectMissingError, redactExternalUrl } from "./external.js";
+import {
+  checkStallTimeoutMs,
+  discardStorageBody,
+  readStorageBody,
+  StorageBodyTooLargeError,
+  type StorageResponse,
+  StorageStallError,
+  storageBodyText,
+  storageFetch,
+  storageStallTimeoutMsFromEnv,
+} from "./storage-http.js";
 
 /** Environment variable naming the vendor's base URL. */
 export const ENV_URL = "VGI_BLOB_VENDOR_URL";
@@ -323,44 +335,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Read a response body, refusing more than `maxBytes`. */
-async function readBounded(response: Response, maxBytes: number, what: string): Promise<Uint8Array> {
-  const declared = response.headers.get("Content-Length");
-  if (declared != null) {
-    const length = Number(declared);
-    if (Number.isFinite(length) && length > maxBytes) {
-      await response.body?.cancel().catch(() => {});
-      throw new VendorError(`${what} is ${length} bytes, over the ${maxBytes}-byte cap`);
-    }
-  }
-  if (!response.body) return new Uint8Array();
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        throw new VendorError(`${what} exceeded the ${maxBytes}-byte cap`);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
-  if (chunks.length === 1) return chunks[0]!;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
-}
-
 /** The `<Code>` of an S3/R2 XML error body, if any. */
 function s3ErrorCode(body: string): string | null {
   const match = /<Code>([A-Za-z0-9]{1,64})<\/Code>/.exec(body);
@@ -505,8 +479,24 @@ class VendorHostsValidator {
 
 /** Options shared by {@link VendorStorage} and {@link VendorBlobClient}. */
 export interface VendorClientOptions {
-  /** Per-request timeout, ms (default 30000). */
+  /** Whole-request timeout for vendor API (control) calls, ms (default
+   *  30000). Storage transfers never use it: see `stallTimeoutMs`. */
   timeoutMs?: number;
+  /**
+   * Stall timeout for storage transfers (signed PUT/GET), ms: a transfer is
+   * abandoned, and retried, only after no bytes moved for this long. A slow
+   * transfer that keeps moving is never cut off. Default:
+   * `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS` (the `env` of the `fromEnv`
+   * helpers, else `process.env`), else 30000.
+   */
+  stallTimeoutMs?: number;
+  /**
+   * Floor rate, bytes/s, for an upload on a runtime that cannot stream a
+   * fixed-length request body (Cloudflare Workers, browsers, Deno): the PUT
+   * then gets one window of `stallTimeoutMs + size / rate`. Default 65536
+   * (64 KiB/s). Bun and Node stream the body and use the stall timeout only.
+   */
+  minUploadRateBytesPerSecond?: number;
   /**
    * `fetch` for vendor API requests (e.g. a Cloudflare service binding). Its
    * transport only: requests carry exactly the vendor headers. Storage-host
@@ -533,12 +523,14 @@ class VendorApi {
   readonly baseUrl: string;
   readonly loopbackHttp: boolean;
   readonly timeoutMs: number;
+  readonly stallTimeoutMs: number;
+  private readonly minUploadRate: number | undefined;
   private readonly token: string;
   private readonly apiFetch: typeof globalThis.fetch | undefined;
   private readonly maxAttempts: number;
   private readonly backoffMs: number;
 
-  constructor(url: string, token: string, options: VendorClientOptions) {
+  constructor(url: string, token: string, options: VendorClientOptions, env?: EnvLike) {
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -559,6 +551,15 @@ class VendorApi {
     this.baseUrl = url.replace(/\/+$/, "");
     this.token = token;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.stallTimeoutMs =
+      options.stallTimeoutMs !== undefined
+        ? checkStallTimeoutMs(options.stallTimeoutMs)
+        : storageStallTimeoutMsFromEnv(env);
+    const rate = options.minUploadRateBytesPerSecond;
+    if (rate !== undefined && (!Number.isFinite(rate) || rate <= 0)) {
+      throw new Error("minUploadRateBytesPerSecond must be positive");
+    }
+    this.minUploadRate = rate;
     this.apiFetch = options.fetch;
     this.maxAttempts = maxAttempts;
     this.backoffMs = options.backoffMs ?? 250;
@@ -566,27 +567,29 @@ class VendorApi {
 
   // -- transport ----------------------------------------------------------
 
+  private async backoff(attempt: number): Promise<void> {
+    if (attempt === 0) return;
+    const delay = Math.min(this.backoffMs * 2 ** (attempt - 1), MAX_BACKOFF_MS);
+    await sleep(delay * (0.5 + Math.random() / 2));
+  }
+
   /**
-   * Send one request, retrying transport errors, 429 and 5xx with backoff.
-   * The request carries exactly `headers`, never follows a redirect, and on a
-   * storage host always goes through the global `fetch`.
+   * Send one vendor API (control) request under the whole-request
+   * `timeoutMs`, retrying transport errors, 429 and 5xx with backoff. The
+   * request carries exactly `headers` and never follows a redirect.
    */
   async send(
     method: string,
     url: string,
     op: string,
     headers: Record<string, string>,
-    body: Uint8Array | string | null,
-    storage: boolean,
+    body: string | null,
   ): Promise<Response> {
-    const fetchFn = storage ? globalThis.fetch : (this.apiFetch ?? globalThis.fetch);
+    const fetchFn = this.apiFetch ?? globalThis.fetch;
     let lastError = "";
     let status: number | null = null;
     for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
-      if (attempt > 0) {
-        const delay = Math.min(this.backoffMs * 2 ** (attempt - 1), MAX_BACKOFF_MS);
-        await sleep(delay * (0.5 + Math.random() / 2));
-      }
+      await this.backoff(attempt);
       const controller = new AbortController();
       const timer = this.timeoutMs > 0 ? setTimeout(() => controller.abort(), this.timeoutMs) : null;
       let response: Response;
@@ -597,7 +600,7 @@ class VendorApi {
           redirect: "manual",
           signal: controller.signal,
         };
-        if (body !== null) init.body = body as BodyInit;
+        if (body !== null) init.body = body;
         // Bun-only: hand back the stored bytes, not a transparently decoded body.
         (init as Record<string, unknown>).decompress = false;
         response = await fetchFn(url, init);
@@ -623,6 +626,109 @@ class VendorApi {
     );
   }
 
+  /**
+   * Send one storage-host (signed URL) request through the global `fetch`
+   * under the stall timeout, retrying transport errors (connect, reset,
+   * stall), 429 and 5xx with backoff. No whole-request deadline: a transfer
+   * that keeps moving is never cut off. A retry resends the body (a signed
+   * PUT cannot resume). The returned response's body is still watched: read
+   * it with `readStorageBody` or discard it.
+   */
+  async sendStorage(
+    method: string,
+    url: string,
+    op: string,
+    headers: Record<string, string>,
+    body: Uint8Array | null,
+  ): Promise<StorageResponse> {
+    let lastError = "";
+    let status: number | null = null;
+    for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
+      await this.backoff(attempt);
+      let r: StorageResponse;
+      try {
+        r = await this.storageRequest(method, url, headers, body);
+      } catch (error) {
+        // Never the error's message: fetch errors can embed the full URL.
+        status = null;
+        lastError = transportErrorName(error);
+        continue;
+      }
+      if (r.response.status === 429 || r.response.status >= 500) {
+        status = r.response.status;
+        lastError = `HTTP ${r.response.status}`;
+        await discardStorageBody(r);
+        continue;
+      }
+      return r;
+    }
+    throw new VendorError(
+      `Blob vendor ${op} failed after ${this.maxAttempts} attempts (${lastError}): ${redactExternalUrl(url)}`,
+      status,
+    );
+  }
+
+  /**
+   * GET a signed download URL, refusing more than `maxBytes`. The body read
+   * is inside the retry loop (as vgi-rpc-python's `_download_capped`): a
+   * transfer that stalls or resets mid-body is retried; one over the cap is
+   * not. Non-2xx answers other than 429/5xx are returned as
+   * {@link DownloadHttpError} for the caller to word.
+   */
+  async download(url: string, maxBytes: number): Promise<Uint8Array> {
+    let lastError = "";
+    let status: number | null = null;
+    for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
+      await this.backoff(attempt);
+      let r: StorageResponse;
+      try {
+        r = await this.storageRequest("GET", url, {}, null);
+      } catch (error) {
+        status = null;
+        lastError = transportErrorName(error);
+        continue;
+      }
+      const code = r.response.status;
+      if (code === 429 || code >= 500) {
+        status = code;
+        lastError = `HTTP ${code}`;
+        await discardStorageBody(r);
+        continue;
+      }
+      if (code < 200 || code >= 300) {
+        throw new DownloadHttpError(code, s3ErrorCode(await storageBodyText(r)));
+      }
+      try {
+        return await readStorageBody(r, maxBytes);
+      } catch (error) {
+        if (error instanceof StorageBodyTooLargeError) throw error;
+        status = null;
+        lastError = transportErrorName(error);
+      }
+    }
+    throw new VendorError(
+      `Signed download failed after ${this.maxAttempts} attempts (${lastError}): ${redactExternalUrl(url)}`,
+      status,
+    );
+  }
+
+  private storageRequest(
+    method: string,
+    url: string,
+    headers: Record<string, string>,
+    body: Uint8Array | null,
+  ): Promise<StorageResponse> {
+    return storageFetch(url, {
+      method,
+      headers,
+      body,
+      stallTimeoutMs: this.stallTimeoutMs,
+      ...(this.minUploadRate !== undefined ? { minUploadRateBytesPerSecond: this.minUploadRate } : {}),
+      // Bun-only: hand back the stored bytes, not a transparently decoded body.
+      extra: { decompress: false },
+    });
+  }
+
   private async call(method: string, path: string, op: string, body: Json | null): Promise<Json> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {
@@ -634,7 +740,7 @@ class VendorApi {
       headers["Content-Type"] = "application/json";
       content = JSON.stringify(body);
     }
-    const response = await this.send(method, url, op, headers, content, false);
+    const response = await this.send(method, url, op, headers, content);
     const text = await response.text();
     if (response.status < 200 || response.status >= 300) {
       const [code, detail] = errorDetail(text);
@@ -757,16 +863,34 @@ class VendorApi {
       throw new VendorError(`Blob vendor granted Content-Length ${declared} for a ${data.byteLength}-byte object`);
     }
     if (contentEncoding && !hasEncoding) headers["Content-Encoding"] = contentEncoding;
-    const response = await this.send("PUT", grant.uploadUrl, "upload", headers, data, true);
-    if (response.status < 200 || response.status >= 300) {
-      const code = s3ErrorCode(await response.text().catch(() => ""));
+    const r = await this.sendStorage("PUT", grant.uploadUrl, "upload", headers, data);
+    const status = r.response.status;
+    if (status < 200 || status >= 300) {
+      const code = s3ErrorCode(await storageBodyText(r));
       throw new VendorError(
-        `Signed upload failed: HTTP ${response.status}${code ? ` ${code}` : ""}: ${redactExternalUrl(grant.uploadUrl)}`,
-        response.status,
+        `Signed upload failed: HTTP ${status}${code ? ` ${code}` : ""}: ${redactExternalUrl(grant.uploadUrl)}`,
+        status,
         code,
       );
     }
-    await response.body?.cancel().catch(() => {});
+    await discardStorageBody(r);
+  }
+}
+
+/** A transport failure's name for a diagnostic (never its message, which can
+ *  embed a signed URL). */
+function transportErrorName(error: unknown): string {
+  return error instanceof StorageStallError ? "stalled" : ((error as Error)?.name ?? "Error");
+}
+
+/** A signed download answered a non-retryable non-2xx status. */
+class DownloadHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(`HTTP ${status}`);
+    this.name = "DownloadHttpError";
   }
 }
 
@@ -809,8 +933,8 @@ abstract class VendorClientBase {
   protected readonly api: VendorApi;
   private readonly hosts: VendorHostsValidator;
 
-  constructor(url: string, token: string, options: VendorClientOptions = {}) {
-    this.api = new VendorApi(url, token, options);
+  constructor(url: string, token: string, options: VendorClientOptions = {}, env?: EnvLike) {
+    this.api = new VendorApi(url, token, options, env);
     this.hosts = new VendorHostsValidator(this.api, options.infoTtlMs ?? DEFAULT_INFO_TTL_MS);
   }
 
@@ -869,8 +993,8 @@ export class VendorStorage extends VendorClientBase implements ExternalStorage, 
   private readonly purpose: VendorPurpose;
   private readonly pin: boolean;
 
-  constructor(url: string, token: string, options: VendorStorageOptions = {}) {
-    super(url, token, options);
+  constructor(url: string, token: string, options: VendorStorageOptions = {}, env?: EnvLike) {
+    super(url, token, options, env);
     this.purpose = options.purpose ?? "rpc";
     this.pin = options.pinHosts ?? true;
   }
@@ -878,8 +1002,9 @@ export class VendorStorage extends VendorClientBase implements ExternalStorage, 
   /** Build from `VGI_BLOB_VENDOR_URL` and the vendor token variables.
    *  @throws Error if the URL or token is missing. */
   static fromEnv(options: VendorStorageOptions & { env?: EnvLike } = {}): VendorStorage {
-    const [url, token] = envUrlAndToken(resolveEnv(options.env));
-    return new VendorStorage(url, token, options);
+    const env = resolveEnv(options.env);
+    const [url, token] = envUrlAndToken(env);
+    return new VendorStorage(url, token, options, env);
   }
 
   /** Upload `data` via a vendor grant and return its pre-signed download URL.
@@ -996,19 +1121,27 @@ export class VendorStorage extends VendorClientBase implements ExternalStorage, 
       );
     }
     if (this.pin) await this.check(location.downloadUrl);
-    const response = await this.api.send("GET", location.downloadUrl, "download", {}, null, true);
-    if (response.status === 404) {
-      await response.body?.cancel().catch(() => {});
-      throw new ObjectMissingError(`object is gone: ${redactExternalUrl(location.downloadUrl)}`);
+    try {
+      return await this.api.download(location.downloadUrl, limit);
+    } catch (error) {
+      if (error instanceof DownloadHttpError) {
+        if (error.status === 404) {
+          throw new ObjectMissingError(`object is gone: ${redactExternalUrl(location.downloadUrl)}`);
+        }
+        throw new VendorError(
+          `Signed download failed: HTTP ${error.status}: ${redactExternalUrl(location.downloadUrl)}`,
+          error.status,
+        );
+      }
+      if (error instanceof StorageBodyTooLargeError) {
+        throw new VendorError(
+          error.declared
+            ? `Signed download is over the ${limit}-byte cap`
+            : `Signed download exceeded the ${limit}-byte cap`,
+        );
+      }
+      throw error;
     }
-    if (response.status < 200 || response.status >= 300) {
-      await response.body?.cancel().catch(() => {});
-      throw new VendorError(
-        `Signed download failed: HTTP ${response.status}: ${redactExternalUrl(location.downloadUrl)}`,
-        response.status,
-      );
-    }
-    return readBounded(response, limit, "Signed download");
   }
 }
 
@@ -1036,8 +1169,8 @@ export class VendorBlobClient extends VendorClientBase {
   /** Largest blob {@link getBytes} will fetch. */
   readonly maxFetchBytes: number;
 
-  constructor(url: string, token: string, options: VendorBlobClientOptions = {}) {
-    super(url, token, options);
+  constructor(url: string, token: string, options: VendorBlobClientOptions = {}, env?: EnvLike) {
+    super(url, token, options, env);
     this.purpose = options.purpose ?? "fs";
     this.maxFetchBytes = options.maxFetchBytes ?? DEFAULT_MAX_FETCH_BYTES;
   }
@@ -1045,8 +1178,9 @@ export class VendorBlobClient extends VendorClientBase {
   /** Build from `VGI_BLOB_VENDOR_URL` and the vendor token variables.
    *  @throws Error if the URL or token is missing. */
   static fromEnv(options: VendorBlobClientOptions & { env?: EnvLike } = {}): VendorBlobClient {
-    const [url, token] = envUrlAndToken(resolveEnv(options.env));
-    return new VendorBlobClient(url, token, options);
+    const env = resolveEnv(options.env);
+    const [url, token] = envUrlAndToken(env);
+    return new VendorBlobClient(url, token, options, env);
   }
 
   /**
@@ -1108,27 +1242,29 @@ export class VendorBlobClient extends VendorClientBase {
     } catch (error) {
       throw new VendorError(`Blob ${ref.objectId} download rejected: ${(error as Error).message}`);
     }
-    const response = await this.api.send("GET", location.downloadUrl, "download", {}, null, true);
-    if (response.status < 200 || response.status >= 300) {
-      const code = s3ErrorCode(await response.text().catch(() => ""));
-      throw new VendorError(
-        `Blob ${ref.objectId} download failed: HTTP ${response.status}${code ? ` ${code}` : ""}: ` +
-          redactExternalUrl(location.downloadUrl),
-        response.status,
-        code,
-      );
-    }
-    // One byte over the expected size is enough to report a size mismatch.
-    const data = await readBounded(response, ref.size + 1, `Blob ${ref.objectId}`).catch((error) => {
-      if (error instanceof VendorError && /cap/.test(error.message)) {
+    let data: Uint8Array;
+    try {
+      // One byte over the expected size is enough to report a size mismatch.
+      data = await this.api.download(location.downloadUrl, ref.size + 1);
+    } catch (error) {
+      if (error instanceof DownloadHttpError) {
+        throw new VendorError(
+          `Blob ${ref.objectId} download failed: HTTP ${error.status}${error.code ? ` ${error.code}` : ""}: ` +
+            redactExternalUrl(location.downloadUrl),
+          error.status,
+          error.code,
+        );
+      }
+      if (error instanceof StorageBodyTooLargeError) {
         throw new VendorError(
           `Blob ${ref.objectId} size mismatch: expected ${ref.size}, got more`,
           null,
           "size_mismatch",
         );
       }
+      if (error instanceof VendorError) throw error;
       throw new VendorError(`Blob ${ref.objectId} download failed (${(error as Error)?.name ?? "Error"})`);
-    });
+    }
     if (data.byteLength !== ref.size) {
       throw new VendorError(
         `Blob ${ref.objectId} size mismatch: expected ${ref.size}, got ${data.byteLength}`,

@@ -37,6 +37,15 @@ import {
   UPLOAD_URL_SUPPORT_VERSION,
 } from "../http/common.js";
 import { ACCEPT_MAX_RESPONSE_BYTES_HEADER, minPositive, optionalResponseBudget } from "../http/response-budget.js";
+import {
+  checkStallTimeoutMs,
+  discardStorageBody,
+  type StorageResponse,
+  StorageStallError,
+  storageBodyText,
+  storageFetch,
+  storageStallTimeoutMsFromEnv,
+} from "../storage-http.js";
 import { discoverHttpCapabilities, requireResponseBudgetSupport } from "./capabilities.js";
 import { readResponseBodyBounded } from "./decode.js";
 import { buildRequestIpc, dispatchLogOrError } from "./ipc.js";
@@ -342,6 +351,10 @@ export interface ExternalizeOptions {
   /** @internal The upload-URL version the owning client's capability snapshot
    *  holds; omitted, it is discovered. */
   uploadUrlVersion?: number | null;
+  /** Stall timeout for the PUT to storage, ms: it fails only when no bytes
+   *  move for this long, never on total time. Default:
+   *  `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`, else 30000. */
+  stallTimeoutMs?: number;
 }
 
 /**
@@ -395,20 +408,29 @@ export async function externalizeRequestBody(body: Uint8Array, opts: Externalize
   // listed (and so may have signed) a content type.
   if (!hasContentType) headers["Content-Type"] = "application/octet-stream";
 
-  const putResp = await fetchFn(pair.uploadUrl, {
-    method: "PUT",
-    headers,
-    body: body as unknown as BodyInit,
-  });
-  if (!putResp.ok) {
-    const code = s3ErrorCode(await putResp.text().catch(() => ""));
+  // A stall (idle) timeout, never a whole-PUT deadline: on Bun and Node the
+  // body streams in 64 KiB chunks with a fixed Content-Length, and every chunk
+  // the transport takes restarts the window.
+  const stallTimeoutMs =
+    opts.stallTimeoutMs !== undefined ? checkStallTimeoutMs(opts.stallTimeoutMs) : storageStallTimeoutMsFromEnv();
+  let put: StorageResponse;
+  try {
+    put = await storageFetch(pair.uploadUrl, { method: "PUT", headers, body, stallTimeoutMs, fetch: fetchFn });
+  } catch (error) {
+    if (error instanceof StorageStallError) {
+      throw new RpcError("ExternalUploadFailed", `PUT to upload URL stalled: no bytes for ${stallTimeoutMs} ms`, "");
+    }
+    throw error;
+  }
+  if (!put.response.ok) {
+    const code = s3ErrorCode(await storageBodyText(put));
     throw new RpcError(
       "ExternalUploadFailed",
-      `PUT to upload URL failed: HTTP ${putResp.status}${code ? ` ${code}` : ""}`,
+      `PUT to upload URL failed: HTTP ${put.response.status}${code ? ` ${code}` : ""}`,
       "",
     );
   }
-  await putResp.body?.cancel().catch(() => {});
+  await discardStorageBody(put);
 
   return buildPointerRequestBody(body, pair.downloadUrl, sha256);
 }

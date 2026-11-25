@@ -359,6 +359,9 @@ export interface DispatchContext {
    *  tag check and is rejected exactly as an invalid token -- including on the
    *  call-state cache-hit path, where the call token is never opened at all. */
   protocolName: string;
+  /** Extra custom metadata for a unary result batch (reflection's
+   *  `vgi_rpc.protocol_versions`). */
+  resultMetadata?: ReadonlyMap<string, string>;
   /** Deprecated compatibility alias for the hard response budget. */
   maxStreamResponseBytes?: number;
   /** Hard wire cap for unary, exchange, and each producer turn.
@@ -612,7 +615,7 @@ export async function httpDispatchUnary(
     const resultBatch = isExternalRef(result)
       ? result.pointerBatch(schema)
       : await externalizeForResponseBudget(
-          buildResultBatch(schema, result, ctx.serverId, parsed.requestId),
+          buildResultBatch(schema, result, ctx.serverId, parsed.requestId, ctx.resultMetadata),
           ctx,
           method.name,
         );

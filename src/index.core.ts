@@ -225,6 +225,7 @@ export {
   type IrohHttpHandlerOptions,
   irohForwardedHeaderIdentityProvider,
   irohHttpBridgeOptions,
+  irohHttpHandler,
 } from "./iroh.js";
 // StateRef, argument references, the turn budget and the object cache
 // (STATE_REF_V1.md, protocol 3.4).
@@ -239,6 +240,28 @@ export {
   type ObjectCacheStats,
 } from "./object-cache.js";
 export { Protocol } from "./protocol.js";
+// Protocol version negotiation (PROTOCOL_VERSIONS_V1).
+export {
+  CLIENT_PROTOCOL_VERSIONS_HEADER,
+  CLIENT_PROTOCOL_VERSIONS_KEY,
+  ClientVersioning,
+  EndpointNegotiation,
+  formatVersions,
+  highestCommon,
+  isRetrySafe,
+  isVersionRefusal,
+  legacyServerVersion,
+  type MajorMinor,
+  NoCommonVersionError,
+  PROTOCOL_VERSION_MISMATCH,
+  PROTOCOL_VERSION_UNSUPPORTED,
+  PROTOCOL_VERSIONS_HEADER,
+  PROTOCOL_VERSIONS_KEY,
+  parseMajorMinor,
+  parseVersions,
+  rangesFromError,
+  VersionRange,
+} from "./protocol-versions.js";
 export {
   bool,
   bytes,
@@ -303,6 +326,23 @@ export {
   type StateRefEventSink,
   setStateRefEventSink,
 } from "./state-ref-events.js";
+// Storage HTTP timeouts: stall (idle) timeouts, never a whole-transfer deadline.
+export {
+  canStreamFixedLengthBody,
+  DEFAULT_MIN_UPLOAD_RATE_BYTES_PER_SECOND,
+  DEFAULT_STORAGE_STALL_TIMEOUT_MS,
+  discardStorageBody,
+  ENV_STORAGE_STALL_TIMEOUT,
+  readStorageBody,
+  STORAGE_UPLOAD_CHUNK_BYTES,
+  StallWatchdog,
+  StorageBodyTooLargeError,
+  type StorageFetchOptions,
+  type StorageResponse,
+  StorageStallError,
+  storageFetch,
+  storageStallTimeoutMsFromEnv,
+} from "./storage-http.js";
 export {
   CODEC_DEFLATE,
   CODEC_RAW,

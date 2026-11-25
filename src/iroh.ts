@@ -131,3 +131,28 @@ export function irohForwardedHeaderIdentityProvider(options: IrohForwardedHeader
     },
   };
 }
+
+/**
+ * Wrap an HTTP handler for `iroh-http` serving (`node.serve(...)`), which
+ * refuses a response header with an empty value. The handler emits some
+ * headers present-but-empty on purpose -- `VGI-Protocol-Versions` on a server
+ * gating nothing (PROTOCOL_VERSIONS_V1 §4.1), `VGI-Supported-Encodings` with
+ * compression off -- and those are dropped here. A client then reads them as
+ * absent: for the version header that is the pre-negotiation fallback (speak
+ * its own version), which is what "gates nothing" needs anyway.
+ */
+export function irohHttpHandler(
+  handler: (request: Request) => Response | Promise<Response>,
+): (request: Request) => Promise<Response> {
+  return async (request) => {
+    const response = await handler(request);
+    const empty: string[] = [];
+    response.headers.forEach((value, name) => {
+      if (value === "") empty.push(name);
+    });
+    if (empty.length === 0) return response;
+    const headers = new Headers(response.headers);
+    for (const name of empty) headers.delete(name);
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  };
+}
